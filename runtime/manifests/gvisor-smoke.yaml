@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: livepeer-gvisor-smoke
+spec:
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+  - name: smoke
+    image: busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+    command:
+    - sh
+    - -ec
+    - |
+      dmesg | grep -q 'Starting gVisor'
+      for attempt in $(seq 1 20); do
+        if nslookup kubernetes.default.svc.cluster.local &&
+          wget -T 2 -qO- http://orchestrator.livepeer.svc:8936/readyz &&
+          wget -T 2 -qO- http://orchestrator.livepeer.svc:8935/discovery; then
+          echo gvisor-ok
+          exit 0
+        fi
+        sleep 2
+      done
+      exit 1
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        memory: 128Mi

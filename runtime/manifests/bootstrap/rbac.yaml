@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: livepeer-http-source
+  namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: livepeer-http-source
+  namespace: flux-system
+rules:
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - externalartifacts
+  resourceNames:
+  - livepeer-service
+  verbs:
+  - get
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - externalartifacts/status
+  resourceNames:
+  - livepeer-service
+  verbs:
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: livepeer-http-source
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: livepeer-http-source
+subjects:
+- kind: ServiceAccount
+  name: livepeer-http-source
+  namespace: flux-system

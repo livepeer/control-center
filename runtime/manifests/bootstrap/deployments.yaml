@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livepeer-http-source
+  namespace: flux-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: livepeer-http-source
+  template:
+    metadata:
+      labels:
+        app: livepeer-http-source
+    spec:
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: livepeer-http-source
+        image: python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34
+        args:
+        - python3
+        - -B
+        - /app/http_source.py
+        - --directory
+        - /artifacts
+        - --url
+        - '@CONFIG_URL@'
+        - --token-file
+        - /credentials/token
+        - --artifact-url
+        - http://livepeer-http-source.flux-system.svc.cluster.local:8080
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: code
+          mountPath: /app
+          readOnly: true
+        - name: credential
+          mountPath: /credentials
+          readOnly: true
+        - name: artifacts
+          mountPath: /artifacts
+          readOnly: false
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+      volumes:
+      - name: code
+        configMap:
+          name: livepeer-bootstrap-code
+      - name: credential
+        secret:
+          secretName: livepeer-service-auth
+          defaultMode: 288
+      - name: artifacts
+        hostPath:
+          path: '@INSTALL_DIR@/volumes/http-source'
+          type: Directory
+      serviceAccountName: livepeer-http-source

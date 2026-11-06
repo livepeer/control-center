@@ -1,0 +1,18 @@
+# Dedicated to this single-node installation; never flush the host ruleset.
+table inet livepeer_bootstrap {
+  chain input {
+    type filter hook input priority -20; policy accept;
+    iifname "lo" accept
+    # Service traffic is DNATed to the node API before the input hook.
+    iifname { "cni0", "flannel.1" } ip saddr 10.42.0.0/16 tcp dport 6443 accept
+    tcp dport { 2379, 2380, 6443, 6444, 10010, 10249, 10250, 10256, 10257, 10259 } drop
+    udp dport 8472 drop
+  }
+  chain forward {
+    type filter hook forward priority -20; policy accept;
+    iifname { "cni0", "flannel.1" } accept
+    # Preserve replies to Pod-initiated outbound connections.
+    ct direction reply ct state established,related accept
+    ip daddr { 10.42.0.0/16, 10.43.0.0/16 } drop
+  }
+}

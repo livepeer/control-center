@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: livepeer-http-source
+  namespace: flux-system
+spec:
+  selector:
+    app: livepeer-http-source
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

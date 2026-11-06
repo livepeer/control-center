@@ -1,0 +1,15 @@
+data-dir: "@INSTALL_DIR@/k3s"
+bind-address: 0.0.0.0
+write-kubeconfig: "@INSTALL_DIR@/config/kubeconfig.yaml"
+write-kubeconfig-mode: "0600"
+default-local-storage-path: "@INSTALL_DIR@/volumes/local-path"
+node-label:
+  - "livepeer.io/node-id=@NODE_ID@"
+cluster-cidr: 10.42.0.0/16
+service-cidr: 10.43.0.0/16
+disable:
+  - traefik
+  - servicelb
+  - metrics-server
+kubelet-arg:
+  - "root-dir=@INSTALL_DIR@/kubelet"

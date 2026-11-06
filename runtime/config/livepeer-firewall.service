@@ -1,0 +1,15 @@
+[Unit]
+Description=Livepeer single-node cluster firewall
+Wants=network-online.target
+After=network-online.target
+Before=livepeer-k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@INSTALL_DIR@/bin/livepeer-firewall @INSTALL_DIR@/config/firewall.nft @NFT@
+ExecReload=@INSTALL_DIR@/bin/livepeer-firewall @INSTALL_DIR@/config/firewall.nft @NFT@
+# Leave protection installed when the service stops.
+
+[Install]
+WantedBy=multi-user.target

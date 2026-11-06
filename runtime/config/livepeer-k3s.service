@@ -1,0 +1,32 @@
+[Unit]
+Description=Livepeer K3s
+Wants=network-online.target
+Requires=livepeer-firewall.service
+BindsTo=livepeer-firewall.service
+After=network-online.target livepeer-firewall.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+Environment="PATH=@INSTALL_DIR@/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=@INSTALL_DIR@/bin/k3s server --config @INSTALL_DIR@/config/k3s.yaml
+ExecStartPre=@MODPROBE@ overlay
+ExecStartPre=@MODPROBE@ br_netfilter
+ExecStartPre=@MODPROBE@ veth
+ExecStartPre=@MODPROBE@ vxlan
+ExecStartPre=@SYSCTL@ -w net.ipv4.ip_forward=1 net.bridge.bridge-nf-call-iptables=1
+ExecStartPre=@INSTALL_DIR@/bin/livepeer-record-version @INSTALL_DIR@/bin/k3s @INSTALL_DIR@/state/k3s-version @INSTALL_DIR@/lib/recovery.sh
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5
+StandardOutput=append:@INSTALL_DIR@/logs/k3s.log
+StandardError=append:@INSTALL_DIR@/logs/k3s.log
+
+[Install]
+WantedBy=multi-user.target
