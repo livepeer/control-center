@@ -33,6 +33,7 @@ type Params struct {
 	PublicAPIURL            string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
 	SupabaseURL             string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
 	SupabasePublishableKey  string        `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
+	DefaultAdminEmail       string        `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
 	JWTSigningSecret        string        `env:"JWT_SIGNING_SECRET" secret:"true" min:"32" descr:"Persistent enrollment signing secret (at least 32 bytes)"`
 	JWTSigningSecretFile    string        `env:"JWT_SIGNING_SECRET_FILE" secretfor:"JWTSigningSecret" basepath:"source" descr:"File containing the enrollment signing secret"`
 	MachineTokenSecret      string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
@@ -86,6 +87,11 @@ func OpenDB(ctx context.Context, raw, password string) (*sql.DB, error) {
 }
 
 func (p Params) PreValidate() error {
+	if p.DefaultAdminEmail != "" {
+		if _, err := normalizeEmail(p.DefaultAdminEmail); err != nil {
+			return errors.New("DefaultAdminEmail must be a single email address")
+		}
+	}
 	if p.JWTSigningSecret != "" && p.JWTSigningSecret == p.MachineTokenSecret {
 		return errors.New("use different enrollment and machine credential secrets")
 	}

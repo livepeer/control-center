@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/livepeer/control-center/api/internal/migrations"
@@ -33,11 +34,13 @@ type Machine struct {
 }
 
 type Server struct {
-	db     *sql.DB
-	params Params
-	logger *slog.Logger
-	client *http.Client
-	build  func(Machine) ([]byte, string, error)
+	db       *sql.DB
+	params   Params
+	logger   *slog.Logger
+	client   *http.Client
+	build    func(Machine) ([]byte, string, error)
+	denialMu sync.Mutex
+	denials  map[AdminAction]denialWindow
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
@@ -72,6 +75,11 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /api/bootstrap-token", s.bootstrapToken)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
+	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/admin/administrators", s.adminRead(s.listAdministrators))
+	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
+	mux.HandleFunc("DELETE /api/admin/administrators/{grant_id}", s.adminMutation("administrator.revoke", s.prepareRevoke))
+	mux.HandleFunc("GET /api/admin/machines", s.adminRead(s.fleetMachines))
 	mux.HandleFunc("POST /v1/nodes/register", s.register)
 	mux.HandleFunc("GET /v1/nodes/{node_id}/config", s.configuration)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,10 +94,10 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
 	owner, err := s.user(r.Context(), bearer(r))
 	if err != nil {
-		fail(w, 401, err.Error())
+		s.respondError(w, err)
 		return
 	}
-	token, expires, err := signEnrollment(s.params.JWTSigningSecret, owner, time.Now())
+	token, expires, err := signEnrollment(s.params.JWTSigningSecret, owner.ID, time.Now())
 	if err != nil {
 		fail(w, 500, "could not issue enrollment token")
 		return
@@ -100,10 +108,10 @@ func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listMachines(w http.ResponseWriter, r *http.Request) {
 	owner, err := s.user(r.Context(), bearer(r))
 	if err != nil {
-		fail(w, 401, err.Error())
+		s.respondError(w, err)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT node_id,hostname,install_dir,k3s_version,created_at,last_config_fetch_at FROM lpcc.machines WHERE owner_id=$1 ORDER BY created_at DESC`, owner)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT node_id,hostname,install_dir,k3s_version,created_at,last_config_fetch_at FROM lpcc.machines WHERE owner_id=$1 ORDER BY created_at DESC`, owner.ID)
 	if err != nil {
 		s.databaseError(w, err)
 		return

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 	"uuid"
@@ -63,34 +64,89 @@ func bearer(r *http.Request) string {
 	return token
 }
 
+// UserIdentity comes only from Auth's verified response, never browser metadata.
+type UserIdentity struct {
+	ID             string `json:"user_id"`
+	Email          string `json:"email"`
+	EmailConfirmed bool   `json:"-"`
+}
+
+func normalizeEmail(raw string) (string, error) {
+	email := strings.TrimSpace(raw)
+	address, err := mail.ParseAddress(email)
+	if err != nil || address.Name != "" || address.Address != email || len(email) > 254 {
+		return "", errors.New("invalid email address")
+	}
+	return strings.ToLower(email), nil
+}
+
 // Ask Auth for the user; never trust a client-decoded Supabase session.
-func (s *Server) user(ctx context.Context, token string) (string, error) {
+func (s *Server) user(ctx context.Context, token string) (UserIdentity, error) {
 	if token == "" {
-		return "", errors.New("sign in to continue")
+		return UserIdentity{}, problem(401, "authentication_required", "Sign in to continue.")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.params.SupabaseURL, "/")+"/auth/v1/user", nil)
+	var raw struct {
+		ID               string     `json:"id"`
+		Email            string     `json:"email"`
+		EmailConfirmedAt *time.Time `json:"email_confirmed_at"`
+	}
+	if err := s.authJSON(ctx, "/user", token, &raw); err != nil {
+		return UserIdentity{}, err
+	}
+	id, err := uuid.Parse(raw.ID)
+	if err != nil || id == (uuid.UUID{}) {
+		return UserIdentity{}, problem(503, "authentication_unavailable", "Authentication is temporarily unavailable.")
+	}
+	identity := UserIdentity{ID: id.String()}
+	if raw.Email != "" {
+		identity.Email, err = normalizeEmail(raw.Email)
+		if err != nil {
+			// Provisioning syntax is stricter than Auth's accepted account emails.
+			// UUID authentication and previously bound grants remain valid.
+			return identity, nil
+		}
+	}
+	identity.EmailConfirmed = raw.EmailConfirmedAt != nil && !raw.EmailConfirmedAt.IsZero()
+	return identity, nil
+}
+
+func (s *Server) authJSON(ctx context.Context, path, token string, value any) error {
+	unavailable := problem(503, "authentication_unavailable", "Authentication is temporarily unavailable.")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.params.SupabaseURL, "/")+"/auth/v1"+path, nil)
 	if err != nil {
-		return "", errors.New("authentication unavailable")
+		return unavailable
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("apikey", s.params.SupabasePublishableKey)
 	response, err := s.client.Do(req)
 	if err != nil {
-		return "", errors.New("authentication unavailable")
+		return unavailable
 	}
 	defer response.Body.Close()
+	if token != "" && (response.StatusCode == 401 || response.StatusCode == 403) {
+		return problem(401, "invalid_session", "Session expired; sign in again.")
+	}
 	if response.StatusCode != http.StatusOK {
-		return "", errors.New("session expired; sign in again")
+		return unavailable
 	}
-	var user struct {
-		ID string `json:"id"`
+	data, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 || json.Unmarshal(data, value) != nil {
+		return unavailable
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&user); err != nil {
-		return "", errors.New("authentication unavailable")
+	return nil
+}
+
+func (s *Server) emailProvisioning(ctx context.Context) error {
+	var settings struct {
+		AutoConfirm *bool `json:"mailer_autoconfirm"`
 	}
-	id, err := uuid.Parse(user.ID)
-	if err != nil {
-		return "", errors.New("invalid authenticated user")
+	if err := s.authJSON(ctx, "/settings", "", &settings); err != nil {
+		return err
 	}
-	return id.String(), nil
+	if settings.AutoConfirm == nil || *settings.AutoConfirm {
+		return problem(503, "email_verification_unavailable", "Administrator provisioning requires verified email. Contact the operator.")
+	}
+	return nil
 }

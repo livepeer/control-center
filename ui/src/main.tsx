@@ -4,6 +4,8 @@ import { createClient } from '@supabase/supabase-js'
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { ArrowDown, ArrowRight, Check, CheckCheck, ChevronRight, Copy, Cpu, LogOut, Plus, RefreshCw, Server, Terminal, X } from 'lucide-react'
 import './style.css'
+import { api } from './api'
+import { Administration } from './administration'
 
 type Config = { supabase_url: string; supabase_publishable_key: string; public_api_url: string }
 type Machine = { node_id: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
@@ -84,13 +86,6 @@ function Login({ client }: { client: SupabaseClient }) {
   </div>
 }
 
-async function api<T>(session: Session, path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, { ...options, headers: { Authorization: `Bearer ${session.access_token}` }, cache: 'no-store' })
-  const body = await response.json()
-  if (!response.ok) throw new Error(body.error || 'The request failed. Please try again.')
-  return body as T
-}
-
 function Dashboard({ client, session, config }: { client: SupabaseClient; session: Session; config: Config }) {
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
   const [machines, setMachines] = useState<Machine[] | null>(null)
@@ -157,6 +152,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
         <div className="machine-panel">{machines === null ? <div className="empty-state"><RefreshCw size={22} className="spin" /><h3>Loading your machines…</h3></div> : machines.length === 0 ? <div className="empty-state"><div className="empty-icon"><Server size={25} /><span><Plus size={12} /></span></div><h3>Your first machine starts here.</h3><p>Run the command above. Your machine will appear<br />here as soon as enrollment succeeds.</p><a href="#connect-title" className="text-link">Ready when you are<ArrowRight size={15} /></a></div> : <div className="table-scroll"><table><thead><tr><th>MACHINE</th><th>STATUS</th><th>REGISTERED</th><th>LAST CONFIG REQUEST</th></tr></thead><tbody>{machines.map(machine => <tr key={machine.node_id}><td><div className="machine-name"><span className="machine-glyph"><Server size={17} /></span><div><strong>{machine.hostname}</strong><code>{machine.node_id}</code></div></div></td><td><span className={`machine-status ${machine.last_config_fetch_at ? 'delivered' : ''}`}><span className="status-dot active" />{machine.last_config_fetch_at ? 'Config requested' : 'Registered'}</span></td><td>{new Date(machine.created_at).toLocaleString()}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td></tr>)}</tbody></table></div>}</div>
         <p className="table-note">Registration and configuration requests are shown here. Installation progress stays in your terminal.</p>
       </section>
+      <Administration key={session.access_token} session={session} />
       <footer className="dashboard-footer"><span>LIVEPEER / CONTROL CENTER</span><span>YOUR MACHINES. OPEN POSSIBILITIES.</span></footer>
     </main>
   </div>
@@ -198,7 +194,7 @@ function App() {
   }, [])
   if (!ready) return <div className="loading-screen"><Brand /><RefreshCw size={22} className="spin" /><p>Opening your workspace…</p></div>
   if (!client || !config) return <div className="loading-screen"><Brand /><Notice>{problem || 'Configuration unavailable.'}</Notice><button className="button primary" onClick={() => window.location.reload()}>Try again<RefreshCw size={16} /></button></div>
-  return <>{problem && <div className="callback-error"><span>{problem}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setProblem('')}><X size={16} /></button></div>}{session ? <Dashboard client={client} session={session} config={config} /> : <Login client={client} />}</>
+  return <>{problem && <div className="callback-error"><span>{problem}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setProblem('')}><X size={16} /></button></div>}{session ? <Dashboard key={session.user.id} client={client} session={session} config={config} /> : <Login client={client} />}</>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<App />)

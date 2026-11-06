@@ -44,7 +44,9 @@ func Open(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if _, err := db.Exec(`CREATE SCHEMA auth; CREATE TABLE auth.users(id UUID PRIMARY KEY)`); err != nil {
+	if _, err := db.Exec(`CREATE SCHEMA auth; CREATE TABLE auth.users(
+ id UUID PRIMARY KEY, email TEXT, email_confirmed_at TIMESTAMPTZ,
+ deleted_at TIMESTAMPTZ, is_anonymous BOOLEAN NOT NULL DEFAULT false)`); err != nil {
 		t.Fatal(err)
 	}
 	return db

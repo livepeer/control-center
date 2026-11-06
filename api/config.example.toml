@@ -1,5 +1,5 @@
 # Copy to config.toml in this directory. Create secrets/ with mode 0700 and
-# secret files with mode 0600. Files contain exact values, without a trailing newline.
+# secret files with mode 0600. Values must not have a trailing newline.
 # Paths here are relative to this config file.
 # Put the PostgreSQL URI and its password in these files.
 PGConnstrFile = "secrets/pg-connstr"
@@ -10,6 +10,11 @@ PGPasswordFile = "secrets/pg-password"
 SupabaseURL = "https://PROJECT.supabase.co"
 # Browser-public publishable key, never a service-role key.
 SupabasePublishableKey = "replace-with-publishable-key"
+
+# Optional. Seed one pending administrator grant only if no active grants exist.
+# Enable Confirm Email and establish safe account verification history first;
+# see docs/operations.md. This does not create credentials or replace grants.
+# DefaultAdminEmail = "admin@example.com"
 
 # Generate each once: openssl rand -hex 32 | tr -d '\n'
 # Keep stable. Changing MachineTokenSecret invalidates installed credentials.

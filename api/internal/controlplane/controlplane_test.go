@@ -22,6 +22,7 @@ import (
 
 const ownerA = "11111111-1111-4111-8111-111111111111"
 const ownerB = "22222222-2222-4222-8222-222222222222"
+const ownerC = "33333333-3333-4333-8333-333333333333"
 
 func testParams() Params {
 	return Params{JWTSigningSecret: strings.Repeat("a", 32), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
@@ -137,12 +138,20 @@ func newTestServer(t *testing.T) *Server {
 	if err := Migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO auth.users(id) VALUES($1),($2)`, ownerA, ownerB); err != nil {
+	if _, err := db.Exec(`INSERT INTO auth.users(id,email,email_confirmed_at) VALUES($1,'a@example.invalid',now()),($2,'b@example.invalid',now())`, ownerA, ownerB); err != nil {
 		t.Fatal(err)
 	}
 	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/auth/v1/user" || r.Header.Get("apikey") != "public-test" {
+		if r.Header.Get("apikey") != "public-test" {
 			w.WriteHeader(401)
+			return
+		}
+		if r.URL.Path == "/auth/v1/settings" {
+			json.NewEncoder(w).Encode(map[string]bool{"mailer_autoconfirm": false})
+			return
+		}
+		if r.URL.Path != "/auth/v1/user" {
+			w.WriteHeader(404)
 			return
 		}
 		owner := ""
@@ -151,11 +160,19 @@ func newTestServer(t *testing.T) *Server {
 			owner = ownerA
 		case "Bearer session-b":
 			owner = ownerB
+		case "Bearer session-c":
+			owner = ownerC
 		default:
 			w.WriteHeader(401)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"id": owner})
+		var email *string
+		var confirmed *time.Time
+		if err := db.QueryRow(`SELECT email,email_confirmed_at FROM auth.users WHERE id=$1 AND deleted_at IS NULL`, owner).Scan(&email, &confirmed); err != nil {
+			w.WriteHeader(401)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": owner, "email": email, "email_confirmed_at": confirmed, "user_metadata": map[string]any{"role": "admin"}})
 	}))
 	t.Cleanup(auth.Close)
 	p := testParams()

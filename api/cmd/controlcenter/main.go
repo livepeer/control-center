@@ -49,6 +49,9 @@ func serve(ctx context.Context, p controlplane.Params) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	app := controlplane.New(db, p, logger)
+	if err := app.BootstrapAdmin(ctx); err != nil {
+		return fmt.Errorf("initialize administrator policy: %w", err)
+	}
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	workerDone := make(chan struct{})

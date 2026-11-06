@@ -23,7 +23,10 @@ func TestBrowserPreview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user := map[string]any{"id": ownerA, "email": "preview@example.invalid", "aud": "authenticated", "role": "authenticated", "created_at": time.Now().UTC()}
+	user := map[string]any{"id": ownerA, "email": "preview@example.invalid", "email_confirmed_at": time.Now().UTC(), "aud": "authenticated", "role": "authenticated", "created_at": time.Now().UTC()}
+	if _, err := s.db.Exec(`UPDATE auth.users SET email='preview@example.invalid',email_confirmed_at=now() WHERE id=$1`, ownerA); err != nil {
+		t.Fatal(err)
+	}
 	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
 		w.Header().Set("Access-Control-Allow-Headers", r.Header.Get("Access-Control-Request-Headers"))
@@ -34,6 +37,8 @@ func TestBrowserPreview(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
+		case "/auth/v1/settings":
+			json.NewEncoder(w).Encode(map[string]bool{"mailer_autoconfirm": false})
 		case "/auth/v1/authorize":
 			http.Redirect(w, r, "http://localhost:5173/auth/callback?code=expired-code", http.StatusFound)
 		case "/auth/v1/token":
@@ -68,6 +73,10 @@ func TestBrowserPreview(t *testing.T) {
 	}))
 	defer auth.Close()
 	s.params.SupabaseURL = auth.URL
+	s.params.DefaultAdminEmail = "preview@example.invalid"
+	if err := s.BootstrapAdmin(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	stop := make(chan struct{})
 	handler := s.Handler()
 	listener, err := net.Listen("tcp", "localhost:41932")
