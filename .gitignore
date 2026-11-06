@@ -1,0 +1,8 @@
+/api/config.toml
+/api/secrets/
+*.local
+api/controlcenter
+ui/node_modules/
+ui/dist/
+.DS_Store
+ui/tsconfig.tsbuildinfo

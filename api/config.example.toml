@@ -1,0 +1,23 @@
+# Copy to config.toml in this directory. Create secrets/ with mode 0700 and
+# secret files with mode 0600. Files contain exact values, without a trailing newline.
+# Paths here are relative to this config file.
+# Put the PostgreSQL URI and its password in these files.
+PGConnstrFile = "secrets/pg-connstr"
+# Required for [YOUR-PASSWORD] or [PG_PASSWORD] in the URI; omit if it already
+# contains an encoded password. Connections require TLS (not sslmode=prefer).
+PGPasswordFile = "secrets/pg-password"
+
+SupabaseURL = "https://PROJECT.supabase.co"
+# Browser-public publishable key, never a service-role key.
+SupabasePublishableKey = "replace-with-publishable-key"
+
+# Generate each once: openssl rand -hex 32 | tr -d '\n'
+# Keep stable. Changing MachineTokenSecret invalidates installed credentials.
+JWTSigningSecretFile = "secrets/jwt-signing-secret"
+MachineTokenSecretFile = "secrets/machine-token-secret"
+
+Listen = "localhost:41932"
+# Remote bootstrap hosts AND their Kubernetes pods must reach this URL.
+# Put the API behind a reachable HTTPS endpoint for remote machines.
+PublicAPIURL = "http://localhost:41932"
+ConfigReconcileInterval = "1m"

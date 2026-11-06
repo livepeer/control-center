@@ -1,0 +1,169 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: livepeer
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: livepeer-orchestrator
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: ''
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  claimRef:
+    name: orchestrator
+    namespace: livepeer
+  local:
+    path: '@INSTALL_DIR@/volumes/orchestrator'
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: livepeer.io/node-id
+          operator: In
+          values:
+          - '@NODE_ID@'
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator
+  namespace: livepeer
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  volumeName: livepeer-orchestrator
+  storageClassName: ''
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator
+  namespace: livepeer
+data:
+  orchestrator.toml: |
+    Network = "offchain"
+    DataDir = "/data"
+    Listen = "unsafe@0.0.0.0:8935"
+    MetricsListen = "unsafe@0.0.0.0:8936"
+    ServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
+    BootstrapSecretFile = "/credentials/secret"
+    HeartbeatInterval = "5s"
+    HeartbeatTTL = "30s"
+    RunnerGrants = []
+    HealthGrants = []
+    SessionProxyGrants = []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: livepeer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: orchestrator
+        image: ghcr.io/livepeer/node:v1.0.6@sha256:a265916e8612ec4291230f0867734ce2bae763f6326f5204cbe86a267f8153ef
+        args:
+        - orchestrator
+        - --config
+        - /config/orchestrator.toml
+        ports:
+        - name: http
+          containerPort: 8935
+        - name: metrics
+          containerPort: 8936
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: runner-secret
+          mountPath: /credentials
+          readOnly: true
+        - name: data
+          mountPath: /data
+          readOnly: false
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: metrics
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          failureThreshold: 60
+          periodSeconds: 2
+      volumes:
+      - name: config
+        configMap:
+          name: orchestrator
+      - name: runner-secret
+        secret:
+          secretName: runner-bootstrap
+          defaultMode: 288
+      - name: data
+        persistentVolumeClaim:
+          claimName: orchestrator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: livepeer
+spec:
+  selector:
+    app: orchestrator
+  ports:
+  - name: http
+    port: 8935
+    targetPort: http
+  - name: metrics
+    port: 8936
+    targetPort: metrics

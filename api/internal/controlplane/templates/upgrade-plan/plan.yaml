@@ -1,0 +1,22 @@
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: livepeer-k3s
+  namespace: system-upgrade
+spec:
+  concurrency: 1
+  version: '@K3S_VERSION@'
+  serviceAccountName: system-upgrade
+  nodeSelector:
+    matchLabels:
+      livepeer.io/allow-upgrade: 'true'
+    matchExpressions:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+  cordon: true
+  drain:
+    force: true
+    deleteEmptydirData: true
+    ignoreDaemonSets: true
+  upgrade:
+    image: rancher/k3s-upgrade
