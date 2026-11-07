@@ -46,7 +46,9 @@ parse_args() {
   while (( $# )); do
     case "$1" in
       --token)
-        (( $# >= 2 )) && [[ -n "$2" ]] || die '--token requires an enrollment JWT'
+        if (( $# < 2 )) || [[ -z "$2" ]]; then
+          die '--token requires an enrollment JWT'
+        fi
         ENROLLMENT_TOKEN="$2"; shift 2 ;;
       --install-dir)
         (( $# >= 2 )) || die '--install-dir requires a path'

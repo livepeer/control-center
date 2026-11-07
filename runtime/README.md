@@ -6,6 +6,11 @@ HTTP configuration adapter, system-upgrade-controller, and the standalone
 [`livepeer/node`](https://github.com/livepeer/node) orchestrator in offchain mode.
 It does not deploy runners or configure GPUs or public ingress.
 
+Runtime lives under `runtime/` in the combined Control Center repository.
+Run the commands below from that directory. The combined repository is the
+development source of truth; an older standalone checkout may be retained as
+a reference, but is not automatically synchronized.
+
 Copy or clone the whole project onto the target machine. Host installation uses
 Bash and standard Linux utilities; Python runs only in the pinned HTTP service
 containers. Repository templates and installed paths are described under
@@ -261,7 +266,8 @@ before adding runners on private networks, configure the appropriate
 
 No node has `livepeer.io/allow-upgrade=true` initially. To enable a planned
 upgrade, set `spec.version` to the target K3s version in the backend-owned
-`api/internal/controlplane/templates/upgrade-plan/plan.yaml` template and redeploy
+`api/internal/controlplane/templates/upgrade-plan/plan.yaml` template (relative to
+the combined repository root) and redeploy
 the backend. After the reconciler publishes the bundle and Flux applies it,
 explicitly add that label to the intended node with
 `kubectl label node <node-name> livepeer.io/allow-upgrade=true`. This permits a
@@ -277,29 +283,27 @@ Kustomization conditions, then follow the [recovery steps](#interrupted-installa
 
 ## Verification
 
-Development tests require Python 3.10+ and use temporary directories and localhost
-servers without root or a cluster. Shell tests reject host Python calls during
-enrollment, staging, and reruns. Optional offline Kustomize validation uses
-`kubectl` and PyYAML (`python3-yaml` on Debian/Ubuntu). Run:
+On Linux, with the tools listed in the [remote-test guide](../README.md#remote-runtime-tests),
+run from `runtime/`:
 
 ```bash
-bash -n bootstrap-livepeer.sh lib/*.sh tests/firewall-network.sh
-shellcheck bootstrap-livepeer.sh lib/*.sh tests/firewall-network.sh
-python3 -m unittest discover -s tests -v
+bash tests/run.sh
 ```
 
-The real firewall traffic test runs only in a disposable Docker container, with
-separate network namespaces and a read-only source mount. It verifies API access
-through simulated kube-proxy DNAT, blocked external management/cluster access,
-unaffected SSH, Pod egress, and safe reloads. It does not apply host rules:
+The runner checks Bash syntax, runs ShellCheck and Python tests, then runs the
+firewall traffic test in Docker. Python tests use temporary directories and
+localhost servers without root or a cluster. Optional offline Kustomize checks
+use `kubectl` and PyYAML and report skips if unavailable. From the repository
+root, `make test-runtime REMOTE=livepeer-t4` runs the same tests remotely; the
+[guide](../README.md#remote-runtime-tests) covers source selection, results,
+and cleanup.
 
-```bash
-docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN \
-  --security-opt apparmor=unconfined --sysctl net.ipv4.ip_forward=1 \
-  -e LIVEPEER_FIREWALL_CONTAINER_TEST=1 -v "$PWD:/src:ro" \
-  golang:1.27.2-bookworm bash -ec \
-  'apt-get update -qq && apt-get install -y -qq nftables iproute2 curl python3 >/tmp/packages.log && bash /src/tests/firewall-network.sh'
-```
+The firewall test mounts Runtime source read-only in a disposable
+`golang:1.27.2-bookworm` container, installs nftables, iproute2, curl, and Python
+inside it, and uses NET_ADMIN/SYS_ADMIN, AppArmor unconfined, and IPv4
+forwarding in private Docker namespaces. It checks simulated kube-proxy DNAT,
+blocked external management and cluster access, SSH, Pod egress, and safe
+reloads. Runtime firewall rules are never applied to the host.
 
 The installer itself waits for node, controller, source, and workload readiness,
 then runs a gVisor Pod checking its kernel banner, cluster DNS, and the

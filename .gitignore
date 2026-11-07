@@ -8,3 +8,6 @@ ui/dist/
 ui/tsconfig.tsbuildinfo
 ui/test-results/
 ui/playwright-report/
+/.remote-test-results/
+/tools/__pycache__/
+/tools/tests/__pycache__/

@@ -36,9 +36,19 @@ ip netns exec pod python3 -m http.server 8080 --bind 0.0.0.0 --directory /tmp >/
 pids+=("$!")
 ip netns exec external python3 -m http.server 8080 --bind 0.0.0.0 --directory /tmp >/tmp/external-http.log 2>&1 &
 pids+=("$!")
-for _attempt in {1..50}; do
-  if curl --noproxy '*' -fsS --max-time 1 http://127.0.0.1:6443 >/dev/null 2>&1; then break; fi
-  sleep .1
+wait_http() {
+  for _attempt in {1..50}; do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep .1
+  done
+  echo "HTTP listener did not become ready: $*" >&2
+  return 1
+}
+for port in 22 6443 10250; do
+  wait_http curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$port"
+done
+for namespace in pod external; do
+  wait_http ip netns exec "$namespace" curl --noproxy '*' -fsS --max-time 1 http://127.0.0.1:8080
 done
 
 # Simulate kube-proxy's Service DNAT before the firewall input hook.

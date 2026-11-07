@@ -1,4 +1,4 @@
-module github.com/livepeer/control-center/api
+module github.com/livepeer/control-center
 
 go 1.27.3
 
