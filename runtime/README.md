@@ -4,7 +4,8 @@
 Debian/Ubuntu amd64, systemd** host. It installs K3s, gVisor, Flux, an API-backed
 HTTP configuration adapter, system-upgrade-controller, and the standalone
 [`livepeer/node`](https://github.com/livepeer/node) orchestrator in offchain mode.
-It does not deploy runners or configure GPUs or public ingress.
+It does not deploy runners or configure GPUs. Control Center can opt an enrolled
+machine into managed Cloudflare ingress as described below.
 
 Runtime lives under `runtime/` in the Control Center repository. Run the
 commands below from that directory.
@@ -45,7 +46,7 @@ sudo apt-get install -y ca-certificates curl jq tar bzip2 gzip coreutils \
 
 Eligibility checks run before authentication, downloads, directory creation, or
 service changes. `--check-only` is read-only. Checks include available kernel
-modules, reserved TCP management ports 2379/2380/6443/6444/10010/10249/10250/10256/10257/10259,
+modules, reserved TCP ports 2379/2380/6443/6444/8935/8936/10010/10249/10250/10256/10257/10259/20241,
 UDP 8472, and routes overlapping
 the fixed `10.42.0.0/16` Pod and `10.43.0.0/16` Service networks. Once K3s has been
 downloaded, its own `check-config` performs additional kernel validation.
@@ -87,7 +88,8 @@ The one-hour bootstrap JWT can enroll multiple machines. The installer sends a
 hash of `/etc/machine-id`, hostname, installation directory, and K3s version to
 `POST /v1/nodes/register`. The API returns HTTP 200 with `node_id`, a 64-hex
 long-lived service `token`, and `config_url` only after registration and initial
-configuration are stored. The installer rejects redirects and invalid responses.
+configuration are stored; modern responses also carry enrollment `epoch` and
+`credential_version`. The installer rejects redirects and invalid responses.
 It saves credentials in owner-only files and reuses them on reruns; the service
 credential remains valid after the bootstrap JWT expires. Fresh registration
 retries require the original owner, install path, and initial K3s version; a
@@ -108,6 +110,45 @@ it rejects links, traversal, oversized archives, and redirects. Limits are
 16 MiB compressed, 64 MiB expanded, and 2,048 files. Bootstrap resources and
 runner credentials remain installer-managed. K3s upgrades require explicit
 opt-in using the node label, and persistent volumes retain their data.
+
+## Protected machine ingress
+
+See [the machine tunnel runbook](../docs/machine-tunnels.md) for backend setup,
+operator decisions and release gates. Live provisioning requires verified HTTPS
+for enrollment, configuration, status and token delivery. Development HTTP is
+available only with `LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1` and cannot enable tunnels.
+
+Upgrade an existing HTTP/legacy installation using the complete new Runtime
+source and a fresh owner enrollment JWT:
+
+```bash
+export LIVEPEER_API_URL=https://<CONTROL_CENTER_ORIGIN>
+sudo --preserve-env=LIVEPEER_API_URL bash bootstrap-livepeer.sh \
+  --refresh-credentials --token <FRESH_OWNER_JWT> --install-dir /opt/livepeer
+```
+
+This suspends Flux and verifies the old adapter/connector Pods have terminated
+before releasing refreshed credentials. It stages HTTPS-enforcing source and URL
+settings, replaces owner-only credential files and the bootstrap-owned Secret,
+then starts and verifies the trusted adapter. The transition's UUID and expected
+version persist under `state/credential-transition.json`; after interruption,
+rerun the same command with a fresh JWT and the same HTTPS origin. Never delete
+that marker to return to ordinary bootstrap. Refresh retains the enrollment,
+tunnel UUID, local runner credential and installed K3s version.
+
+After the backend has removed an enrollment, use `--reenroll` with a fresh owner
+JWT to create a new epoch while retaining local data. The old adapter is stopped
+and cached epoch metadata/artifact status is fenced before the new one starts.
+Use the same installation root. Re-enrollment does not accelerate the backend's
+external cleanup of the old epoch.
+
+The connector fetches a fresh token before every start; running connectors can
+reconnect during a Control Center outage. Runtime reports applied state, while
+Control Center verifies external readiness. See the [tunnel runbook](../docs/machine-tunnels.md).
+
+Terminal configuration removes managed workloads after Flux applies it, retaining
+bootstrap resources and data volumes. Fetch/authentication failures preserve the
+last valid artifact and never trigger removal. Public Trickle is unsupported.
 
 ## Storage and host integration
 

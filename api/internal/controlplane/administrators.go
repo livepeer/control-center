@@ -213,6 +213,7 @@ func (s *Server) prepareRevoke(r *http.Request, _ UserIdentity) (AdminApply, err
 // suppresses owner_id in owner-scoped responses.
 type FleetMachine struct {
 	NodeID            string     `json:"node_id"`
+	Epoch             string     `json:"epoch"`
 	Hostname          string     `json:"hostname"`
 	OwnerID           string     `json:"owner_id"`
 	K3sVersion        string     `json:"k3s_version"`
@@ -221,7 +222,7 @@ type FleetMachine struct {
 }
 
 func (s *Server) fleetMachines(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT node_id,hostname,owner_id::text,k3s_version,created_at,last_config_fetch_at FROM lpcc.machines ORDER BY created_at DESC,node_id`)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT node_id,enrollment_epoch::text,hostname,owner_id::text,k3s_version,created_at,last_config_fetch_at FROM lpcc.machines ORDER BY created_at DESC,node_id`)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -230,7 +231,7 @@ func (s *Server) fleetMachines(w http.ResponseWriter, r *http.Request, _ UserIde
 	machines := []FleetMachine{}
 	for rows.Next() {
 		var m FleetMachine
-		if err := rows.Scan(&m.NodeID, &m.Hostname, &m.OwnerID, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt); err != nil {
+		if err := rows.Scan(&m.NodeID, &m.Epoch, &m.Hostname, &m.OwnerID, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt); err != nil {
 			s.respondError(w, err)
 			return
 		}

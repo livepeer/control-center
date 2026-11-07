@@ -80,6 +80,8 @@ docker run --rm --name "$container" --cidfile "$cidfile" \
   --label "livepeer.runtime-test=$run_id" \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
   --sysctl net.ipv4.ip_forward=1 \
+  --sysctl net.ipv6.conf.all.forwarding=1 \
+  --sysctl net.ipv6.conf.default.forwarding=1 \
   -e LIVEPEER_FIREWALL_CONTAINER_TEST=1 -v "$project:/src:ro" \
   "$image" bash -ec '
     apt-get update -qq

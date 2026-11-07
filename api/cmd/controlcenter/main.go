@@ -49,12 +49,17 @@ func serve(ctx context.Context, p controlplane.Params) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	app := controlplane.New(db, p, logger)
+	if err := app.ConfigureTunnels(); err != nil {
+		return fmt.Errorf("initialize tunnel provisioning: %w", err)
+	}
 	if err := app.BootstrapAdmin(ctx); err != nil {
 		return fmt.Errorf("initialize administrator policy: %w", err)
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	workerDone := make(chan struct{})
+	tunnelDone := make(chan struct{})
+	go func() { defer close(tunnelDone); app.RunTunnels(workCtx) }()
 	go func() { defer close(workerDone); app.Reconcile(workCtx) }()
 	server := &http.Server{Addr: p.Listen, Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
 	done := make(chan error, 1)
@@ -63,6 +68,7 @@ func serve(ctx context.Context, p controlplane.Params) error {
 	case err := <-done:
 		cancel()
 		<-workerDone
+		<-tunnelDone
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -73,6 +79,7 @@ func serve(ctx context.Context, p controlplane.Params) error {
 		defer stop()
 		err := server.Shutdown(shutdownCtx)
 		<-workerDone
+		<-tunnelDone
 		return err
 	}
 }

@@ -9,6 +9,7 @@ INSTALL_DIR='/opt/livepeer'
 CHECK_ONLY=0
 STATUS_ONLY=0
 ENROLLMENT_TOKEN=''
+CREDENTIAL_TRANSITION=''
 UNIT='livepeer-k3s.service'
 case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR=${BASH_SOURCE[0]%/*} ;; *) SCRIPT_DIR=. ;; esac
 SCRIPT_DIR=$(cd -- "$SCRIPT_DIR" && pwd -P)
@@ -18,6 +19,8 @@ source "$SCRIPT_DIR/lib/preflight.sh"
 source "$SCRIPT_DIR/lib/recovery.sh"
 # shellcheck source=lib/components.sh
 source "$SCRIPT_DIR/lib/components.sh"
+# shellcheck source=lib/credentials.sh
+source "$SCRIPT_DIR/lib/credentials.sh"
 
 log() { printf '%s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
@@ -35,6 +38,8 @@ Set LIVEPEER_API_URL to an API address reachable from this host and its pods.
                       Use letters, digits, underscores, hyphens, dots, slashes.
   --check-only        Read-only eligibility checks; no authentication or install.
   --status            Show local installation progress without changing anything.
+  --refresh-credentials  Refresh via a fresh owner JWT and HTTPS, preserving identity.
+  --reenroll           Enroll a removed installation as a new lifetime; retain data.
   -h, --help          Show this help without requiring root.
 
 Requires Debian/Ubuntu amd64, systemd, 2 CPUs, 4 GiB RAM,
@@ -55,6 +60,8 @@ parse_args() {
         INSTALL_DIR="$2"; shift 2 ;;
       --check-only) CHECK_ONLY=1; shift ;;
       --status) STATUS_ONLY=1; shift ;;
+      --refresh-credentials) CREDENTIAL_TRANSITION=refresh; shift ;;
+      --reenroll) CREDENTIAL_TRANSITION=reenroll; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -70,7 +77,7 @@ parse_args() {
 # Reruns reuse the saved machine credential and never require another JWT.
 authenticate_node() {
   local credentials="$INSTALL_DIR/credentials" key fingerprint request response api status
-  NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''
+  NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; ENROLLMENT_EPOCH=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" ]]; }; then
     for key in node-id service-token config-url; do
       [[ -f "$credentials/$key" && -s "$credentials/$key" ]] || die "saved credential is missing or invalid: $key; restore it from backup"
@@ -81,18 +88,23 @@ authenticate_node() {
     NODE_ID=$(cat "$credentials/node-id")
     SERVICE_TOKEN=$(cat "$credentials/service-token")
     CONFIG_URL=$(cat "$credentials/config-url")
+    if [[ -f "$credentials/identity.json" ]]; then
+      ENROLLMENT_EPOCH=$(jq -r '.epoch' "$credentials/identity.json")
+      CREDENTIAL_VERSION=$(jq -r '.credential_version' "$credentials/identity.json")
+    fi
   else
     [[ -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires --token TOKEN'
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
     api="${LIVEPEER_API_URL:-}"
     api="${api%/}"
     [[ "$api" =~ ^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*$ ]] || die 'set LIVEPEER_API_URL to the enrollment API base URL'
+    [[ "$api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS; development HTTP must be explicit'
     [[ -s /etc/machine-id ]] || die '/etc/machine-id must be initialized'
     fingerprint=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
     fingerprint=${fingerprint:0:64}
     request=$(jq -nc --arg fingerprint "$fingerprint" --arg hostname "$(hostname)" \
-      --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" \
-      '{fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$k3s_version}')
+      --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" --argjson development_http "${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0}" \
+      '{fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$k3s_version,development_http:($development_http==1)}')
     log 'Registering machine with the Livepeer API.'
     # Pass the bearer header through a descriptor, rather than curl's argv.
     response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 \
@@ -110,10 +122,16 @@ authenticate_node() {
     NODE_ID=$(printf '%s' "$response" | jq -er '.node_id | select(type == "string")') || die 'invalid enrollment response: node_id'
     SERVICE_TOKEN=$(printf '%s' "$response" | jq -er '.token | select(type == "string")') || die 'invalid enrollment response: token'
     CONFIG_URL=$(printf '%s' "$response" | jq -er '.config_url | select(type == "string")') || die 'invalid enrollment response: config_url'
+    ENROLLMENT_EPOCH=$(printf '%s' "$response" | jq -r '.epoch // ""')
+    CREDENTIAL_VERSION=$(printf '%s' "$response" | jq -r '.credential_version // "0"')
+    if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} != 1 ]]; then
+      [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" && "$ENROLLMENT_EPOCH" =~ ^[a-f0-9-]{36}$ && "$CREDENTIAL_VERSION" =~ ^[1-9][0-9]*$ ]] || die 'enrollment returned invalid HTTPS identity metadata'
+    fi
     [[ "$NODE_ID" == "lp-${fingerprint:0:16}" ]] || die 'enrollment returned an unexpected node identity'
   fi
   [[ "$NODE_ID" =~ ^lp-[a-f0-9]{16}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
   [[ "$CONFIG_URL" =~ ^https?://[a-zA-Z0-9/_.:-]+$ ]] || die 'invalid configuration URL'
+  [[ "$CONFIG_URL" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'saved HTTP credential requires --refresh-credentials over HTTPS'
   [[ ! "${CONFIG_URL,,}" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]] ||
     die 'configuration URL uses loopback; Kubernetes pods need a reachable API address'
   ENROLLMENT_TOKEN=''
@@ -127,6 +145,7 @@ render_template() {
   temporary=$(mktemp "${2}.render.XXXXXX")
   sed -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" -e "s|@NODE_ID@|$NODE_ID|g" \
     -e "s|@CONFIG_URL@|$CONFIG_URL|g" \
+    -e "s|@CONTROL_TRANSPORT@|$(control_transport)|g" \
     -e "s|@MODPROBE@|$(command -v modprobe)|g" -e "s|@SYSCTL@|$(command -v sysctl)|g" \
     -e "s|@NFT@|$(command -v nft)|g" "$1" > "$temporary"
   atomic_write "$2" 0644 < "$temporary"
@@ -157,6 +176,7 @@ prepare_installation() {
   write_once "$INSTALL_DIR/credentials/node-id" "$NODE_ID"
   write_once "$INSTALL_DIR/credentials/service-token" "$SERVICE_TOKEN"
   write_once "$INSTALL_DIR/credentials/config-url" "$CONFIG_URL"
+  save_identity
   if [[ ! -f "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]]; then
     random_token | atomic_write "$INSTALL_DIR/credentials/runner-bootstrap.secret"
   fi
@@ -229,8 +249,7 @@ bootstrap_cluster() {
   kube -n flux-system rollout status deployment/source-controller --timeout=300s
   kube -n flux-system rollout status deployment/kustomize-controller --timeout=300s
   kube apply -f "$INSTALL_DIR/manifests/bootstrap/namespaces.yaml"
-  kube -n flux-system create secret generic livepeer-service-auth \
-    --from-file="token=$INSTALL_DIR/credentials/service-token" --dry-run=client -o yaml | kube apply -f -
+  install_machine_secret
   kube -n livepeer create secret generic runner-bootstrap \
     --from-file="secret=$INSTALL_DIR/credentials/runner-bootstrap.secret" --dry-run=client -o yaml | kube apply -f -
   kube apply -k "$INSTALL_DIR/manifests/bootstrap"
@@ -244,11 +263,11 @@ bootstrap_cluster() {
 }
 
 smoke_test() {
-  kube delete pod/livepeer-gvisor-smoke --ignore-not-found --wait=true >/dev/null
-  kube apply -f "$SCRIPT_DIR/manifests/gvisor-smoke.yaml"
-  kube wait pod/livepeer-gvisor-smoke --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s
-  kube logs livepeer-gvisor-smoke > "$INSTALL_DIR/logs/gvisor-smoke.log"
-  kube delete pod/livepeer-gvisor-smoke --wait=false >/dev/null
+  kube -n livepeer delete pod/livepeer-gvisor-smoke --ignore-not-found --wait=true >/dev/null
+  kube -n livepeer apply -f "$SCRIPT_DIR/manifests/gvisor-smoke.yaml"
+  kube -n livepeer wait pod/livepeer-gvisor-smoke --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s
+  kube -n livepeer logs livepeer-gvisor-smoke > "$INSTALL_DIR/logs/gvisor-smoke.log"
+  kube -n livepeer delete pod/livepeer-gvisor-smoke --wait=false >/dev/null
 }
 
 diagnostics() {
@@ -291,6 +310,8 @@ main() {
   # Serialize enrollment reads as well as writes to prevent concurrent token changes.
   lock_installation
   check_existing_installation
+  if [[ -n "$CREDENTIAL_TRANSITION" ]]; then transition_credentials; return; fi
+  [[ ! -f "$INSTALL_DIR/state/credential-transition.json" ]] || die 'resume the interrupted credential transition before normal installation'
   authenticate_node
   trap diagnostics ERR
   prepare_installation

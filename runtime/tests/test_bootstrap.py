@@ -141,6 +141,7 @@ python() { echo 'host Python is forbidden' >&2; exit 199; }
 python3() { echo 'host Python is forbidden' >&2; exit 199; }
 ENROLLMENT_TOKEN='header.payload.signature'
 LIVEPEER_API_URL='http://127.0.0.1:41932'
+LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
 curl() {
   local digest
   digest=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
@@ -441,6 +442,8 @@ df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted-on\\n/dev/
     def test_port_conflicts_allow_only_managed_processes(self):
         for protocol, port, managed, pids, good in [
             ('tcp', 6443, 0, 'pid=123', False), ('udp', 8472, 0, 'pid=123', False),
+            ('tcp', 8935, 0, 'pid=999', False), ('tcp', 8936, 0, 'pid=999', False),
+            ('tcp', 20241, 0, 'pid=999', False),
             ('tcp', 6443, 1, 'pid=123', True), ('tcp', 6443, 1, 'pid=999', False),
             ('tcp', 6443, 1, 'pid=123,pid=999', False), ('tcp', 6443, 1, '', False),
             ('tcp', 8080, 0, 'pid=999', True)]:
@@ -743,7 +746,7 @@ write_host_configuration
             return list(yaml.safe_load_all(result.stdout))
         resources = build(self.root / 'manifests/bootstrap')
         config = next(r for r in resources if r['kind'] == 'ConfigMap')
-        self.assertEqual(set(config['data']), {'artifacts.py', 'http_common.py', 'http_source.py'})
+        self.assertEqual(set(config['data']), {'artifacts.py', 'http_common.py', 'http_source.py', 'control_client.py'})
         for deploy in (r for r in resources if r['kind'] == 'Deployment'):
             pod = deploy['spec']['template']['spec']
             self.assertNotIn('runtimeClassName', pod)
@@ -793,7 +796,7 @@ class HttpFlowTests(TempTest):
         self.bundle = bundle()
         self.config_requests = 0
         self.token = self.root / 'token'
-        self.token.write_text('mock-token')
+        self.token.write_text('b' * 64)
         self.artifacts = self.root / 'artifacts'
         self.artifacts.mkdir()
         self.status = {'metadata': {'generation': 1}, 'status': {}}
@@ -803,7 +806,7 @@ class HttpFlowTests(TempTest):
                 pass
 
             def respond(self):
-                if self.headers.get('Authorization') != 'Bearer mock-token':
+                if self.headers.get('Authorization') != 'Bearer ' + 'b' * 64:
                     self.send_error(401)
                     return
                 test.assertIn(self.path, (http_source.API_PATH, http_source.API_PATH + '/status'))
@@ -822,8 +825,8 @@ class HttpFlowTests(TempTest):
                 pass
             def do_GET(self):
                 test.config_requests += 1
-                test.assertEqual(self.path, '/v1/nodes/node/config')
-                if self.headers.get('Authorization') != 'Bearer mock-token':
+                test.assertEqual(self.path, '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
+                if self.headers.get('Authorization') != 'Bearer ' + 'b' * 64:
                     self.send_error(401)
                     return
                 self.send_response(200)
@@ -835,10 +838,10 @@ class HttpFlowTests(TempTest):
         deployment = next(doc for doc in (PROJECT / 'manifests/bootstrap/deployments.yaml').read_text().split('---')
                           if '\n  name: livepeer-http-source\n' in doc)
         self.probe_path = re.search(r'readinessProbe:\s+httpGet:\s+path: (\S+)\s+port: http\b', deployment)[1]
-        self.start_adapter(self.config_url + '/v1/nodes/node/config')
+        self.start_adapter(self.config_url + '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
 
     def start_adapter(self, url):
-        self.adapter = http_source.Adapter(url, self.token, self.artifacts, 'http://artifacts.test:8080', self.kube)
+        self.adapter = http_source.Adapter(url, self.token, self.artifacts, 'http://artifacts.test:8080', self.kube, allow_http=True)
         self.artifact_url = self.stack.enter_context(serve(http_source.handler_for(self.artifacts)))
 
     def sync(self):
@@ -889,7 +892,7 @@ class HttpFlowTests(TempTest):
         self.assertEqual(self.status['status']['artifact'], first)
         self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
         self.assertEqual(self.get(self.artifact_url + '/' + first['path']), served)
-        self.adapter.url = url
+        self.start_adapter(url)
         self.bundle = bundle(b'resources: []\n# recovered\n')
         self.assertTrue(self.sync())
         self.assertEqual(self.status['status']['conditions'][0]['status'], 'True')
@@ -951,11 +954,11 @@ class HttpFlowTests(TempTest):
                 pass
             def do_GET(self):
                 self.send_response(302)
-                self.send_header('Location', test.config_url + '/v1/nodes/node/config')
+                self.send_header('Location', test.config_url + '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
                 self.end_headers()
                 redirected.append(True)
         with serve(Redirect) as redirect:
-            self.adapter.url = redirect
+            self.start_adapter(redirect + '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
             self.assertFalse(self.sync())
         self.assertTrue(redirected)
         self.assertEqual(self.config_requests, requests_before)

@@ -29,6 +29,7 @@ type DatabaseParams struct {
 type Params struct {
 	ConfigFile string `name:"config" env:"CONTROL_CENTER_CONFIG" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables file loading"`
 	DatabaseParams
+	TunnelParams
 	Listen                  string        `env:"LISTEN_ADDR" default:"localhost:41932" descr:"HTTP listen address"`
 	PublicAPIURL            string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
 	SupabaseURL             string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
@@ -88,6 +89,9 @@ func OpenDB(ctx context.Context, raw, password string) (*sql.DB, error) {
 }
 
 func (p Params) PreValidate() error {
+	if err := p.TunnelParams.validate(p.PublicAPIURL); err != nil {
+		return err
+	}
 	if p.DefaultAdminEmail != "" {
 		if _, err := normalizeEmail(p.DefaultAdminEmail); err != nil {
 			return errors.New("DefaultAdminEmail must be a single email address")

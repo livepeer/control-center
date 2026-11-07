@@ -285,7 +285,8 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT generated_at FROM lpcc.machine_configs WHERE node_id=$1`, id).Scan(&afterTime); err != nil || !beforeTime.Equal(afterTime) {
 		t.Fatal("unchanged bundle rewritten", err)
 	}
-	s.build = func(m Machine) ([]byte, string, error) { m.InstallDir = "/srv/changed"; return buildBundle(m) }
+	// Upgrade-plan changes can publish while the Node workload is held for drain.
+	s.build = func(m Machine) ([]byte, string, error) { m.K3sVersion = "v1.37.3+k3s1"; return buildBundle(m) }
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}

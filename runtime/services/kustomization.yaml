@@ -7,3 +7,4 @@ configMapGenerator:
       - artifacts.py
       - http_common.py
       - http_source.py
+      - control_client.py

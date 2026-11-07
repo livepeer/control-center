@@ -2,6 +2,10 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: livepeer-gvisor-smoke
+  namespace: livepeer
+  labels:
+    livepeer.io/runner-control: 'true'
+    app: livepeer-gvisor-smoke
 spec:
   runtimeClassName: gvisor
   automountServiceAccountToken: false

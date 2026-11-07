@@ -5,7 +5,7 @@ table inet livepeer_bootstrap {
     iifname "lo" accept
     # Service traffic is DNATed to the node API before the input hook.
     iifname { "cni0", "flannel.1" } ip saddr 10.42.0.0/16 tcp dport 6443 accept
-    tcp dport { 2379, 2380, 6443, 6444, 10010, 10249, 10250, 10256, 10257, 10259 } drop
+    tcp dport { 2379, 2380, 6443, 6444, 8935, 8936, 10010, 10249, 10250, 10256, 10257, 10259, 20241 } drop
     udp dport 8472 drop
   }
   chain forward {
@@ -13,6 +13,8 @@ table inet livepeer_bootstrap {
     iifname { "cni0", "flannel.1" } accept
     # Preserve replies to Pod-initiated outbound connections.
     ct direction reply ct state established,related accept
+    # Also covers direct IPv6 Pod traffic and NodePort/host-port DNAT to Pods.
+    oifname { "cni0", "flannel.1" } drop
     ip daddr { 10.42.0.0/16, 10.43.0.0/16 } drop
   }
 }

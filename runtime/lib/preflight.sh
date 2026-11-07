@@ -121,7 +121,7 @@ check_ports() {
   sockets=$(ss -H -lntup) || die 'cannot inspect listening ports'
   while read -r protocol _state _recv _send address _peer rest; do
     port=${address##*:}
-    case "$protocol:$port" in tcp:2379|tcp:2380|tcp:6443|tcp:6444|tcp:10010|tcp:10249|tcp:10250|tcp:10256|tcp:10257|tcp:10259|udp:8472) ;; *) continue ;; esac
+    case "$protocol:$port" in tcp:2379|tcp:2380|tcp:6443|tcp:6444|tcp:8935|tcp:8936|tcp:10010|tcp:10249|tcp:10250|tcp:10256|tcp:10257|tcp:10259|tcp:20241|udp:8472) ;; *) continue ;; esac
     if [[ "$protocol:$port" == udp:8472 && ! "$rest" =~ pid=([0-9]+) ]] && managed_flannel_socket; then continue; fi
     if (( ! MANAGED )) || [[ ! "$rest" =~ pid=([0-9]+) ]]; then die "required port in use: $protocol $port"; fi
     while [[ "$rest" =~ pid=([0-9]+) ]]; do

@@ -63,3 +63,11 @@ Use **Administration → App catalog** to validate and publish TOML, inspect
 revision history, and retire definitions. See the [app registry guide](app-registry.md)
 for definition settings and pricing policy. Catalog changes alone do not assign
 or deploy applications.
+
+## Machine ingress
+
+Per-enrollment Cloudflare tunnels and protected Collector discovery are opt-in.
+Follow [the machine tunnel runbook](machine-tunnels.md) for infrastructure
+prerequisites, credential delivery, refresh, rotation, removal, integration
+contracts and release evidence. Keep `CloudflareEnabled` and
+`CloudflareIngressApproved` false until their respective gates are satisfied.

@@ -2,6 +2,8 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: livepeer
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 ---
 apiVersion: v1
 kind: PersistentVolume
@@ -58,7 +60,9 @@ data:
     DataDir = "/data"
     Listen = "unsafe@0.0.0.0:8935"
     MetricsListen = "unsafe@0.0.0.0:8936"
-    ServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
+    ServiceURL = "@SERVICE_URL@"
+    RunnerServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
+    ProxyURLTemplate = "@PROXY_URL_TEMPLATE@"
     BootstrapSecretFile = "/credentials/secret"
     HeartbeatInterval = "5s"
     HeartbeatTTL = "30s"
@@ -80,6 +84,8 @@ spec:
       app: orchestrator
   template:
     metadata:
+      annotations:
+        livepeer.io/config-sha256: '@ORCHESTRATOR_DIGEST@'
       labels:
         app: orchestrator
     spec:

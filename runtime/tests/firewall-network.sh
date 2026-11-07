@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run ONLY inside a disposable Docker container, with its own network namespace.
 set -euo pipefail
+trap 'echo "Firewall fixture failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 [[ -f /.dockerenv && "${LIVEPEER_FIREWALL_CONTAINER_TEST:-}" == 1 ]] || {
   echo 'Run this test in the disposable container documented in README.md.' >&2
   exit 2
@@ -27,12 +28,20 @@ ip -n pod addr add 10.42.0.2/16 dev pod0
 ip -n pod link set pod0 up
 ip -n pod link set lo up
 ip -n pod route add default via 10.42.0.1
+ip -6 addr add 2001:db8:1::1/64 dev wan nodad
+ip -n external -6 addr add 2001:db8:1::2/64 dev client nodad
+ip -n external -6 route add default via 2001:db8:1::1
+ip -6 addr add fd42::1/64 dev cni0 nodad
+ip -n pod -6 addr add fd42::2/64 dev pod0 nodad
+ip -n pod -6 route add default via fd42::1
 
-for port in 22 6443 10250; do
+for port in 22 6443 8936 10250 20241; do
   python3 -m http.server "$port" --bind 0.0.0.0 --directory /tmp >"/tmp/http-$port.log" 2>&1 &
   pids+=("$!")
 done
-ip netns exec pod python3 -m http.server 8080 --bind 0.0.0.0 --directory /tmp >/tmp/pod-http.log 2>&1 &
+python3 -m http.server 8935 --bind :: --directory /tmp >/tmp/http-v6.log 2>&1 &
+pids+=("$!")
+ip netns exec pod python3 -m http.server 8080 --bind :: --directory /tmp >/tmp/pod-http-v6.log 2>&1 &
 pids+=("$!")
 ip netns exec external python3 -m http.server 8080 --bind 0.0.0.0 --directory /tmp >/tmp/external-http.log 2>&1 &
 pids+=("$!")
@@ -44,9 +53,11 @@ wait_http() {
   echo "HTTP listener did not become ready: $*" >&2
   return 1
 }
-for port in 22 6443 10250; do
+for port in 22 6443 8935 8936 10250 20241; do
   wait_http curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$port"
 done
+wait_http curl --noproxy '*' -gfsS --max-time 1 'http://[::1]:8935'
+wait_http ip netns exec pod curl --noproxy '*' -gfsS --max-time 1 'http://[::1]:8080'
 for namespace in pod external; do
   wait_http ip netns exec "$namespace" curl --noproxy '*' -fsS --max-time 1 http://127.0.0.1:8080
 done
@@ -57,6 +68,7 @@ table ip service_test {
   chain prerouting {
     type nat hook prerouting priority dstnat;
     ip daddr 10.43.0.1 tcp dport 443 dnat to 192.0.2.1:6443
+    ip daddr 192.0.2.1 tcp dport { 30080, 18080 } dnat to 10.42.0.2:8080
   }
 }
 table inet operator_owned {}
@@ -65,6 +77,9 @@ NFT
 reachable() { ip netns exec "$1" curl --noproxy '*' -fsS --max-time 2 "$2" >/dev/null 2>&1; }
 reachable external http://192.0.2.1:6443
 reachable external http://10.42.0.2:8080
+reachable external 'http://[fd42::2]:8080'
+reachable external 'http://[2001:db8:1::1]:8935'
+reachable external http://192.0.2.1:30080
 bash "$project/lib/firewall.sh" "$project/config/firewall.nft" "$(command -v nft)"
 nft list table inet operator_owned >/dev/null
 curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:6443 >/dev/null
@@ -72,7 +87,7 @@ reachable pod http://10.43.0.1:443
 reachable pod http://192.0.2.1:6443
 reachable external http://192.0.2.1:22
 reachable pod http://192.0.2.2:8080
-for url in http://192.0.2.1:6443 http://192.0.2.1:10250 http://10.42.0.2:8080 http://10.43.0.1:443; do
+for url in http://192.0.2.1:6443 http://192.0.2.1:10250 http://192.0.2.1:8935 http://192.0.2.1:8936 http://192.0.2.1:20241 http://10.42.0.2:8080 http://10.43.0.1:443 http://192.0.2.1:30080 http://192.0.2.1:18080 'http://[fd42::2]:8080' 'http://[2001:db8:1::1]:8935'; do
   if reachable external "$url"; then echo "Unexpected external access: $url" >&2; exit 1; fi
 done
 # Reapplying preserves operator rules, and malformed batches preserve old protection.

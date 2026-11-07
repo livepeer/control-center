@@ -36,6 +36,10 @@ spec:
         - '@CONFIG_URL@'
         - --token-file
         - /credentials/token
+        - --identity-file
+        - /credentials/identity.json
+        - --transport
+        - '@CONTROL_TRANSPORT@'
         - --artifact-url
         - http://livepeer-http-source.flux-system.svc.cluster.local:8080
         ports:

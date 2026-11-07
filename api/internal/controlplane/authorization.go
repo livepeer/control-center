@@ -77,8 +77,13 @@ func (s *Server) adminStatus(ctx context.Context, user UserIdentity) (bool, erro
 	}
 	var pending bool
 	err = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.administrator_grants WHERE email=$1 AND bound_user_id IS NULL AND revoked_at IS NULL)`, user.Email).Scan(&pending)
-	if err != nil || !pending {
+	if err != nil {
 		return false, err
+	}
+	if !pending {
+		// Another request can bind between the initial membership check and this
+		// pending-grant read. Observe that committed binding before denying access.
+		return hasAdmin(ctx, s.db, user.ID)
 	}
 	if err := s.emailProvisioning(ctx); err != nil {
 		return false, err

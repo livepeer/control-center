@@ -10,6 +10,17 @@ metadata:
   name: livepeer-http-source
   namespace: flux-system
 rules:
+- apiGroups: [kustomize.toolkit.fluxcd.io]
+  resources: [kustomizations]
+  resourceNames: [livepeer, livepeer-upgrade-plan]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: [livepeer-tunnel]
+  verbs: [get]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [list]
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:
@@ -36,6 +47,34 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: livepeer-http-source
+subjects:
+- kind: ServiceAccount
+  name: livepeer-http-source
+  namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: livepeer-applied-reader
+  namespace: livepeer
+rules:
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: [orchestrator]
+  verbs: [get]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: livepeer-applied-reader
+  namespace: livepeer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: livepeer-applied-reader
 subjects:
 - kind: ServiceAccount
   name: livepeer-http-source

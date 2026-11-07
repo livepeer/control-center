@@ -29,3 +29,21 @@ ConfigReconcileInterval = "1m"
 
 # Registry price validation only; actual Node payment configuration is separate.
 RegistryPaymentMode = "offchain"
+
+# Machine ingress is opt-in. See docs/machine-tunnels.md before enabling it.
+CloudflareEnabled = false
+CloudflareIngressApproved = false
+# The following are operator decisions; placeholders are intentionally invalid.
+# CloudflareAccountID = "<ACCOUNT_ID>"
+# CloudflareZoneID = "<ZONE_ID>"
+# CloudflareBaseDomain = "<BASE_DOMAIN>"
+# CloudflareTeamName = "<ZERO_TRUST_TEAM>"
+# CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
+# CloudflareKeyringFile = "secrets/collector-access-keyring.json"
+# CloudflareConnectorImage = "<REGISTRY>/livepeer-tunnel@sha256:<IMAGE_DIGEST>"
+# CloudflareAccessLifetime = "<TOKEN_LIFETIME>"
+# CloudflareRotateBefore = "<ROTATION_WINDOW>"
+# TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
+# TunnelDrainTimeout = "<DRAIN_DEADLINE>"
+# TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
+# TunnelPrivateControlCIDRs = ["<PRIVATE_CONTROL_CENTER_IP/32>"] # if needed

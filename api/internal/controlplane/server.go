@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"context"
-	"crypto/hmac"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -12,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,24 +23,35 @@ import (
 var MigrationFiles embed.FS
 
 type Machine struct {
-	NodeID            string     `json:"node_id"`
-	OwnerID           string     `json:"-"`
-	Fingerprint       string     `json:"fingerprint"`
-	Hostname          string     `json:"hostname"`
-	InstallDir        string     `json:"install_dir"`
-	K3sVersion        string     `json:"k3s_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	LastConfigFetchAt *time.Time `json:"last_config_fetch_at"`
+	NodeID            string        `json:"node_id"`
+	OwnerID           string        `json:"-"`
+	Fingerprint       string        `json:"fingerprint"`
+	Hostname          string        `json:"hostname"`
+	InstallDir        string        `json:"install_dir"`
+	K3sVersion        string        `json:"k3s_version"`
+	CreatedAt         time.Time     `json:"created_at"`
+	LastConfigFetchAt *time.Time    `json:"last_config_fetch_at"`
+	Epoch             string        `json:"-"`
+	CredentialVersion int64         `json:"-"`
+	Routing           *RoutingState `json:"-"`
+	Terminal          bool          `json:"-"`
+	ControlAPIURL     string        `json:"-"`
+	TunnelConfig      *TunnelParams `json:"-"`
+	DevelopmentHTTP   bool          `json:"development_http,omitempty"`
 }
 
 type Server struct {
-	db       *sql.DB
-	params   Params
-	logger   *slog.Logger
-	client   *http.Client
-	build    func(Machine) ([]byte, string, error)
-	denialMu sync.Mutex
-	denials  map[AdminAction]denialWindow
+	db               *sql.DB
+	params           Params
+	logger           *slog.Logger
+	client           *http.Client
+	build            func(Machine) ([]byte, string, error)
+	denialMu         sync.Mutex
+	denials          map[AdminAction]denialWindow
+	provider         TunnelProvider
+	keys             *accessKeyring
+	endpointVerifier func(context.Context, RoutingState, AccessCredential) error
+	endpointClient   *http.Client
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
@@ -80,6 +91,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
 	mux.HandleFunc("DELETE /api/admin/administrators/{grant_id}", s.adminMutation("administrator.revoke", s.prepareRevoke))
 	mux.HandleFunc("GET /api/admin/machines", s.adminRead(s.fleetMachines))
+	mux.HandleFunc("DELETE /api/admin/machines/{node_id}", s.adminMutation("machine.remove", s.prepareMachineRemoval))
+	mux.HandleFunc("POST /api/admin/machines/{node_id}/tunnel/rotate", s.adminMutation("tunnel.rotate", s.prepareTunnelRotation))
+	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/retry", s.adminMutation("machine.drain.retry", s.prepareDrainRetry))
 	mux.HandleFunc("GET /api/admin/apps", s.adminRead(s.listApps))
 	mux.HandleFunc("POST /api/admin/apps/validate", s.adminRead(s.validateApp))
 	mux.HandleFunc("POST /api/admin/apps", s.adminMutation("app.create", s.prepareCreateApp))
@@ -89,11 +103,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/apps/{name}/revisions/{revision_id}/retire", s.adminMutation("app.retire", s.prepareRetireApp))
 	mux.HandleFunc("POST /v1/nodes/register", s.register)
 	mux.HandleFunc("GET /v1/nodes/{node_id}/config", s.configuration)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/credentials/refresh", s.refreshCredentials)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/tunnel/connector-token", s.connectorToken)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/status", s.machineStatus)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/removal-ack", s.removalAck)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Livepeer-Tunnels-Enabled", strconv.FormatBool(s.params.CloudflareEnabled))
 		mux.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -178,11 +197,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	m.NodeID = "lp-" + m.Fingerprint[:16]
 	m.OwnerID = owner
-	data, digest, err := s.build(m)
-	if err != nil {
-		fail(w, 503, "configuration generation failed")
-		return
-	}
+	m.ControlAPIURL = s.params.PublicAPIURL
+	m.TunnelConfig = &s.params.TunnelParams
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.databaseError(w, err)
@@ -191,17 +207,27 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	// The unique node ID also catches truncated fingerprint collisions. An existing
 	// row is reusable only by the same owner with the same installation identity.
-	result, err := tx.ExecContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version) VALUES($1,$2,$3,$4,$5,$6)
+	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,1,$7)
  ON CONFLICT(node_id) DO UPDATE SET hostname=EXCLUDED.hostname,updated_at=now()
  WHERE lpcc.machines.owner_id=EXCLUDED.owner_id AND lpcc.machines.fingerprint=EXCLUDED.fingerprint
- AND lpcc.machines.install_dir=EXCLUDED.install_dir AND lpcc.machines.k3s_version=EXCLUDED.k3s_version`, m.NodeID, m.Fingerprint, owner, m.Hostname, m.InstallDir, m.K3sVersion)
+	 AND lpcc.machines.install_dir=EXCLUDED.install_dir AND lpcc.machines.k3s_version=EXCLUDED.k3s_version
+ RETURNING enrollment_epoch::text,credential_version`, m.NodeID, m.Fingerprint, owner, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
+	err = row.Scan(&m.Epoch, &m.CredentialVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		fail(w, 409, "machine already registered with a different owner or installation")
+		return
+	}
 	if err != nil {
 		s.databaseError(w, err)
 		return
 	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		fail(w, 409, "machine already registered with a different owner or installation")
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,epoch,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(node_id,epoch) DO NOTHING`, m.NodeID, m.Epoch, m.OwnerID, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion); err != nil {
+		s.databaseError(w, err)
+		return
+	}
+	data, digest, err := s.build(m)
+	if err != nil {
+		fail(w, 503, "configuration generation failed")
 		return
 	}
 	// Preserve an existing bundle; the backend reconciler owns later updates.
@@ -213,13 +239,26 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
-	respond(w, 200, map[string]string{"node_id": m.NodeID, "token": machineToken(s.params.MachineTokenSecret, owner, m.NodeID), "config_url": strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/config"})
+	respond(w, 200, s.machineCredentials(m))
+}
+
+func (s *Server) machineCredentials(m Machine) map[string]string {
+	return map[string]string{"node_id": m.NodeID, "epoch": m.Epoch, "credential_version": strconv.FormatInt(m.CredentialVersion, 10), "token": s.enrollmentToken(m), "config_url": strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/config"}
 }
 
 func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
-	var owner, digest string
+	m, err := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), true)
+	if err != nil {
+		s.respondError(w, err)
+		return
+	}
+	var digest string
 	var data []byte
-	err := s.db.QueryRowContext(r.Context(), `SELECT m.owner_id::text,c.bundle,c.sha256 FROM lpcc.machines m JOIN lpcc.machine_configs c USING(node_id) WHERE m.node_id=$1`, r.PathValue("node_id")).Scan(&owner, &data, &digest)
+	if m.Terminal {
+		err = s.db.QueryRowContext(r.Context(), `SELECT terminal_bundle,terminal_sha256 FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND terminal_bundle IS NOT NULL`, m.NodeID, m.Epoch).Scan(&data, &digest)
+	} else {
+		err = s.db.QueryRowContext(r.Context(), `SELECT c.bundle,c.sha256 FROM lpcc.machine_configs c JOIN lpcc.machines m USING(node_id) WHERE m.node_id=$1 AND m.enrollment_epoch=$2`, m.NodeID, m.Epoch).Scan(&data, &digest)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "machine configuration not found")
 		return
@@ -228,17 +267,15 @@ func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
-	expected := machineToken(s.params.MachineTokenSecret, owner, r.PathValue("node_id"))
-	if !hmac.Equal([]byte(bearer(r)), []byte(expected)) {
-		fail(w, 401, "invalid machine credential")
-		return
-	}
-	if _, err := s.db.ExecContext(r.Context(), `UPDATE lpcc.machines SET last_config_fetch_at=now() WHERE node_id=$1`, r.PathValue("node_id")); err != nil {
+	if _, err := s.db.ExecContext(r.Context(), `UPDATE lpcc.machines SET last_config_fetch_at=now() WHERE node_id=$1 AND enrollment_epoch=$2`, m.NodeID, m.Epoch); err != nil {
 		s.databaseError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("ETag", `"`+digest+`"`)
+	w.Header().Set("X-Livepeer-Epoch", m.Epoch)
+	w.Header().Set("X-Livepeer-Credential-Version", strconv.FormatInt(m.CredentialVersion, 10))
+	w.Header().Set("X-Livepeer-Terminal", strconv.FormatBool(m.Terminal))
 	w.WriteHeader(200)
 	w.Write(data)
 }

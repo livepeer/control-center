@@ -58,7 +58,7 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 		if err := db.QueryRow(`SELECT has_schema_privilege($1,'lpcc','USAGE')`, role).Scan(&usage); err != nil || usage {
 			t.Fatal("schema access", role, usage, err)
 		}
-		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state"} {
+		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state", "enrollments", "credential_refreshes", "machine_reports", "machine_tunnels", "access_credentials"} {
 			var privilege, rls bool
 			var policies int
 			if err := db.QueryRow(`SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE')`, role, "lpcc."+table).Scan(&privilege); err != nil || privilege {
@@ -92,7 +92,7 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 			if table == "apps" {
 				write = `INSERT INTO lpcc.apps(name) VALUES('forbidden')`
 			}
-			if table == "app_revisions" || table == "app_revision_state" {
+			if table != "administrator_grants" && table != "admin_audit_events" && table != "apps" {
 				write = `INSERT INTO lpcc.` + table + ` DEFAULT VALUES`
 			}
 			if _, err := tx.Exec(write); err == nil {
