@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { api, APIError } from './api'
+import { Catalog } from './catalog'
 
 type Grant = { grant_id: string; email: string; user_id: string | null; current_email: string | null; revision: number; state: 'pending' | 'bound' | 'account_missing' }
 type FleetMachine = { node_id: string; hostname: string; owner_id: string; k3s_version: string; created_at: string; last_config_fetch_at: string | null }
 type Capability = 'loading' | 'admin' | 'ordinary' | 'unavailable'
 
-// Keyed by access token in Dashboard. Request versions reject obsolete successes
+// Keyed by account in Dashboard. Request versions reject obsolete successes
 // after a newer failure in the same session.
 export function Administration({ session }: { session: Session }) {
   const [capability, setCapability] = useState<Capability>('loading')
@@ -28,12 +29,14 @@ export function Administration({ session }: { session: Session }) {
     version.current++
     requests.current.forEach(controller => controller.abort()); requests.current.clear()
     refreshing.current = false
-    setCapability(next); setGrants([]); setMachines([]); setMessage('')
+    setCapability(next); setGrants([]); setMachines([]); setMessage(''); setEmail(''); setBusy(false); mutating.current = false
   }
 
   useEffect(() => {
     let alive = true
     mounted.current = true
+    refreshing.current = false
+    mutating.current = false; setBusy(false)
     refresh.current = async () => {
       if (!alive || document.hidden || mutating.current || refreshing.current) return
       refreshing.current = true
@@ -90,7 +93,9 @@ export function Administration({ session }: { session: Session }) {
       if (error instanceof APIError && [401, 403, 503].includes(error.status)) invalidate(error.status === 503 ? 'unavailable' : 'ordinary')
       setProblem(error instanceof Error ? error.message : 'Could not update administrator access.')
     } finally {
-      requests.current.delete(controller); mutating.current = false
+      requests.current.delete(controller)
+      if (ticket !== version.current || controller.signal.aborted) return
+      mutating.current = false
       if (mounted.current) { setBusy(false); refresh.current() }
     }
   }
@@ -109,6 +114,7 @@ export function Administration({ session }: { session: Session }) {
       <p className="table-note">Grant access only after the account’s email verification history has been established.</p>
       <ul className="admin-list">{grants.map(grant => <li key={grant.grant_id}><div><strong>{grant.current_email || grant.email}</strong><span className="muted">{grant.user_id === session.user.id ? 'You' : grant.state === 'pending' ? 'Pending verified sign-in' : grant.state === 'account_missing' ? 'Account deleted or unavailable' : 'Administrator'}</span>{grant.user_id && <code>{grant.user_id}</code>}</div><button className="button" disabled={busy || grant.user_id === session.user.id} title={grant.user_id === session.user.id ? 'Another administrator must revoke your access.' : undefined} onClick={() => void change(`/api/admin/administrators/${grant.grant_id}`, 'DELETE')}>Revoke</button></li>)}</ul>
     </div>
+    <Catalog session={session} authorityFailure={error => { invalidate(error.status === 503 ? 'unavailable' : 'ordinary'); setAccessProblem(error.message) }} />
     <h3>Machine fleet <span className="count">{machines.length}</span></h3>
     <div className="machine-panel table-scroll"><table><thead><tr><th>MACHINE</th><th>OWNER</th><th>K3S VERSION</th><th>LAST CONFIG REQUEST</th></tr></thead><tbody>{machines.map(machine => <tr key={machine.node_id}><td><strong>{machine.hostname}</strong><code>{machine.node_id}</code></td><td><code>{machine.owner_id}</code></td><td>{machine.k3s_version}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td></tr>)}</tbody></table>{machines.length === 0 && <p className="admin-empty muted">No machines enrolled.</p>}</div>
   </section>

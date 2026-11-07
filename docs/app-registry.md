@@ -1,0 +1,142 @@
+# App registry
+
+The app registry is Control Center's catalog of HTTP applications. Each entry
+describes a container image, its resources, health check, instance settings, and
+price. The catalog keeps a history of immutable revisions for inspection and
+retirement. It does not assign or deploy apps to machines.
+
+## Publish an app
+
+1. Sign in as an administrator, open **Administration → App catalog**, and
+   select **Create app**.
+2. Enter a TOML definition and select **Validate definition**. Correct any
+   reported errors and validate again.
+3. Review the normalized definition and select **Publish definition**.
+4. To update an app, select it and choose **Publish new revision**. If the app
+   changes while you edit, refresh the publication base and validate again.
+
+Select an app to view its revision history, original TOML, normalized settings,
+and publication details. Select a revision and choose **Retire revision** to
+mark it retired. Retirement is permanent and does not delete the revision.
+
+An app is identified by its case-sensitive name and cannot be renamed. A new
+publication receives the next revision number. Publishing a definition identical
+to an existing revision returns that revision, even if it is retired; it does
+not create a revision or change the latest revision. Formatting changes alone
+do not create a revision. The latest revision can be retired.
+
+## Write a definition
+
+Definitions use UTF-8 TOML, limited to 64 KiB. Keys are case-sensitive. Unknown
+or duplicate keys and incorrect value types are rejected. Values are literal:
+they do not expand environment variables or load files. Do not put secrets in
+the definition.
+
+This example uses a pinned image and configures it to listen on port 8080:
+
+```toml
+name = "my-app"
+schema_version = 1
+
+[container]
+image = "traefik/whoami@sha256:c4717a8d1f0134a7444e24f881160e033991f23027c6c5a9a3f8fd22e70d1d44"
+user = "10001:10001"
+
+[container.environment]
+WHOAMI_PORT_NUMBER = "8080"
+
+[resources.limits]
+memory = "1GiB"
+
+[http]
+port = 8080
+```
+
+Replace the image, user, environment, and port with values for your app. The
+image must run as a non-root user; if its metadata specifies root, set
+`container.user` to a compatible nonzero numeric `UID:GID`. Validation checks
+the definition, not whether the image can be pulled or run successfully. In
+onchain mode, add a positive price to the example. See the
+[complete example](../runtime/tests/fixtures/whoami.toml) for more settings.
+
+### Required settings
+
+| TOML setting | Description |
+| --- | --- |
+| `name` | 1–128 ASCII letters, digits, dots, underscores, or hyphens; starts with a letter or digit. |
+| `schema_version` | Integer `1`. |
+| `container.image` | OCI/Docker image reference pinned with `@sha256:` and 64 lowercase hexadecimal digits. |
+| `resources.limits.memory` | Memory limit, such as `"1GiB"`. |
+| `http.port` | Application HTTP port, from 1 to 65535. |
+
+### Optional settings
+
+| TOML setting | Default and accepted values |
+| --- | --- |
+| `app_version` | Empty; an optional string of up to 128 bytes. Versions need not be unique. |
+| `container.platform` | Image default; `"linux/amd64"` if specified. |
+| `container.entrypoint`, `container.command`, `container.working_dir`, `container.user` | Image defaults. Entrypoint and command are nonempty arrays of literal strings; working directory is an absolute path. |
+| `container.environment` | No additions. A table of nonsecret string values. |
+| `resources.limits.cpu` | 1 CPU. Use integer cores or quoted values such as `"0.5"` or `"500m"`. |
+| `resources.limits.ephemeral_storage` | `"100MB"`. |
+| `resources.requests` | Each omitted CPU, memory, or ephemeral storage request defaults to its corresponding limit. Requests cannot exceed limits. |
+| `health.readiness` | With no table, TCP check on the HTTP port. A supplied table defaults to HTTP and requires `path`; set `type = "tcp"` for TCP. Defaults: `interval = "5s"`, `timeout = "2s"`, `failure_threshold = 3`. |
+| `filesystem.read_only_root` | `true`; writable roots are unsupported. |
+| `filesystem.shm_size` | `"64MiB"` of memory-backed shared memory. |
+| `filesystem.scratch` | No mounts. Each `[[filesystem.scratch]]` table requires `path`; `size` defaults to `"64MiB"`. Mounts are memory-backed. |
+| `network.egress` | `"deny"`; other values are unsupported. |
+| `lifecycle.startup_timeout`, `lifecycle.stop_grace_period` | `"120s"` and `"30s"`. |
+| `lifecycle.stop_signal` | Image default; otherwise a supported catchable Linux signal name such as `"SIGTERM"`. |
+| `instances.mode` | `"reusable"` or `"single-session"`. Default: `"reusable"`. |
+| `instances.replicas` | `1`; range 1–100. |
+| `instances.capacity_per_instance` | `1`; range 1–10,000. Single-session instances require 1. |
+| `instances.drain_timeout` | `"12h"`; range 0–12 hours. |
+| `runner.mode` | `"persistent"` or `"single-shot"`. Default: `"persistent"`. |
+| `price.amount`, `price.currency`, `price.unit` | `"0"`, `"usd"`, `"hour"`. Amount is a nonnegative decimal string; currency is USD; unit is `"hour"` or `"fixed"`. |
+
+Byte quantities are quoted, with units such as `"100MB"` or `"1GiB"`; units
+are case-sensitive. Durations are quoted, such as `"5s"` or `"12h"`, and must
+resolve to whole seconds. Quote fractional CPU values and prices; TOML floats
+are not accepted. Shared memory and scratch sizes together must fit within the
+memory limit.
+
+Paths must be canonical and absolute. Scratch mounts cannot overlap each other
+or system and secret paths. HTTP readiness paths must be local absolute paths
+without a query, fragment, or traversal. The validator reports the affected
+field when a setting is invalid.
+
+## Pricing policy
+
+Set `RegistryPaymentMode` in the API configuration, or the
+`REGISTRY_PAYMENT_MODE` environment variable, to one of:
+
+| Mode | Registry behavior |
+| --- | --- |
+| `offchain` | Default; allows zero or positive prices. |
+| `onchain` | Requires a positive price for validation and new publications. |
+
+This setting controls registry policy; it does not configure payment mode on
+Livepeer Nodes. The publication API returns an identical existing revision even
+if it no longer meets the current pricing policy. The catalog UI requires
+validation first, so it cannot submit such a definition in onchain mode.
+
+## Catalog API
+
+Catalog routes require administrator authorization; machine credentials do not
+grant access. Requests and responses use JSON.
+
+| Method and route | Purpose | Request body |
+| --- | --- | --- |
+| `POST /api/admin/apps/validate` | Validate a definition without publishing it. | `source_toml` |
+| `GET /api/admin/apps` | List apps. | — |
+| `GET /api/admin/apps/{name}` | View an app and its revision history. | — |
+| `GET /api/admin/apps/{name}/revisions/{id}` | View a revision, including its original TOML. | — |
+| `POST /api/admin/apps` | Publish a new app. | `source_toml` |
+| `POST /api/admin/apps/{name}/revisions` | Publish a revision. | `source_toml`, `expected_head_revision_id` |
+| `POST /api/admin/apps/{name}/revisions/{id}/retire` | Retire a revision. | `expected_state_version` |
+
+List routes accept `limit` (default 50, maximum 100); use `after_name` for the
+app list and `before_revision` for revision history. Both cursors are
+exclusive. Mutations return the revision and a `changed` boolean. A stale head
+or state produces a conflict; refresh before retrying. Validation errors
+include field-specific messages.

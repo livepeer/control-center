@@ -3,8 +3,6 @@
 Control Center manages onboarding and configuration for Livepeer orchestrators.
 The repository contains the Go API (`api/`), web UI (`ui/`), and host bootstrap
 and tests (`runtime/`), with one Go module at the repository root.
-This combined repository is the source of truth for development; the original
-Runtime checkout is retained as a reference. Node and the Go SDK remain separate.
 
 ## Run locally
 
@@ -23,10 +21,8 @@ make ui
 
 Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
 
-Administrators manage access and inspect fleet metadata; ordinary accounts
-retain their inventory and enrollment access. Note that administrator status
-grants no machine-token, host, Kubernetes, SSH, payment, or operator-secret
-access. Runtime configuration still requires the machine's credential.
+See the [app registry guide](docs/app-registry.md) for publishing app
+definitions, revision history, and pricing policy.
 
 ## Connect a node
 
@@ -64,10 +60,8 @@ make test-runtime REMOTE=livepeer-t4 REF=<commit>
 ```
 
 The first command tests current `runtime/` files, including uncommitted changes;
-`REF` selects a combined-repository commit containing `runtime/tests/run.sh`.
-Standalone Runtime commits and older combined commits without the runner are
-unsupported. Only `runtime/` is transferred; no push or remote checkout update
-is needed.
+`REF` selects a repository commit containing `runtime/tests/run.sh`. Only
+`runtime/` is transferred; no push or remote checkout update is needed.
 
 Locally, install Git, Python 3.10+, and OpenSSH configured with your usual SSH
 settings and host keys. `REMOTE` is required; local Docker is not. The Linux

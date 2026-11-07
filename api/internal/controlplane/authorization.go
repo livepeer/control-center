@@ -5,22 +5,27 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+
+	"github.com/livepeer/control-center/schema"
 )
 
 type apiProblem struct {
 	status          int
 	reason, message string
+	fields          []schema.FieldError
 }
 
-func (e *apiProblem) Error() string                    { return e.reason }
-func problem(status int, reason, message string) error { return &apiProblem{status, reason, message} }
+func (e *apiProblem) Error() string { return e.reason }
+func problem(status int, reason, message string) error {
+	return &apiProblem{status: status, reason: reason, message: message}
+}
 
 func errorDetails(err error) *apiProblem {
 	var p *apiProblem
 	if errors.As(err, &p) {
 		return p
 	}
-	return &apiProblem{503, "unavailable", "The service is temporarily unavailable."}
+	return &apiProblem{status: 503, reason: "unavailable", message: "The service is temporarily unavailable."}
 }
 
 func (s *Server) respondError(w http.ResponseWriter, err error) {
@@ -29,7 +34,11 @@ func (s *Server) respondError(w http.ResponseWriter, err error) {
 		s.logLimited("control plane operation failed", "request.failure", "", err)
 	}
 	p := errorDetails(err)
-	respond(w, p.status, map[string]string{"error": p.message, "code": p.reason})
+	respond(w, p.status, struct {
+		Error  string              `json:"error"`
+		Code   string              `json:"code"`
+		Fields []schema.FieldError `json:"fields,omitempty"`
+	}{p.message, p.reason, p.fields})
 }
 
 // Policy writers share this lock. READ COMMITTED and the separate lock/check

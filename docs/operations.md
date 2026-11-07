@@ -56,3 +56,10 @@ COMMIT;
 
 Verify that one row was inserted. Correct `DefaultAdminEmail` and restart; a new
 grant is seeded only if no active grants remain.
+
+## App catalog
+
+Use **Administration → App catalog** to validate and publish TOML, inspect
+revision history, and retire definitions. See the [app registry guide](app-registry.md)
+for definition settings and pricing policy. Catalog changes alone do not assign
+or deploy applications.

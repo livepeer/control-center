@@ -1,0 +1,63 @@
+name = "whoami"
+app_version = "1"
+
+schema_version = 1
+
+[container]
+image = "traefik/whoami@sha256:c4717a8d1f0134a7444e24f881160e033991f23027c6c5a9a3f8fd22e70d1d44"
+platform = "linux/amd64"
+# Omit these to use image metadata:
+# entrypoint = ["/app/server"]
+# command = ["--port", "2001"]
+# working_dir = "/app"
+user = "10001:10001"
+
+[container.environment]
+WHOAMI_PORT_NUMBER = "8080"
+LOG_LEVEL = "info"
+
+[resources.limits]
+cpu = 1
+memory = "1GiB"
+ephemeral_storage = "2GiB"
+# Requests default to the corresponding limits.
+
+[http]
+port = 8080
+
+[health.readiness]
+type = "http"
+path = "/health"
+interval = "5s"
+timeout = "2s"
+failure_threshold = 3
+
+[filesystem]
+read_only_root = true
+shm_size = "64MiB"
+
+[[filesystem.scratch]]
+path = "/tmp"
+size = "512MiB"
+
+[network]
+egress = "deny"
+
+[lifecycle]
+startup_timeout = "120s"
+stop_signal = "SIGTERM"
+stop_grace_period = "30s"
+
+[instances]
+mode = "reusable"
+replicas = 2
+capacity_per_instance = 1
+drain_timeout = "12h"
+
+[runner]
+mode = "single-shot"
+
+[price]
+amount = "0.001"
+currency = "usd"
+unit = "fixed"

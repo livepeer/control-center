@@ -17,8 +17,18 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Down(t.Context(), db, files); err != nil {
-		t.Fatal(err)
+	// Reapply administrator and all later migrations under hostile grants.
+	for {
+		var newer bool
+		if err := db.QueryRow(`SELECT EXISTS(SELECT FROM lpcc.migrations WHERE version>=2)`).Scan(&newer); err != nil {
+			t.Fatal(err)
+		}
+		if !newer {
+			break
+		}
+		if err := migrations.Down(t.Context(), db, files); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, role := range []string{"anon", "authenticated"} {
 		var exists bool
@@ -48,7 +58,7 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 		if err := db.QueryRow(`SELECT has_schema_privilege($1,'lpcc','USAGE')`, role).Scan(&usage); err != nil || usage {
 			t.Fatal("schema access", role, usage, err)
 		}
-		for _, table := range []string{"administrator_grants", "admin_audit_events"} {
+		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state"} {
 			var privilege, rls bool
 			var policies int
 			if err := db.QueryRow(`SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE')`, role, "lpcc."+table).Scan(&privilege); err != nil || privilege {
@@ -79,6 +89,12 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 			if table == "admin_audit_events" {
 				write = `INSERT INTO lpcc.admin_audit_events(actor_kind,actor_id,action,target_kind,target_id,outcome,reason) VALUES('system','attacker','administrator.grant','request','fake','success','changed')`
 			}
+			if table == "apps" {
+				write = `INSERT INTO lpcc.apps(name) VALUES('forbidden')`
+			}
+			if table == "app_revisions" || table == "app_revision_state" {
+				write = `INSERT INTO lpcc.` + table + ` DEFAULT VALUES`
+			}
 			if _, err := tx.Exec(write); err == nil {
 				t.Fatal("browser role wrote private table")
 			}
@@ -86,22 +102,28 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 		}
 	}
 	// Even accidental table/schema grants must not bypass the no-policy RLS layer.
-	if _, err := db.Exec(`INSERT INTO lpcc.administrator_grants(grant_id,email) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','admin@example.invalid'); GRANT USAGE ON SCHEMA lpcc TO authenticated; GRANT ALL ON lpcc.administrator_grants,lpcc.admin_audit_events TO authenticated`); err != nil {
+	if _, err := db.Exec(`INSERT INTO lpcc.administrator_grants(grant_id,email) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','admin@example.invalid'); INSERT INTO lpcc.apps(name) VALUES('private'); GRANT USAGE ON SCHEMA lpcc TO authenticated; GRANT ALL ON lpcc.administrator_grants,lpcc.admin_audit_events,lpcc.apps TO authenticated`); err != nil {
 		t.Fatal(err)
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`SET LOCAL ROLE authenticated`); err != nil {
-		t.Fatal(err)
-	}
-	var visible int
-	if err := tx.QueryRow(`SELECT count(*) FROM lpcc.administrator_grants`).Scan(&visible); err != nil || visible != 0 {
-		t.Fatal("RLS exposed grants", visible, err)
-	}
-	if _, err := tx.Exec(`INSERT INTO lpcc.administrator_grants(grant_id,email) VALUES('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','attacker@example.invalid')`); err == nil {
-		t.Fatal("RLS allowed browser mutation")
+	for _, table := range []string{"administrator_grants", "apps"} {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`SET LOCAL ROLE authenticated`); err != nil {
+			t.Fatal(err)
+		}
+		var visible int
+		if err := tx.QueryRow(`SELECT count(*) FROM lpcc.` + table).Scan(&visible); err != nil || visible != 0 {
+			t.Fatal("RLS exposed private rows", table, visible, err)
+		}
+		write := `INSERT INTO lpcc.apps(name) VALUES('attacker')`
+		if table == "administrator_grants" {
+			write = `INSERT INTO lpcc.administrator_grants(grant_id,email) VALUES('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','attacker@example.invalid')`
+		}
+		if _, err := tx.Exec(write); err == nil {
+			t.Fatal("RLS allowed browser mutation", table)
+		}
+		tx.Rollback()
 	}
 }

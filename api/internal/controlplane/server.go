@@ -80,6 +80,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
 	mux.HandleFunc("DELETE /api/admin/administrators/{grant_id}", s.adminMutation("administrator.revoke", s.prepareRevoke))
 	mux.HandleFunc("GET /api/admin/machines", s.adminRead(s.fleetMachines))
+	mux.HandleFunc("GET /api/admin/apps", s.adminRead(s.listApps))
+	mux.HandleFunc("POST /api/admin/apps/validate", s.adminRead(s.validateApp))
+	mux.HandleFunc("POST /api/admin/apps", s.adminMutation("app.create", s.prepareCreateApp))
+	mux.HandleFunc("GET /api/admin/apps/{name}", s.adminRead(s.inspectApp))
+	mux.HandleFunc("POST /api/admin/apps/{name}/revisions", s.adminMutation("app.publish", s.preparePublishApp))
+	mux.HandleFunc("GET /api/admin/apps/{name}/revisions/{revision_id}", s.adminRead(s.inspectAppRevision))
+	mux.HandleFunc("POST /api/admin/apps/{name}/revisions/{revision_id}/retire", s.adminMutation("app.retire", s.prepareRetireApp))
 	mux.HandleFunc("POST /v1/nodes/register", s.register)
 	mux.HandleFunc("GET /v1/nodes/{node_id}/config", s.configuration)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

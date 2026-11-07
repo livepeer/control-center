@@ -1,7 +1,7 @@
 import type { Session } from '@supabase/supabase-js'
 
 export class APIError extends Error {
-  constructor(public status: number, message: string) { super(message) }
+  constructor(public status: number, message: string, public code = "", public fields: {path: string; code: string; message: string}[] = []) { super(message) }
 }
 
 export async function api<T>(session: Session, path: string, options: RequestInit = {}): Promise<T> {
@@ -12,6 +12,6 @@ export async function api<T>(session: Session, path: string, options: RequestIni
   let body
   try { body = await response.json() }
   catch (error) { if (response.ok) throw error }
-  if (!response.ok) throw new APIError(response.status, typeof body?.error === 'string' ? body.error : 'The request failed. Please try again.')
+  if (!response.ok) throw new APIError(response.status, typeof body?.error === 'string' ? body.error : 'The request failed. Please try again.', typeof body?.code === 'string' ? body.code : '', Array.isArray(body?.fields) ? body.fields : [])
   return body as T
 }

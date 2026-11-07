@@ -33,6 +33,7 @@ type Params struct {
 	PublicAPIURL            string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
 	SupabaseURL             string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
 	SupabasePublishableKey  string        `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
+	RegistryPaymentMode     string        `env:"REGISTRY_PAYMENT_MODE" default:"offchain" alts:"offchain,onchain" descr:"Registry pricing policy; does not configure Node payments"`
 	DefaultAdminEmail       string        `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
 	JWTSigningSecret        string        `env:"JWT_SIGNING_SECRET" secret:"true" min:"32" descr:"Persistent enrollment signing secret (at least 32 bytes)"`
 	JWTSigningSecretFile    string        `env:"JWT_SIGNING_SECRET_FILE" secretfor:"JWTSigningSecret" basepath:"source" descr:"File containing the enrollment signing secret"`

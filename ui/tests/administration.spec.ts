@@ -31,6 +31,7 @@ async function setup(page: Page, initialAdmin = true) {
       if (state.holdMe) { state.heldMe = route; return }
       return route.fulfill({ status: state.meStatus, json: state.meStatus === 200 ? { user_id: actor, is_admin: actor === a && state.admin } : { error: 'Capability service unavailable.' } })
     }
+    if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], payment_mode: 'offchain', next_after_name: null } })
     if (path === '/api/admin/machines') {
       if (state.holdFleet) { state.heldFleet = route; return }
       return route.fulfill({ json: { machines: [fleet] } })

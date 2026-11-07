@@ -26,3 +26,6 @@ Listen = "localhost:41932"
 # Put the API behind a reachable HTTPS endpoint for remote machines.
 PublicAPIURL = "http://localhost:41932"
 ConfigReconcileInterval = "1m"
+
+# Registry price validation only; actual Node payment configuration is separate.
+RegistryPaymentMode = "offchain"

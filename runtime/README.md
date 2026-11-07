@@ -6,10 +6,8 @@ HTTP configuration adapter, system-upgrade-controller, and the standalone
 [`livepeer/node`](https://github.com/livepeer/node) orchestrator in offchain mode.
 It does not deploy runners or configure GPUs or public ingress.
 
-Runtime lives under `runtime/` in the combined Control Center repository.
-Run the commands below from that directory. The combined repository is the
-development source of truth; an older standalone checkout may be retained as
-a reference, but is not automatically synchronized.
+Runtime lives under `runtime/` in the Control Center repository. Run the
+commands below from that directory.
 
 Copy or clone the whole project onto the target machine. Host installation uses
 Bash and standard Linux utilities; Python runs only in the pinned HTTP service
@@ -69,9 +67,12 @@ container registries. Downloads use fixed releases with checksum verification:
 
 The Python service, smoke-test BusyBox, and Livepeer images are pinned by digest.
 The upgrade job's kubectl helper uses `rancher/kubectl:v1.36.2`, within one minor
-of the initial Kubernetes version. Update that helper together with future
-Kubernetes minor upgrades. Published checksums provide download integrity;
+of the installer's pinned Kubernetes version. Keep that helper within one minor
+of the Kubernetes version. Published checksums provide download integrity;
 the installer trusts the upstream HTTPS release endpoints.
+
+See the [app registry guide](../docs/app-registry.md) for application definitions.
+The HTTP archive adapter treats application configuration as an opaque archive.
 
 ## Enrollment and desired configuration
 
@@ -147,7 +148,7 @@ Host integration still requires paths and state outside the root:
 The orchestrator uses a local PV tied to this node. This is a single-host
 installation, with no failover or durable sessions across process restarts.
 It runs on `runc`, as do Flux, the helpers, and the upgrade controller.
-gVisor is available through `runtimeClassName: gvisor` for future workloads;
+gVisor is available through `runtimeClassName: gvisor` for workloads;
 its systrap platform does not require KVM.
 
 ## Tunnel-only external access
@@ -239,7 +240,7 @@ To uninstall:
 
 There is no automatic destructive uninstall command. Collector/connectivity
 components and an externally validated CPU support matrix are outside this
-bootstrap's scope; see [issue #86](https://github.com/livepeer/naap-ops/issues/86).
+bootstrap's scope.
 
 ## Inspection and upgrades
 
@@ -259,7 +260,7 @@ curl -fsS http://127.0.0.1:8936/readyz
 curl -fsS http://127.0.0.1:8935/discovery
 ```
 
-An empty runner inventory is expected. Runner registration can later use
+An empty runner inventory is expected. Runner registration uses
 `credentials/runner-bootstrap.secret`. The initial destination grants are empty;
 before adding runners on private networks, configure the appropriate
 [`RunnerGrants` and `HealthGrants`](https://github.com/livepeer/node/blob/v1.0.6/docs/orchestrator.md).

@@ -8,7 +8,7 @@ build:
 	go build -o api/controlcenter ./api/cmd/controlcenter
 	npm --prefix ui run build
 test:
-	go test ./api/...
+	go test ./...
 	python3 -m unittest discover -s tools/tests -v
 test-runtime:
 	python3 tools/test-runtime-remote.py
