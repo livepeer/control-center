@@ -241,6 +241,9 @@ func (s *Server) adminMutation(action AdminAction, prepare func(*http.Request, U
 			s.respondError(w, err)
 			return
 		}
+		if change.Changed {
+			s.requestReconcile()
+		}
 		if change.Status == http.StatusNoContent {
 			w.WriteHeader(change.Status)
 		} else {

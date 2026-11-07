@@ -79,6 +79,14 @@ func buildBundle(m Machine) ([]byte, string, error) {
 
 func (s *Server) Reconcile(ctx context.Context) {
 	run := func() {
+		if s.discovery != nil {
+			sourceCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+			err := s.discovery.Reconcile(sourceCtx)
+			stop()
+			if err != nil && ctx.Err() == nil {
+				s.logger.Error("fleet discovery reconciliation failed", "reason", "reconcile_failed")
+			}
+		}
 		passCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if err := s.reconcile(passCtx); err != nil && ctx.Err() == nil {
@@ -93,6 +101,8 @@ func (s *Server) Reconcile(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			run()
+		case <-s.reconcileWake:
 			run()
 		}
 	}

@@ -71,3 +71,10 @@ Follow [the machine tunnel runbook](machine-tunnels.md) for infrastructure
 prerequisites, credential delivery, refresh, rotation, removal, integration
 contracts and release evidence. Keep `CloudflareEnabled` and
 `CloudflareIngressApproved` false until their respective gates are satisfied.
+
+## Fleet discovery
+
+Fleet discovery shares the API process and its TLS proxy. Enable it separately
+after protected ingress approval, using the existing encrypted Access credential
+store and protected keyring. See [fleet discovery](fleet-discovery.md) for
+configuration, source lifecycle, rotation, freshness diagnosis and release gates.

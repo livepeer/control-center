@@ -323,7 +323,8 @@ func (s *Server) DiscoverySources(ctx context.Context) ([]DiscoverySource, error
 		if ready && (r.VerifiedAt.IsZero() || time.Since(r.VerifiedAt) > s.params.TunnelStatusTTL) {
 			ready, reason = false, "observation_expired"
 		}
-		sources = append(sources, DiscoverySource{ID: node + "/" + epoch, NodeID: node, Epoch: epoch, URL: r.DiscoveryURL, Lifecycle: r.Lifecycle, Ready: ready, Generation: r.SourceGeneration, VerifiedGeneration: r.VerifiedGeneration, CredentialVersion: r.AccessVersion, CredentialRef: credentialRef(node, epoch, r.AccessVersion), Reason: reason, RotationReason: r.RotationReason})
+		blocked := r.Quarantined || r.Reason == "ownership_conflict" || r.Reason == "predecessor_cleanup_pending" || r.Reason == "ingress_validation_required"
+		sources = append(sources, DiscoverySource{ID: node + "/" + epoch, NodeID: node, Epoch: epoch, URL: r.DiscoveryURL, ServiceURL: r.ServiceURL, ProxyURLTemplate: r.ProxyURLTemplate, Lifecycle: r.Lifecycle, Ready: ready, Blocked: blocked, Generation: r.SourceGeneration, VerifiedGeneration: r.VerifiedGeneration, CredentialVersion: r.AccessVersion, CredentialRef: credentialRef(node, epoch, r.AccessVersion), Reason: reason, RotationReason: r.RotationReason})
 	}
 	return sources, rows.Err()
 }

@@ -61,3 +61,7 @@ func (k *accessKeyring) open(id, ref string, b []byte) (AccessCredential, error)
 	}
 	return c, nil
 }
+
+// Formatting must not expose encrypted-store plaintext credentials.
+func (AccessCredential) String() string   { return "[redacted Access credential]" }
+func (AccessCredential) GoString() string { return "[redacted Access credential]" }

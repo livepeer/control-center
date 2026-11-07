@@ -33,6 +33,15 @@ RegistryPaymentMode = "offchain"
 # Machine ingress is opt-in. See docs/machine-tunnels.md before enabling it.
 CloudflareEnabled = false
 CloudflareIngressApproved = false
+
+# Fleet discovery shares the API process and existing TLS proxy. It requires
+# approved machine ingress and CloudflareKeyringFile; no provisioning API token
+# is needed when CloudflareEnabled is false. Source inventory comes from #112.
+DiscoveryEnabled = false
+DiscoveryRefreshInterval = "5m"
+DiscoveryMaxFailedRefreshes = 6
+# Usually empty: grant private IP/IP:port/CIDR destinations only deliberately.
+DiscoveryGrants = []
 # The following are operator decisions; placeholders are intentionally invalid.
 # CloudflareAccountID = "<ACCOUNT_ID>"
 # CloudflareZoneID = "<ZONE_ID>"

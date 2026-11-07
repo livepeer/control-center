@@ -1,0 +1,70 @@
+// Package discovery hosts the Node Collector independently of API/auth/database code.
+package discovery
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+const (
+	AuthCloudflare = "cloudflare"
+	AuthNone       = "none"
+)
+
+// Config controls collection, not machine placement or qualification policy.
+type Config struct {
+	RefreshInterval    time.Duration
+	MaxFailedRefreshes int
+	ReconcileInterval  time.Duration
+	Grants             []string
+	OwnURL             string
+}
+
+func (c Config) Validate() error {
+	if c.RefreshInterval < time.Second || c.ReconcileInterval < time.Second || c.MaxFailedRefreshes < 0 {
+		return errors.New("discovery requires intervals of at least 1s and a nonnegative failure limit")
+	}
+	return nil
+}
+
+// Dependencies supplies only source operations. Transport nil selects Node's
+// destination-policy transport; embeddings supplying one must preserve protections.
+// It is not exposed as runtime configuration by Control Center.
+type Dependencies struct {
+	Store     Store
+	Logger    *slog.Logger
+	Transport http.RoundTripper
+}
+
+// Store projects authoritative managed state; it is not another editable fleet list.
+type Store interface {
+	Sources(context.Context) ([]Source, error)
+	Resolve(context.Context, string) (Credential, error)
+	Acknowledge(context.Context, Source) error
+}
+
+// Credential is process-local transport material, never a JSON/status payload.
+type Credential struct {
+	ClientID     string `json:"-"`
+	ClientSecret string `json:"-"`
+}
+
+type Source struct {
+	ID                 string `json:"id"`
+	NodeID             string `json:"node_id"`
+	Epoch              string `json:"epoch"`
+	URL                string `json:"url"`
+	ServiceURL         string `json:"service_url"`
+	ProxyURLTemplate   string `json:"proxy_url_template"`
+	AuthMode           string `json:"auth_mode"`
+	Lifecycle          string `json:"lifecycle"`
+	Ready              bool   `json:"ready"`
+	Blocked            bool   `json:"blocked"`
+	Generation         int64  `json:"generation"`
+	CredentialRef      string `json:"credential_ref"`
+	CredentialVersion  int64  `json:"credential_version"`
+	VerifiedGeneration int64  `json:"verified_generation"`
+}

@@ -24,6 +24,9 @@ Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
 See the [app registry guide](docs/app-registry.md) for publishing app
 definitions, revision history, and pricing policy.
 
+The API can also serve [fleet discovery](docs/fleet-discovery.md) from managed,
+Access-protected orchestrators using Node's Collector library.
+
 ## Connect a node
 
 On a Debian or Ubuntu amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB

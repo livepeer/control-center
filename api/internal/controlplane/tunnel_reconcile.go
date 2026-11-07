@@ -24,6 +24,7 @@ func (s *Server) RunTunnels(ctx context.Context) {
 		if e := s.reconcileTunnels(ctx); e != nil && ctx.Err() == nil {
 			s.logger.Error("tunnel reconciliation failed", "reason", "reconcile_failed")
 		}
+		s.requestReconcile()
 	}
 	run()
 	ticker := time.NewTicker(s.params.ConfigReconcileInterval)

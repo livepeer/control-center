@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
 	"github.com/livepeer/control-center/api/internal/migrations"
 )
 
@@ -52,10 +53,12 @@ type Server struct {
 	keys             *accessKeyring
 	endpointVerifier func(context.Context, RoutingState, AccessCredential) error
 	endpointClient   *http.Client
+	discovery        *fleet.Manager
+	reconcileWake    chan struct{}
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
-	return &Server{db: db, params: p, logger: logger, build: buildBundle, client: &http.Client{
+	return &Server{db: db, params: p, logger: logger, build: buildBundle, reconcileWake: make(chan struct{}, 1), client: &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
@@ -91,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
 	mux.HandleFunc("DELETE /api/admin/administrators/{grant_id}", s.adminMutation("administrator.revoke", s.prepareRevoke))
 	mux.HandleFunc("GET /api/admin/machines", s.adminRead(s.fleetMachines))
+	mux.HandleFunc("GET /discovery", s.discoveryHTTP)
+	mux.HandleFunc("GET /api/admin/discovery", s.adminRead(func(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
+		respond(w, http.StatusOK, s.DiscoveryStatus())
+	}))
 	mux.HandleFunc("DELETE /api/admin/machines/{node_id}", s.adminMutation("machine.remove", s.prepareMachineRemoval))
 	mux.HandleFunc("POST /api/admin/machines/{node_id}/tunnel/rotate", s.adminMutation("tunnel.rotate", s.prepareTunnelRotation))
 	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/retry", s.adminMutation("machine.drain.retry", s.prepareDrainRetry))

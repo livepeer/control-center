@@ -81,8 +81,11 @@ type DiscoverySource struct {
 	NodeID             string `json:"node_id"`
 	Epoch              string `json:"epoch"`
 	URL                string `json:"url"`
+	ServiceURL         string `json:"service_url"`
+	ProxyURLTemplate   string `json:"proxy_url_template"`
 	Lifecycle          string `json:"lifecycle"`
 	Ready              bool   `json:"ready"`
+	Blocked            bool   `json:"blocked"`
 	Generation         int64  `json:"generation"`
 	CredentialRef      string `json:"credential_ref"`
 	CredentialVersion  int64  `json:"credential_version"`
