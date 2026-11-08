@@ -61,6 +61,8 @@ type Runtime struct {
 	ProxyURLTemplate  string `json:"proxy_url_template"`
 	DiscoveryURL      string `json:"discovery_url"`
 	IngressDigest     string `json:"ingress_digest"`
+	AppsGeneration    int64  `json:"apps_generation,omitempty"`
+	AppsDigest        string `json:"apps_digest,omitempty"`
 	ConnectorTokenRef string `json:"connector_token_ref"`
 }
 

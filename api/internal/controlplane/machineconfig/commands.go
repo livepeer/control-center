@@ -81,6 +81,9 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, fo
 		raw, _ = json.Marshal(state)
 		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,epoch,state,rollout) VALUES($1,$2,'{}',$3) ON CONFLICT(node_id,epoch) DO UPDATE SET rollout=EXCLUDED.rollout,revision=lpcc.machine_states.revision+1,next_attempt_at=now()`, node, epoch, string(raw))
 	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `SELECT lpcc.remove_machine_apps($1,$2,'system:machine-removal')`, node, epoch)
+	}
 	result.Lifecycle = "draining"
 	result.Generation = state.Generation
 	return result, err

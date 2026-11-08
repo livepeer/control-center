@@ -140,3 +140,125 @@ app list and `before_revision` for revision history. Both cursors are
 exclusive. Mutations return the revision and a `changed` boolean. A stale head
 or state produces a conflict; refresh before retrying. Validation errors
 include field-specific messages.
+
+## Assign revisions to a machine
+
+In **Administration → Machine fleet**, choose **Manage apps**, select an app
+and explicit revision, set replicas, and assign it. Multiple revisions may coexist,
+with one assignment per revision and enrollment. Publishing a catalog revision does
+not change existing assignments; scaling does not change the definition or digest.
+New assignments reject retired revisions and definitions incompatible with current
+pricing policy, but existing assignments may scale or recover. Rollback requires an
+explicit assignment or replacement with an eligible prior revision.
+
+**Replace revision after cleanup** requests source removal and queues the target.
+The target may start only after source cleanup and a new published snapshot permits it,
+so replacement can cause an availability gap. Replica edits preserve this condition.
+Removing a queued target leaves source removal in place. Replacement chains through
+blocked assignments are rejected; a revision being removed cannot be reassigned until
+cleanup is acknowledged.
+
+**Applied — health unverified** means the requested replicas were reconciled and
+scale-down finished safely; it does not establish current health, registration,
+capacity or discoverability. Config download and ConfigMap application do not
+establish app completion. Inspect an assignment for pinned settings, actor, time
+and paginated desired history.
+
+### Assignment API
+
+All routes require server-verified administrator authority; machine owners,
+bootstrap JWTs and machine service credentials cannot mutate assignments. Let
+`M = /api/admin/machines/{node_id}/apps`:
+
+| Method and route | Body or query |
+| --- | --- |
+| `GET M` | `limit` (50 default, 100 maximum), exclusive `after_revision_id` |
+| `GET M/{revision_id}` | Optional retained `epoch`; history `limit`, exclusive `before_generation` |
+| `PUT M/{revision_id}` | `epoch`, `digest`, `expected_generation`, optional `replicas` |
+| `DELETE M/{revision_id}` | `epoch`, `expected_generation` |
+| `POST M/{revision_id}/replace` | `epoch`, `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
+
+Writes require a current active enrollment with modern credentials.
+`expected_generation: 0` means never assigned. Replicas range from 1 to 100;
+omitting them uses the definition default on creation and preserves the count on
+scaling. Changed operations return 202 and `{changed, epoch, assignments}`;
+identical completed retries return 200 without advancing generations. Concurrent
+edits return 409. A lost-response retry must match the immediately resulting
+version and complete desired result; an intervening edit conflicts even if values
+return to their earlier state. Audit and desired writes commit together.
+
+At most 100 assignments may be pending, including present, queued and
+unacknowledged removals. Admission reserves room for removal within the 900 KiB
+ConfigMap limit; completed history does not count. Invalid or oversized changes
+leave desired state and the last valid bundle intact.
+
+### Runtime delivery and completion contract
+
+Flux delivers the nonsecret `livepeer/livepeer-app-assignments` ConfigMap through
+the authenticated HTTP bundle. Version 1 `data["desired.json"]` contains `node_id`,
+enrollment `epoch`, independent `apps_generation` and `entries` sorted by revision
+UUID. `livepeer.io/apps-sha256` is the SHA-256 of its exact canonical UTF-8 JSON bytes;
+`runtime.json` carries matching `apps_generation` and `apps_digest`. App-only edits
+preserve Node/connector manifests, rollout generation, drain identity and routing
+inputs. The adapter retains confirmed Node readiness only when verified archives
+prove infrastructure unchanged; otherwise the ordinary readiness gate applies.
+
+Each entry identifies its pinned revision, desired `present`/`absent` state,
+assignment `generation`, stable `activation_generation` and cleanup policy.
+Present entries include the resolved definition, effective replicas and
+`start_allowed`; a queued target has
+`start_after: {source_revision_id, source_removal_generation}`. Activation survives
+scaling and removal; reassignment after cleanup creates a new activation generation,
+without a new deployment UUID. Absent entries omit full image, health and pricing
+definitions but retain identity and bounded drain/stop policy.
+
+App completion, reassignment after removal and normal machine removal require the
+Runtime lifecycle consumer (#113). It validates snapshots and manages workloads,
+instance identities, endpoints, admission, sessions, draining and cleanup, including registration. The
+App Reporter (#114) maps health to registration; #117 handles ongoing fleet status.
+
+Runtime reports with the machine service credential to
+`POST /v1/nodes/{node_id}/apps/{revision_id}/status`. The strict JSON body is limited
+to 16 KiB:
+
+```json
+{"epoch":"<ENROLLMENT_UUID>","credential_version":1,"generation":2,
+ "activation_generation":1,"apps_digest":"sha256:<HEX>",
+ "phase":"removed","reason":""}
+```
+
+`applied` records reconciliation completion for a present, start-permitted version.
+`removed` records cleanup of the entire activation, including owned instances,
+private routes and registration. Completion reports require an empty reason.
+`failed` records a diagnostic while incomplete and cannot undo completion. Its
+reasons are `reconcile_failed`, `invalid_definition`, `image_pull_failed`,
+`startup_failed`, `isolation_refused`, `resource_refused`,
+`cleanup_failed`, or `registration_cleanup_failed`; do not send credentials,
+payloads or arbitrary error text.
+
+Reports must match published membership, desired state and start permission. An
+older published digest remains valid while that assignment version is current.
+Immutable completion receipts allow exact retries after removal-entry compaction
+or reassignment without changing a newer activation. Unknown, future,
+cross-enrollment and stale transitions are rejected. Completion is monotonic; no
+report sequence is required, and changing health is separate.
+
+Unacknowledged removals remain in snapshots while offline. Fetch or authentication
+failure preserves the last valid artifact; on reconnection, Runtime receives the
+latest snapshot without running every intermediate version. Cleanup acknowledgement
+removes the tombstone from future active snapshots and releases prerequisites,
+advancing `apps_generation` while preserving the Node/tunnel generation.
+
+Normal machine removal withdraws all assignments, including queued targets, and
+waits for app cleanup and machine drain completion. Force removal and owner
+deletion retain terminal instructions and history. Terminal removal acknowledgement
+also requires app cleanup. A retired enrollment can fetch its terminal bundle and
+acknowledge exact terminal app cleanup, but cannot report active state, obtain
+connector credentials or administer apps. Terminal snapshots are write-once, and
+old-epoch cleanup cannot affect reenrollment. Runtime's cleanup consumer and
+credential access must survive terminal workload pruning until cleanup finishes.
+
+Deploy the additive migration with assignment-aware API and Runtime code. Software
+rollback must retain assignment rendering and decoding; otherwise freeze publication
+during recovery. A pre-assignment bundle writer must not resume. The down migration
+refuses to discard existing assignment history.

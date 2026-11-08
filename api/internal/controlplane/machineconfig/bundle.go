@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"github.com/livepeer/control-center/schema"
 	"io/fs"
 	"sort"
 	"strings"
@@ -44,6 +46,24 @@ func Build(m Desired) ([]byte, string, error) {
 	}
 	if err = addRoutingBundle(files, m); err != nil {
 		return nil, "", err
+	}
+	if m.Apps != nil {
+		manifest, appsDigest, err := schema.AssignmentConfigMap(*m.Apps)
+		if err != nil {
+			return nil, "", err
+		}
+		files[schema.AppAssignmentsFile] = manifest
+		// Add to resources before the existing patches section.
+		files["kustomization.yaml"] = []byte(strings.Replace(string(files["kustomization.yaml"]), "patches:", "- "+schema.AppAssignmentsFile+"\npatches:", 1))
+		var runtime Runtime
+		if err := json.Unmarshal(files["runtime.json"], &runtime); err != nil {
+			return nil, "", err
+		}
+		runtime.AppsGeneration, runtime.AppsDigest = m.Apps.Generation, appsDigest
+		files["runtime.json"], err = json.Marshal(runtime)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	names := make([]string, 0, len(files))
 	for name := range files {

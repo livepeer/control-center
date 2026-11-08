@@ -16,7 +16,7 @@ import tarfile
 import urllib.request
 import urllib.error
 
-from artifacts import MAX_ARCHIVE, atomic_write, validate_archive
+from artifacts import strict_json, validate_app_assignments, MAX_ARCHIVE, atomic_write, validate_archive
 from http_common import Handler
 from control_client import ControlClient, NoRedirect, read_config
 
@@ -72,13 +72,52 @@ class Adapter:
         self.allow_http = allow_http
         self.identity_file = pathlib.Path(identity_file) if identity_file else None
 
+    def app_only_change(self, previous, current):
+        """Reuse confirmed infrastructure only when cached archives prove equality."""
+        def infrastructure(revision):
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}', revision):
+                raise ValueError('invalid applied revision')
+            path = self.directory / (revision.split(':')[1] + '.tar.gz')
+            with path.open('rb') as stream:
+                data = stream.read(MAX_ARCHIVE + 1)
+            if validate_archive(data) != revision:
+                raise ValueError('cached applied revision digest mismatch')
+            with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+                files = {m.name: archive.extractfile(m).read() for m in archive}
+            metadata = strict_json(files.pop('runtime.json'))
+            generation = metadata.pop('apps_generation', 0)
+            metadata.pop('apps_digest', None)
+            files['runtime.json'] = json.dumps(metadata, sort_keys=True).encode()
+            files.pop('app-assignments.json', None)
+            # The renderer adds only this resource for assignment delivery.
+            root = files.get('kustomization.yaml', b'')
+            files['kustomization.yaml'] = b'\n'.join(line for line in root.splitlines()
+                                                        if line != b'- app-assignments.json').rstrip()
+            return generation, files
+        try:
+            old_generation, old_files = infrastructure(previous)
+            new_generation, new_files = infrastructure(current)
+            return new_generation > old_generation and old_files == new_files
+        except (OSError, ValueError, KeyError, TypeError, tarfile.TarError):
+            return False
+
     def report(self, client, desired, digest):
+        applied_revision = ''
         def applied(name):
+            nonlocal applied_revision
             resource = self.kube.request(FLUX_PATH + name)
             status = resource.get('status', {})
-            return (status.get('observedGeneration') == resource['metadata']['generation'] and
-                    status.get('lastAppliedRevision') == digest and
-                    any(c['type'] == 'Ready' and c['status'] == 'True' for c in status.get('conditions', [])))
+            revision = status.get('lastAppliedRevision', '')
+            if name == 'livepeer' and re.fullmatch(r'sha256:[0-9a-f]{64}', revision):
+                applied_revision = revision.split(':')[1]
+            observed = status.get('observedGeneration') == resource['metadata']['generation']
+            current = (revision == digest and any(c['type'] == 'Ready' and c['status'] == 'True'
+                                                 for c in status.get('conditions', [])))
+            # A new app ConfigMap does not invalidate already-applied Node,
+            # tunnel or upgrade resources. Require byte-equivalent infrastructure.
+            unchanged = (not current and revision != digest and not desired['terminal'] and
+                         self.app_only_change(revision, digest))
+            return observed and (current or unchanged)
 
         applied_bundle = applied('livepeer') and applied('livepeer-upgrade-plan')
         if desired['terminal']:
@@ -124,7 +163,7 @@ class Adapter:
         client.request('status', {
             'epoch': desired['epoch'], 'credential_version': desired['credential_version'],
             'component': 'runtime', 'generation': desired['generation'],
-            'bundle_sha256': digest.split(':')[1], 'config_digest': actual_digest,
+            'bundle_sha256': applied_revision, 'config_digest': actual_digest,
             'ready': ready, 'https': self.url.startswith('https://'),
             'reason': 'ready' if ready else 'applying'})
 
@@ -144,7 +183,8 @@ class Adapter:
                 if member is not None:
                     if member.size > 16384:
                         raise ValueError('Runtime metadata exceeds limit')
-                    desired = json.loads(archive.extractfile(member).read())
+                    desired = strict_json(archive.extractfile(member).read())
+                    validate_app_assignments(archive, desired)
             if desired is not None:
                 if desired['node_id'] != client.node_id or desired['epoch'] != headers.get('X-Livepeer-Epoch'):
                     raise ValueError('configuration epoch mismatch')
@@ -165,8 +205,10 @@ class Adapter:
                         raise ValueError('terminal enrollment cannot reactivate')
                     if not desired['terminal'] and previous['generation'] > desired['generation']:
                         raise ValueError('stale configuration generation')
-                atomic_write(watermark_path, json.dumps(desired).encode())
-            elif not self.allow_http:
+                with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+                    validate_app_assignments(archive, desired, previous if watermark_path.exists() else None)
+            elif not self.allow_http or ((self.directory / 'enrollment.json').exists() and
+                                        read_config(self.directory / 'enrollment.json').get('apps_generation', 0)):
                 raise ValueError('enrollment metadata required')
             filename = digest.split(':')[1] + '.tar.gz'
             path = self.directory / filename
@@ -174,6 +216,9 @@ class Adapter:
                 atomic_write(path, data, 0o644)
             elif hashlib.sha256(path.read_bytes()).hexdigest() != digest.split(':')[1]:
                 atomic_write(path, data, 0o644)
+            # Stage validated bytes before advancing any local delivery watermark.
+            if desired is not None:
+                atomic_write(watermark_path, json.dumps(desired).encode())
             timestamp = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
             artifact = {'digest': digest, 'revision': digest, 'path': 'artifacts/' + filename,
                         'url': self.artifact_url + '/artifacts/' + filename,

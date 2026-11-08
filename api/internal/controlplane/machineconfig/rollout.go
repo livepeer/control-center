@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"time"
 )
 
@@ -117,8 +118,26 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 	return false, nil
 }
 
+func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) (bool, error) {
+	if state.DrainedGeneration != state.Generation {
+		done, err := s.drainComplete(ctx, m, state)
+		if err != nil || !done {
+			return false, err
+		}
+		// A timely Node drain remains complete while slower app cleanup runs.
+		state.DrainedGeneration = state.Generation
+	}
+	pending, err := machineapps.Pending(ctx, s.store.DB, m.NodeID, m.Epoch)
+	if err != nil || pending {
+		state.RolloutReason = "app_cleanup_pending"
+		return false, err
+	}
+	state.RolloutReason = ""
+	return true, nil
+}
+
 func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
-	done, err := s.drainComplete(ctx, l.Machine, &l.State)
+	done, err := s.removalComplete(ctx, l.Machine, &l.State)
 	if err != nil || !done {
 		return false, err
 	}

@@ -336,6 +336,110 @@ basicConstraints=critical,CA:TRUE
             self.save_desired()
             self.assertFalse(adapter.sync_once())
 
+    def test_app_assignment_validation_preserves_artifact_and_watermark(self):
+        class Kube:
+            artifact = None
+            def publish(self, artifact, *args):
+                if artifact:
+                    self.artifact = artifact
+        directory = self.root / 'app-artifacts'
+        directory.mkdir()
+        kube = Kube()
+        adapter = http_source.Adapter(self.url, self.machine_file, directory, 'http://artifacts.internal', kube)
+        def make_archive(files):
+            return archive_bytes([(name, tarfile.REGTYPE, data) for name, data in files.items()])
+        def bundle(generation, entries=None):
+            data = json.dumps({'schema_version': 1, 'node_id': NODE, 'epoch': EPOCH,
+                               'apps_generation': generation, 'entries': entries or []}, separators=(',', ':'))
+            digest = 'sha256:' + hashlib.sha256(data.encode()).hexdigest()
+            self.desired.update(apps_generation=generation, apps_digest=digest)
+            manifest = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {
+                'name': 'livepeer-app-assignments', 'namespace': 'livepeer',
+                'annotations': {'livepeer.io/apps-sha256': digest}}, 'data': {'desired.json': data}}
+            self.bundle = make_archive({'kustomization.yaml': b'resources: [app-assignments.json]\n',
+                'runtime.json': json.dumps(self.desired).encode(), 'app-assignments.json': json.dumps(manifest).encode()})
+        def sync():
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return adapter.sync_once()
+        bundle(2)
+        self.assertTrue(sync())
+        previous, watermark = kube.artifact.copy(), (directory / 'enrollment.json').read_bytes()
+        bundle(1)
+        self.assertFalse(sync())
+        self.assertEqual(kube.artifact, previous)
+        self.assertEqual((directory / 'enrollment.json').read_bytes(), watermark)
+        bundle(3)
+        self.desired['apps_digest'] = 'sha256:' + '0' * 64
+        # The body has mismatching Runtime metadata and manifest digest.
+        with tarfile.open(fileobj=io.BytesIO(self.bundle), mode='r:gz') as archive:
+            manifest = archive.extractfile('app-assignments.json').read()
+        self.bundle = make_archive({'kustomization.yaml': b'resources: []\n',
+            'runtime.json': json.dumps(self.desired).encode(), 'app-assignments.json': manifest})
+        self.assertFalse(sync())
+        self.assertEqual(kube.artifact, previous)
+        self.assertEqual((directory / 'enrollment.json').read_bytes(), watermark)
+        self.desired.pop('apps_generation'); self.desired.pop('apps_digest')
+        self.save_desired()
+        self.assertFalse(sync())
+        bundle(3)
+        self.assertTrue(sync())
+        self.assertEqual(json.loads((directory / 'enrollment.json').read_bytes())['apps_generation'], 3)
+
+    def test_app_status_client_path_is_scoped(self):
+        client = control_client.ControlClient(self.url, self.machine_file)
+        client.request('apps/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/status', {'phase': 'removed'})
+        for endpoint in ['apps/../status', 'apps/x/status', 'apps/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/status/other']:
+            with self.assertRaises(ValueError):
+                client.request(endpoint, {})
+
+    def test_app_only_update_keeps_confirmed_infrastructure_ready(self):
+        old_metadata = dict(self.desired)
+        new_metadata = dict(self.desired, apps_generation=1, apps_digest='sha256:' + 'c' * 64)
+        def cached(metadata, node=b'unchanged node', routing=b'unchanged protection'):
+            root = b'resources:\n- orchestrator.yaml\n- tunnel.yaml\n'
+            files = [('orchestrator.yaml', tarfile.REGTYPE, node), ('tunnel.yaml', tarfile.REGTYPE, routing),
+                     ('runtime.json', tarfile.REGTYPE, json.dumps(metadata).encode())]
+            if metadata.get('apps_generation'):
+                root += b'- app-assignments.json\n'
+                files.append(('app-assignments.json', tarfile.REGTYPE, b'{}'))
+            data = archive_bytes([('kustomization.yaml', tarfile.REGTYPE, root)] + files)
+            digest = hashlib.sha256(data).hexdigest()
+            (self.root / (digest + '.tar.gz')).write_bytes(data)
+            return 'sha256:' + digest
+        previous, current = cached(old_metadata), cached(new_metadata)
+        fixture = self
+        class Kube:
+            def request(self, path):
+                if '/kustomizations/' in path:
+                    return {'metadata': {'generation': 1}, 'status': {'observedGeneration': 1,
+                        'lastAppliedRevision': previous, 'conditions': [{'type': 'Ready', 'status': 'False'}]}}
+                if '/pods?' in path:
+                    return {'items': [{'metadata': {'annotations': {'livepeer.io/config-sha256': fixture.desired['config_digest']}},
+                                       'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}}]}
+                if '/deployments/' in path:
+                    return {'metadata': {'generation': 1}, 'spec': {'template': {'metadata': {'annotations': {
+                        'livepeer.io/config-sha256': fixture.desired['config_digest']}}}},
+                        'status': {'observedGeneration': 1, 'updatedReplicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
+                raise AssertionError(path)
+        class Origin:
+            def open(self, url, **kwargs):
+                response = io.BytesIO(json.dumps([{'address': fixture.desired['service_url']}]).encode())
+                response.status = 200
+                return response
+        adapter = http_source.Adapter(self.url, self.machine_file, self.root, 'http://artifacts.internal', Kube())
+        client = control_client.ControlClient(self.url, self.machine_file)
+        with mock.patch.object(http_source.urllib.request, 'build_opener', return_value=Origin()):
+            adapter.report(client, new_metadata, current)
+            self.assertTrue(self.observed[-1][1]['ready'])
+            self.assertEqual(self.observed[-1][1]['bundle_sha256'], previous.split(':')[1])
+            for changed in [cached(new_metadata, node=b'changed node'),
+                            cached(new_metadata, routing=b'changed protection')]:
+                adapter.report(client, new_metadata, changed)
+                self.assertFalse(self.observed[-1][1]['ready'])
+            (self.root / (previous.split(':')[1] + '.tar.gz')).write_bytes(b'corrupt cache')
+            adapter.report(client, new_metadata, current)
+            self.assertFalse(self.observed[-1][1]['ready'])
+
 
 if __name__ == '__main__':
     unittest.main()

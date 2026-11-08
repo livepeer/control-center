@@ -50,3 +50,56 @@ def validate_archive(data):
         raise ValueError('archive needs a root Kustomize configuration')
     return 'sha256:' + hashlib.sha256(data).hexdigest()
 
+
+
+def strict_json(data):
+    import json
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate JSON member')
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ValueError('non-JSON number')
+    return json.loads(data, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
+
+
+def validate_app_assignments(archive, desired, previous=None):
+    """Validate delivery identity only; shared Go schema owns app semantics."""
+    import re
+    generation = desired.get('apps_generation', 0)
+    digest = desired.get('apps_digest', '')
+    if type(generation) is not int or not 0 <= generation <= (1 << 63) - 1:
+        raise ValueError('invalid app-set generation')
+    try:
+        member = archive.getmember('app-assignments.json')
+    except KeyError:
+        member = None
+    if generation == 0:
+        if member is not None or digest:
+            raise ValueError('unexpected app assignment metadata')
+    else:
+        if member is None or member.size > 900 * 1024 or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+            raise ValueError('missing or oversized app assignment manifest')
+        manifest = strict_json(archive.extractfile(member).read())
+        if (manifest.get('apiVersion') != 'v1' or manifest.get('kind') != 'ConfigMap' or
+                manifest.get('metadata', {}).get('name') != 'livepeer-app-assignments' or
+                manifest['metadata'].get('namespace') != 'livepeer' or
+                manifest['metadata'].get('annotations', {}).get('livepeer.io/apps-sha256') != digest or
+                set(manifest.get('data', {})) != {'desired.json'}):
+            raise ValueError('invalid app assignment ConfigMap')
+        raw = manifest['data']['desired.json'].encode('utf-8')
+        if 'sha256:' + hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError('app assignment digest mismatch')
+        data = strict_json(raw)
+        if (type(data.get('schema_version')) is not int or data['schema_version'] != 1 or data.get('node_id') != desired['node_id'] or
+                data.get('epoch') != desired['epoch'] or type(data.get('apps_generation')) is not int or
+                data['apps_generation'] != generation or not isinstance(data.get('entries'), list) or
+                len(data['entries']) > 100):
+            raise ValueError('app assignment enrollment/version mismatch')
+    if previous is not None:
+        old = previous.get('apps_generation', 0)
+        if old > generation or (old == generation and previous.get('apps_digest', '') != digest):
+            raise ValueError('stale or conflicting app assignment generation')

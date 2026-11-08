@@ -62,7 +62,11 @@ grant is seeded only if no active grants remain.
 Use **Administration → App catalog** to validate and publish TOML, inspect
 revision history, and retire definitions. See the [app registry guide](app-registry.md)
 for definition settings and pricing policy. Catalog changes alone do not assign
-or deploy applications.
+or deploy applications. In the fleet, use **Manage apps** for revision-pinned
+assignments, replica edits and sequential replacement/removal. Runtime completion
+is separate from current health; see the registry guide for the delivery and
+cleanup contract. Without the Runtime lifecycle consumer (#113), reassignment after
+removal and normal machine removal remain pending.
 
 ## Machine ingress
 

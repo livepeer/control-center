@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
+	"github.com/livepeer/control-center/schema"
 	"log/slog"
 	"time"
 )
@@ -122,6 +124,10 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 			}
 			if removed {
 				m.Terminal = true
+				lease.Record, e = s.store.Load(ctx, m.NodeID, m.Epoch)
+				if e != nil {
+					return e
+				}
 				lease.State.Lifecycle = "removed"
 			}
 		}
@@ -135,16 +141,18 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		lease.Release(ctx)
 		lease = nil
 	}
-	data, digest, err := s.deps.Build(s.Desired(m, record.State, exposure))
+	desired := s.Desired(m, record.State, exposure)
+	desired.Apps, err = machineapps.Snapshot(ctx, s.store.DB, m.NodeID, m.Epoch)
 	if err != nil {
-		s.deps.Logger.Error("keeping previous configuration", "node_id", m.NodeID, "error", err)
-		return nil
-	}
-	if m.Terminal {
-		_, err = s.store.DB.ExecContext(ctx, `UPDATE lpcc.enrollments SET terminal_bundle=$3,terminal_sha256=$4 WHERE node_id=$1 AND epoch=$2 AND retired_at IS NOT NULL AND terminal_bundle IS NULL AND credential_version=$5`, m.NodeID, m.Epoch, data, digest, m.CredentialVersion)
 		return err
 	}
-	return s.publish(ctx, m, record.Revision, data, digest)
+	data, digest, err := s.deps.Build(desired)
+	if err != nil {
+		s.deps.Logger.Error("keeping previous configuration", "node_id", m.NodeID, "reason", "generation_failed")
+		_, _ = s.store.DB.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error='generation_failed' WHERE node_id=$1 AND epoch=$2 AND revision=$3`, m.NodeID, m.Epoch, record.Revision)
+		return nil
+	}
+	return s.publish(ctx, m, record.Revision, data, digest, desired.Apps)
 }
 
 // Plan from a snapshot first. Mutations are re-planned under a current lease.
@@ -168,7 +176,7 @@ func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposur
 		record.HeldOrchestrator = manifest
 	}
 	if record.Lifecycle == "draining" {
-		done, e := s.drainComplete(ctx, m, &record.State)
+		done, e := s.removalComplete(ctx, m, &record.State)
 		return exposure, done, e
 	}
 	if record.Target == "" {
@@ -179,23 +187,29 @@ func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposur
 
 // Publish serializes enrollment changes and artifact writes before reading the
 // shared rollout/provider revision, so a lock wait cannot publish a stale plan.
-func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data []byte, digest string) error {
+func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data []byte, digest string, apps *schema.AppAssignmentSetV1) error {
 	tx, err := s.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var present int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&present)
+	if m.Terminal {
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$3 AND retired_at IS NOT NULL FOR UPDATE`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&present)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&present)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machine_configs WHERE node_id=$1 FOR UPDATE`, m.NodeID).Scan(&present)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+	if !m.Terminal {
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machine_configs WHERE node_id=$1 FOR UPDATE`, m.NodeID).Scan(&present)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 	}
 	var current int64
 	err = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 FOR SHARE`, m.NodeID, m.Epoch).Scan(&current)
@@ -205,7 +219,22 @@ func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data [
 	if current != revision {
 		return nil
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_configs(node_id,bundle,sha256) VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET bundle=EXCLUDED.bundle,sha256=EXCLUDED.sha256,generated_at=now() WHERE lpcc.machine_configs.sha256<>EXCLUDED.sha256`, m.NodeID, data, digest); err != nil {
+	if m.Terminal {
+		result, e := tx.ExecContext(ctx, `UPDATE lpcc.enrollments SET terminal_bundle=$3,terminal_sha256=$4 WHERE node_id=$1 AND epoch=$2 AND terminal_bundle IS NULL`, m.NodeID, m.Epoch, data, digest)
+		if e != nil {
+			return e
+		}
+		n, _ := result.RowsAffected()
+		if n == 0 {
+			return nil
+		}
+	} else if _, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_configs(node_id,bundle,sha256) VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET bundle=EXCLUDED.bundle,sha256=EXCLUDED.sha256,generated_at=now() WHERE lpcc.machine_configs.sha256<>EXCLUDED.sha256`, m.NodeID, data, digest); err != nil {
+		return err
+	}
+	if err = machineapps.RecordDelivery(ctx, tx, apps, digest, m.Terminal); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error=NULL WHERE node_id=$1 AND epoch=$2 AND apps_error IS NOT NULL`, m.NodeID, m.Epoch); err != nil {
 		return err
 	}
 	return tx.Commit()

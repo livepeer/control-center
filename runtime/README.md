@@ -72,8 +72,10 @@ of the installer's pinned Kubernetes version. Keep that helper within one minor
 of the Kubernetes version. Published checksums provide download integrity;
 the installer trusts the upstream HTTPS release endpoints.
 
-See the [app registry guide](../docs/app-registry.md) for application definitions.
-The HTTP archive adapter treats application configuration as an opaque archive.
+The HTTP adapter verifies the assignment envelope, digest and delivery generation
+before selecting an archive for Flux. App completion, reassignment after removal
+and normal machine removal require the Runtime lifecycle consumer (#113).
+See the [app registry and delivery contract](../docs/app-registry.md#runtime-delivery-and-completion-contract).
 
 ## Enrollment and desired configuration
 

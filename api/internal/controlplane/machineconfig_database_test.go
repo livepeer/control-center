@@ -217,8 +217,10 @@ func TestMachineConfigurationMigrationPreservesInflightRollout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Down(t.Context(), s.db, files); err != nil {
-		t.Fatal(err)
+	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
+		if err = migrations.Down(t.Context(), s.db, files); err != nil {
+			t.Fatal(err)
+		}
 	}
 	c := enroll(t, s, ownerA, strings.Repeat("8", 64))
 	lease := uuid.New().String()
@@ -249,8 +251,10 @@ func TestMachineConfigurationMigrationPreservesInflightRollout(t *testing.T) {
 	if err != nil || record.Lifecycle != "removed" || record.Generation != 9 || record.Revision != 8 {
 		t.Fatal("retirement did not fence both states", record, err)
 	}
-	if err = migrations.Down(t.Context(), s.db, files); err != nil {
-		t.Fatal(err)
+	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
+		if err = migrations.Down(t.Context(), s.db, files); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var restored []byte
 	if err = s.db.QueryRow(`SELECT state FROM lpcc.machine_tunnels`).Scan(&restored); err != nil {
@@ -371,8 +375,10 @@ func TestPendingTargetWithoutStoredHoldKeepsAppliedWorkload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Down(t.Context(), s.db, files); err != nil {
-		t.Fatal(err)
+	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
+		if err = migrations.Down(t.Context(), s.db, files); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// Baseline stageEndpoints stored only the target and generation, and relied
 	// on holdUnapprovedConfiguration in the publisher to retain the old workload.
@@ -544,8 +550,10 @@ func TestRollbackInitializesConfigOnlyProviderDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Down(t.Context(), s.db, files); err != nil {
-		t.Fatal(err)
+	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
+		if err = migrations.Down(t.Context(), s.db, files); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var raw []byte
 	if err = s.db.QueryRow(`SELECT state FROM lpcc.machine_tunnels WHERE node_id=$1`, c["node_id"]).Scan(&raw); err != nil {
@@ -610,8 +618,10 @@ func TestRetirementReasonSurvivesOldDrainReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Down(t.Context(), s.db, files); err != nil {
-		t.Fatal(err)
+	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
+		if err = migrations.Down(t.Context(), s.db, files); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var reason string
 	if err = s.db.QueryRow(`SELECT state->>'reason' FROM lpcc.machine_tunnels WHERE node_id=$1`, c["node_id"]).Scan(&reason); err != nil {

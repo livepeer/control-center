@@ -46,19 +46,27 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 			})
 		}
 		// Deliberately hostile existing schema/default grants.
-		if _, err := db.Exec(`GRANT ALL ON SCHEMA lpcc TO ` + role + `; ALTER DEFAULT PRIVILEGES IN SCHEMA lpcc GRANT ALL ON TABLES TO ` + role); err != nil {
+		if _, err := db.Exec(`GRANT ALL ON SCHEMA lpcc TO ` + role + `; ALTER DEFAULT PRIVILEGES IN SCHEMA lpcc GRANT ALL ON TABLES TO ` + role + `; ALTER DEFAULT PRIVILEGES IN SCHEMA lpcc GRANT EXECUTE ON FUNCTIONS TO ` + role); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := Migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
+	var invoker bool
+	if err := db.QueryRow(`SELECT reloptions @> ARRAY['security_invoker=true'] FROM pg_class WHERE oid='lpcc.machine_app_heads'::regclass`).Scan(&invoker); err != nil || !invoker {
+		t.Fatal("assignment view must respect caller RLS", invoker, err)
+	}
 	for _, role := range []string{"anon", "authenticated"} {
 		var usage bool
 		if err := db.QueryRow(`SELECT has_schema_privilege($1,'lpcc','USAGE')`, role).Scan(&usage); err != nil || usage {
 			t.Fatal("schema access", role, usage, err)
 		}
-		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state", "enrollments", "credential_refreshes", "machine_reports", "machine_states", "access_credentials"} {
+		var view, execute bool
+		if err := db.QueryRow(`SELECT has_table_privilege($1,'lpcc.machine_app_heads','SELECT,INSERT,UPDATE,DELETE'),has_function_privilege($1,'lpcc.remove_machine_apps(text,uuid,text)','EXECUTE')`, role).Scan(&view, &execute); err != nil || view || execute {
+			t.Fatal("assignment view/function access", role, view, execute, err)
+		}
+		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state", "enrollments", "credential_refreshes", "machine_reports", "machine_states", "access_credentials", "machine_app_versions", "machine_app_deliveries", "machine_app_completions", "machine_app_diagnostics"} {
 			var privilege, rls bool
 			var policies int
 			if err := db.QueryRow(`SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE')`, role, "lpcc."+table).Scan(&privilege); err != nil || privilege {

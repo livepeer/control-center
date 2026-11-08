@@ -28,7 +28,8 @@ class ControlClient:
         self.opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
 
     def request(self, endpoint, payload=None, limit=16384):
-        if endpoint not in ('config', 'status', 'removal-ack', 'tunnel/connector-token'):
+        if (endpoint not in ('config', 'status', 'removal-ack', 'tunnel/connector-token') and
+                not re.fullmatch(r'apps/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/status', endpoint)):
             raise ValueError('unsupported machine endpoint')
         token = self.token_file.read_text()
         if not re.fullmatch('[a-f0-9]{64}', token):

@@ -2,6 +2,7 @@
 package machineconfig
 
 import (
+	"github.com/livepeer/control-center/schema"
 	"regexp"
 	"time"
 )
@@ -20,6 +21,7 @@ type State struct {
 	Generation           int64     `json:"generation"`
 	DrainRequested       bool      `json:"drain_requested,omitempty"`
 	DrainStartedAt       time.Time `json:"drain_started_at,omitempty"`
+	DrainedGeneration    int64     `json:"drained_generation,omitempty"`
 	Target               string    `json:"target,omitempty"`
 	HeldOrchestrator     string    `json:"held_orchestrator,omitempty"`
 	PendingConfigDigest  string    `json:"pending_config_digest,omitempty"`
@@ -48,6 +50,7 @@ type ConnectorConfig struct {
 
 type Desired struct {
 	Machine
+	Apps          *schema.AppAssignmentSetV1
 	State         State
 	Exposure      *Exposure
 	Connector     ConnectorConfig

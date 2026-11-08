@@ -14,6 +14,7 @@ import (
 	"strings"
 	"uuid"
 
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 )
 
@@ -242,6 +243,15 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 	}
 	if !m.Terminal || in.Epoch != m.Epoch || !in.ConnectorAbsent || !fingerprintPattern.MatchString(in.Digest) {
 		fail(w, 409, "invalid removal acknowledgement")
+		return
+	}
+	pending, e := machineapps.Pending(r.Context(), s.db, m.NodeID, m.Epoch)
+	if e != nil {
+		s.respondError(w, e)
+		return
+	}
+	if pending {
+		fail(w, 409, "app cleanup is incomplete")
 		return
 	}
 	result, e := s.db.ExecContext(r.Context(), `UPDATE lpcc.enrollments SET removal_ack_at=COALESCE(removal_ack_at,now()) WHERE node_id=$1 AND epoch=$2 AND retired_at IS NOT NULL AND terminal_sha256=$3`, m.NodeID, m.Epoch, in.Digest)

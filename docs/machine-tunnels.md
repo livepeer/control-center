@@ -115,7 +115,7 @@ private Node workloads remain in place during additive upgrades until the
 controlled routing rollout. The worker creates or recovers a tunnel, source
 token, hostname-wide Access application and Service Auth-only policy. It installs audience-validating
 ingress before publishing routing. Managed Node configuration changes publish a drain
-intent while retaining the previous workload. A fresh matching #114 drain report
+intent while retaining the previous workload. A fresh matching Runtime #113/#94 drain report
 releases the replacement; an expired deadline blocks and requires intervention.
 Token-generation changes replace the connector; remote-only ingress changes do
 not unnecessarily restart it.
@@ -181,8 +181,8 @@ security rotations proceed even when Runtime is offline; `RotationReason`
 reports rotation separately from observation expiry. See
 [Access service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
 
-Ordinary removal stages drain and withdraws readiness. #114 must stop admission
-and report drained for that generation. An expired drain deadline remains
+Ordinary removal stages drain and withdraws readiness. Runtime #113/#94 must
+coordinate admission withdrawal and report drained for that generation. An expired drain deadline remains
 blocked even if a late completion arrives. An administrator can start a fresh,
 audited drain generation with `drain/retry`, or deliberately remove with
 `force:true`. Legacy credentials require refresh or explicit force removal.
@@ -192,19 +192,22 @@ and revokes source tokens.
 Cleanup proceeds even with the machine offline. A new epoch cannot reuse stable
 hostnames until the predecessor's external cleanup is complete.
 
-The terminal artifact prunes connector, orchestrator and assigned workloads;
-bootstrap namespaces/Secrets, retained PV/PVC and shared upgrade controller/CRDs
-remain. The upgrade-plan subtree remains valid with no active Plan. Terminal
-delivery persists through local acknowledgement; authentication/fetch errors
-never mean removal. Verify provider absence separately from local cleanup.
+The terminal artifact prunes the connector and orchestrator and delivers app-removal
+intents; the Runtime lifecycle consumer (#113) cleans up assigned apps.
+Bootstrap namespaces/Secrets, retained PV/PVC and shared upgrade controller/CRDs
+remain, with no active upgrade Plan. Terminal delivery persists through local
+acknowledgement; authentication/fetch errors never mean removal. Verify provider
+absence separately from local cleanup.
 
 ## Integration agreements and release evidence
 
-#111 must agree epoch, lifecycle, desired/assignment generation, drain intent,
-status and removal acknowledgement. #114 supplies collision-safe DNS-label
+App assignments use the [delivery and cleanup contract](app-registry.md#runtime-delivery-and-completion-contract).
+Normal removal and terminal removal acknowledgement require app cleanup by the
+Runtime lifecycle consumer (#113). Runtime #113/#94 owns admission, destination
+grants, drain policy, deadlines and workload pruning. #114 supplies collision-safe DNS-label
 registration IDs (at most 63 lowercase characters), private `proxy=true`
-RunnerURLs, literal IP/IP:port/CIDR RunnerGrants, admission/drain completion,
-destination-grant generations, assigned workload pruning and compatible images.
+RunnerURLs, literal IP/IP:port/CIDR RunnerGrants, registration observations and
+compatible SDK/Node images.
 Do not claim end-to-end private application readiness before that integration.
 
 #115/#116 consume `DiscoverySources`, `ResolveAccessCredential` and
