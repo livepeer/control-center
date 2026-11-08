@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 )
 
 type IngressRule struct {
@@ -22,17 +23,17 @@ type IngressAccess struct {
 	Audience []string `json:"audTag"`
 }
 
-const PrivateOrchestrator = "http://orchestrator.livepeer.svc.cluster.local:8935"
+const PrivateOrchestrator = machineconfig.PrivateOrchestrator
 
 // Reserve these path segments even under generated app hosts. Go RE2 has no
 // negative lookahead: ordered denial rules precede every forwarding rule.
 const reservedPath = `(?i)(?:^|/)(?:discovery|runners?|metrics|healthz|readyz)(?:/|;|$)|(?:^|/)ai/trickle(?:/|;|$)`
 const clientPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/(?:session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment|app(?:/.*)?))?|app(?:/.*)?)|refresh-payment|(?:run|proxy)/[A-Za-z0-9_-]{1,128}(?:/.*)?)$`
 
-func RoutingFor(node, domain string) RoutingState {
-	return RoutingState{Lifecycle: "active", Generation: 1, EndpointGeneration: 1, CredentialGeneration: 1, SourceGeneration: 1, AccessVersion: 1,
+func RoutingFor(node, domain string) Snapshot {
+	return Snapshot{State: machineconfig.InitialState(false), RoutingState: RoutingState{EndpointGeneration: 1, CredentialGeneration: 1, SourceGeneration: 1, AccessVersion: 1,
 		ServiceURL:       "https://api-" + node + "." + domain,
-		ProxyURLTemplate: "https://{proxy}.apps-" + node + "." + domain, DiscoveryURL: "https://discovery-" + node + "." + domain + "/discovery", Resources: map[string]CFResource{}}
+		ProxyURLTemplate: "https://{proxy}.apps-" + node + "." + domain, DiscoveryURL: "https://discovery-" + node + "." + domain + "/discovery", Resources: map[string]CFResource{}}}
 }
 func ingressFor(node string, p Config, audience string) []IngressRule {
 	api := "api-" + node + "." + p.CloudflareBaseDomain

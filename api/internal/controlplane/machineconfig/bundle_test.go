@@ -1,0 +1,81 @@
+package machineconfig
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"strings"
+	"testing"
+)
+
+func TestConfigurationBundle(t *testing.T) {
+	m := Desired{Machine: Machine{NodeID: "lp-" + strings.Repeat("a", 16), InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}}
+	first, digest, err := Build(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, other, err := Build(m)
+	if err != nil || !bytes.Equal(first, second) || digest != other {
+		t.Fatal("archive is not deterministic", err)
+	}
+	files := archiveFiles(t, first)
+	for _, name := range []string{"kustomization.yaml", "orchestrator.yaml", "suc.yaml", "suc-crd.yaml", "upgrade-plan/kustomization.yaml", "upgrade-plan/plan.yaml"} {
+		if _, ok := files[name]; !ok {
+			t.Fatal("missing", name)
+		}
+	}
+	for name, expected := range map[string]string{
+		"suc-crd.yaml": "1393ba034e7691273fc519b721a7f72a0cdbef8c7b051c9e408be96090b8478d",
+		"suc.yaml":     "81ef8c40f85b8822c87e0cf790612fc6d4dcf1eebb83f89e522bc929ef85e18c",
+	} {
+		hash := sha256.Sum256([]byte(files[name]))
+		if hex.EncodeToString(hash[:]) != expected {
+			t.Fatalf("rendering changed pinned asset %s", name)
+		}
+	}
+	if strings.Contains(files["orchestrator.yaml"], "@INSTALL_DIR@") || strings.Contains(files["orchestrator.yaml"], "@NODE_ID@") || !strings.Contains(files["orchestrator.yaml"], "/srv/livepeer/volumes/orchestrator") {
+		t.Fatal("incorrect machine rendering")
+	}
+	if !strings.Contains(files["upgrade-plan/plan.yaml"], m.K3sVersion) {
+		t.Fatal("upgrade plan version missing")
+	}
+	hash := sha256.Sum256(first)
+	if hex.EncodeToString(hash[:]) != digest {
+		t.Fatal("wrong digest")
+	}
+}
+
+func archiveFiles(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+	z, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer z.Close()
+	tarReader := tar.NewReader(io.LimitReader(z, 64<<20))
+	files := map[string]string{}
+	for {
+		h, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag != tar.TypeReg || strings.HasPrefix(h.Name, "/") || strings.Contains(h.Name, "..") {
+			t.Fatal("unsafe archive member")
+		}
+		if _, ok := files[h.Name]; ok {
+			t.Fatal("duplicate archive member")
+		}
+		contents, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[h.Name] = string(contents)
+	}
+	return files
+}

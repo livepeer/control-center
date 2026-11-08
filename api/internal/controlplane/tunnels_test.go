@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"io/fs"
 	"strconv"
 	"strings"
@@ -185,6 +186,7 @@ func testTunnelDeps(s *Server) *tunnel.Dependencies {
 
 func configureTestTunnels(t *testing.T, s *Server) {
 	t.Helper()
+	s.configs = s.newConfigurationManager()
 	s.tunnels = s.newTunnelManager(*testTunnelDeps(s))
 	if err := s.tunnels.Configure(s.params.PublicAPIURL); err != nil {
 		t.Fatal(err)
@@ -203,7 +205,10 @@ func credentialRef(node, epoch string, version int64) string {
 
 func driveTunnels(t *testing.T, s *Server) {
 	t.Helper()
-	if _, e := s.db.Exec(`UPDATE lpcc.machine_tunnels SET next_attempt_at=now()`); e != nil {
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, e := s.db.Exec(`UPDATE lpcc.machine_states SET next_attempt_at=now()`); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.tunnels.Reconcile(t.Context()); e != nil {
@@ -223,17 +228,14 @@ func reportRuntime(t *testing.T, s *Server, c map[string]string, component strin
 	gen := int64(1)
 	if e == nil {
 		gen = state.Generation
-		m.Routing = &state
 	}
-	m.ControlAPIURL = s.params.PublicAPIURL
-	m.TunnelConfig = &s.params.TunnelParams
-	r := tunnel.MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, ConfigDigest: orchestratorDigest(m), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
+	r := tunnel.MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
 	r.Drained = component == "runner" && ready
 	if w := request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], r); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
-func readyTunnel(t *testing.T, s *Server, c map[string]string) tunnel.RoutingState {
+func readyTunnel(t *testing.T, s *Server, c map[string]string) tunnel.Snapshot {
 	t.Helper()
 	reportRuntime(t, s, c, "runtime", false)
 	driveTunnels(t, s)
@@ -435,7 +437,7 @@ func TestSupabaseCascadeRetiresTunnels(t *testing.T) {
 	}
 	driveTunnels(t, s)
 	var retired, complete bool
-	e := s.db.QueryRow(`SELECT e.retired_at IS NOT NULL,(t.state->>'cleanup_complete')::boolean FROM lpcc.enrollments e JOIN lpcc.machine_tunnels t USING(node_id,epoch) WHERE e.node_id=$1`, c["node_id"]).Scan(&retired, &complete)
+	e := s.db.QueryRow(`SELECT e.retired_at IS NOT NULL,(t.state->>'cleanup_complete')::boolean FROM lpcc.enrollments e JOIN lpcc.machine_states t USING(node_id,epoch) WHERE e.node_id=$1`, c["node_id"]).Scan(&retired, &complete)
 	if e != nil || !retired || !complete || len(f.resources) != 0 {
 		t.Fatal("cascade lost cleanup", retired, complete, e, len(f.resources))
 	}
@@ -452,8 +454,9 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	}
 	stateBefore := tunnel.RoutingFor(m.NodeID, s.params.CloudflareBaseDomain)
 	stateBefore.IngressDigest = "configured-before-drain-intent"
-	raw, _ := json.Marshal(stateBefore)
-	execSQL(t, s.db, `INSERT INTO lpcc.machine_tunnels(node_id,epoch,state) VALUES($1,$2,$3)`, m.NodeID, m.Epoch, raw)
+	raw, _ := json.Marshal(stateBefore.RoutingState)
+	rollout, _ := json.Marshal(stateBefore.State)
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,epoch,state,rollout) VALUES($1,$2,$3,$4)`, m.NodeID, m.Epoch, string(raw), string(rollout))
 	if e = s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
@@ -484,7 +487,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if !bytes.Equal(stable, request(t, s, "GET", path, c["token"], nil).Body.Bytes()) {
 		t.Fatal("unchanged desired state changed bundle")
 	}
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{verified_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{verified_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 	sources, e := s.tunnels.DiscoverySources(t.Context())
 	if e != nil {
 		t.Fatal(e)
@@ -579,8 +582,17 @@ func TestLegacyEnrollmentMigrationRequiresHTTPSRefresh(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = migrations.Down(t.Context(), s.db, files); e != nil {
-		t.Fatal(e)
+	for {
+		var version int
+		if e = s.db.QueryRow(`SELECT max(version) FROM lpcc.migrations`).Scan(&version); e != nil {
+			t.Fatal(e)
+		}
+		if version < 4 {
+			break
+		}
+		if e = migrations.Down(t.Context(), s.db, files); e != nil {
+			t.Fatal(e)
+		}
 	}
 	node := "lp-" + strings.Repeat("6", 16)
 	execSQL(t, s.db, `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version) VALUES($1,$2,$3,'legacy','/opt/livepeer','v1.37.10+k3s1')`, node, strings.Repeat("6", 64), ownerA)
@@ -622,18 +634,20 @@ func TestPrivateWorkloadUpdatePolicy(t *testing.T) {
 		t.Run(fmt.Sprint("managed-enable-", enabled), func(t *testing.T) {
 			s := newTestServer(t)
 			s.params.CloudflareEnabled = enabled
+			s.configs = s.newConfigurationManager()
 			c := enroll(t, s, ownerA, strings.Repeat("4", 64))
 			m, e := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
 			if e != nil {
 				t.Fatal(e)
 			}
-			data, _, e := buildBundle(m)
+			desired := desiredConfiguration(s, m, nil)
+			data, _, e := machineconfig.Build(desired)
 			if e != nil {
 				t.Fatal(e)
 			}
 			previous := strings.Replace(archiveFiles(t, data)["orchestrator.yaml"], "RunnerServiceURL = \""+tunnel.PrivateOrchestrator+"\"", "# previous Node release used its ServiceURL fallback", 1)
-			m.Routing = &tunnel.RoutingState{Generation: 1, HeldOrchestrator: previous}
-			data, digest, e := buildBundle(m)
+			desired.State.HeldOrchestrator = previous
+			data, digest, e := machineconfig.Build(desired)
 			if e != nil {
 				t.Fatal(e)
 			}

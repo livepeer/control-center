@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"time"
 )
 
@@ -9,8 +10,6 @@ import (
 // reconciler renders it. A source generation changes when its URL or credential
 // reference changes; transport health alone does not replace a Collector source.
 type RoutingState struct {
-	Lifecycle            string                `json:"lifecycle"`
-	Generation           int64                 `json:"generation"`
 	EndpointGeneration   int64                 `json:"endpoint_generation"`
 	AccountID            string                `json:"account_id"`
 	ZoneID               string                `json:"zone_id"`
@@ -26,6 +25,7 @@ type RoutingState struct {
 	SourceGeneration     int64                 `json:"source_generation"`
 	AccessVersion        int64                 `json:"access_version"`
 	Resources            map[string]CFResource `json:"resources"`
+	ReadyGeneration      int64                 `json:"ready_generation"`
 	Ready                bool                  `json:"ready"`
 	VerifiedAt           time.Time             `json:"verified_at,omitempty"`
 	VerifiedGeneration   int64                 `json:"verified_generation"`
@@ -38,12 +38,6 @@ type RoutingState struct {
 	TokenFingerprint     string                `json:"token_fingerprint,omitempty"`
 	RotationStarted      bool                  `json:"rotation_started,omitempty"`
 	Compromised          bool                  `json:"compromised,omitempty"`
-	DrainRequested       bool                  `json:"drain_requested,omitempty"`
-	EndpointDrainURL     string                `json:"endpoint_drain_url,omitempty"`
-	DrainStartedAt       time.Time             `json:"drain_started_at,omitempty"`
-	HeldOrchestrator     string                `json:"held_orchestrator,omitempty"`
-	PendingConfigDigest  string                `json:"pending_config_digest,omitempty"`
-	ApprovedConfigDigest string                `json:"approved_config_digest,omitempty"`
 	RotateAccess         bool                  `json:"rotate_access,omitempty"`
 	CompromisedAccess    bool                  `json:"compromised_access,omitempty"`
 }
@@ -109,18 +103,11 @@ type TunnelProvider interface {
 	Route(context.Context, CFResource, string) error
 }
 
-type MachineReport struct {
-	Epoch             string `json:"epoch"`
-	CredentialVersion int64  `json:"credential_version"`
-	Component         string `json:"component"`
-	Generation        int64  `json:"generation"`
-	BundleSHA256      string `json:"bundle_sha256,omitempty"`
-	ConfigDigest      string `json:"config_digest,omitempty"`
-	ProviderVersion   int64  `json:"provider_version,omitempty"`
-	TokenGeneration   int64  `json:"token_generation,omitempty"`
-	Ready             bool   `json:"ready"`
-	Drained           bool   `json:"drained"`
-	HTTPS             bool   `json:"https"`
-	ConnectorAbsent   bool   `json:"connector_absent"`
-	Reason            string `json:"reason,omitempty"`
+// Snapshot composes provider routing and the enrollment's machine rollout.
+// Each is persisted separately under the same revision and lease.
+type Snapshot struct {
+	RoutingState
+	machineconfig.State
 }
+
+type MachineReport = machineconfig.Report

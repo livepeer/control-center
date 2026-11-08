@@ -38,6 +38,10 @@ func Open(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Match the production pooler-compatible mode, including JSON parameter encoding.
+	q := u.Query()
+	q.Set("default_query_exec_mode", "exec")
+	u.RawQuery = q.Encode()
 	u.Path = "/" + name
 	db, err := sql.Open("pgx", u.String())
 	if err != nil {

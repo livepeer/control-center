@@ -58,7 +58,7 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 		if err := db.QueryRow(`SELECT has_schema_privilege($1,'lpcc','USAGE')`, role).Scan(&usage); err != nil || usage {
 			t.Fatal("schema access", role, usage, err)
 		}
-		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state", "enrollments", "credential_refreshes", "machine_reports", "machine_tunnels", "access_credentials"} {
+		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state", "enrollments", "credential_refreshes", "machine_reports", "machine_states", "access_credentials"} {
 			var privilege, rls bool
 			var policies int
 			if err := db.QueryRow(`SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE')`, role, "lpcc."+table).Scan(&privilege); err != nil || privilege {

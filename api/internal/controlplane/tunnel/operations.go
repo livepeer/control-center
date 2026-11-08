@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -24,14 +23,14 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 	next := l.state
 	next.Resources = maps.Clone(l.state.Resources)
 	next.Resources[key] = r
-	b, e := json.Marshal(next)
+	b, e := json.Marshal(next.RoutingState)
 	if e != nil {
 		return e
 	}
 	var keyID string
 	var ciphertext []byte
 	if secret != nil {
-		keyID, ciphertext, e = l.s.keys.seal(credentialRef(l.m.NodeID, l.m.Epoch, r.CredentialVersion), *secret)
+		keyID, ciphertext, e = l.s.keys.seal(credentialRef(l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion), *secret)
 		if e != nil {
 			return e
 		}
@@ -41,16 +40,12 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 		return e
 	}
 	defer tx.Rollback()
-	var revision int64
-	e = tx.QueryRowContext(ctx, `UPDATE lpcc.machine_tunnels SET state=$4,revision=revision+1,lease_until=now()+interval '90 seconds' WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$5 AND lease_until>now() AND ($6 OR state->>'lifecycle'='active') RETURNING revision`, l.m.NodeID, l.m.Epoch, l.id, b, l.revision, secret == nil).Scan(&revision)
-	if errors.Is(e, sql.ErrNoRows) {
-		return errTunnelFenced
-	}
+	revision, e := l.Lease.Write(ctx, tx, next.State, b, secret != nil)
 	if e != nil {
 		return e
 	}
 	if secret != nil {
-		result, e := tx.ExecContext(ctx, `INSERT INTO lpcc.access_credentials(node_id,epoch,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,epoch,version) DO NOTHING`, l.m.NodeID, l.m.Epoch, r.CredentialVersion, r.ID, keyID, ciphertext, expiry)
+		result, e := tx.ExecContext(ctx, `INSERT INTO lpcc.access_credentials(node_id,epoch,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,epoch,version) DO NOTHING`, l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion, r.ID, keyID, ciphertext, expiry)
 		if e != nil {
 			return e
 		}
@@ -58,7 +53,7 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 			return errors.New("Access credential version is already bound")
 		}
 	} else if r.CredentialVersion > 0 {
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2 AND version=$3`, l.m.NodeID, l.m.Epoch, r.CredentialVersion); e != nil {
+		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2 AND version=$3`, l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion); e != nil {
 			return e
 		}
 	}
@@ -66,7 +61,9 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 		return e
 	}
 	l.state = next
-	l.revision = revision
+	l.Revision = revision
+	l.Lease.State = next.State
+	l.Routing = b
 	return nil
 }
 

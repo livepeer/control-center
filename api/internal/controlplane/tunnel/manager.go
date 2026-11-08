@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,29 +13,12 @@ import (
 
 var ErrPending = errors.New("tunnel is not provisioned")
 
-// Machine identifies an enrollment and the installation used to render its
-// configuration. Authentication and bundle assembly belong to the caller.
-type Machine struct {
-	NodeID, Epoch, InstallDir, K3sVersion string
-	CredentialVersion                     int64
-	Terminal                              bool
-}
-
-type AppliedConfiguration struct {
-	Digest, Manifest string
-}
-
-// Rollout supplies configuration facts without exposing the bundle format or
-// importing the HTTP server. DesiredDigest must honor HeldOrchestrator.
-type Rollout interface {
-	DesiredDigest(Machine, RoutingState) string
-	Applied(context.Context, Machine) (AppliedConfiguration, error)
-}
+type Machine = machineconfig.Machine
 
 type Dependencies struct {
 	DB              *sql.DB
 	Logger          *slog.Logger
-	Rollout         Rollout
+	Configurations  *machineconfig.Manager
 	Provider        TunnelProvider
 	VerifyEndpoints func(context.Context, RoutingState, AccessCredential) error
 }
@@ -43,7 +27,7 @@ type Manager struct {
 	db               *sql.DB
 	params           Config
 	logger           *slog.Logger
-	rollout          Rollout
+	rollout          *machineconfig.Manager
 	provider         TunnelProvider
 	keys             *accessKeyring
 	endpointVerifier func(context.Context, RoutingState, AccessCredential) error
@@ -53,7 +37,7 @@ type Manager struct {
 // Configure enables provisioning; ConfigureCredentials enables credential reads.
 // Both are startup operations and must finish before workers start.
 func New(config Config, deps Dependencies) *Manager {
-	return &Manager{db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Rollout,
+	return &Manager{db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
 		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints}
 }
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/api/internal/migrations"
 )
@@ -25,21 +26,18 @@ import (
 var MigrationFiles embed.FS
 
 type Machine struct {
-	NodeID            string               `json:"node_id"`
-	OwnerID           string               `json:"-"`
-	Fingerprint       string               `json:"fingerprint"`
-	Hostname          string               `json:"hostname"`
-	InstallDir        string               `json:"install_dir"`
-	K3sVersion        string               `json:"k3s_version"`
-	CreatedAt         time.Time            `json:"created_at"`
-	LastConfigFetchAt *time.Time           `json:"last_config_fetch_at"`
-	Epoch             string               `json:"-"`
-	CredentialVersion int64                `json:"-"`
-	Routing           *tunnel.RoutingState `json:"-"`
-	Terminal          bool                 `json:"-"`
-	ControlAPIURL     string               `json:"-"`
-	TunnelConfig      *TunnelParams        `json:"-"`
-	DevelopmentHTTP   bool                 `json:"development_http,omitempty"`
+	NodeID            string     `json:"node_id"`
+	OwnerID           string     `json:"-"`
+	Fingerprint       string     `json:"fingerprint"`
+	Hostname          string     `json:"hostname"`
+	InstallDir        string     `json:"install_dir"`
+	K3sVersion        string     `json:"k3s_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	LastConfigFetchAt *time.Time `json:"last_config_fetch_at"`
+	Epoch             string     `json:"-"`
+	CredentialVersion int64      `json:"-"`
+	Terminal          bool       `json:"-"`
+	DevelopmentHTTP   bool       `json:"development_http,omitempty"`
 }
 
 type Server struct {
@@ -47,19 +45,21 @@ type Server struct {
 	params        Params
 	logger        *slog.Logger
 	client        *http.Client
-	build         func(Machine) ([]byte, string, error)
+	build         func(machineconfig.Desired) ([]byte, string, error)
 	denialMu      sync.Mutex
 	denials       map[AdminAction]denialWindow
 	tunnels       *tunnel.Manager
+	configs       *machineconfig.Manager
 	discovery     *fleet.Manager
 	reconcileWake chan struct{}
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
-	s := &Server{db: db, params: p, logger: logger, build: buildBundle, reconcileWake: make(chan struct{}, 1), client: &http.Client{
+	s := &Server{db: db, params: p, logger: logger, build: machineconfig.Build, reconcileWake: make(chan struct{}, 1), client: &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
+	s.configs = s.newConfigurationManager()
 	s.tunnels = s.newTunnelManager(tunnel.Dependencies{})
 	return s
 }
@@ -204,8 +204,6 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	m.NodeID = "lp-" + m.Fingerprint[:16]
 	m.OwnerID = owner
-	m.ControlAPIURL = s.params.PublicAPIURL
-	m.TunnelConfig = &s.params.TunnelParams
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.databaseError(w, err)
@@ -232,7 +230,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
-	data, digest, err := s.build(m)
+	data, digest, err := s.build(s.configs.Desired(configurationMachine(m), machineconfig.InitialState(false), nil))
 	if err != nil {
 		fail(w, 503, "configuration generation failed")
 		return

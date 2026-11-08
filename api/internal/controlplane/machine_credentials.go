@@ -14,7 +14,7 @@ import (
 	"strings"
 	"uuid"
 
-	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 )
 
 func (s *Server) enrollmentToken(m Machine) string {
@@ -131,6 +131,11 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 			s.databaseError(w, e)
 			return
 		}
+		if e = s.configs.FenceCredentialRefresh(r.Context(), tx, m.NodeID, m.Epoch); e != nil {
+			s.databaseError(w, e)
+			return
+		}
+
 	} else {
 		s.databaseError(w, e)
 		return
@@ -139,6 +144,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
+	s.requestReconcile()
 	respond(w, 200, s.machineCredentials(m))
 }
 func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +162,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	safe, e := s.tunnels.SecureRuntime(r.Context(), tunnelMachine(m))
+	safe, e := s.tunnels.SecureRuntime(r.Context(), configurationMachine(m))
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -165,7 +171,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "secure configuration is not applied")
 		return
 	}
-	token, e := s.tunnels.ConnectorToken(r.Context(), state)
+	token, e := s.tunnels.ConnectorToken(r.Context(), state.RoutingState)
 	if e != nil {
 		fail(w, 503, "connector credential temporarily unavailable")
 		return
@@ -192,7 +198,7 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "legacy credentials authorize configuration only; refresh over HTTPS")
 		return
 	}
-	var report tunnel.MachineReport
+	var report machineconfig.Report
 	if e = machineInput(r, &report); e != nil {
 		s.respondError(w, e)
 		return
@@ -205,40 +211,17 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid status digest")
 		return
 	}
-	desiredGeneration := int64(1)
-	if state, _, err := s.loadTunnel(r.Context(), m.NodeID, m.Epoch); err == nil {
-		desiredGeneration = state.Generation
-	} else {
-		var pending *apiProblem
-		if !errors.As(err, &pending) || pending.status != 409 {
-			s.respondError(w, err)
-			return
+	wake, err := s.configs.RecordReport(r.Context(), configurationMachine(m), report)
+	if err != nil {
+		if errors.Is(err, machineconfig.ErrStatusAhead) || errors.Is(err, machineconfig.ErrStaleStatus) {
+			fail(w, 409, err.Error())
+		} else {
+			s.databaseError(w, err)
 		}
-	}
-	if report.Generation > desiredGeneration {
-		fail(w, 409, "status generation is ahead of desired state")
 		return
 	}
-	reasons := map[string]bool{"ready": true, "applying": true, "offline": true, "failed": true, "drain_pending": true, "removed": true, "tls_pending": true}
-	if !reasons[report.Reason] {
-		report.Reason = "failed"
-	}
-	b, _ := json.Marshal(report)
-	result, e := s.db.ExecContext(r.Context(), `INSERT INTO lpcc.machine_reports(node_id,epoch,component,generation,credential_version,report) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$5) ON CONFLICT(node_id,epoch,component) DO UPDATE SET generation=EXCLUDED.generation,credential_version=EXCLUDED.credential_version,report=EXCLUDED.report,received_at=now() WHERE lpcc.machine_reports.generation<=EXCLUDED.generation AND lpcc.machine_reports.credential_version<=EXCLUDED.credential_version`, m.NodeID, m.Epoch, report.Component, report.Generation, m.CredentialVersion, b)
-	if e != nil {
-		s.databaseError(w, e)
-		return
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		fail(w, 409, "stale status")
-		return
-	}
-	if report.Component == "runner" && report.Drained && !s.params.CloudflareEnabled {
-		if _, e = s.db.ExecContext(r.Context(), `DELETE FROM lpcc.machines m USING lpcc.machine_tunnels t WHERE m.node_id=$1 AND m.enrollment_epoch=$2 AND m.credential_version=$4 AND t.node_id=m.node_id AND t.epoch=m.enrollment_epoch AND t.state->>'lifecycle'='draining' AND (t.state->>'generation')::bigint=$3 AND now()<=(t.state->>'drain_started_at')::timestamptz+make_interval(secs=>$5)`, m.NodeID, m.Epoch, report.Generation, m.CredentialVersion, s.params.TunnelDrainTimeout.Seconds()); e != nil {
-			s.databaseError(w, e)
-			return
-		}
+	if wake {
+		s.requestReconcile()
 	}
 	respond(w, 200, map[string]string{"status": "accepted"})
 }

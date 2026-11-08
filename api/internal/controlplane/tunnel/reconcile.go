@@ -95,12 +95,12 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 			cancel()
 			return e
 		}
-		if l.m.Terminal {
+		if l.Machine.Terminal {
 			e = l.cleanup(pass)
 		} else if e = l.sweepAbsentResources(pass, false); e != nil {
 			// Retained absent intents also collect provider results that arrive late.
 		} else if l.state.Lifecycle == "draining" {
-			e = l.finishDrain(pass)
+			e = nil // Machine configuration owns drain completion and retirement.
 		} else if l.state.Lifecycle != "active" {
 			e = errTunnelFenced
 		} else if !safe {
@@ -116,7 +116,7 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 		if e != nil && !errors.Is(e, errTunnelFenced) {
 			l.state.Ready = false
 			l.state.Reason = "provisioning_pending"
-			if !safe && !l.m.Terminal {
+			if !safe && !l.Machine.Terminal {
 				l.state.Reason = "runtime_offline"
 			}
 			if errors.Is(e, ErrResourceConflict) && safe {
@@ -143,7 +143,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		return errors.New("retire the previous provider scope before changing account, zone or team")
 	}
 	var predecessor bool
-	if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch<>$2 AND COALESCE((state->>'cleanup_complete')::boolean,false)=false)`, l.m.NodeID, l.m.Epoch).Scan(&predecessor); e != nil {
+	if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND epoch<>$2 AND COALESCE((state->>'cleanup_complete')::boolean,false)=false)`, l.Machine.NodeID, l.Machine.Epoch).Scan(&predecessor); e != nil {
 		return e
 	}
 	if predecessor {
@@ -151,7 +151,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Reason = "predecessor_cleanup_pending"
 		return l.save(ctx)
 	}
-	desired := RoutingFor(l.m.NodeID, p.CloudflareBaseDomain)
+	desired := RoutingFor(l.Machine.NodeID, p.CloudflareBaseDomain)
 	if waiting, e := l.stageEndpoints(ctx, desired); e != nil || waiting {
 		return e
 	}
@@ -180,7 +180,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	tokens, e := l.s.activeAccessIDs(ctx, l.m)
+	tokens, e := l.s.activeAccessIDs(ctx, l.Machine)
 	if e != nil {
 		return e
 	}
@@ -188,7 +188,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		return e
 	}
 	l.credentialPoliciesReady(len(tokens))
-	rules := ingressFor(l.m.NodeID, p, app.Audience)
+	rules := ingressFor(l.Machine.NodeID, p, app.Audience)
 	// Keep predecessor discovery hosts protected throughout endpoint replacement.
 	keys := make([]string, 0, len(l.state.Resources))
 	for key := range l.state.Resources {
@@ -216,15 +216,15 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if waiting, e := l.gateNodeConfiguration(ctx); e != nil || waiting {
 		return e
 	}
-	runtime, at, e := l.s.report(ctx, l.m, "runtime")
+	runtime, at, e := l.s.report(ctx, l.Machine, "runtime")
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return e
 	}
-	if !runtime.Ready || runtime.Generation != l.state.Generation || runtime.ConfigDigest != l.s.rollout.DesiredDigest(l.m, l.state) || time.Since(at) > p.TunnelStatusTTL {
+	if !runtime.Ready || runtime.Generation != l.state.Generation || runtime.ConfigDigest != l.desiredDigest() || time.Since(at) > p.TunnelStatusTTL {
 		l.state.Ready = false
 		return l.save(ctx)
 	}
-	connector, at, e := l.s.report(ctx, l.m, "connector")
+	connector, at, e := l.s.report(ctx, l.Machine, "connector")
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return e
 	}
@@ -232,13 +232,13 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Ready = false
 		return l.save(ctx)
 	}
-	hosts := []string{strings.TrimPrefix(l.state.ServiceURL, "https://"), discoveryHost, "*.apps-" + l.m.NodeID + "." + p.CloudflareBaseDomain}
+	hosts := []string{strings.TrimPrefix(l.state.ServiceURL, "https://"), discoveryHost, "*.apps-" + l.Machine.NodeID + "." + p.CloudflareBaseDomain}
 	for i, host := range hosts {
 		if _, e = l.ensure(ctx, prefix+"dns-"+strconv.Itoa(i), "dns", host, tunnel.ID); e != nil {
 			return e
 		}
 	}
-	credential, e := l.s.ResolveAccessCredential(ctx, credentialRef(l.m.NodeID, l.m.Epoch, l.state.AccessVersion))
+	credential, e := l.s.ResolveAccessCredential(ctx, credentialRef(l.Machine.NodeID, l.Machine.Epoch, l.state.AccessVersion))
 	if e != nil {
 		return e
 	}
@@ -246,12 +246,13 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if verify == nil {
 		verify = l.s.verifyEndpoints
 	}
-	if e = verify(ctx, l.state, credential); e != nil {
+	if e = verify(ctx, l.state.RoutingState, credential); e != nil {
 		l.state.Ready = false
 		l.state.Reason = "tls_or_route_pending"
 		return l.save(ctx)
 	}
 	l.state.Ready = p.CloudflareIngressApproved
+	l.state.ReadyGeneration = l.state.Generation
 	l.state.VerifiedAt = time.Now().UTC()
 	l.state.Reason = "ingress_validation_required"
 	if l.state.Ready {
@@ -292,7 +293,7 @@ func (l *tunnelLease) maintainCredentials(ctx context.Context) (result error) {
 	if _, e := l.ensure(ctx, "token-"+strconv.FormatInt(l.state.AccessVersion, 10), "token", "", ""); e != nil {
 		return e
 	}
-	ids, e := l.s.activeAccessIDs(ctx, l.m)
+	ids, e := l.s.activeAccessIDs(ctx, l.Machine)
 	if e != nil {
 		return e
 	}
@@ -365,7 +366,7 @@ func (l *tunnelLease) rotateConnector(ctx context.Context) error {
 func (l *tunnelLease) prepareAccessRotation(ctx context.Context) error {
 	var expires time.Time
 	var revoked bool
-	e := l.s.db.QueryRowContext(ctx, `SELECT expires_at,revoked_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3`, l.m.NodeID, l.m.Epoch, l.state.AccessVersion).Scan(&expires, &revoked)
+	e := l.s.db.QueryRowContext(ctx, `SELECT expires_at,revoked_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3`, l.Machine.NodeID, l.Machine.Epoch, l.state.AccessVersion).Scan(&expires, &revoked)
 	missing := errors.Is(e, sql.ErrNoRows)
 	if e != nil && !missing {
 		return e
@@ -397,7 +398,7 @@ func (l *tunnelLease) prepareAccessRotation(ctx context.Context) error {
 		return nil
 	}
 	var count int
-	if e = l.s.db.QueryRowContext(ctx, `SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL AND expires_at>now()`, l.m.NodeID, l.m.Epoch).Scan(&count); e != nil {
+	if e = l.s.db.QueryRowContext(ctx, `SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL AND expires_at>now()`, l.Machine.NodeID, l.Machine.Epoch).Scan(&count); e != nil {
 		return e
 	}
 	if count > 1 {
@@ -426,7 +427,7 @@ func (l *tunnelLease) retireAccessTokens(ctx context.Context, expiredOnly bool) 
 		}
 		if expiredOnly {
 			var expired bool
-			if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3 AND (expires_at<=now() OR revoked_at IS NOT NULL))`, l.m.NodeID, l.m.Epoch, r.CredentialVersion).Scan(&expired); e != nil {
+			if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3 AND (expires_at<=now() OR revoked_at IS NOT NULL))`, l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion).Scan(&expired); e != nil {
 				return e
 			}
 			if !expired {
@@ -472,7 +473,7 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 	}
 	sort.Strings(keys)
 	app := l.state.Resources[prefix+"app"]
-	rules := ingressFor(l.m.NodeID, l.s.params, app.Audience)
+	rules := ingressFor(l.Machine.NodeID, l.s.params, app.Audience)
 	version, e := l.provider.Configure(ctx, l.state.TunnelID, rules)
 	if e != nil {
 		return e
@@ -556,7 +557,7 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 			}
 		}
 	}
-	if _, e := l.s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2`, l.m.NodeID, l.m.Epoch); e != nil {
+	if _, e := l.s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2`, l.Machine.NodeID, l.Machine.Epoch); e != nil {
 		return e
 	}
 	l.state.CleanupComplete = true

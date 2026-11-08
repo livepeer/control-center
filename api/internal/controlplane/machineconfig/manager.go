@@ -1,0 +1,212 @@
+package machineconfig
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"time"
+)
+
+type Config struct {
+	RequireDrain            bool
+	APIURL                  string
+	Connector               ConnectorConfig
+	DrainTimeout, StatusTTL time.Duration
+}
+
+type Dependencies struct {
+	DB       *sql.DB
+	Logger   *slog.Logger
+	Exposure func(json.RawMessage) (*Exposure, error)
+	Build    func(Desired) ([]byte, string, error)
+}
+
+type Manager struct {
+	config Config
+	store  Store
+	deps   Dependencies
+}
+
+func New(config Config, deps Dependencies) *Manager {
+	if config.StatusTTL == 0 {
+		config.StatusTTL = 2 * time.Minute
+	}
+	if deps.Build == nil {
+		deps.Build = Build
+	}
+	return &Manager{config: config, store: Store{deps.DB}, deps: deps}
+}
+
+func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
+	return Desired{Machine: m, State: state, Exposure: exposure, Connector: s.config.Connector, ControlAPIURL: s.config.APIURL}
+}
+
+func (s *Manager) Reconcile(ctx context.Context) error {
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT node_id,epoch::text,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments ORDER BY node_id,epoch`)
+	if err != nil {
+		return err
+	}
+	var machines []Machine
+	for rows.Next() {
+		var m Machine
+		if err = rows.Scan(&m.NodeID, &m.Epoch, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); err != nil {
+			rows.Close()
+			return err
+		}
+		machines = append(machines, m)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, m := range machines {
+		if err = s.reconcile(ctx, m); err != nil && !errors.Is(err, ErrFenced) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Manager) reconcile(ctx context.Context, m Machine) error {
+	record, err := s.store.Load(ctx, m.NodeID, m.Epoch)
+	var lease *Lease
+	defer func() {
+		if lease != nil {
+			lease.Release(ctx)
+		}
+	}()
+	if errors.Is(err, sql.ErrNoRows) {
+		lease, err = s.store.Claim(ctx, m, nil, false)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		record = lease.Record
+	} else if err != nil {
+		return err
+	}
+	m.CredentialVersion = record.CredentialVersion
+	m.Terminal = record.Terminal
+	before := record.State
+	exposure, remove, err := s.plan(ctx, m, &record)
+	if err != nil {
+		return err
+	}
+	if lease == nil && (record.State != before || remove) {
+		lease, err = s.store.Claim(ctx, m, nil, false)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		record = lease.Record
+		m = lease.Machine
+		before = record.State
+		exposure, remove, err = s.plan(ctx, m, &record)
+		if err != nil {
+			return err
+		}
+	}
+	if lease != nil {
+		lease.State = record.State
+		if remove {
+			removed, e := s.finishRemoval(ctx, lease)
+			if e != nil {
+				return e
+			}
+			if removed {
+				m.Terminal = true
+				lease.State.Lifecycle = "removed"
+			}
+		}
+		if lease.State != before && !m.Terminal {
+			if err = lease.Save(ctx); err != nil {
+				return err
+			}
+		}
+		record = lease.Record
+		// Rendering and publication use the revision fence, not the provider lease.
+		lease.Release(ctx)
+		lease = nil
+	}
+	data, digest, err := s.deps.Build(s.Desired(m, record.State, exposure))
+	if err != nil {
+		s.deps.Logger.Error("keeping previous configuration", "node_id", m.NodeID, "error", err)
+		return nil
+	}
+	if m.Terminal {
+		_, err = s.store.DB.ExecContext(ctx, `UPDATE lpcc.enrollments SET terminal_bundle=$3,terminal_sha256=$4 WHERE node_id=$1 AND epoch=$2 AND retired_at IS NOT NULL AND terminal_bundle IS NULL AND credential_version=$5`, m.NodeID, m.Epoch, data, digest, m.CredentialVersion)
+		return err
+	}
+	return s.publish(ctx, m, record.Revision, data, digest)
+}
+
+// Plan from a snapshot first. Mutations are re-planned under a current lease.
+func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposure, bool, error) {
+	var exposure *Exposure
+	var err error
+	if s.deps.Exposure != nil {
+		exposure, err = s.deps.Exposure(record.Routing)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	if m.Terminal {
+		return exposure, false, nil
+	}
+	if (record.Lifecycle == "draining" || record.Target != "") && record.HeldOrchestrator == "" {
+		_, manifest, e := s.applied(ctx, m)
+		if e != nil {
+			return nil, false, e
+		}
+		record.HeldOrchestrator = manifest
+	}
+	if record.Lifecycle == "draining" {
+		done, e := s.drainComplete(ctx, m, &record.State)
+		return exposure, done, e
+	}
+	if record.Target == "" {
+		_, err = s.Gate(ctx, m, &record.State, s.Desired(m, record.State, exposure))
+	}
+	return exposure, false, err
+}
+
+// Publish serializes enrollment changes and artifact writes before reading the
+// shared rollout/provider revision, so a lock wait cannot publish a stale plan.
+func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data []byte, digest string) error {
+	tx, err := s.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var present int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machine_configs WHERE node_id=$1 FOR UPDATE`, m.NodeID).Scan(&present)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	var current int64
+	err = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 FOR SHARE`, m.NodeID, m.Epoch).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if current != revision {
+		return nil
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_configs(node_id,bundle,sha256) VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET bundle=EXCLUDED.bundle,sha256=EXCLUDED.sha256,generated_at=now() WHERE lpcc.machine_configs.sha256<>EXCLUDED.sha256`, m.NodeID, data, digest); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

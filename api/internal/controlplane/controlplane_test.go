@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +15,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/testdb"
 )
 
@@ -61,43 +60,6 @@ func TestEnrollmentAuthorization(t *testing.T) {
 	raw, _ := jwt.NewWithClaims(jwt.SigningMethodHS384, claims).SignedString([]byte(p.JWTSigningSecret))
 	if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
 		t.Fatal("accepted wrong signing algorithm")
-	}
-}
-
-func TestConfigurationBundle(t *testing.T) {
-	m := Machine{NodeID: "lp-" + strings.Repeat("a", 16), InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}
-	first, digest, err := buildBundle(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, other, err := buildBundle(m)
-	if err != nil || !bytes.Equal(first, second) || digest != other {
-		t.Fatal("archive is not deterministic", err)
-	}
-	files := archiveFiles(t, first)
-	for _, name := range []string{"kustomization.yaml", "orchestrator.yaml", "suc.yaml", "suc-crd.yaml", "upgrade-plan/kustomization.yaml", "upgrade-plan/plan.yaml"} {
-		if _, ok := files[name]; !ok {
-			t.Fatal("missing", name)
-		}
-	}
-	for name, expected := range map[string]string{
-		"suc-crd.yaml": "1393ba034e7691273fc519b721a7f72a0cdbef8c7b051c9e408be96090b8478d",
-		"suc.yaml":     "81ef8c40f85b8822c87e0cf790612fc6d4dcf1eebb83f89e522bc929ef85e18c",
-	} {
-		hash := sha256.Sum256([]byte(files[name]))
-		if hex.EncodeToString(hash[:]) != expected {
-			t.Fatalf("rendering changed pinned asset %s", name)
-		}
-	}
-	if strings.Contains(files["orchestrator.yaml"], "@INSTALL_DIR@") || strings.Contains(files["orchestrator.yaml"], "@NODE_ID@") || !strings.Contains(files["orchestrator.yaml"], "/srv/livepeer/volumes/orchestrator") {
-		t.Fatal("incorrect machine rendering")
-	}
-	if !strings.Contains(files["upgrade-plan/plan.yaml"], m.K3sVersion) {
-		t.Fatal("upgrade plan version missing")
-	}
-	hash := sha256.Sum256(first)
-	if hex.EncodeToString(hash[:]) != digest {
-		t.Fatal("wrong digest")
 	}
 }
 
@@ -286,7 +248,10 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 		t.Fatal("unchanged bundle rewritten", err)
 	}
 	// Upgrade-plan changes can publish while the Node workload is held for drain.
-	s.build = func(m Machine) ([]byte, string, error) { m.K3sVersion = "v1.37.3+k3s1"; return buildBundle(m) }
+	s.build = func(m machineconfig.Desired) ([]byte, string, error) {
+		m.K3sVersion = "v1.37.3+k3s1"
+		return machineconfig.Build(m)
+	}
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +259,9 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT sha256 FROM lpcc.machine_configs WHERE node_id=$1`, id).Scan(&changed); err != nil || changed == beforeDigest {
 		t.Fatal("new backend config not persisted", err)
 	}
-	s.build = func(Machine) ([]byte, string, error) { return nil, "", errors.New("invalid desired config") }
+	s.build = func(machineconfig.Desired) ([]byte, string, error) {
+		return nil, "", errors.New("invalid desired config")
+	}
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -308,13 +275,13 @@ func TestRegistrationFailureIsAtomic(t *testing.T) {
 	s := newTestServer(t)
 	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
 	body := map[string]string{"fingerprint": strings.Repeat("a", 64), "hostname": "worker", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1"}
-	s.build = func(Machine) ([]byte, string, error) { return nil, "", errors.New("generation failed") }
+	s.build = func(machineconfig.Desired) ([]byte, string, error) { return nil, "", errors.New("generation failed") }
 	if w := request(t, s, "POST", "/v1/nodes/register", token, body); w.Code != 503 {
 		t.Fatal(w.Code)
 	}
 	// Simulate a persistence failure after inserting the machine: a bad digest
 	// violates the bundle constraint, so both inserts must roll back.
-	s.build = func(Machine) ([]byte, string, error) { return []byte("bundle"), "bad-digest", nil }
+	s.build = func(machineconfig.Desired) ([]byte, string, error) { return []byte("bundle"), "bad-digest", nil }
 	if w := request(t, s, "POST", "/v1/nodes/register", token, body); w.Code != 503 {
 		t.Fatal(w.Code)
 	}

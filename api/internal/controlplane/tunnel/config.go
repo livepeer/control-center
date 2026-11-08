@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"errors"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -32,7 +33,6 @@ type Config struct {
 
 var cfIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var domainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
-var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
 
 func (p Config) Validate(api string) error {
 	if !p.CloudflareEnabled {
@@ -48,7 +48,7 @@ func (p Config) Validate(api string) error {
 	if p.CloudflareAccessLifetime <= 0 || p.CloudflareRotateBefore <= 0 || p.CloudflareRotateBefore >= p.CloudflareAccessLifetime || p.TunnelStatusTTL < 2*time.Minute || p.TunnelDrainTimeout <= 0 {
 		return errors.New("configure tunnel status TTL of at least two minutes, positive drain limit and Access lifetime/rotation window")
 	}
-	if !ValidConnectorImage(p.CloudflareConnectorImage) {
+	if !machineconfig.ValidConnectorImage(p.CloudflareConnectorImage) {
 		return errors.New("CloudflareConnectorImage requires an immutable sha256 digest")
 	}
 	for _, raw := range append(append([]string{}, p.TunnelPrivateControlCIDRs...), p.TunnelNodeAddresses...) {
@@ -67,5 +67,3 @@ func (p Config) Validate(api string) error {
 	}
 	return nil
 }
-
-func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }

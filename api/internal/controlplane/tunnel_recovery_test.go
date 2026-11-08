@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +28,9 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 				t.Fatal(e)
 			}
 			old := tunnel.RoutingFor(m.NodeID, "example.invalid")
-			raw, _ := json.Marshal(old)
-			execSQL(t, s.db, `INSERT INTO lpcc.machine_tunnels(node_id,epoch,state) VALUES($1,$2,$3)`, m.NodeID, m.Epoch, raw)
+			raw, _ := json.Marshal(old.RoutingState)
+			rollout, _ := json.Marshal(old.State)
+			execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,epoch,state,rollout) VALUES($1,$2,$3,$4)`, m.NodeID, m.Epoch, string(raw), string(rollout))
 			if e = s.reconcile(t.Context()); e != nil {
 				t.Fatal(e)
 			}
@@ -38,10 +40,7 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 			} else {
 				newer.Generation++
 			}
-			m.Routing = &newer
-			m.ControlAPIURL = s.params.PublicAPIURL
-			m.TunnelConfig = &s.params.TunnelParams
-			bundle, digest, e := buildBundle(m)
+			bundle, digest, e := machineconfig.Build(desiredConfiguration(s, m, &newer))
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -61,8 +60,9 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 					t.Fatal(e)
 				}
 			} else {
-				raw, _ = json.Marshal(newer)
-				if _, e = tx.Exec(`UPDATE lpcc.machine_tunnels SET state=$3,revision=revision+1 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, raw); e != nil {
+				raw, _ = json.Marshal(newer.RoutingState)
+				rollout, _ = json.Marshal(newer.State)
+				if _, e = tx.Exec(`UPDATE lpcc.machine_states SET state=$3,rollout=$4,revision=revision+1 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, string(raw), string(rollout)); e != nil {
 					t.Fatal(e)
 				}
 			}
@@ -95,7 +95,7 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 			if e = s.db.QueryRow(`SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&data); e != nil {
 				t.Fatal(e)
 			}
-			var desired runtimeDesired
+			var desired machineconfig.Runtime
 			if e = json.Unmarshal([]byte(archiveFiles(t, data)["runtime.json"]), &desired); e != nil {
 				t.Fatal(e)
 			}
@@ -250,7 +250,7 @@ func TestLateDrainReportNeedsAuditedRetry(t *testing.T) {
 	adminA(t, s)
 	path := "/api/admin/machines/" + c["node_id"]
 	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"epoch": c["epoch"]}), 202)
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
 	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
@@ -287,7 +287,7 @@ func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
 	// credential previously released to development HTTP consumers.
 	enroll(t, s, ownerA, fp)
 	driveTunnels(t, s)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.machine_tunnels`) != 0 {
+	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE state->>'tunnel_id' IS NOT NULL AND state->>'tunnel_id'<>''`) != 0 {
 		t.Fatal("development enrollment became live")
 	}
 	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", jwt, map[string]any{"fingerprint": fp, "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
@@ -335,7 +335,7 @@ func TestOfflineAccessReplacementStatusSurvivesFailure(t *testing.T) {
 			}
 			f.fail = false
 			// Allow the persisted retry deadline without waiting in the test.
-			execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,token-2,attempt_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+			execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,token-2,attempt_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 			driveTunnels(t, s)
 			state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
 			if state.Reason != "runtime_offline" || state.RotationReason != recovered || state.Ready {
@@ -359,7 +359,7 @@ func TestLateRetiredResultWithdrawsSuccessorReadiness(t *testing.T) {
 	old := readyTunnel(t, s, c)
 	late := old.Resources["g1-dns-0"]
 	// Only ambiguous operations need periodic late-result inventories.
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,g1-dns-0,watch}','true')`)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,g1-dns-0,watch}','true')`)
 	if e := s.RetireMachine(t.Context(), c["node_id"]); e != nil {
 		t.Fatal(e)
 	}
@@ -368,7 +368,7 @@ func TestLateRetiredResultWithdrawsSuccessorReadiness(t *testing.T) {
 	readyTunnel(t, s, newC)
 	late.ID = "late-old-dns"
 	base.resources[late.ID] = late
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,g1-dns-0,audit_after}',to_jsonb($1::text)) WHERE epoch=$2`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano), c["epoch"])
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,g1-dns-0,audit_after}',to_jsonb($1::text)) WHERE epoch=$2`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano), c["epoch"])
 	testTunnelDeps(s).Provider = &dnsDeleteFailure{base}
 	configureTestTunnels(t, s)
 	// Two passes remove dependence on enrollment row enumeration order.
@@ -396,7 +396,7 @@ func TestSecureEnrollmentBeforeEnablementCanProvision(t *testing.T) {
 	testTunnelDeps(s).Provider = nil
 	configureTestTunnels(t, s)
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.machine_tunnels`) != 0 {
+	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.machine_states`) != 0 {
 		t.Fatal("secure issuance coupled to enablement")
 	}
 	s.params.CloudflareEnabled = true
@@ -456,13 +456,13 @@ func TestEndpointDrainCancellationAndFailedStageRollback(t *testing.T) {
 				configureTestTunnels(t, s)
 				driveTunnels(t, s)
 			}
-			execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+			execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 			s.params.CloudflareBaseDomain = "fleet.example.invalid"
 			testTunnelDeps(s).Provider = f
 			configureTestTunnels(t, s)
 			driveTunnels(t, s)
 			current, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
-			if current.DrainRequested || current.EndpointDrainURL != "" || current.ServiceURL != initial.ServiceURL {
+			if current.DrainRequested || current.Target != "" || current.ServiceURL != initial.ServiceURL {
 				t.Fatal("obsolete endpoint drain survived rollback", current)
 			}
 			// No fresh runner report is needed to retain the already applied A workload.
@@ -484,7 +484,7 @@ func TestUnfinishedEndpointDrainCannotResetItsDeadline(t *testing.T) {
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
 	old := time.Now().UTC().Add(-time.Hour)
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{drain_started_at}',to_jsonb($1::text))`, old.Format(time.RFC3339Nano))
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, old.Format(time.RFC3339Nano))
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
 	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
@@ -565,7 +565,7 @@ func TestRemovalRevokesReconnectingConnectorAndResumesLostResponse(t *testing.T)
 				delete(base.resources, initial.TunnelID)
 			} else {
 				// An interrupted old cleanup may already have persisted an absent intent.
-				execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,tunnel,absent}','true')`)
+				execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,tunnel,absent}','true')`)
 			}
 			if e := s.RetireMachine(t.Context(), c["node_id"]); e != nil {
 				t.Fatal(e)
@@ -669,7 +669,7 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 	s, base := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("1", 64))
 	initial := readyTunnel(t, s, c)
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,tunnel,watch}','true')`)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,tunnel,watch}','true')`)
 	if e := s.RetireMachine(t.Context(), c["node_id"]); e != nil {
 		t.Fatal(e)
 	}
@@ -687,7 +687,7 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 		t.Fatal("completed retirement ignored audit interval", f.inventories, revision, after)
 	}
 	overdue := time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,tunnel,audit_after}',to_jsonb($1::text))`, overdue)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,tunnel,audit_after}',to_jsonb($1::text))`, overdue)
 	driveTunnels(t, s)
 	if f.inventories == 0 {
 		t.Fatal("due watch was never inventoried")
@@ -702,7 +702,7 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 	f.lateToken = "late-usable-connector-token"
 	base.tokens[initial.TunnelID] = f.lateToken
 	f.failDelete = true
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{resources,tunnel,audit_after}',to_jsonb($1::text))`, overdue)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,tunnel,audit_after}',to_jsonb($1::text))`, overdue)
 	driveTunnels(t, s)
 	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
 	if state.CleanupComplete || !state.ConnectorRevoked || f.rotations != 1 {

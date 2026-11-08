@@ -312,7 +312,7 @@ func count(t *testing.T, s *Manager, query string, args ...any) int {
 
 func TestLeaseFencingOnRetirement(t *testing.T) {
 	s, _, lease := claimTestTunnel(t)
-	if _, err := s.claimTunnel(t.Context(), lease.m); err == nil {
+	if _, err := s.claimTunnel(t.Context(), lease.Machine); err == nil {
 		t.Fatal("concurrent lease acquired")
 	}
 	execSQL(t, s.db, `DELETE FROM auth.users`)
@@ -320,13 +320,13 @@ func TestLeaseFencingOnRetirement(t *testing.T) {
 		t.Fatal("retired worker was not fenced", err)
 	}
 	lease.finish(t.Context(), false)
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET next_attempt_at=now()`)
-	retired, err := s.claimTunnel(t.Context(), lease.m)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET next_attempt_at=now()`)
+	retired, err := s.claimTunnel(t.Context(), lease.Machine)
 	if err != nil {
 		t.Fatal("fenced worker did not release lease for cleanup", err)
 	}
 	defer retired.finish(t.Context(), false)
-	if !retired.m.Terminal {
+	if !retired.Machine.Terminal {
 		t.Fatal("cleanup worker did not observe retirement")
 	}
 }
@@ -335,7 +335,7 @@ func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
 	for _, kind := range []string{"tunnel", "token"} {
 		t.Run(kind, func(t *testing.T) {
 			s, f, l := claimTestTunnel(t)
-			m := l.m
+			m := l.Machine
 			var e error
 			defer l.finish(t.Context(), false)
 			key := kind
@@ -432,12 +432,12 @@ func (f *lostTokenCheckpoint) Delete(ctx context.Context, r CFResource, target s
 }
 func TestAccessSecretCheckpointAndStrandedDeletionRecovery(t *testing.T) {
 	s, base, l := claimTestTunnel(t)
-	m := l.m
+	m := l.Machine
 	var e error
 	f := &lostTokenCheckpoint{recoveryCloudflare: base, lostDelete: true}
 	l.provider = f
 	f.afterCreate = func() {
-		execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET revision=revision+1 WHERE node_id=$1`, m.NodeID)
+		execSQL(t, s.db, `UPDATE lpcc.machine_states SET revision=revision+1 WHERE node_id=$1`, m.NodeID)
 	}
 	if _, e = l.ensure(t.Context(), "token-1", "token", "", ""); !errors.Is(e, errTunnelFenced) {
 		t.Fatal("failed checkpoint accepted", e)
@@ -446,7 +446,7 @@ func TestAccessSecretCheckpointAndStrandedDeletionRecovery(t *testing.T) {
 		t.Fatal("secret committed without selected resource")
 	}
 	l.finish(t.Context(), false)
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET next_attempt_at=now()`)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET next_attempt_at=now()`)
 	l, e = s.claimTunnel(t.Context(), m)
 	if e != nil {
 		t.Fatal(e)
@@ -496,7 +496,7 @@ func TestSupersededCreateHandoffSurvivesCleanupFailure(t *testing.T) {
 	for _, after := range []bool{false, true} {
 		t.Run(fmt.Sprint("lost-delete-response-", after), func(t *testing.T) {
 			s, base, l := claimTestTunnel(t)
-			m := l.m
+			m := l.Machine
 			var e error
 			key := "g1-policy"
 			old := CFResource{Kind: "policy", Name: resourceName(m, key), Host: "app-id", Pending: true, Attempts: 1, OperationVersion: 1, CreationTarget: "token-a"}
@@ -520,7 +520,7 @@ func TestSupersededCreateHandoffSurvivesCleanupFailure(t *testing.T) {
 				t.Fatal("handoff was not atomic", persisted.Resources)
 			}
 			l.finish(t.Context(), true)
-			execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET next_attempt_at=now()`)
+			execSQL(t, s.db, `UPDATE lpcc.machine_states SET next_attempt_at=now()`)
 			l, e = s.claimTunnel(t.Context(), m)
 			if e != nil {
 				t.Fatal(e)
@@ -539,7 +539,7 @@ func TestSupersededCreateHandoffSurvivesCleanupFailure(t *testing.T) {
 
 func TestRollbackReusesUnselectedOwnedOperation(t *testing.T) {
 	_, f, l := claimTestTunnel(t)
-	m := l.m
+	m := l.Machine
 	var e error
 	defer l.finish(t.Context(), false)
 	old := CFResource{Kind: "app", Name: resourceName(m, "g1-app"), Host: "discovery.example.invalid", Pending: true, Attempts: 1, OperationVersion: 1}
