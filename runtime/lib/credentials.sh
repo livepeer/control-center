@@ -13,6 +13,9 @@ runtime_image() {
 
 verify_retired_apps() {
   local headers code token
+  if [[ -f "$INSTALL_DIR/volumes/http-source/system-layout.json" ]]; then
+    [[ $(jq -r '.stage' "$INSTALL_DIR/volumes/http-source/system-layout.json") == complete ]] || die 'finish the Runtime inventory transfer before re-enrolling; keep the existing enrollment running'
+  fi
   headers=$(mktemp "$INSTALL_DIR/state/cleanup-headers.XXXXXX")
   token=$(cat "$INSTALL_DIR/credentials/service-token")
   code=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --proto '=https' \
@@ -47,7 +50,17 @@ install_machine_secret() {
 }
 
 stop_credential_consumers() {
-  kube -n flux-system patch kustomization livepeer --type merge -p '{"spec":{"suspend":true}}'
+  local replicas
+  if ! jq -e '.flux_replicas != null' "$INSTALL_DIR/state/credential-transition.json" >/dev/null; then
+    replicas=$(kube -n flux-system get deployment/kustomize-controller -o jsonpath='{.spec.replicas}')
+    [[ "$replicas" =~ ^[0-9]+$ ]] || die 'cannot establish the Flux writer replica count'
+    jq --argjson replicas "$replicas" '. + {flux_replicas:$replicas,resume_legacy_root:(.runtime_transition_format != 3)}' "$INSTALL_DIR/state/credential-transition.json" | \
+      atomic_write "$INSTALL_DIR/state/credential-transition.json"
+  fi
+  # Suspending a Kustomization does not stop an in-flight apply. Terminate the
+  # writer before stopping consumers so no sibling or app path can recreate one.
+  kube -n flux-system scale deployment/kustomize-controller --replicas=0
+  kube -n flux-system wait pod -l app=kustomize-controller --for=delete --timeout=120s
   kube -n flux-system scale deployment/livepeer-http-source --replicas=0
   if kube -n flux-system get deployment/livepeer-app-reconciler >/dev/null 2>&1; then
     kube -n flux-system scale deployment/livepeer-app-reconciler --replicas=0
@@ -60,7 +73,7 @@ stop_credential_consumers() {
 }
 
 transition_credentials() {
-  local api fingerprint operation expected response status request metadata previous_epoch apps
+  local api fingerprint operation expected response status request metadata previous_epoch apps replicas layout_epoch issued_epoch installed_epoch
   managed_installation || die 'credential transition requires an initialized installation'
   [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]] || die 'restore the runner bootstrap credential before changing credentials'
   runtime_image
@@ -84,12 +97,38 @@ transition_credentials() {
     if [[ -f "$INSTALL_DIR/credentials/identity.json" ]]; then expected=$(jq -er '.credential_version | tonumber' "$INSTALL_DIR/credentials/identity.json"); fi
     if [[ -f "$INSTALL_DIR/credentials/identity.json" ]]; then previous_epoch=$(jq -er '.epoch' "$INSTALL_DIR/credentials/identity.json"); fi
     jq -nc --arg mode "$CREDENTIAL_TRANSITION" --arg api "$api" --arg operation "$operation" --argjson expected "$expected" --arg previous_epoch "$previous_epoch" \
-      '{mode:$mode,api:$api,operation:$operation,expected:$expected,previous_epoch:$previous_epoch,cleanup_verified:($mode=="reenroll")}' | atomic_write "$INSTALL_DIR/state/credential-transition.json"
+      '{mode:$mode,api:$api,operation:$operation,expected:$expected,previous_epoch:$previous_epoch,cleanup_verified:($mode=="reenroll"),runtime_transition_format:3}' | atomic_write "$INSTALL_DIR/state/credential-transition.json"
     metadata=$(cat "$INSTALL_DIR/state/credential-transition.json")
   fi
   stop_credential_consumers
+  if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    # Recheck after publisher termination, including on resume: the old agent
+    # could have started a transfer while the cleanup preflight was in flight.
+    if [[ -f "$INSTALL_DIR/volumes/http-source/system-layout.json" && $(jq -r '.stage' "$INSTALL_DIR/volumes/http-source/system-layout.json") != complete ]]; then
+      layout_epoch=$(jq -r '.epoch' "$INSTALL_DIR/volumes/http-source/system-layout.json")
+      issued_epoch=$(jq -r '.issued_epoch // empty' "$INSTALL_DIR/state/credential-transition.json")
+      installed_epoch=''
+      if [[ -f "$INSTALL_DIR/credentials/identity.json" ]]; then installed_epoch=$(jq -r '.epoch' "$INSTALL_DIR/credentials/identity.json"); fi
+      if [[ $(jq -r '.layout_verified // false' "$INSTALL_DIR/state/credential-transition.json") == true && -n "$issued_epoch" && "$layout_epoch" == "$issued_epoch" && "$installed_epoch" == "$issued_epoch" ]]; then
+        : # Resume the successfully installed new enrollment's own transfer.
+      elif [[ $(jq -r '.layout_verified // false' "$INSTALL_DIR/state/credential-transition.json") != true ]]; then
+        kube -n flux-system scale deployment/livepeer-http-source --replicas=1
+        replicas=$(jq -er '.flux_replicas' "$INSTALL_DIR/state/credential-transition.json")
+        kube -n flux-system scale deployment/kustomize-controller --replicas="$replicas"
+        rm -- "$INSTALL_DIR/state/credential-transition.json"
+        die 'Runtime inventory transfer began during preflight; the old enrollment was resumed; finish its transfer and retry re-enrollment'
+      else
+        die 'unfinished Runtime inventory transfer after the enrollment fence; restore the prior transition before continuing'
+      fi
+    fi
+    jq '. + {layout_verified:true}' "$INSTALL_DIR/state/credential-transition.json" | atomic_write "$INSTALL_DIR/state/credential-transition.json"
+  fi
   install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/app-reconciler"
+  install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
+  chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"
@@ -118,6 +157,9 @@ transition_credentials() {
   [[ $(jq -r '.config_url' <<< "$response") == "$CONFIG_URL" ]] || die 'credential destination changed'
   SERVICE_TOKEN=$(jq -er '.token' <<< "$response"); ENROLLMENT_EPOCH=$(jq -er '.epoch' <<< "$response"); CREDENTIAL_VERSION=$(jq -er '.credential_version' <<< "$response")
   [[ "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ && "$ENROLLMENT_EPOCH" =~ ^[a-f0-9-]{36}$ && "$CREDENTIAL_VERSION" =~ ^[1-9][0-9]*$ ]] || die 'invalid refreshed machine credential'
+  if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    jq --arg epoch "$ENROLLMENT_EPOCH" '. + {issued_epoch:$epoch}' "$INSTALL_DIR/state/credential-transition.json" | atomic_write "$INSTALL_DIR/state/credential-transition.json"
+  fi
   printf '%s' "$SERVICE_TOKEN" | atomic_write "$INSTALL_DIR/credentials/service-token"
   printf '%s' "$CONFIG_URL" | atomic_write "$INSTALL_DIR/credentials/config-url"
   save_identity
@@ -142,8 +184,15 @@ transition_credentials() {
   kube apply -k "$INSTALL_DIR/manifests/bootstrap"
   kube -n flux-system rollout status deployment/livepeer-http-source --timeout=180s
   kube -n flux-system wait externalartifact/livepeer-service --for=condition=Ready --timeout=180s
-  kube -n flux-system patch kustomization livepeer --type merge -p '{"spec":{"suspend":false}}'
-  kube -n flux-system wait kustomization/livepeer --for=condition=Ready --timeout=300s
+  replicas=$(jq -er '.flux_replicas' "$INSTALL_DIR/state/credential-transition.json")
+  if [[ $(jq -r '.resume_legacy_root' "$INSTALL_DIR/state/credential-transition.json") == true ]]; then
+    kube -n flux-system patch kustomization livepeer --type merge -p '{"spec":{"suspend":false}}'
+  fi
+  kube -n flux-system scale deployment/kustomize-controller --replicas="$replicas"
+  if (( replicas > 0 )); then
+    kube -n flux-system rollout status deployment/kustomize-controller --timeout=180s
+    kube -n flux-system wait kustomization/livepeer --for=condition=Ready --timeout=300s
+  fi
   rm -- "$INSTALL_DIR/state/credential-transition.json"
   ENROLLMENT_TOKEN=''
 }

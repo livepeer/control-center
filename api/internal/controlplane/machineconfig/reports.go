@@ -66,7 +66,7 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 	if report.BundleFormat >= 2 && previous.Drained && previous.Generation == report.Generation && previous.Evidence != nil && report.Evidence != nil && previous.Evidence.Target == report.Evidence.Target && time.Now().Before(previous.Evidence.ExpiresAt) {
 		drainWake = false
 	}
-	return drainWake || (report.Component == "runtime" && ((report.BundleFormat >= 2 && record.BundleFormat < 2) || (report.Ready && record.ApplyingConfigDigest != "" && report.ConfigDigest == record.ApplyingConfigDigest && report.Generation == record.Generation))), nil
+	return drainWake || (report.Component == "runtime" && ((report.BundleFormat >= 2 && report.BundleFormat > record.BundleFormat) || (report.Ready && record.ApplyingConfigDigest != "" && report.ConfigDigest == record.ApplyingConfigDigest && report.Generation == record.Generation))), nil
 }
 
 func validDrainEvidence(m Machine, state State, report Report, now time.Time) bool {

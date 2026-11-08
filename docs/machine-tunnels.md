@@ -37,25 +37,31 @@ immutable digest:
 
 ```sh
 docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
+  --build-arg RUNTIME_IMAGE=<REGISTRY>/livepeer-runtime@sha256:<RUNTIME_DIGEST> \
   -t <REGISTRY>/livepeer-tunnel:<RELEASE> runtime/services
 ```
 
 The image downloads cloudflared 2026.10.7 and verifies the upstream artifact's
-SHA256. The launcher disables automatic updates and enables path normalization.
-Changing the configured image replaces the connector Deployment.
+SHA256 and copies the helper from the pinned Go Runtime image. Set
+`RuntimeConnectorImage` to its published digest before enabling managed ingress
+on format 3. `CloudflareConnectorImage` remains the legacy format 1/2 image. Startup disables
+automatic updates and enables path normalization. Changing the selected image
+replaces the connector Deployment.
 
 ## Credential boundaries
 
 | Class | Delivery / storage | Consumers |
 | --- | --- | --- |
 | Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel/Access and zone DNS write permissions | Control Center only |
-| Machine Tunnel token | Provider token API → authenticated Control Center endpoint → broker Unix socket → launcher-owned tmpfs file mode 0600 | cloudflared process only |
+| Machine Tunnel token | Provider API → authenticated Control Center endpoint → management agent's scoped Unix socket → private tmpfs file mode 0600 | cloudflared process only |
 | Collector Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Authorized #115/#116 integration only |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
-the `flux-system/livepeer-service-auth` Secret. Only the broker among connector
-containers mounts it; neither container has Kubernetes API credentials. The
-configuration adapter has its own mount and limited read/status RBAC. Protect
+the `flux-system/livepeer-service-auth` Secret. In format 3, only the management
+agent mounts its token. The connector mounts its own socket directory and has no
+Kubernetes API credential. App Reconciler mounts only nonsecret enrollment fields
+and reports through a separate scoped socket. The agent has limited observation,
+artifact-status and ownership-migration RBAC. Protect
 Kubernetes Secrets and backups at deployment.
 
 Use independently generated random 32-byte keys, base64 encoded:
@@ -71,10 +77,12 @@ Keep credentials out of bundles, ConfigMaps, command arguments, URLs, logs,
 audit bodies and metric labels. Protect process memory and core dumps. Replace
 backend credentials by controlled restart.
 
-The launcher fetches a fresh token before every cloudflared start and removes
-its temporary file on exit. A broker restart restarts cloudflared and fetches a
-new token; a broker outage alone leaves the current process running. New starts
-require Control Center and Cloudflare. See
+The Go helper deletes prior launch files, fetches a fresh token before every
+start and execs cloudflared. Kubernetes owns exit and restart handling. An agent
+restart leaves a healthy connector running; uncertain associations report no
+positive readiness until a fresh probe revalidates the same Pod and private PID 1
+grant. Rotation replaces the connector. New starts require Control Center and
+Cloudflare. See
 [Tunnel token behavior](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
 
 ## Enrollment, refresh and status
@@ -100,11 +108,13 @@ and terminal removal acknowledgement. They are origin-bound, reject redirects
 and return `Cache-Control: no-store`. Retired credentials can fetch only their
 terminal artifact and acknowledge its epoch and digest.
 
-Reports merge independently and use server receipt time. The adapter checks
-both Flux Kustomizations, completed orchestrator rollout/config digest, metrics
-`/readyz`, and private discovery's public address. The broker checks loopback
-cloudflared readiness/config version and the granted token generation. Source
-readiness expires with `TunnelStatusTTL`; an offline source remains available
+Reports merge independently and use server receipt time. The agent checks Node's
+applied revision, completed rollout/config digest, metrics `/readyz`, private
+discovery address and installed K3s version. Connector reports use a fresh local
+probe, the observed configuration version and an incarnation-bound token grant.
+Probe reporting is best effort within its five-second deadline; missing evidence
+expires without restarting cloudflared. Source readiness expires with
+`TunnelStatusTTL`; an offline source remains available
 to #116's eviction policy. Bundle download or Pod readiness alone is insufficient.
 
 ## Reconciliation and recovery

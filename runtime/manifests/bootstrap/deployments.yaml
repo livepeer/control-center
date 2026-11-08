@@ -15,6 +15,7 @@ spec:
       labels:
         app: livepeer-http-source
     spec:
+      nodeSelector: {livepeer.io/node-id: '@NODE_ID@'}
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
@@ -40,6 +41,8 @@ spec:
         - '@CONTROL_TRANSPORT@'
         - --artifact-url
         - http://livepeer-http-source.flux-system.svc.cluster.local:8080
+        - --socket-root
+        - /management
         ports:
         - name: http
           containerPort: 8080
@@ -62,6 +65,8 @@ spec:
         - name: artifacts
           mountPath: /artifacts
           readOnly: false
+        - name: management
+          mountPath: /management
         livenessProbe:
           httpGet:
             path: /healthz
@@ -79,5 +84,9 @@ spec:
       - name: artifacts
         hostPath:
           path: '@INSTALL_DIR@/volumes/http-source'
+          type: Directory
+      - name: management
+        hostPath:
+          path: '@INSTALL_DIR@/volumes/management-sockets'
           type: Directory
       serviceAccountName: livepeer-http-source

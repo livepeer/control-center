@@ -19,7 +19,8 @@ var appManagement string
 func DrainTarget(node, epoch string, state State) string {
 	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%s/%s", node, epoch, state.Generation, state.PendingConfigDigest, state.Target)))
 }
-func (s *Manager) runtimeSettings(ctx context.Context, m Machine, state *State) {
+func (s *Manager) runtimeSettings(ctx context.Context, m Machine, record *Record) {
+	state := &record.State
 	// Retirement uses the delivered format captured by the deletion transaction.
 	// A capability report alone must not promote its write-once terminal bundle.
 	if m.Terminal {
@@ -28,9 +29,23 @@ func (s *Manager) runtimeSettings(ctx context.Context, m Machine, state *State) 
 	if s.config.RuntimeImage != "" {
 		state.RuntimeImage = s.config.RuntimeImage
 	}
+	if s.config.Connector.ManagedImage != "" {
+		state.SystemConnectorImage = s.config.Connector.ManagedImage
+	}
 	report, _, err := s.store.Report(ctx, m, "runtime")
 	if err == nil && report.BundleFormat >= contract.BundleFormat && ValidConnectorImage(state.RuntimeImage) {
-		state.BundleFormat = contract.BundleFormat
+		format := min(report.BundleFormat, contract.SystemBundleFormat)
+		if format >= contract.SystemBundleFormat && !ValidConnectorImage(state.SystemConnectorImage) {
+			connectorRequired := s.config.RequireDrain
+			if !connectorRequired && s.deps.Exposure != nil {
+				exposure, err := s.deps.Exposure(record.Routing)
+				connectorRequired = err != nil || (exposure != nil && exposure.IngressDigest != "")
+			}
+			if connectorRequired {
+				format = contract.BundleFormat
+			}
+		}
+		state.BundleFormat = max(state.BundleFormat, format)
 	}
 }
 
@@ -112,7 +127,7 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 	if err := json.Unmarshal(files["runtime.json"], &metadata); err != nil {
 		return err
 	}
-	metadata.BundleFormat = contract.BundleFormat
+	metadata.BundleFormat = m.BundleFormat
 	metadata.AppsGeneration = 0
 	metadata.AppsDigest = ""
 	if p.Intent != nil {
@@ -138,6 +153,10 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		for _, name := range []string{"orchestrator.yaml", "tunnel.yaml", "tunnel-network.yaml"} {
 			data := m.RetainedFiles["management/"+name]
 			if data == nil {
+				path := map[string]string{"orchestrator.yaml": "system/node/orchestrator.yaml", "tunnel.yaml": "system/connector/tunnel.yaml", "tunnel-network.yaml": "system/connector/network.yaml"}[name]
+				data = m.RetainedFiles[path]
+			}
+			if data == nil {
 				data = m.RetainedFiles[name]
 			}
 			if data == nil {
@@ -153,6 +172,8 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		}
 		if prior, e := transport.ReadMetadata(m.RetainedFiles["runtime.json"]); e == nil {
 			metadata.ConfigDigest = prior.ConfigDigest
+			// Retained connectors may restart while the backend still authorizes app cleanup.
+			metadata.TunnelID, metadata.TokenGeneration, metadata.ProviderVersion, metadata.ConnectorTokenRef = prior.TunnelID, prior.TokenGeneration, prior.ProviderVersion, prior.ConnectorTokenRef
 			files["runtime.json"], err = json.Marshal(metadata)
 		}
 	}

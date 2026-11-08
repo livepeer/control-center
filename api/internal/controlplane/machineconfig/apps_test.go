@@ -12,7 +12,7 @@ import (
 )
 
 func TestNodeImageOverrideBeforeBundleNegotiation(t *testing.T) {
-	for _, format := range []int{1, 2} {
+	for _, format := range []int{1, 2, 3} {
 		m := Desired{Machine: Machine{NodeID: "lp-" + strings.Repeat("a", 16), Epoch: "22222222-2222-4222-8222-222222222222", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, BundleFormat: format, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
 		data, _, err := Build(m)
 		if err != nil {
@@ -25,6 +25,9 @@ func TestNodeImageOverrideBeforeBundleNegotiation(t *testing.T) {
 		path := "orchestrator.yaml"
 		if format == 2 {
 			path = "management/orchestrator.yaml"
+		}
+		if format == 3 {
+			path = "system/node/orchestrator.yaml"
 		}
 		if !strings.Contains(string(files[path]), "image: "+m.NodeImage) {
 			t.Fatalf("format %d ignored the configured Node image", format)

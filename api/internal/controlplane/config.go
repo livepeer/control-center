@@ -42,7 +42,8 @@ type Params struct {
 	MachineTokenSecret      string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
 	MachineTokenSecretFile  string        `env:"MACHINE_TOKEN_SECRET_FILE" secretfor:"MachineTokenSecret" basepath:"source" descr:"File containing the machine credential secret"`
 	ConfigReconcileInterval time.Duration `env:"CONFIG_RECONCILE_INTERVAL" default:"1m" descr:"Desired configuration reconciliation interval"`
-	RuntimeImage            string        `env:"RUNTIME_IMAGE" optional:"true" descr:"Digest-pinned Go Runtime image for app reconciliation"`
+	RuntimeImage            string        `env:"RUNTIME_IMAGE" optional:"true" descr:"Digest-pinned Go Runtime distribution for system services"`
+	RuntimeConnectorImage   string        `env:"RUNTIME_CONNECTOR_IMAGE" optional:"true" descr:"Digest-pinned Go connector image for system workload consolidation"`
 	RuntimeNodeImage        string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
 	AppStopSignals          bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
 }
@@ -93,7 +94,7 @@ func OpenDB(ctx context.Context, raw, password string) (*sql.DB, error) {
 }
 
 func (p Params) PreValidate() error {
-	for _, image := range []string{p.RuntimeImage, p.RuntimeNodeImage} {
+	for _, image := range []string{p.RuntimeImage, p.RuntimeNodeImage, p.RuntimeConnectorImage} {
 		if image != "" && !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$`).MatchString(image) {
 			return errors.New("Runtime images must be pinned by sha256 digest")
 		}

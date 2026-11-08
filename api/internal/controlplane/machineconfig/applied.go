@@ -26,7 +26,7 @@ func ReadApplied(data []byte) (Runtime, string, error) {
 		if e != nil {
 			return d, "", e
 		}
-		if h.Name != "runtime.json" && h.Name != "orchestrator.yaml" && h.Name != "management/orchestrator.yaml" {
+		if h.Name != "runtime.json" && h.Name != "orchestrator.yaml" && h.Name != "management/orchestrator.yaml" && h.Name != "system/node/orchestrator.yaml" {
 			continue
 		}
 		if h.Size > 1<<20 || h.Typeflag != tar.TypeReg {

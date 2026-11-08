@@ -703,7 +703,7 @@ stage_manifests
         self.assertFalse((self.root / 'desired').exists())
         self.assertFalse((self.root / 'services/mock_service.py').exists())
         self.assertFalse((self.root / 'services/http_source.py').exists())
-        self.assertTrue((self.root / 'services/tunnel_broker.py').exists())
+        self.assertFalse((self.root / 'services/tunnel_broker.py').exists())
         self.assertFalse((self.root / 'bin/bootstrap-helper.py').exists())
         self.assertNotIn((self.root / 'credentials/service-token').read_text(),
                          (self.root / 'manifests/bootstrap/deployments.yaml').read_text())
@@ -722,6 +722,34 @@ stage_manifests
         deployment = (self.root / 'manifests/bootstrap/deployments.yaml').read_text()
         self.assertIn('http://api.example/v1/nodes/', deployment)
         self.assertNotIn('name: livepeer-config', deployment)
+
+    def test_bootstrap_preserves_managed_upgrade_prerequisite_and_waits_for_creation(self):
+        flux = self.root / 'bin/flux'
+        flux.write_text('#!/bin/sh\nprintf "kind: List\\nitems: []\\n"\n')
+        flux.chmod(0o755)
+        for managed in ('true', ''):
+            steps = self.root / 'cluster-steps'
+            steps.unlink(missing_ok=True)
+            result = self.shell('''INSTALL_DIR="$1"
+UPGRADE_MANAGED="$2"
+install_machine_secret() { :; }
+kube() {
+  printf '%s\\n' "$*" >> "$INSTALL_DIR/cluster-steps"
+  if [[ "$*" == 'get nodes -o name' ]]; then printf 'node/test-node'; fi
+  if [[ "$*" == *'get kustomization/livepeer-upgrade-plan'* ]]; then printf '%s' "$UPGRADE_MANAGED"; fi
+  if [[ "$*" == *'create secret generic'* ]]; then printf '{}'; fi
+  if [[ "$*" == 'apply -f -' ]]; then cat >/dev/null; fi
+}
+bootstrap_cluster
+''', str(self.root), managed)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = steps.read_text().splitlines()
+            seed = 'apply -f ' + str(self.root / 'manifests/upgrade-reconciliation.yaml')
+            self.assertEqual(seed in calls, managed != 'true')
+            for namespace, name in (('system-upgrade', 'system-upgrade-controller'), ('livepeer', 'orchestrator')):
+                creation = f'-n {namespace} wait --for=create deployment/{name} --timeout=300s'
+                rollout = f'-n {namespace} rollout status deployment/{name} --timeout=300s'
+                self.assertLess(calls.index(creation), calls.index(rollout))
 
     def test_failed_firewall_activation_stops_k3s(self):
         result = self.shell('''INSTALL_DIR="$1"

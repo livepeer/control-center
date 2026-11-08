@@ -21,6 +21,7 @@ type Machine struct {
 type State struct {
 	BundleFormat           int       `json:"bundle_format,omitempty"`
 	RuntimeImage           string    `json:"runtime_image,omitempty"`
+	SystemConnectorImage   string    `json:"system_connector_image,omitempty"`
 	HeldUpgradePlan        string    `json:"held_upgrade_plan,omitempty"`
 	ApplyingConfigDigest   string    `json:"applying_config_digest,omitempty"`
 	ApplyingUpgradeVersion string    `json:"applying_upgrade_version,omitempty"`
@@ -52,6 +53,7 @@ type Exposure struct {
 
 type ConnectorConfig struct {
 	Image                              string
+	ManagedImage                       string
 	NodeAddresses, PrivateControlCIDRs []string
 }
 

@@ -166,13 +166,17 @@ prepare_installation() {
   initialize_installation
   umask 022
   install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/bin" "$INSTALL_DIR/config" \
-    "$INSTALL_DIR/manifests" "$INSTALL_DIR/systemd" "$INSTALL_DIR/logs" "$INSTALL_DIR/services" \
+    "$INSTALL_DIR/manifests" "$INSTALL_DIR/systemd" "$INSTALL_DIR/logs" \
     "$INSTALL_DIR/lib" \
     "$INSTALL_DIR/volumes" "$INSTALL_DIR/kubelet" "$INSTALL_DIR/k3s/agent/etc/containerd" \
     "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d"
   install -d -m 0700 "$INSTALL_DIR/credentials" "$INSTALL_DIR/state" "$INSTALL_DIR/download" \
     "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
+  install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
+  chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   chmod 0700 "$INSTALL_DIR/k3s" "$INSTALL_DIR/kubelet"
   write_once "$INSTALL_DIR/credentials/node-id" "$NODE_ID"
@@ -190,7 +194,10 @@ stage_manifests() {
   copy_templates "$SCRIPT_DIR/manifests/bootstrap" "$INSTALL_DIR/manifests/bootstrap"
   copy_templates "$SCRIPT_DIR/manifests/flux" "$INSTALL_DIR/manifests/flux"
   render_template "$SCRIPT_DIR/manifests/upgrade-reconciliation.yaml" "$INSTALL_DIR/manifests/upgrade-reconciliation.yaml"
-  install -m 0644 "$SCRIPT_DIR/services/"*.py "$INSTALL_DIR/services/"
+  rm -f -- "$INSTALL_DIR/services/control_client.py" "$INSTALL_DIR/services/tunnel_broker.py" \
+    "$INSTALL_DIR/services/tunnel_launcher.py" "$INSTALL_DIR/services/http_source.py" \
+    "$INSTALL_DIR/services/http_common.py" "$INSTALL_DIR/services/artifacts.py"
+  rmdir "$INSTALL_DIR/services" 2>/dev/null || true
 }
 
 version_at_least() {
@@ -236,7 +243,7 @@ write_host_configuration() {
 kube() { "$INSTALL_DIR/bin/k3s" kubectl --kubeconfig "$INSTALL_DIR/config/kubeconfig.yaml" --request-timeout=30s "$@"; }
 
 bootstrap_cluster() {
-  local _attempt ready=0
+  local _attempt ready=0 upgrade_owner
   for _attempt in {1..120}; do
     if kube get --raw=/readyz >/dev/null 2>&1 && [[ -n $(kube get nodes -o name) ]]; then ready=1; break; fi
     sleep 5
@@ -255,11 +262,15 @@ bootstrap_cluster() {
   kube -n livepeer create secret generic runner-bootstrap \
     --from-file="secret=$INSTALL_DIR/credentials/runner-bootstrap.secret" --dry-run=client -o yaml | kube apply -f -
   kube apply -k "$INSTALL_DIR/manifests/bootstrap"
-  kube apply -f "$INSTALL_DIR/manifests/upgrade-reconciliation.yaml"
+  upgrade_owner=$(kube -n flux-system get kustomization/livepeer-upgrade-plan --ignore-not-found -o jsonpath='{.metadata.labels.livepeer\.io/system-workload}')
+  if [[ "$upgrade_owner" != true ]]; then kube apply -f "$INSTALL_DIR/manifests/upgrade-reconciliation.yaml"; fi
   kube -n flux-system rollout status deployment/livepeer-http-source --timeout=300s
   kube -n flux-system wait externalartifact/livepeer-service --for=condition=Ready --timeout=300s
   kube -n flux-system wait kustomization/livepeer --for=condition=Ready --timeout=600s
+  # Child reconciliation can recreate these after the parent is Ready.
+  kube -n system-upgrade wait --for=create deployment/system-upgrade-controller --timeout=300s
   kube -n system-upgrade rollout status deployment/system-upgrade-controller --timeout=300s
+  kube -n livepeer wait --for=create deployment/orchestrator --timeout=300s
   kube -n livepeer rollout status deployment/orchestrator --timeout=300s
   kube -n flux-system wait kustomization/livepeer-upgrade-plan --for=condition=Ready --timeout=300s
 }

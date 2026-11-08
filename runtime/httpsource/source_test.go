@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -23,6 +24,165 @@ type fakeKube struct {
 	last  *transport.Artifact
 	ready bool
 	reply func(string) any
+	err   error
+}
+
+func cacheBundle(t *testing.T, store artifact.Store, m contract.Metadata, files map[string][]byte) string {
+	t.Helper()
+	files = copyFiles(files)
+	if files["kustomization.yaml"] == nil {
+		files["kustomization.yaml"] = []byte("resources: []\n")
+	}
+	files["runtime.json"], _ = json.Marshal(m)
+	data, err := artifact.Pack(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.Put(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func TestSystemCapabilityWaitsForThisEpochAppliedInventory(t *testing.T) {
+	f := newFixture(t)
+	f.source.SystemWorkloads = true
+	m := f.meta
+	m.BundleFormat = 2
+	cache := func(node, epoch string) string {
+		prior := m
+		prior.NodeID = node
+		prior.Epoch = epoch
+		return cacheBundle(t, f.source.Store, prior, nil)
+	}
+	old := cache(m.NodeID, "previous-epoch")
+	current := cache(m.NodeID, m.Epoch)
+	revision := old
+	f.kube.reply = func(path string) any {
+		if path == fluxPath+"livepeer" {
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": revision, "conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}}
+		}
+		return nil
+	}
+	check := func(want int) {
+		t.Helper()
+		if err := f.source.report(t.Context(), m, current, "invalid_legacy_app_input", false); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.lastReport()["bundle_format"]; got != float64(want) {
+			t.Fatal("capability", got, "want", want)
+		}
+	}
+	check(2) // A stopped Flux writer must not get stuck behind premature format3 input.
+	legacy := m
+	legacy.BundleFormat = 1
+	legacy.AppsGeneration = 1
+	legacy.AppsDigest = "sha256:" + strings.Repeat("f", 64)
+	f.set(t, map[string][]byte{"kustomization.yaml": []byte("resources: []\n")}, legacy)
+	if err := f.source.Sync(t.Context()); err == nil {
+		t.Fatal("invalid legacy app input accepted")
+	}
+	if err := f.source.Report(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.lastReport(); r["bundle_format"] != float64(2) || r["apps_error"] == "" {
+		t.Fatal("invalid legacy input lost repair capability", r)
+	}
+	revision = cache("lp-bbbbbbbbbbbbbbbb", m.Epoch)
+	check(2)
+	revision = current
+	check(3) // No workload health prerequisite.
+	revision = old
+	state := layoutState{Stage: "complete", Epoch: "previous-epoch", Transfer: old}
+	write := func() {
+		b, _ := json.Marshal(state)
+		if err := artifact.AtomicWrite(filepath.Join(f.source.Store.Directory, "system-layout.json"), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	check(3) // Completed ownership survives reenrollment.
+	state.Stage = "handoff"
+	write()
+	check(2)
+	state.Epoch = m.Epoch
+	write()
+	check(3)
+}
+
+func TestDownloadsDoNotHoldPublishedAuthorityOrObservationReporting(t *testing.T) {
+	f := newFixture(t)
+	if err := f.source.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.source.Control.Client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/config") {
+			close(entered)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	done := make(chan error, 1)
+	go func() { done <- f.source.Sync(t.Context()) }()
+	<-entered
+	defer func() {
+		close(release)
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, ok := f.source.Desired(); !ok {
+		t.Fatal("slow fetch revoked valid delivered authority")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := f.source.Report(ctx); err != nil {
+		t.Fatal("download blocked reporting", err)
+	}
+}
+
+func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
+	f := newFixture(t)
+	m := f.meta
+	m.BundleFormat = contract.SystemBundleFormat
+	cache := func(connector string) string {
+		return cacheBundle(t, f.source.Store, m, map[string][]byte{"system/node/node.yaml": []byte("same Node inputs"), "system/connector/connector.yaml": []byte(connector)})
+	}
+	old, current := cache("healthy peer"), cache("broken peer")
+	f.kube.reply = func(path string) any {
+		switch {
+		case path == fluxPath+"livepeer-node":
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
+		case strings.Contains(path, "/deployments/orchestrator"):
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
+		case strings.Contains(path, "/pods?"):
+			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
+		default:
+			return nil
+		}
+	}
+	f.source.Control.Client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Hostname() == "orchestrator.livepeer.svc.cluster.local" {
+			body := "ok"
+			if r.URL.Path == "/discovery" {
+				body = `[{"address":"https://machine.example"}]`
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	if err := f.source.report(t.Context(), m, current, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if report := f.lastReport(); report["ready"] != true || report["bundle_sha256"] != old[7:] {
+		t.Fatal("peer failure suppressed Node or invented its applied archive", report)
+	}
 }
 
 func (k *fakeKube) Publish(_ context.Context, _ string, a *transport.Artifact, ready bool, _ string) error {
@@ -34,6 +194,9 @@ func (k *fakeKube) Publish(_ context.Context, _ string, a *transport.Artifact, r
 	return nil
 }
 func (k *fakeKube) Request(_ context.Context, _ string, path string, _ any, out any) error {
+	if k.err != nil {
+		return k.err
+	}
 	if k.reply == nil {
 		return &transport.HTTPError{Status: 404}
 	}
@@ -43,6 +206,45 @@ func (k *fakeKube) Request(_ context.Context, _ string, path string, _ any, out 
 	}
 	b, _ := json.Marshal(v)
 	return transport.Decode(b, out)
+}
+
+func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
+	f := newFixture(t)
+	f.source.SystemWorkloads = true
+	cache := func(label string, age time.Duration) string {
+		digest := cacheBundle(t, f.source.Store, f.meta, map[string][]byte{"label": []byte(label)})
+		stamp := time.Now().Add(-age)
+		if err := os.Chtimes(filepath.Join(f.source.Store.Directory, digest[7:]+".tar.gz"), stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		return digest
+	}
+	var current string
+	for n := 0; n < 10; n++ {
+		current = cache(formatInt(int64(n)), 0)
+	}
+	applied, attempted, orphan := cache("applied", 3*time.Hour), cache("attempted", 3*time.Hour), cache("orphan", 4*time.Hour)
+	f.kube.reply = func(path string) any {
+		if path == fluxPath+"livepeer-node" {
+			return map[string]any{"status": map[string]any{"lastAppliedRevision": applied, "lastAttemptedRevision": attempted}}
+		}
+		return nil
+	}
+	f.kube.err = &transport.HTTPError{Status: 500}
+	f.source.gc(t.Context(), current)
+	if _, err := f.source.Store.Get(orphan); err != nil {
+		t.Fatal("unknown references allowed collection")
+	}
+	f.kube.err = nil
+	f.source.gc(t.Context(), current)
+	for _, digest := range []string{applied, attempted} {
+		if _, err := f.source.Store.Get(digest); err != nil {
+			t.Fatal("peer input collected", err)
+		}
+	}
+	if _, err := f.source.Store.Get(orphan); !os.IsNotExist(err) {
+		t.Fatal("unreferenced expired archive retained", err)
+	}
 }
 
 type sourceFixture struct {
@@ -191,6 +393,9 @@ func TestSourcePreservesArtifactAndIsolatesInvalidAppInput(t *testing.T) {
 	if err := f.source.Sync(ctx); err != nil {
 		t.Fatal("app input blocked management", err)
 	}
+	if err := f.source.Report(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if f.kube.last.Digest == first || !f.kube.ready || f.lastReport()["apps_error"] == "" {
 		t.Fatal("missing management repair/app diagnostic")
 	}
@@ -246,17 +451,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 		for name, b := range p.Files {
 			files[name] = b
 		}
-		raw, _ := json.Marshal(m)
-		files["runtime.json"] = raw
-		b, err := artifact.Pack(files)
-		if err != nil {
-			t.Fatal(err)
-		}
-		digest, err := f.source.Store.Put(b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return m, digest
+		return m, cacheBundle(t, f.source.Store, m, files)
 	}
 	_, old := cache(1, "same node")
 	m, current := cache(2, "same node")
@@ -285,7 +480,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})
-	if err := f.source.report(context.Background(), m, current, ""); err != nil {
+	if err := f.source.report(context.Background(), m, current, "", false); err != nil {
 		t.Fatal(err)
 	}
 	report := f.lastReport()
@@ -297,10 +492,39 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 		t.Fatal("ignored infrastructure change")
 	}
 	os.WriteFile(filepath.Join(f.source.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)
-	if err := f.source.report(context.Background(), m, current, ""); err != nil {
+	if err := f.source.report(context.Background(), m, current, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if f.lastReport()["ready"] != false {
 		t.Fatal("trusted corrupt cache")
+	}
+}
+
+func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *testing.T) {
+	s := &Source{Store: artifact.Store{Directory: t.TempDir()}}
+	cache := func(epoch, node, connector string) string {
+		m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: 3}
+		return cacheBundle(t, s.Store, m, map[string][]byte{"system/node/kustomization.yaml": []byte(node), "system/connector/kustomization.yaml": []byte(connector)})
+	}
+	old := cache("epoch", "same node", "old connector")
+	current := cache("epoch", "same node", "broken connector")
+	if !s.componentUnchanged("livepeer-node", old, current) || s.componentUnchanged("livepeer-connector", old, current) {
+		t.Fatal("component evidence coupled")
+	}
+	if s.componentUnchanged("livepeer-node", old, cache("new epoch", "same node", "old connector")) {
+		t.Fatal("borrowed old enrollment proof")
+	}
+	data, _ := s.Store.Get(current)
+	files, _ := artifact.Read(data)
+	files["system-layout-publication.json"] = []byte(`{"phase":"adopting"}`)
+	files[".system-transfer/node/kustomization.yaml"] = []byte("older applied node")
+	data, _ = artifact.Pack(files)
+	adopting, _ := s.Store.Put(data)
+	if s.componentUnchanged("livepeer-node", adopting, current) {
+		t.Fatal("credited the unapplied canonical path in an adoption archive")
+	}
+	os.WriteFile(filepath.Join(s.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)
+	if s.componentUnchanged("livepeer-node", old, current) {
+		t.Fatal("trusted corrupt archive")
 	}
 }

@@ -12,8 +12,8 @@ Runtime lives under `runtime/` in the Control Center repository. Run the
 commands below from that directory.
 
 Copy or clone the whole project onto the target machine. Host installation uses
-Bash and standard Linux utilities. The configuration adapter and App Reconciler
-are Go services; the tunnel broker and launcher remain Python services. See
+Bash and standard Linux utilities. Runtime management, App Reconciler, connector
+startup and probes use one Go distribution. Kubernetes supervises cloudflared. See
 [storage and host integration](#storage-and-host-integration) for installed paths.
 
 ```bash
@@ -76,12 +76,47 @@ the installer trusts the upstream HTTPS release endpoints.
 
 Build the Go Runtime image from the repository root with
 `docker build -f runtime/Dockerfile -t <registry>/livepeer-runtime:<tag> .`, push
-it to your registry, and use its published digest for `LIVEPEER_RUNTIME_IMAGE`
-and backend `RUNTIME_IMAGE`. The installer saves the selected image for reruns.
-Deploy backend support before upgrading the adapter. Format 2 activates when the
-adapter reports support and the backend has a valid resolved Runtime image. The
-backend retains that image in machine state; terminal bundles retain their
-already selected format. Format 1 remains readable during migration.
+it, and use its published digest for `LIVEPEER_RUNTIME_IMAGE` and backend
+`RUNTIME_IMAGE`. The backend image used by App Reconciler must support scoped
+sockets before the management agent is upgraded. The installer saves its selected
+image for reruns.
+
+For managed ingress, build the Go connector image using that Runtime digest as
+shown in the [tunnel runbook](../docs/machine-tunnels.md#infrastructure-and-enablement). Set
+backend `RUNTIME_CONNECTOR_IMAGE` to its published digest. Keep the separate
+legacy `CloudflareConnectorImage` pin while format 1/2 machines remain. Format 3
+promotion waits for the new connector pin when managed ingress is enabled or
+retained routing needs a connector. An unrouted machine can use format 3 without
+it; configure the pin before enabling routing. Selected pins survive backend
+configuration loss and terminal delivery within an enrollment; a new enrollment
+does not necessarily inherit them.
+
+Before starting the new management agent, prepare a rollback image that supports
+format 3 and sockets. Backend selection of format 3 is the rollback boundary and
+can happen before any local migration marker exists. There is no automatic
+format downgrade; a format 2 publisher alone is not a safe rollback. Restore a
+compatible release through bootstrap and keep the installation root, migration
+markers, caches and watermarks.
+
+## System workload delivery
+
+Node, connector, App Reconciler and upgrade controller have separate inventories;
+their parent does not wait for health. Node reports its own applied revision and
+workload evidence. App Reconciler reads `app-desired/` from the management bundle
+and publishes app workloads through a separate source and restricted identity.
+
+Only the agent mounts the enrollment token; consumers mount scoped sockets.
+See the [tunnel runbook](../docs/machine-tunnels.md#credential-boundaries) for connector
+startup, readiness and restart behavior.
+
+First format-3 advertisement waits for a verified root inventory from the same
+Node and epoch, with format-2 repair reporting available meanwhile. Migration
+does not wait for workload health. Its durable `volumes/http-source/system-layout.json`
+records adoption before pruning; app intent and upgrade plans keep updating.
+Keep one publisher and preserve the installation root, caches and migration state.
+Resolve unknown legacy resources before retrying a stopped transfer. A completed
+layout keeps the format-3 floor across re-enrollment; use bootstrap for agent repair.
+Remove old code ConfigMaps only after no Pod references them.
 
 The bundled Node image is not sufficient for production app admission. Set
 backend `RUNTIME_NODE_IMAGE` to a compatible digest-pinned image once available.
@@ -149,11 +184,12 @@ sudo --preserve-env=LIVEPEER_API_URL bash bootstrap-livepeer.sh \
   --refresh-credentials --token <FRESH_OWNER_JWT> --install-dir /opt/livepeer
 ```
 
-This suspends Flux and verifies the old adapter/connector Pods have terminated
-before releasing refreshed credentials. It stages HTTPS-enforcing source and URL
+This stops the Flux apply controller before terminating the old management, App
+Reconciler and connector Pods and releasing refreshed credentials. It stages HTTPS-enforcing source and URL
 settings, replaces owner-only credential files and the bootstrap-owned Secret,
 then starts and verifies the trusted adapter. The transition's UUID and expected
-version persist under `state/credential-transition.json`; after interruption,
+version and original controller replica count persist under
+`state/credential-transition.json`; after interruption,
 rerun the same command with a fresh JWT and the same HTTPS origin. Never delete
 that marker to return to ordinary bootstrap. Refresh retains the enrollment,
 tunnel UUID, local runner credential and installed K3s version.
@@ -162,8 +198,10 @@ After the backend has removed an enrollment, use `--reenroll` with a fresh owner
 JWT to create a new epoch while retaining local data. The old adapter is stopped
 and cached epoch metadata/artifact status is fenced before the new one starts.
 The installer requires confirmed app cleanup for the retired epoch and archives
-its owner journal before starting a new lifetime.
-Use the same installation root. Re-enrollment does not accelerate the backend's
+its owner journal before starting a new lifetime. It rechecks migration after
+stopping the publisher: finish an old enrollment’s incomplete transfer before
+retrying. A new enrollment’s interrupted transfer resumes only when its issued
+epoch matches the installed identity. Use the same installation root. Re-enrollment does not accelerate the backend's
 external cleanup of the old epoch.
 
 The connector fetches a fresh token before every start; running connectors can
@@ -171,8 +209,10 @@ reconnect during a Control Center outage. Runtime reports applied state, while
 Control Center verifies external readiness. See the [tunnel runbook](../docs/machine-tunnels.md).
 
 Terminal configuration retains Node, routes, the App Reconciler and connector
-token while format 2 app cleanup receipts are pending. Accepted receipts select
-final cleanup; credential compromise overrides the hold. Fetch or authentication
+token access while app cleanup receipts are pending. Accepted receipts select
+final cleanup; credential compromise overrides the hold. Token access ends when
+the backend no longer authorizes cleanup. The terminal upgrade plan can be
+removed even if the upgrade controller is unhealthy. Fetch or authentication
 failures preserve the last valid artifact. Public Trickle is unsupported.
 
 ## Storage and host integration
@@ -184,12 +224,11 @@ failures preserve the last valid artifact. Public Trickle is unsupported.
 | --- | --- |
 | `bin/`, `download/`, `runtimes/` | Verified binaries, versioned release caches, complete gVisor generations |
 | `lib/` | Bash recovery helpers used before each K3s launch |
-| `services/` | Tunnel broker, launcher and their shared Python client |
 | `credentials/`, `state/` | Enrollment, runner secret, installation marker |
 | `config/`, `systemd/` | K3s configuration, kubeconfig, runsc settings, service unit |
 | `k3s/`, `kubelet/` | Explicit K3s data directory and kubelet root |
 | `manifests/` | Bootstrap manifests |
-| `volumes/` | Orchestrator data, source artifacts, App Reconciler journal/artifacts, local-path storage |
+| `volumes/` | Orchestrator data, source artifacts, scoped sockets, nonsecret connector associations, App Reconciler journal/artifacts, local-path storage |
 | `logs/` | Bootstrap, K3s, Pod, and smoke-test logs |
 
 K3s's data directory is explicitly `<root>/k3s`, never its default

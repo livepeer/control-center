@@ -8,6 +8,9 @@ import (
 )
 
 func tunnelManifest(m Desired, routing string) string {
+	if m.BundleFormat >= 3 {
+		return managedTunnelManifest(m)
+	}
 	image := m.Connector.Image
 	return fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
@@ -126,11 +129,16 @@ spec:
     - ipBlock: {cidr: '::/0', except: %s}
     ports: [{protocol: TCP, port: 443}, {protocol: TCP, port: 7844}, {protocol: UDP, port: 7844}]
 `, list(v4), list(v6))
-	for _, cidr := range m.Connector.PrivateControlCIDRs {
-		result += fmt.Sprintf("  - to:\n    - ipBlock: {cidr: %q}\n    ports: [{protocol: TCP, port: 443}]\n", cidr)
+	if m.BundleFormat < 3 {
+		for _, cidr := range m.Connector.PrivateControlCIDRs {
+			result += fmt.Sprintf("  - to:\n    - ipBlock: {cidr: %q}\n    ports: [{protocol: TCP, port: 443}]\n", cidr)
+		}
 	}
-	result += `---
-apiVersion: networking.k8s.io/v1
+	return result + "---\n" + nodeNetwork()
+}
+
+func nodeNetwork() string {
+	return `apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: orchestrator-private, namespace: livepeer}
 spec:
@@ -156,5 +164,4 @@ spec:
     - podSelector: {matchLabels: {app: livepeer-gvisor-smoke}}
     ports: [{protocol: TCP, port: 8935}, {protocol: TCP, port: 8936}]
 `
-	return result
 }

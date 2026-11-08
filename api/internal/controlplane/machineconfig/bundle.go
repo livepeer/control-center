@@ -65,6 +65,9 @@ func Build(m Desired) ([]byte, string, error) {
 			return nil, "", err
 		}
 	}
+	if err = addSystemWorkloads(files, m); err != nil {
+		return nil, "", err
+	}
 	data, err := artifact.Pack(files)
 	if err != nil {
 		return nil, "", err

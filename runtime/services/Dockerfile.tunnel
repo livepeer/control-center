@@ -1,6 +1,10 @@
-# Build for the supported Runtime platform, then publish and configure its digest.
-FROM --platform=linux/amd64 python:3.13.9-slim-bookworm@sha256:b685a4fa58bb19d1814d78a1ec0f0208f351452724f78b20212c984d6e124a34
-RUN python3 -c "import hashlib,pathlib,urllib.request; b=urllib.request.urlopen('https://github.com/cloudflare/cloudflared/releases/download/2026.10.7/cloudflared-linux-amd64',timeout=60).read(); assert hashlib.sha256(b).hexdigest()=='1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872'; p=pathlib.Path('/usr/local/bin/cloudflared'); p.write_bytes(b); p.chmod(0o755)"
-COPY control_client.py tunnel_broker.py tunnel_launcher.py /app/
+# syntax=docker/dockerfile:1.7
+# Build from the same digest-pinned Go Runtime distribution used by management.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE} AS runtime
+FROM scratch
+ADD --checksum=sha256:1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872 --chmod=0555 https://github.com/cloudflare/cloudflared/releases/download/2026.10.7/cloudflared-linux-amd64 /usr/local/bin/cloudflared
+COPY --from=runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=runtime /usr/local/bin/livepeer-runtime /usr/local/bin/livepeer-runtime
 USER 65532:65532
-ENTRYPOINT ["python3", "-B", "/app/tunnel_launcher.py"]
+ENTRYPOINT ["/usr/local/bin/livepeer-runtime", "connector-start"]

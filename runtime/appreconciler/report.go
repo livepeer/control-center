@@ -27,7 +27,7 @@ type Reporter interface {
 	Status(context.Context, Report) error
 	Receipt(context.Context, contract.Metadata, Receipt) error
 }
-type ControlReporter struct{ Client *transport.Control }
+type ControlReporter struct{ Client transport.Requester }
 
 func Diagnose(ctx context.Context, input Inputs, reporter Reporter, reason string) {
 	value, err := input.Read(ctx)

@@ -196,6 +196,59 @@ func TestRetirementFreezesFormatBeforeCapabilityOptIn(t *testing.T) {
 	}
 }
 
+func TestSystemFormatWaitsForManagedConnectorImage(t *testing.T) {
+	s := newTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: 3, Reason: "applying"}), 200)
+	for index, pin := range []string{"", "registry.invalid/connector-go@sha256:" + strings.Repeat("b", 64), ""} {
+		s.configs = machineconfig.New(machineconfig.Config{RequireDrain: true, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: machineconfig.ConnectorConfig{Image: "registry.invalid/legacy@sha256:" + strings.Repeat("c", 64), ManagedImage: pin}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger})
+		if err := s.reconcile(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		got := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
+		requireStatus(t, got, 200)
+		var m contract.Metadata
+		json.Unmarshal([]byte(archiveFiles(t, got.Body.Bytes())["runtime.json"]), &m)
+		want := 3
+		if index == 0 {
+			want = 2
+		}
+		if m.BundleFormat != want {
+			t.Fatalf("format %d with connector pin %q, want %d", m.BundleFormat, pin, want)
+		}
+	}
+}
+
+func TestRetainedRouteStillRequiresManagedConnectorPinAfterDisablingIngress(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("8", 64))
+	route := readyTunnel(t, s, c)
+	s.params.CloudflareEnabled = false
+	s.params.RuntimeImage = "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: route.Generation, BundleFormat: 3, HTTPS: true, Reason: "applying"}), 200)
+	for _, pin := range []string{"", "registry.invalid/connector-go@sha256:" + strings.Repeat("b", 64)} {
+		s.params.RuntimeConnectorImage = pin
+		s.configs = s.newConfigurationManager()
+		if err := s.configs.Reconcile(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		got := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
+		requireStatus(t, got, 200)
+		var m contract.Metadata
+		json.Unmarshal([]byte(archiveFiles(t, got.Body.Bytes())["runtime.json"]), &m)
+		want := 3
+		if pin == "" {
+			want = 2
+		}
+		if m.BundleFormat != want || m.IngressDigest == "" {
+			t.Fatal("retained route escaped promotion prerequisite", m.BundleFormat, want, m.IngressDigest)
+		}
+	}
+}
+
 func TestMaintenanceAdmissionFreezeEndsOnlyAtActualTarget(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("e", 64))

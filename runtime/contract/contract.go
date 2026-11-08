@@ -5,6 +5,9 @@ import "time"
 
 const BundleFormat = 2
 
+// SystemBundleFormat adds sibling system reconciliation and scoped management sockets.
+const SystemBundleFormat = 3
+
 type Metadata struct {
 	NodeID                  string    `json:"node_id"`
 	Epoch                   string    `json:"epoch"`

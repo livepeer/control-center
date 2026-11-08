@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/appbundle"
@@ -31,12 +32,48 @@ type Kubernetes interface {
 	Publish(context.Context, string, *transport.Artifact, bool, string) error
 }
 type Source struct {
-	Control      *transport.Control
-	Kube         Kubernetes
-	Store        artifact.Store
-	ArtifactURL  string
-	IdentityFile string
-	mu           sync.Mutex
+	Control         *transport.Control
+	Kube            Kubernetes
+	Store           artifact.Store
+	ArtifactURL     string
+	IdentityFile    string
+	SystemWorkloads bool
+	mu              sync.Mutex
+	published       atomic.Pointer[delivery]
+	reporting       atomic.Pointer[delivery]
+}
+
+type delivery struct {
+	Metadata contract.Metadata
+	Digest   string
+	AppError string
+	Handoff  bool
+}
+
+// Desired never lends authority from a different installed enrollment.
+func (s *Source) Desired() (contract.Metadata, bool) {
+	d := s.published.Load()
+	if d == nil || !s.installed(d.Metadata) {
+		return contract.Metadata{}, false
+	}
+	return d.Metadata, true
+}
+
+func (s *Source) installed(m contract.Metadata) bool {
+	if s.IdentityFile == "" {
+		return true
+	}
+	i, err := transport.ReadIdentity(s.IdentityFile)
+	return err == nil && ((i.Epoch == m.Epoch && i.CredentialVersion == m.CredentialVersion) || (i.Epoch == "" && i.CredentialVersion == 0 && m.CredentialVersion == 0))
+}
+
+// Report runs independently of downloads, credential requests and consumer observations.
+func (s *Source) Report(ctx context.Context) error {
+	d := s.reporting.Load()
+	if d == nil || !s.installed(d.Metadata) {
+		return nil
+	}
+	return s.report(ctx, d.Metadata, d.Digest, d.AppError, d.Handoff)
 }
 
 func (s *Source) Sync(ctx context.Context) error {
@@ -91,10 +128,10 @@ func (s *Source) sync(ctx context.Context) error {
 	} else if !os.IsNotExist(err) {
 		return errors.New("cache_identity_unavailable")
 	}
-	if m.BundleFormat > contract.BundleFormat {
+	if m.BundleFormat > contract.SystemBundleFormat {
 		return errors.New("unsupported_bundle_format")
 	}
-	if m.Terminal && m.BundleFormat == contract.BundleFormat {
+	if m.Terminal && m.BundleFormat >= contract.BundleFormat {
 		inputDigest := artifact.Digest(data)
 		if previous != nil && previous.TerminalInputDigest != "" && previous.TerminalInputDigest != inputDigest {
 			return errors.New("terminal_bundle_changed")
@@ -123,9 +160,16 @@ func (s *Source) sync(ctx context.Context) error {
 		// Advertise installed format support even when legacy app input is invalid.
 		// The backend can then deliver a management-only repair using format 2.
 		if !m.Terminal {
-			_ = s.report(ctx, m, "", appErr.Error())
+			s.reporting.Store(&delivery{Metadata: m, AppError: appErr.Error()})
 		}
 		return appErr
+	}
+	data, handoff, err := s.systemLayout(ctx, files, data, m)
+	if err != nil {
+		if !m.Terminal {
+			s.reporting.Store(&delivery{Metadata: m})
+		}
+		return err
 	}
 	digest, err := s.Store.Put(data)
 	if err != nil {
@@ -160,9 +204,10 @@ func (s *Source) sync(ctx context.Context) error {
 	if err = artifact.AtomicWrite(filepath.Join(s.Store.Directory, digest[7:]+".seen"), []byte(digest), 0600); err != nil {
 		return errors.New("cache_publication_commit")
 	}
-	// Reporting errors do not revoke a published management artifact.
-	_ = s.report(ctx, m, digest, delivered.AppsError)
-	s.gc(digest)
+	d := &delivery{Metadata: m, Digest: digest, AppError: delivered.AppsError, Handoff: handoff}
+	s.published.Store(d)
+	s.reporting.Store(d)
+	s.gc(ctx, digest)
 	return nil
 }
 func formatInt(n int64) string { b, _ := json.Marshal(n); return string(b) }
@@ -219,10 +264,20 @@ type fluxState struct {
 	Metadata struct {
 		Generation int64 `json:"generation"`
 	} `json:"metadata"`
+	Spec struct {
+		Prune bool   `json:"prune"`
+		Path  string `json:"path"`
+	} `json:"spec"`
 	Status struct {
-		ObservedGeneration  int64                 `json:"observedGeneration"`
-		LastAppliedRevision string                `json:"lastAppliedRevision"`
-		Conditions          []transport.Condition `json:"conditions"`
+		ObservedGeneration    int64  `json:"observedGeneration"`
+		LastAppliedRevision   string `json:"lastAppliedRevision"`
+		LastAttemptedRevision string `json:"lastAttemptedRevision"`
+		Inventory             struct {
+			Entries []struct {
+				ID string `json:"id"`
+			} `json:"entries"`
+		} `json:"inventory"`
+		Conditions []transport.Condition `json:"conditions"`
 	} `json:"status"`
 }
 
@@ -239,7 +294,7 @@ func (s *Source) applied(ctx context.Context, name, digest string) (bool, string
 		return false, ""
 	}
 	current := k.Status.LastAppliedRevision == digest && ready
-	unchanged := digest != "" && k.Status.LastAppliedRevision != digest && s.appOnlyChange(k.Status.LastAppliedRevision, digest)
+	unchanged := digest != "" && k.Status.LastAppliedRevision != digest && (s.componentUnchanged(name, k.Status.LastAppliedRevision, digest) || s.appOnlyChange(k.Status.LastAppliedRevision, digest))
 	return k.Status.ObservedGeneration == k.Metadata.Generation && (current || unchanged), k.Status.LastAppliedRevision
 }
 func (s *Source) appOnlyChange(previous, current string) bool {
@@ -286,13 +341,26 @@ func (s *Source) appOnlyChange(previous, current string) bool {
 	return ea == nil && eb == nil && gb > ga && bytes.Equal(a, b)
 }
 
-func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appError string) error {
-	applied, revision := s.applied(ctx, "livepeer", digest)
-	upgrade, _ := s.applied(ctx, "livepeer-upgrade-plan", digest)
-	applied = applied && upgrade
+func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appError string, handoff bool) error {
+	name := "livepeer"
+	if m.BundleFormat >= contract.SystemBundleFormat && !handoff {
+		name = "livepeer-node"
+	}
+	applied, revision := s.applied(ctx, name, digest)
+	if handoff {
+		applied = false
+	}
+	if m.BundleFormat < contract.SystemBundleFormat || m.Terminal {
+		upgrade, _ := s.applied(ctx, "livepeer-upgrade-plan", digest)
+		applied = applied && upgrade
+	}
 	if m.Terminal {
 		if m.BundleFormat >= 2 && !m.TerminalCleanup {
 			return nil
+		}
+		if m.BundleFormat >= contract.SystemBundleFormat {
+			connector, _ := s.applied(ctx, "livepeer-connector", digest)
+			applied = applied && connector && !handoff
 		}
 		var pods struct {
 			Items []json.RawMessage `json:"items"`
@@ -419,8 +487,12 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 	if ready {
 		reason = "ready"
 	}
+	format := contract.BundleFormat
+	if s.SystemWorkloads && (m.BundleFormat >= contract.SystemBundleFormat || s.systemCapable(m, revision)) {
+		format = contract.SystemBundleFormat
+	}
 	_, _, err := s.Control.Request(ctx, "status", map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
-		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appError}, 16384)
+		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": format, "apps_error": appError}, 16384)
 	return err
 }
 
@@ -431,7 +503,24 @@ func readBounded(resp *http.Response, limit int64) ([]byte, error) {
 	}
 	return b, nil
 }
-func (s *Source) gc(current string) {
+func (s *Source) gc(ctx context.Context, current string) {
+	pins := map[string]bool{current: true}
+	names := []string{"livepeer", "livepeer-upgrade-plan"}
+	if s.SystemWorkloads {
+		for _, c := range systemComponents {
+			names = append(names, "livepeer-"+c)
+		}
+	}
+	for _, name := range names {
+		var k fluxState
+		if err := s.Kube.Request(ctx, http.MethodGet, fluxPath+name, nil, &k); err != nil {
+			if transport.IsStatus(err, http.StatusNotFound) {
+				continue
+			}
+			return // Retain every archive if any owner's references are unknown.
+		}
+		pins[k.Status.LastAppliedRevision], pins[k.Status.LastAttemptedRevision] = true, true
+	}
 	entries, _ := os.ReadDir(s.Store.Directory)
 	type file struct {
 		name string
@@ -451,7 +540,7 @@ func (s *Source) gc(current string) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
 	for i, f := range files {
-		if i >= 10 && f.name != current[7:]+".tar.gz" && time.Since(f.mod) > time.Hour {
+		if i >= 10 && !pins["sha256:"+strings.TrimSuffix(f.name, ".tar.gz")] && time.Since(f.mod) > time.Hour {
 			_ = os.Remove(filepath.Join(s.Store.Directory, f.name))
 			_ = os.Remove(filepath.Join(s.Store.Directory, strings.TrimSuffix(f.name, ".tar.gz")+".seen"))
 		}

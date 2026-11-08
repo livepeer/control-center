@@ -50,7 +50,14 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	if s.config.RuntimeImage != "" {
 		image = s.config.RuntimeImage
 	}
-	return Desired{Machine: m, State: state, Exposure: exposure, Connector: s.config.Connector, ControlAPIURL: s.config.APIURL, BundleFormat: state.BundleFormat, RuntimeImage: image, NodeImage: s.config.NodeImage, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout(state)}
+	connector := s.config.Connector
+	if state.BundleFormat >= 3 {
+		connector.Image = state.SystemConnectorImage
+		if connector.ManagedImage != "" {
+			connector.Image = connector.ManagedImage
+		}
+	}
+	return Desired{Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, BundleFormat: state.BundleFormat, RuntimeImage: image, NodeImage: s.config.NodeImage, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout(state)}
 }
 func (s *Manager) drainTimeout(state State) time.Duration {
 	if state.BundleFormat >= 2 && s.config.DrainTimeout <= 0 {
@@ -109,7 +116,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 	m.CredentialVersion = record.CredentialVersion
 	m.Terminal = record.Terminal
 	before := record.State
-	s.runtimeSettings(ctx, m, &record.State)
+	s.runtimeSettings(ctx, m, &record)
 	exposure, remove, err := s.planManagement(ctx, m, &record)
 	if err != nil {
 		return err
@@ -125,7 +132,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		record = lease.Record
 		m = lease.Machine
 		before = record.State
-		s.runtimeSettings(ctx, m, &record.State)
+		s.runtimeSettings(ctx, m, &record)
 		exposure, remove, err = s.planManagement(ctx, m, &record)
 		if err != nil {
 			return err

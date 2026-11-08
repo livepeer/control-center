@@ -15,7 +15,7 @@ spec:
   retryInterval: 30s
   timeout: 5m
   path: ./
-  prune: true
+  prune: false
   deletionPolicy: Orphan
   wait: false
   sourceRef:
