@@ -1,0 +1,9 @@
+# The builder needs only the Go source closure, never an installed Runtime tree.
+**
+!go.mod
+!go.sum
+!schema/
+!schema/*.go
+!runtime/
+!runtime/**/
+!runtime/**/*.go

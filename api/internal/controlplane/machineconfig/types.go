@@ -2,6 +2,8 @@
 package machineconfig
 
 import (
+	"github.com/livepeer/control-center/runtime/appbundle"
+	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/schema"
 	"regexp"
 	"time"
@@ -17,16 +19,21 @@ type Machine struct {
 
 // State is the enrollment's workload rollout, independent of any provider.
 type State struct {
-	Lifecycle            string    `json:"lifecycle"`
-	Generation           int64     `json:"generation"`
-	DrainRequested       bool      `json:"drain_requested,omitempty"`
-	DrainStartedAt       time.Time `json:"drain_started_at,omitempty"`
-	DrainedGeneration    int64     `json:"drained_generation,omitempty"`
-	Target               string    `json:"target,omitempty"`
-	HeldOrchestrator     string    `json:"held_orchestrator,omitempty"`
-	PendingConfigDigest  string    `json:"pending_config_digest,omitempty"`
-	ApprovedConfigDigest string    `json:"approved_config_digest,omitempty"`
-	RolloutReason        string    `json:"rollout_reason,omitempty"`
+	BundleFormat           int       `json:"bundle_format,omitempty"`
+	RuntimeImage           string    `json:"runtime_image,omitempty"`
+	HeldUpgradePlan        string    `json:"held_upgrade_plan,omitempty"`
+	ApplyingConfigDigest   string    `json:"applying_config_digest,omitempty"`
+	ApplyingUpgradeVersion string    `json:"applying_upgrade_version,omitempty"`
+	Lifecycle              string    `json:"lifecycle"`
+	Generation             int64     `json:"generation"`
+	DrainRequested         bool      `json:"drain_requested,omitempty"`
+	DrainStartedAt         time.Time `json:"drain_started_at,omitempty"`
+	DrainedGeneration      int64     `json:"drained_generation,omitempty"`
+	Target                 string    `json:"target,omitempty"`
+	HeldOrchestrator       string    `json:"held_orchestrator,omitempty"`
+	PendingConfigDigest    string    `json:"pending_config_digest,omitempty"`
+	ApprovedConfigDigest   string    `json:"approved_config_digest,omitempty"`
+	RolloutReason          string    `json:"rollout_reason,omitempty"`
 }
 
 func InitialState(terminal bool) State {
@@ -50,11 +57,20 @@ type ConnectorConfig struct {
 
 type Desired struct {
 	Machine
-	Apps          *schema.AppAssignmentSetV1
-	State         State
-	Exposure      *Exposure
-	Connector     ConnectorConfig
-	ControlAPIURL string
+	Apps                    *schema.AppAssignmentSetV1
+	State                   State
+	Exposure                *Exposure
+	Connector               ConnectorConfig
+	ControlAPIURL           string
+	BundleFormat            int
+	RuntimeImage            string
+	NodeImage               string
+	StopSignals             bool
+	AppPayload              *appbundle.Payload
+	AppsError               string
+	RequestedAppsGeneration int64
+	DrainTimeout            time.Duration
+	RetainedFiles           map[string][]byte
 }
 
 var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
@@ -62,17 +78,23 @@ var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{
 func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }
 
 type Report struct {
-	Epoch             string `json:"epoch"`
-	CredentialVersion int64  `json:"credential_version"`
-	Component         string `json:"component"`
-	Generation        int64  `json:"generation"`
-	BundleSHA256      string `json:"bundle_sha256,omitempty"`
-	ConfigDigest      string `json:"config_digest,omitempty"`
-	ProviderVersion   int64  `json:"provider_version,omitempty"`
-	TokenGeneration   int64  `json:"token_generation,omitempty"`
-	Ready             bool   `json:"ready"`
-	Drained           bool   `json:"drained"`
-	HTTPS             bool   `json:"https"`
-	ConnectorAbsent   bool   `json:"connector_absent"`
-	Reason            string `json:"reason,omitempty"`
+	Epoch             string              `json:"epoch"`
+	CredentialVersion int64               `json:"credential_version"`
+	Component         string              `json:"component"`
+	Generation        int64               `json:"generation"`
+	BundleSHA256      string              `json:"bundle_sha256,omitempty"`
+	ConfigDigest      string              `json:"config_digest,omitempty"`
+	K3sVersion        string              `json:"k3s_version,omitempty"`
+	ProviderVersion   int64               `json:"provider_version,omitempty"`
+	TokenGeneration   int64               `json:"token_generation,omitempty"`
+	Ready             bool                `json:"ready"`
+	Drained           bool                `json:"drained"`
+	HTTPS             bool                `json:"https"`
+	ConnectorAbsent   bool                `json:"connector_absent"`
+	Reason            string              `json:"reason,omitempty"`
+	BundleFormat      int                 `json:"bundle_format,omitempty"`
+	AppsError         string              `json:"apps_error,omitempty"`
+	Sequence          uint64              `json:"sequence,omitempty"`
+	Evidence          *contract.Evidence  `json:"evidence,omitempty"`
+	Apps              *contract.AppStatus `json:"apps,omitempty"`
 }

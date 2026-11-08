@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"net/http"
 	"net/url"
 	"sort"
@@ -496,6 +497,20 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 	return nil
 }
 func (l *tunnelLease) cleanup(ctx context.Context) error {
+	if l.state.BundleFormat >= 2 && !l.state.Compromised && !l.state.CompromisedAccess && !l.state.ConnectorRevoked {
+		pending, err := machineapps.Pending(ctx, l.s.db, l.Machine.NodeID, l.Machine.Epoch)
+		if err != nil {
+			return err
+		}
+		if pending {
+			if l.state.Reason != "app_cleanup_pending" {
+				l.state.Ready = false
+				l.state.Reason = "app_cleanup_pending"
+				return l.save(ctx)
+			}
+			return nil
+		}
+	}
 	if l.state.CleanupComplete {
 		complete, e := l.auditCompletedCleanup(ctx)
 		if e != nil || complete {

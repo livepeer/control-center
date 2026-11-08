@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/livepeer/control-center/runtime/contract"
+	"regexp"
 	"strings"
 )
 
@@ -24,7 +26,7 @@ func orchestratorConfiguration(m Desired) string {
 		return configurationFromManifest(m.State.HeldOrchestrator)
 	}
 	b, _ := templates.ReadFile("templates/orchestrator.yaml")
-	s := templateValues(m).Replace(string(b))
+	s := specializeNode(templateValues(m).Replace(string(b)), m)
 	return configurationFromManifest(s)
 }
 func configurationFromManifest(s string) string {
@@ -37,40 +39,72 @@ func configurationFromManifest(s string) string {
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
 }
 func Digest(m Desired) string {
+	if m.BundleFormat >= 2 || m.NodeImage != "" {
+		b, _ := templates.ReadFile("templates/orchestrator.yaml")
+		manifest := specializeNode(templateValues(m).Replace(string(b)), m)
+		if m.State.HeldOrchestrator != "" {
+			manifest = m.State.HeldOrchestrator
+		}
+		manifest = regexp.MustCompile(`livepeer.io/config-sha256: '[^']*'`).ReplaceAllString(manifest, "livepeer.io/config-sha256: '@ORCHESTRATOR_DIGEST@'")
+		plan, _ := templates.ReadFile("templates/upgrade-plan/plan.yaml")
+		upgrade := renderMachineTemplateWithoutDigest(string(plan), m)
+		if m.State.HeldUpgradePlan != "" {
+			upgrade = m.State.HeldUpgradePlan
+		}
+		h := sha256.Sum256([]byte(manifest + "\n" + upgrade))
+		return hex.EncodeToString(h[:])
+	}
 	h := sha256.Sum256([]byte(orchestratorConfiguration(m)))
 	return hex.EncodeToString(h[:])
 }
+func upgradeVersion(m Desired) string {
+	b, _ := templates.ReadFile("templates/upgrade-plan/plan.yaml")
+	plan := renderMachineTemplateWithoutDigest(string(b), m)
+	if m.State.HeldUpgradePlan != "" {
+		plan = m.State.HeldUpgradePlan
+	}
+	match := regexp.MustCompile(`(?m)^  version: '([^']+)'$`).FindStringSubmatch(plan)
+	if len(match) != 2 {
+		return ""
+	}
+	return match[1]
+}
+func specializeNode(raw string, m Desired) string {
+	if m.BundleFormat >= 2 {
+		raw = strings.Replace(raw, "RunnerGrants = []", `RunnerGrants = ["10.43.0.0/16"]`, 1)
+	}
+	if m.NodeImage != "" {
+		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
+	}
+	return raw
+}
+func renderMachineTemplateWithoutDigest(raw string, m Desired) string {
+	return specializeNode(templateValues(m).Replace(raw), m)
+}
 func renderMachineTemplate(raw string, m Desired) string {
-	return strings.ReplaceAll(templateValues(m).Replace(raw), "@ORCHESTRATOR_DIGEST@", Digest(m))
+	return strings.ReplaceAll(renderMachineTemplateWithoutDigest(raw, m), "@ORCHESTRATOR_DIGEST@", Digest(m))
 }
 
-type Runtime struct {
-	NodeID            string `json:"node_id"`
-	Epoch             string `json:"epoch"`
-	CredentialVersion int64  `json:"credential_version"`
-	Generation        int64  `json:"generation"`
-	Terminal          bool   `json:"terminal"`
-	DrainRequested    bool   `json:"drain_requested"`
-	ConfigDigest      string `json:"config_digest"`
-	ServiceURL        string `json:"service_url"`
-	TunnelID          string `json:"tunnel_id"`
-	TokenGeneration   int64  `json:"credential_generation"`
-	ProviderVersion   int64  `json:"provider_version"`
-	APIURL            string `json:"api_url"`
-	RunnerServiceURL  string `json:"runner_service_url"`
-	ProxyURLTemplate  string `json:"proxy_url_template"`
-	DiscoveryURL      string `json:"discovery_url"`
-	IngressDigest     string `json:"ingress_digest"`
-	AppsGeneration    int64  `json:"apps_generation,omitempty"`
-	AppsDigest        string `json:"apps_digest,omitempty"`
-	ConnectorTokenRef string `json:"connector_token_ref"`
-}
+type Runtime = contract.Metadata
 
 func DesiredRuntime(m Desired) Runtime {
 	d := Runtime{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
 	d.RunnerServiceURL = PrivateOrchestrator
 	d.Generation = max(m.State.Generation, 1)
 	d.DrainRequested = m.State.DrainRequested
+	d.BundleFormat = m.BundleFormat
+	if m.BundleFormat >= 2 {
+		d.UpgradeVersion = upgradeVersion(m)
+	}
+	d.AppsError = m.AppsError
+	d.RequestedAppsGeneration = m.RequestedAppsGeneration
+	d.DrainStartedAt = m.State.DrainStartedAt
+	if d.DrainRequested {
+		d.DrainTarget = DrainTarget(m.NodeID, m.Epoch, m.State)
+		if m.DrainTimeout > 0 {
+			d.DrainDeadline = m.State.DrainStartedAt.Add(m.DrainTimeout)
+		}
+	}
 	if routeEnabled(m) {
 		r := m.Exposure
 		d.ServiceURL = r.ServiceURL
@@ -87,6 +121,9 @@ func DesiredRuntime(m Desired) Runtime {
 func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !m.Terminal && m.State.HeldOrchestrator != "" {
 		files["orchestrator.yaml"] = []byte(m.State.HeldOrchestrator)
+	}
+	if !m.Terminal && m.State.HeldUpgradePlan != "" {
+		files["upgrade-plan/plan.yaml"] = []byte(m.State.HeldUpgradePlan)
 	}
 	d := DesiredRuntime(m)
 	b, e := json.Marshal(d)

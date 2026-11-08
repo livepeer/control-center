@@ -146,6 +146,10 @@ spec:
       podSelector: {matchLabels: {app: livepeer-http-source}}
     ports: [{protocol: TCP, port: 8935}, {protocol: TCP, port: 8936}]
   - from:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: flux-system}}
+      podSelector: {matchLabels: {app: livepeer-app-reconciler}}
+    ports: [{protocol: TCP, port: 8935}]
+  - from:
     - podSelector: {matchLabels: {livepeer.io/runner-control: 'true'}}
     ports: [{protocol: TCP, port: 8935}]
   - from:

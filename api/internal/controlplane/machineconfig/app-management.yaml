@@ -1,0 +1,318 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: livepeer-apps
+  labels:
+    livepeer.io/managed-apps: 'true'
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.37
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: livepeer-app, namespace: livepeer-apps}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: livepeer-app-apply, namespace: flux-system}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: livepeer-app-apply, namespace: livepeer-apps}
+rules:
+- apiGroups: ['']
+  resources: [pods, services, configmaps]
+  verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: livepeer-app-apply, namespace: livepeer-apps}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: livepeer-app-apply}
+subjects: [{kind: ServiceAccount, name: livepeer-app-apply, namespace: flux-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: livepeer-app-observe, namespace: livepeer-apps}
+rules:
+- apiGroups: ['']
+  resources: [pods, services]
+  verbs: [get, list, watch]
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [get, list, watch]
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: livepeer-app-observe, namespace: livepeer-apps}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: livepeer-app-observe}
+subjects: [{kind: ServiceAccount, name: livepeer-app-reconciler, namespace: flux-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: livepeer-app-artifacts, namespace: flux-system}
+rules:
+- apiGroups: [source.toolkit.fluxcd.io]
+  resources: [externalartifacts]
+  resourceNames: [livepeer-service, livepeer-apps]
+  verbs: [get]
+- apiGroups: [source.toolkit.fluxcd.io]
+  resources: [externalartifacts/status]
+  resourceNames: [livepeer-apps]
+  verbs: [patch]
+- apiGroups: [kustomize.toolkit.fluxcd.io]
+  resources: [kustomizations]
+  resourceNames: [livepeer-apps]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: livepeer-app-artifacts, namespace: flux-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: livepeer-app-artifacts}
+subjects: [{kind: ServiceAccount, name: livepeer-app-reconciler, namespace: flux-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: livepeer-node-observe, namespace: livepeer}
+rules:
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: livepeer-node-observe, namespace: livepeer}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: livepeer-node-observe}
+subjects: [{kind: ServiceAccount, name: livepeer-app-reconciler, namespace: flux-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: livepeer-app-capacity}
+rules:
+- apiGroups: ['']
+  resources: [nodes]
+  verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: livepeer-app-capacity}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: livepeer-app-capacity}
+subjects:
+- {kind: ServiceAccount, name: livepeer-app-reconciler, namespace: flux-system}
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: ExternalArtifact
+metadata: {name: livepeer-apps, namespace: flux-system}
+spec: {}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: {name: livepeer-apps, namespace: flux-system}
+spec:
+  interval: 5s
+  retryInterval: 5s
+  timeout: 1m
+  path: ./
+  prune: true
+  deletionPolicy: Orphan
+  wait: false
+  dependsOn: [{name: livepeer}]
+  serviceAccountName: livepeer-app-apply
+  sourceRef: {kind: ExternalArtifact, name: livepeer-apps}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: livepeer-app-count, namespace: livepeer-apps}
+spec:
+  hard: {pods: '128', services: '128'}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-app-boundary, namespace: livepeer-apps}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress: []
+  ingress:
+  - from:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: livepeer}}
+      podSelector: {matchLabels: {app: orchestrator}}
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: flux-system}}
+      podSelector: {matchLabels: {app: livepeer-app-reconciler}}
+    ports: [{protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-app-node-egress, namespace: livepeer}
+spec:
+  podSelector: {matchLabels: {app: orchestrator}}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: livepeer-apps}}
+    ports: [{protocol: TCP}]
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4]
+    - ipBlock:
+        cidr: '::/0'
+        except: ['::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8']
+    ports: [{protocol: TCP}]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: livepeer-app-pods}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector: {matchLabels: {livepeer.io/managed-apps: 'true'}}
+    resourceRules: [{apiGroups: [''], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods]}]
+  validations:
+  - expression: "has(object.metadata.labels) && 'livepeer.io/instance' in object.metadata.labels && object.metadata.labels['livepeer.io/instance'] == object.metadata.name && object.metadata.name.matches('^lp-app-[0-9a-f]{20}-[0-9a-f]{32}$')"
+    message: App Pods require an immutable per-incarnation identity.
+  - expression: "object.spec.runtimeClassName == 'gvisor' && object.spec.restartPolicy == 'Never' && object.spec.serviceAccountName == 'livepeer-app' && has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken"
+    message: App Pods require the isolated runtime and unprivileged identity.
+  - expression: "(!has(object.spec.hostNetwork) || !object.spec.hostNetwork) && (!has(object.spec.hostPID) || !object.spec.hostPID) && (!has(object.spec.hostIPC) || !object.spec.hostIPC) && (!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0)"
+    message: Host access and credential references are forbidden.
+  - expression: "size(object.spec.containers) == 1 && (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0) && (!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir)))"
+    message: App Pods support one container and private temporary storage.
+  - expression: "object.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && (!has(c.securityContext.privileged) || !c.securityContext.privileged) && has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0) && (!has(c.envFrom) || size(c.envFrom) == 0) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))) && (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))"
+    message: App containers must keep their filesystem, capabilities and credentials restricted.
+  - expression: "request.operation != 'CREATE' || (has(object.metadata.finalizers) && 'livepeer.io/app-incarnation' in object.metadata.finalizers)"
+    message: App Pods require their lifecycle finalizer.
+  - expression: >-
+      request.operation != 'UPDATE' ||
+      (object.spec == oldObject.spec &&
+       object.metadata.labels == oldObject.metadata.labels &&
+       (request.userInfo.username == 'system:serviceaccount:flux-system:livepeer-app-reconciler'
+        ? (has(oldObject.metadata.deletionTimestamp) &&
+           (has(object.metadata.finalizers) ? object.metadata.finalizers : []) == oldObject.metadata.finalizers.filter(f, f != 'livepeer.io/app-incarnation') &&
+           has(object.metadata.annotations) == has(oldObject.metadata.annotations) &&
+           (!has(object.metadata.annotations) || object.metadata.annotations == oldObject.metadata.annotations) &&
+           has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) &&
+           (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences))
+        : object.metadata.finalizers == oldObject.metadata.finalizers))
+    message: Pod identity and process settings are immutable; only guarded lifecycle finalization is allowed.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: livepeer-app-pods}
+spec:
+  policyName: livepeer-app-pods
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: livepeer-app-services}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector: {matchLabels: {livepeer.io/managed-apps: 'true'}}
+    resourceRules: [{apiGroups: [''], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [services]}]
+  validations:
+  - expression: "object.spec.type == 'ClusterIP' && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0) && (!has(object.spec.externalName) || object.spec.externalName == '') && object.spec.ports.all(p, !has(p.nodePort) || p.nodePort == 0) && has(object.spec.publishNotReadyAddresses) && object.spec.publishNotReadyAddresses"
+    message: App Services must remain private and preserve retained endpoints.
+  - expression: "has(object.spec.selector) && size(object.spec.selector) == 1 && 'livepeer.io/instance' in object.spec.selector && object.spec.selector['livepeer.io/instance'] == object.metadata.name && object.metadata.name.matches('^lp-app-[0-9a-f]{20}-[0-9a-f]{32}$')"
+    message: App Services must select one explicit instance.
+  - expression: "request.operation != 'UPDATE' || object.spec.selector == oldObject.spec.selector"
+    message: App Service instance selectors are immutable.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: livepeer-app-services}
+spec:
+  policyName: livepeer-app-services
+  validationActions: [Deny]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: livepeer-app-reconciler}}
+  template:
+    metadata: {labels: {app: livepeer-app-reconciler}}
+    spec:
+      serviceAccountName: livepeer-app-reconciler
+      automountServiceAccountToken: true
+      nodeSelector: {livepeer.io/node-id: '@NODE_ID@'}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: reconciler
+        image: '@RUNTIME_IMAGE@'
+        command: [/usr/local/bin/livepeer-runtime, app-reconciler]
+        args:
+        - --directory
+        - /state
+        - --artifact-url
+        - http://livepeer-app-reconciler.flux-system.svc.cluster.local:8080
+        - --adapter-url
+        - http://livepeer-http-source.flux-system.svc.cluster.local:8080
+        - --config-url-file
+        - /credentials/config-url
+        - --token-file
+        - /credentials/token
+        - --identity-file
+        - /credentials/identity.json
+        - --transport
+        - '@CONTROL_TRANSPORT@'
+        - --bootstrap-secret-file
+        - /runner/secret
+        ports: [{name: http, containerPort: 8080}]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 512Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 10}
+        readinessProbe: {httpGet: {path: /readyz, port: http}}
+        volumeMounts:
+        - {name: state, mountPath: /state}
+        - {name: credentials, mountPath: /credentials, readOnly: true}
+        - {name: runner, mountPath: /runner, readOnly: true}
+      volumes:
+      - name: state
+        hostPath: {path: '@INSTALL_DIR@/volumes/app-reconciler', type: Directory}
+      - name: credentials
+        secret: {secretName: livepeer-service-auth, defaultMode: 288}
+      - name: runner
+        secret: {secretName: livepeer-runner-bootstrap, defaultMode: 288}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+spec:
+  selector: {app: livepeer-app-reconciler}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+spec:
+  podSelector: {matchLabels: {app: livepeer-app-reconciler}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: kustomize-controller}}}]
+    ports: [{protocol: TCP, port: 8080}]

@@ -8,7 +8,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/j0sh/boa v1.0.5
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/livepeer/golang-runner v0.0.0-20261106090658-0b10de392842
+	github.com/livepeer/golang-runner v0.0.0-20261108033245-0d435fa56849
 	github.com/livepeer/node v1.0.7-0.20261106162658-d5af6f14f102
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2

@@ -516,6 +516,11 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The retirement snapshot migration can roll back while this enrollment is
+	// active; the next rollback must still preserve its assignment history.
+	if err := migrations.Down(t.Context(), s.db, files); err != nil {
+		t.Fatal(err)
+	}
 	if err := migrations.Down(t.Context(), s.db, files); err == nil || !strings.Contains(err.Error(), "retain assignment schema") {
 		t.Fatal("rollback did not protect assignment history", err)
 	}

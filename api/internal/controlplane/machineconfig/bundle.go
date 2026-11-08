@@ -1,17 +1,13 @@
 package machineconfig
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/schema"
 	"io/fs"
-	"sort"
 	"strings"
 )
 
@@ -19,9 +15,9 @@ import (
 var templates embed.FS
 
 func Build(m Desired) ([]byte, string, error) {
-	var output bytes.Buffer
-	compressed := gzip.NewWriter(&output)
-	archive := tar.NewWriter(compressed)
+	if m.NodeImage != "" && !ValidConnectorImage(m.NodeImage) {
+		return nil, "", fmt.Errorf("Node image is not pinned")
+	}
 	files := map[string][]byte{}
 	err := fs.WalkDir(templates, "templates", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -47,7 +43,11 @@ func Build(m Desired) ([]byte, string, error) {
 	if err = addRoutingBundle(files, m); err != nil {
 		return nil, "", err
 	}
-	if m.Apps != nil {
+	if m.BundleFormat >= 2 {
+		if err := addManagedApps(files, m); err != nil {
+			return nil, "", err
+		}
+	} else if m.Apps != nil {
 		manifest, appsDigest, err := schema.AssignmentConfigMap(*m.Apps)
 		if err != nil {
 			return nil, "", err
@@ -65,30 +65,9 @@ func Build(m Desired) ([]byte, string, error) {
 			return nil, "", err
 		}
 	}
-	names := make([]string, 0, len(files))
-	for name := range files {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		data := files[name]
-		header := &tar.Header{Name: name, Mode: 0644, Size: int64(len(data)), Typeflag: tar.TypeReg, Format: tar.FormatUSTAR}
-		if err = archive.WriteHeader(header); err != nil {
-			return nil, "", err
-		}
-		if _, err = archive.Write(data); err != nil {
-			return nil, "", err
-		}
-	}
-	if err := archive.Close(); err != nil {
+	data, err := artifact.Pack(files)
+	if err != nil {
 		return nil, "", err
 	}
-	if err := compressed.Close(); err != nil {
-		return nil, "", err
-	}
-	if output.Len() > 16<<20 {
-		return nil, "", fmt.Errorf("configuration archive exceeds 16 MiB")
-	}
-	digest := sha256.Sum256(output.Bytes())
-	return output.Bytes(), hex.EncodeToString(digest[:]), nil
+	return data, strings.TrimPrefix(artifact.Digest(data), "sha256:"), nil
 }

@@ -160,9 +160,9 @@ cleanup is acknowledged.
 
 **Applied — health unverified** means the requested replicas were reconciled and
 scale-down finished safely; it does not establish current health, registration,
-capacity or discoverability. Config download and ConfigMap application do not
-establish app completion. Inspect an assignment for pinned settings, actor, time
-and paginated desired history.
+capacity or discoverability. Bundle delivery alone does not establish app
+completion. Inspect an assignment for pinned settings, actor, time and paginated
+desired history.
 
 ### Assignment API
 
@@ -194,28 +194,32 @@ leave desired state and the last valid bundle intact.
 
 ### Runtime delivery and completion contract
 
-Flux delivers the nonsecret `livepeer/livepeer-app-assignments` ConfigMap through
-the authenticated HTTP bundle. Version 1 `data["desired.json"]` contains `node_id`,
-enrollment `epoch`, independent `apps_generation` and `entries` sorted by revision
-UUID. `livepeer.io/apps-sha256` is the SHA-256 of its exact canonical UTF-8 JSON bytes;
-`runtime.json` carries matching `apps_generation` and `apps_digest`. App-only edits
-preserve Node/connector manifests, rollout generation, drain identity and routing
-inputs. The adapter retains confirmed Node readiness only when verified archives
-prove infrastructure unchanged; otherwise the ordinary readiness gate applies.
+Format 2 bundles contain management resources and a separate `app-desired/`
+payload. Its versioned index binds canonical assignment intent to rendered Pod
+and Service groups by digest. The root Kustomization applies management only;
+a separate Flux source and Kustomization apply app snapshots. If app rendering
+fails, management can still update using the last valid app payload, or an
+unavailable payload that does not authorize removal. Format 1 retains the
+assignment ConfigMap for migration; it is not a second app apply path.
 
-Each entry identifies its pinned revision, desired `present`/`absent` state,
-assignment `generation`, stable `activation_generation` and cleanup policy.
-Present entries include the resolved definition, effective replicas and
-`start_allowed`; a queued target has
-`start_after: {source_revision_id, source_removal_generation}`. Activation survives
-scaling and removal; reassignment after cleanup creates a new activation generation,
-without a new deployment UUID. Absent entries omit full image, health and pricing
-definitions but retain identity and bounded drain/stop policy.
+Each assignment identifies a pinned revision, desired `present`/`absent` state,
+`generation`, stable `activation_generation` and cleanup policy. Present entries
+include the definition, effective replicas and `start_allowed`; queued targets
+also carry `start_after: {source_revision_id, source_removal_generation}`.
+Activation survives scaling and removal; reassignment after cleanup creates a
+new activation. Absent entries retain identity and bounded drain/stop policy.
+The canonical intent digest is independent of the rendered payload and bundle
+digests. App-only edits preserve the Node and tunnel rollout generation.
 
-App completion, reassignment after removal and normal machine removal require the
-Runtime lifecycle consumer (#113). It validates snapshots and manages workloads,
-instance identities, endpoints, admission, sessions, draining and cleanup, including registration. The
-App Reporter (#114) maps health to registration; #117 handles ongoing fleet status.
+The App Reconciler supports CPU reusable instances in persistent and single-shot
+protocol modes. Single-session lifetimes are unsupported. Each incarnation has
+an immutable gVisor Pod and private Service; readiness controls new admission,
+while the Service remains available to existing work. Removal withdraws
+admission and waits for fresh Node confirmation that sessions are empty. It
+then publishes an exclusion and waits for Flux inventory and actual resource
+absence before reporting completion. At the drain deadline it attempts Node
+cancellation and publishes removal even if cancellation fails; cancellation
+retries continue and physical cleanup can remain pending.
 
 Runtime reports with the machine service credential to
 `POST /v1/nodes/{node_id}/apps/{revision_id}/status`. The strict JSON body is limited
@@ -253,10 +257,11 @@ Normal machine removal withdraws all assignments, including queued targets, and
 waits for app cleanup and machine drain completion. Force removal and owner
 deletion retain terminal instructions and history. Terminal removal acknowledgement
 also requires app cleanup. A retired enrollment can fetch its terminal bundle and
-acknowledge exact terminal app cleanup, but cannot report active state, obtain
-connector credentials or administer apps. Terminal snapshots are write-once, and
-old-epoch cleanup cannot affect reenrollment. Runtime's cleanup consumer and
-credential access must survive terminal workload pruning until cleanup finishes.
+acknowledge exact terminal app cleanup, but cannot report active state or
+administer apps. Terminal snapshots are write-once, and old-epoch cleanup cannot
+affect reenrollment. For format 2, Node, routes, the Reconciler and connector
+credentials remain available until app cleanup receipts complete; credential
+compromise overrides that hold.
 
 Deploy the additive migration with assignment-aware API and Runtime code. Software
 rollback must retain assignment rendering and decoding; otherwise freeze publication

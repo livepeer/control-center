@@ -20,6 +20,7 @@ class CredentialTransitions(unittest.TestCase):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / 'credentials/node-id').write_text('lp-' + 'a' * 16)
         (self.root / 'credentials/service-token').write_text('b' * 64)
+        (self.root / 'credentials/runner-bootstrap.secret').write_text('runner-bootstrap')
         (self.root / 'credentials/config-url').write_text('http://legacy.example.invalid/v1/nodes/lp-' + 'a' * 16 + '/config')
         (self.root / 'state/k3s-version').write_text('v1.37.10+k3s1')
 
@@ -31,6 +32,8 @@ INSTALL_DIR=$2; export INSTALL_DIR
 ENROLLMENT_TOKEN=header.payload.signature
 LIVEPEER_API_URL=https://control.example.invalid
 CREDENTIAL_TRANSITION=refresh
+LIVEPEER_RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+chown() { :; }
 managed_installation() { return 0; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 atomic_write() { cat > "$1"; chmod 0600 "$1"; }
@@ -45,6 +48,12 @@ sha256sum() { command cat >/dev/null; printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaa
 kube() {
   printf 'kube %s\n' "$*" >> "$INSTALL_DIR/steps"
   if [[ "$FAIL_AT" == stop && "$*" == *'wait pod'* ]]; then return 1; fi
+  if [[ "$*" == *'create secret generic livepeer-service-auth'* ]]; then
+    [[ $(cat "$INSTALL_DIR/credentials/config-url") == https://* ]]
+    [[ $(cat "$INSTALL_DIR/credentials/service-token") == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ]]
+    printf 'new-secret\n' >> "$INSTALL_DIR/steps"
+  fi
+  if [[ "$*" == 'apply -f -' ]]; then command cat >/dev/null; fi
 }
 stage_manifests() { printf 'https-code\n' >> "$INSTALL_DIR/steps"; }
 curl() {
@@ -57,11 +66,6 @@ curl() {
   [[ "$FAIL_AT" != request ]] || return 1
   printf '{"node_id":"lp-aaaaaaaaaaaaaaaa","token":"%s","epoch":"22222222-2222-4222-8222-222222222222","credential_version":"1","config_url":"https://control.example.invalid/v1/nodes/lp-aaaaaaaaaaaaaaaa/config"}\n200' \
     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-}
-install_machine_secret() {
-  [[ $(cat "$INSTALL_DIR/credentials/config-url") == https://* ]]
-  [[ $(cat "$INSTALL_DIR/credentials/service-token") == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ]]
-  printf 'new-secret\n' >> "$INSTALL_DIR/steps"
 }
 transition_credentials
 '''
@@ -87,6 +91,7 @@ transition_credentials
         self.assertLess(max(i for i, x in enumerate(steps[:secret]) if 'wait pod' in x), secret)
         self.assertLess(steps.index('https-code'), steps.index('refresh'))
         self.assertGreater(next(i for i, x in enumerate(steps) if 'rollout status' in x), secret)
+        self.assertTrue(any('create secret generic livepeer-runner-bootstrap' in x for x in steps[:next(i for i,x in enumerate(steps) if 'rollout status' in x)]))
 
     def test_unconfirmed_consumer_termination_prevents_refresh(self):
         result = self.transition('stop')

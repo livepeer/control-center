@@ -55,7 +55,10 @@ func (s *Server) authenticateMachine(ctx context.Context, node, token string, re
 	return Machine{}, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 }
 func machineInput(r *http.Request, v any) error {
-	dec := json.NewDecoder(io.LimitReader(r.Body, 16385))
+	return boundedMachineInput(r, v, 16384)
+}
+func boundedMachineInput(r *http.Request, v any, limit int64) error {
+	dec := json.NewDecoder(io.LimitReader(r.Body, limit+1))
 	dec.DisallowUnknownFields()
 	if dec.Decode(v) != nil || dec.Decode(new(any)) != io.EOF {
 		return problem(400, "invalid_request", "Provide one bounded machine request.")
@@ -149,7 +152,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, s.machineCredentials(m))
 }
 func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
-	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), false)
+	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), true)
 	if e != nil {
 		s.respondError(w, e)
 		return
@@ -163,12 +166,24 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	safe, e := s.tunnels.SecureRuntime(r.Context(), configurationMachine(m))
+	retained, e := s.retainedConnector(r.Context(), m, state.BundleFormat)
 	if e != nil {
 		s.databaseError(w, e)
 		return
 	}
-	if !safe || state.Lifecycle != "active" || state.TunnelID == "" || state.IngressDigest == "" {
+	if m.Terminal && !retained {
+		fail(w, 401, "invalid machine credential")
+		return
+	}
+	safe := retained
+	if !m.Terminal {
+		safe, e = s.tunnels.SecureRuntime(r.Context(), configurationMachine(m))
+	}
+	if e != nil {
+		s.databaseError(w, e)
+		return
+	}
+	if !safe || (!retained && state.Lifecycle != "active") || state.TunnelID == "" || state.IngressDigest == "" || state.RotateTunnel || state.Compromised || (m.Terminal && state.CompromisedAccess) || state.Quarantined || state.ConnectorRevoked {
 		fail(w, 409, "secure configuration is not applied")
 		return
 	}
@@ -178,16 +193,23 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Revalidate after the provider call so retirement/refresh cannot race delivery.
-	if _, e = s.authenticateMachine(r.Context(), m.NodeID, bearer(r), false); e != nil {
+	if _, e = s.authenticateMachine(r.Context(), m.NodeID, bearer(r), true); e != nil {
 		s.respondError(w, e)
 		return
 	}
 	latest, _, e := s.loadTunnel(r.Context(), m.NodeID, m.Epoch)
-	if e != nil || latest.Lifecycle != "active" || latest.TunnelID != state.TunnelID || latest.CredentialGeneration != state.CredentialGeneration || latest.RotateTunnel {
+	stillRetained, retainErr := s.retainedConnector(r.Context(), m, latest.BundleFormat)
+	if e != nil || retainErr != nil || (m.Terminal && (!stillRetained || latest.CompromisedAccess)) || (!stillRetained && latest.Lifecycle != "active") || latest.TunnelID != state.TunnelID || latest.CredentialGeneration != state.CredentialGeneration || latest.RotateTunnel || latest.Compromised || latest.Quarantined || latest.ConnectorRevoked {
 		fail(w, 409, "tunnel changed during credential retrieval")
 		return
 	}
 	respond(w, 200, map[string]any{"token": token, "epoch": m.Epoch, "tunnel_id": state.TunnelID, "generation": state.Generation, "credential_generation": state.CredentialGeneration, "provider_version": state.ProviderVersion})
+}
+func (s *Server) retainedConnector(ctx context.Context, m Machine, format int) (bool, error) {
+	if !m.Terminal || format < 2 {
+		return false, nil
+	}
+	return machineapps.Pending(ctx, s.db, m.NodeID, m.Epoch)
 }
 func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), false)
@@ -200,11 +222,11 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var report machineconfig.Report
-	if e = machineInput(r, &report); e != nil {
+	if e = boundedMachineInput(r, &report, 128<<10); e != nil {
 		s.respondError(w, e)
 		return
 	}
-	if report.Epoch != m.Epoch || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || (report.Component != "runtime" && report.Component != "connector" && report.Component != "runner") {
+	if report.Epoch != m.Epoch || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || (report.Component != "runtime" && report.Component != "connector" && report.Component != "runner" && report.Component != "app-reconciler") {
 		fail(w, 409, "status does not match enrollment")
 		return
 	}

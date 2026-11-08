@@ -5,6 +5,29 @@ control_transport() {
   if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]]; then printf 'development-http'; else printf 'https'; fi
 }
 
+runtime_image() {
+  RUNTIME_IMAGE=${LIVEPEER_RUNTIME_IMAGE:-}
+  if [[ -z "$RUNTIME_IMAGE" && -f "$INSTALL_DIR/state/runtime-image" ]]; then RUNTIME_IMAGE=$(cat "$INSTALL_DIR/state/runtime-image"); fi
+  [[ "$RUNTIME_IMAGE" =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || die 'set LIVEPEER_RUNTIME_IMAGE to a built Go Runtime image pinned by digest'
+}
+
+verify_retired_apps() {
+  local headers code token
+  headers=$(mktemp "$INSTALL_DIR/state/cleanup-headers.XXXXXX")
+  token=$(cat "$INSTALL_DIR/credentials/service-token")
+  code=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --proto '=https' \
+    --dump-header "$headers" --output /dev/null --write-out '%{http_code}' \
+    --config <(printf 'header = "Authorization: Bearer %s"\n' "$token") \
+    "$1/v1/nodes/$NODE_ID/config") || { rm -f -- "$headers"; die 'cannot verify prior app cleanup; keep the existing enrollment running'; }
+  if [[ "$code" != 200 ]] ||
+      ! tr -d '\r' < "$headers" | grep -Eiq '^X-Livepeer-Terminal: true$' ||
+      ! tr -d '\r' < "$headers" | grep -Eiq '^X-Livepeer-App-Cleanup-Ready: true$'; then
+    rm -f -- "$headers"
+    die 'finish app and registration cleanup for the retired enrollment before re-enrolling this installation'
+  fi
+  rm -- "$headers"
+}
+
 save_identity() {
   local identity
   identity=$(jq -nc --arg epoch "$ENROLLMENT_EPOCH" --arg version "$CREDENTIAL_VERSION" '{epoch:$epoch,credential_version:$version}')
@@ -18,20 +41,29 @@ install_machine_secret() {
     --from-file="config-url=$INSTALL_DIR/credentials/config-url" \
     --from-file="identity.json=$INSTALL_DIR/credentials/identity.json" \
     --dry-run=client -o yaml | kube apply -f -
+  kube -n flux-system create secret generic livepeer-runner-bootstrap \
+    --from-file="secret=$INSTALL_DIR/credentials/runner-bootstrap.secret" \
+    --dry-run=client -o yaml | kube apply -f -
 }
 
 stop_credential_consumers() {
   kube -n flux-system patch kustomization livepeer --type merge -p '{"spec":{"suspend":true}}'
   kube -n flux-system scale deployment/livepeer-http-source --replicas=0
+  if kube -n flux-system get deployment/livepeer-app-reconciler >/dev/null 2>&1; then
+    kube -n flux-system scale deployment/livepeer-app-reconciler --replicas=0
+  fi
   kube -n flux-system delete deployment/livepeer-tunnel --ignore-not-found --wait=true
   # Replica count alone does not prove old HTTP-speaking processes terminated.
   kube -n flux-system wait pod -l app=livepeer-http-source --for=delete --timeout=120s
+  kube -n flux-system wait pod -l app=livepeer-app-reconciler --for=delete --timeout=120s
   kube -n flux-system wait pod -l app=livepeer-tunnel --for=delete --timeout=120s
 }
 
 transition_credentials() {
-  local api fingerprint operation expected response status request metadata
+  local api fingerprint operation expected response status request metadata previous_epoch apps
   managed_installation || die 'credential transition requires an initialized installation'
+  [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]] || die 'restore the runner bootstrap credential before changing credentials'
+  runtime_image
   [[ -n "$ENROLLMENT_TOKEN" ]] || die 'credential transition requires a fresh owner enrollment JWT'
   [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment JWT'
   api=${LIVEPEER_API_URL:-}; api=${api%/}
@@ -45,14 +77,20 @@ transition_credentials() {
     [[ $(jq -r '.mode' <<< "$metadata") == "$CREDENTIAL_TRANSITION" ]] || die 'resume the existing credential transition mode'
     [[ $(jq -r '.api' <<< "$metadata") == "$api" ]] || die 'resume with the original HTTPS API'
   else
+    if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then verify_retired_apps "$api"; fi
     operation=$(cat /proc/sys/kernel/random/uuid)
     expected=0
+    previous_epoch=legacy
     if [[ -f "$INSTALL_DIR/credentials/identity.json" ]]; then expected=$(jq -er '.credential_version | tonumber' "$INSTALL_DIR/credentials/identity.json"); fi
-    jq -nc --arg mode "$CREDENTIAL_TRANSITION" --arg api "$api" --arg operation "$operation" --argjson expected "$expected" \
-      '{mode:$mode,api:$api,operation:$operation,expected:$expected}' | atomic_write "$INSTALL_DIR/state/credential-transition.json"
+    if [[ -f "$INSTALL_DIR/credentials/identity.json" ]]; then previous_epoch=$(jq -er '.epoch' "$INSTALL_DIR/credentials/identity.json"); fi
+    jq -nc --arg mode "$CREDENTIAL_TRANSITION" --arg api "$api" --arg operation "$operation" --argjson expected "$expected" --arg previous_epoch "$previous_epoch" \
+      '{mode:$mode,api:$api,operation:$operation,expected:$expected,previous_epoch:$previous_epoch,cleanup_verified:($mode=="reenroll")}' | atomic_write "$INSTALL_DIR/state/credential-transition.json"
     metadata=$(cat "$INSTALL_DIR/state/credential-transition.json")
   fi
   stop_credential_consumers
+  install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
+  chown 65532:65532 "$INSTALL_DIR/volumes/app-reconciler"
+  printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"
   # Publish HTTPS-enforcing source files and settings before releasing credentials.
@@ -85,9 +123,21 @@ transition_credentials() {
   save_identity
   install_machine_secret
   if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    [[ $(jq -r '.cleanup_verified' <<< "$metadata") == true ]] || die 'prior app cleanup was not verified; restore the prior credential transition before re-enrolling'
+    if [[ ! -f "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$ENROLLMENT_EPOCH" ]]; then
+      previous_epoch=$(jq -er '.previous_epoch' <<< "$metadata")
+      [[ "$previous_epoch" == legacy || "$previous_epoch" =~ ^[a-f0-9-]{36}$ ]] || die 'invalid previous enrollment identity'
+      if [[ -d "$INSTALL_DIR/volumes/app-reconciler/state" ]]; then
+        mv -- "$INSTALL_DIR/volumes/app-reconciler/state" "$INSTALL_DIR/volumes/app-reconciler/state.$previous_epoch"
+        sync -- "$INSTALL_DIR/volumes/app-reconciler"
+      fi
+      printf '1\n' | atomic_write "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$ENROLLMENT_EPOCH"
+    fi
     # Fence the previous epoch's cached artifact and watermark while Flux is suspended.
     rm -f -- "$INSTALL_DIR/volumes/http-source/enrollment.json"
     kube -n flux-system patch externalartifact livepeer-service --subresource=status --type merge -p '{"status":{"artifact":null,"conditions":[]}}'
+    apps=$(kube -n flux-system get externalartifact livepeer-apps --ignore-not-found -o name)
+    if [[ -n "$apps" ]]; then kube -n flux-system patch externalartifact livepeer-apps --subresource=status --type merge -p '{"status":{"artifact":null,"conditions":[]}}'; fi
   fi
   kube apply -k "$INSTALL_DIR/manifests/bootstrap"
   kube -n flux-system rollout status deployment/livepeer-http-source --timeout=180s

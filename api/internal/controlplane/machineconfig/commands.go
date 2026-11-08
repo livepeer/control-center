@@ -55,9 +55,6 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, fo
 	if version == 0 {
 		return result, ErrLegacyDrain
 	}
-	if s.config.DrainTimeout <= 0 {
-		return result, ErrDeadlineRequired
-	}
 	var raw []byte
 	state := InitialState(false)
 	err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 FOR UPDATE`, node, epoch).Scan(&raw)
@@ -68,6 +65,9 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, fo
 	}
 	if err != nil {
 		return result, err
+	}
+	if s.drainTimeout(state) <= 0 {
+		return result, ErrDeadlineRequired
 	}
 	result.Changed = state.Lifecycle != "draining"
 	if result.Changed {
@@ -91,9 +91,6 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, fo
 
 func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node, epoch string, generation int64) (Change, error) {
 	result := Change{Epoch: epoch}
-	if s.config.DrainTimeout <= 0 {
-		return result, ErrDeadlineRequired
-	}
 	var present int
 	err := tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch::text=$2 FOR UPDATE`, node, epoch).Scan(&present)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -110,10 +107,13 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node, epoch string
 	if err = json.Unmarshal(raw, &state); err != nil {
 		return result, err
 	}
+	if s.drainTimeout(state) <= 0 {
+		return result, ErrDeadlineRequired
+	}
 	if !state.DrainRequested || state.Generation != generation || state.Lifecycle == "removed" {
 		return result, ErrDrainChanged
 	}
-	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.config.DrainTimeout {
+	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.drainTimeout(state) {
 		return result, ErrDrainNotExpired
 	}
 	state.Generation++

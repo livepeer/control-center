@@ -14,7 +14,11 @@ spec:
   - Ingress
   ingress:
   - from:
-    - podSelector: {}
+    - podSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values: [kustomize-controller, livepeer-app-reconciler]
     ports:
     - protocol: TCP
       port: 8080

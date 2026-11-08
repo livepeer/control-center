@@ -23,8 +23,6 @@ import urllib.request
 SCRIPT = Path(__file__).resolve().parents[1] / 'bootstrap-livepeer.sh'
 PROJECT = SCRIPT.parent
 sys.path.insert(0, str(PROJECT / 'services'))
-import artifacts as helper
-import http_source
 try:
     import yaml
 except ImportError:
@@ -142,6 +140,8 @@ python3() { echo 'host Python is forbidden' >&2; exit 199; }
 ENROLLMENT_TOKEN='header.payload.signature'
 LIVEPEER_API_URL='http://127.0.0.1:41932'
 LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
+RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+LIVEPEER_RUNTIME_IMAGE=$RUNTIME_IMAGE
 curl() {
   local digest
   digest=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
@@ -702,7 +702,8 @@ stage_manifests
             self.assertNotRegex(path.read_text(), r'@[A-Z_]+@')
         self.assertFalse((self.root / 'desired').exists())
         self.assertFalse((self.root / 'services/mock_service.py').exists())
-        self.assertTrue((self.root / 'services/http_source.py').exists())
+        self.assertFalse((self.root / 'services/http_source.py').exists())
+        self.assertTrue((self.root / 'services/tunnel_broker.py').exists())
         self.assertFalse((self.root / 'bin/bootstrap-helper.py').exists())
         self.assertNotIn((self.root / 'credentials/service-token').read_text(),
                          (self.root / 'manifests/bootstrap/deployments.yaml').read_text())
@@ -739,237 +740,18 @@ write_host_configuration
         self.assertIn('firewall enforcement failed', result.stderr)
 
     @unittest.skipUnless(shutil.which('kubectl') and yaml, 'kubectl and PyYAML needed for manifest validation')
-    def test_kustomize_wiring_and_code_hash_rollout(self):
-        def build(directory):
-            result = subprocess.run(['kubectl', 'kustomize', str(directory)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return list(yaml.safe_load_all(result.stdout))
-        resources = build(self.root / 'manifests/bootstrap')
-        config = next(r for r in resources if r['kind'] == 'ConfigMap')
-        self.assertEqual(set(config['data']), {'artifacts.py', 'http_common.py', 'http_source.py', 'control_client.py'})
-        for deploy in (r for r in resources if r['kind'] == 'Deployment'):
-            pod = deploy['spec']['template']['spec']
-            self.assertNotIn('runtimeClassName', pod)
-            volume = next(v for v in pod['volumes'] if v['name'] == 'code')
-            self.assertEqual(volume['configMap']['name'], config['metadata']['name'])
-        code = self.root / 'services/http_source.py'
-        code.write_text(code.read_text() + '\n# new version\n')
-        changed = next(r for r in build(self.root / 'manifests/bootstrap') if r['kind'] == 'ConfigMap')
-        self.assertNotEqual(changed['metadata']['name'], config['metadata']['name'])
-
-
-class ArchiveTests(unittest.TestCase):
-    def test_corruption_and_missing_root_rejected(self):
-        for data in (b'', b'not gzip', gzip.compress(b'not a tar'), bundle()[:-8]):
-            with self.subTest(data=data[:10]), self.assertRaises(Exception):
-                helper.validate_archive(data)
-        with self.assertRaisesRegex(ValueError, 'root Kustomize'):
-            helper.validate_archive(archive_bytes([]))
-
-    def test_path_traversal_links_and_duplicates_rejected(self):
-        for name, kind in (('../escape', tarfile.REGTYPE), ('/absolute', tarfile.REGTYPE),
-                           ('link', tarfile.SYMTYPE), ('hardlink', tarfile.LNKTYPE),
-                           ('directory', tarfile.DIRTYPE), ('a/./b', tarfile.REGTYPE)):
-            entries = [('kustomization.yaml', tarfile.REGTYPE, b''), (name, kind, b'')]
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                helper.validate_archive(archive_bytes(entries))
-        with self.assertRaises(ValueError):
-            helper.validate_archive(archive_bytes([('kustomization.yaml', tarfile.REGTYPE, b'')] * 2))
-
-    def test_archive_limits(self):
-        with mock.patch.object(helper, 'MAX_CONTENT', 128):
-            with self.assertRaisesRegex(ValueError, 'expands'):
-                helper.validate_archive(gzip.compress(b'x' * 1024))
-        data = bundle()
-        with mock.patch.object(helper, 'MAX_ARCHIVE', len(data) - 1):
-            with self.assertRaisesRegex(ValueError, '16 MiB'):
-                helper.validate_archive(data)
-        with mock.patch.object(helper, 'MAX_FILES', 1):
-            with self.assertRaises(ValueError):
-                helper.validate_archive(archive_bytes([('kustomization.yaml', tarfile.REGTYPE, b''),
-                                                       ('extra.yaml', tarfile.REGTYPE, b'')]))
-
-
-class HttpFlowTests(TempTest):
-    def setUp(self):
-        super().setUp()
-        self.bundle = bundle()
-        self.config_requests = 0
-        self.token = self.root / 'token'
-        self.token.write_text('b' * 64)
-        self.artifacts = self.root / 'artifacts'
-        self.artifacts.mkdir()
-        self.status = {'metadata': {'generation': 1}, 'status': {}}
-        test = self
-        class ApiHandler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def respond(self):
-                if self.headers.get('Authorization') != 'Bearer ' + 'b' * 64:
-                    self.send_error(401)
-                    return
-                test.assertIn(self.path, (http_source.API_PATH, http_source.API_PATH + '/status'))
-                if self.command == 'PATCH':
-                    test.assertEqual(self.headers.get('Content-Type'), 'application/merge-patch+json')
-                    data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                    test.status['status'].update(data['status'])
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(json.dumps(test.status).encode())
-            do_GET = respond
-            do_PATCH = respond
-        self.api_url = self.stack.enter_context(serve(ApiHandler))
-        class ConfigHandler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-            def do_GET(self):
-                test.config_requests += 1
-                test.assertEqual(self.path, '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
-                if self.headers.get('Authorization') != 'Bearer ' + 'b' * 64:
-                    self.send_error(401)
-                    return
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(test.bundle)
-        self.config_url = self.stack.enter_context(serve(ConfigHandler))
-        self.kube = http_source.KubeClient.__new__(http_source.KubeClient)
-        self.kube.base, self.kube.directory, self.kube.context = self.api_url, self.root, None
-        deployment = next(doc for doc in (PROJECT / 'manifests/bootstrap/deployments.yaml').read_text().split('---')
-                          if '\n  name: livepeer-http-source\n' in doc)
-        self.probe_path = re.search(r'readinessProbe:\s+httpGet:\s+path: (\S+)\s+port: http\b', deployment)[1]
-        self.start_adapter(self.config_url + '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
-
-    def start_adapter(self, url):
-        self.adapter = http_source.Adapter(url, self.token, self.artifacts, 'http://artifacts.test:8080', self.kube, allow_http=True)
-        self.artifact_url = self.stack.enter_context(serve(http_source.handler_for(self.artifacts)))
-
-    def sync(self):
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return self.adapter.sync_once()
-
-    def get(self, url):
-        return urllib.request.urlopen(url, timeout=3).read()
-
-    def test_end_to_end_status_unchanged_changed_and_retained_revisions(self):
-        self.assertTrue(self.sync())
-        first = self.status['status']['artifact'].copy()
-        self.assertEqual(self.status['status']['conditions'][0]['status'], 'True')
-        served = self.get(self.artifact_url + '/' + first['path'])
-        self.assertEqual(helper.validate_archive(served), first['digest'])
-        self.assertTrue(self.sync())
-        self.assertEqual(self.status['status']['artifact'], first)
-        self.assertEqual(len(list(self.artifacts.glob('*.tar.gz'))), 1)
-        self.bundle = bundle(b'resources: []\n# service changed\n')
-        self.assertTrue(self.sync())
-        self.assertNotEqual(self.status['status']['artifact']['digest'], first['digest'])
-        self.assertEqual(self.get(self.artifact_url + '/' + first['path']), served)
-        self.assertEqual(len(list(self.artifacts.glob('*.tar.gz'))), 2)
-
-    def test_invalid_bundle_outage_and_recovery_keep_last_artifact(self):
-        self.assertTrue(self.sync())
-        first = self.status['status']['artifact'].copy()
-        served = self.get(self.artifact_url + '/' + first['path'])
-        with mock.patch.object(self.kube, 'publish', side_effect=OSError):
-            self.assertFalse(self.sync())
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.assertEqual(self.get(self.artifact_url + '/' + first['path']), served)
-        self.bundle = b'not a gzip archive'
-        self.assertFalse(self.sync())
-        self.assertEqual(self.status['status']['artifact'], first)
-        self.assertEqual(self.status['status']['conditions'][0]['status'], 'False')
-        self.assertEqual(self.status['status']['conditions'][0]['reason'], 'FetchFailed')
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.assertEqual(self.get(self.artifact_url + '/' + first['path']), served)
-        url = self.adapter.url
-        self.adapter.url = 'http://127.0.0.1:1/unavailable'
-        self.assertFalse(self.sync())
-        self.assertEqual(self.status['status']['artifact'], first)
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.start_adapter(self.adapter.url)
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.assertFalse(self.sync())
-        self.assertEqual(self.status['status']['artifact'], first)
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.assertEqual(self.get(self.artifact_url + '/' + first['path']), served)
-        self.start_adapter(url)
-        self.bundle = bundle(b'resources: []\n# recovered\n')
-        self.assertTrue(self.sync())
-        self.assertEqual(self.status['status']['conditions'][0]['status'], 'True')
-        recovered = self.status['status']['artifact']
-        self.assertNotEqual(recovered['digest'], first['digest'])
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.assertEqual(helper.validate_archive(self.get(self.artifact_url + '/' + recovered['path'])), recovered['digest'])
-
-    def test_rollback_refreshes_retention_without_changing_artifact_metadata(self):
-        now = time.time()
-        archives, paths = [], []
-        for index in range(14):
-            self.bundle = bundle(f'resources: []\n# revision {index}\n'.encode())
-            data = self.bundle
-            path = self.artifacts / (helper.validate_archive(data).split(':')[1] + '.tar.gz')
-            path.write_bytes(data)
-            os.utime(path, (now - 7200 + index, now - 7200 + index))
-            archives.append(data)
-            paths.append(path)
-        original_mtime = paths[0].stat().st_mtime_ns
-        with mock.patch.object(http_source.time, 'time', return_value=now) as clock, \
-                mock.patch.object(http_source.time, 'time_ns', side_effect=lambda: int(clock.return_value * 10**9)):
-            # Roll back A -> B -> A, then immediately publish another cached revision.
-            for index in (0, 13, 0, 12):
-                self.bundle = bundle(f'resources: []\n# revision {index}\n'.encode())
-                self.assertTrue(self.sync())
-                self.assertTrue(paths[0].exists())
-                clock.return_value += 1
-            self.assertFalse(paths[1].exists())  # Genuinely stale revisions expire.
-            self.assertEqual(paths[0].stat().st_mtime_ns, original_mtime)
-            self.assertEqual(paths[0].read_bytes(), archives[0])
-            # Move A beyond the newest ten while it is still inside its grace period.
-            for index in range(1, 12):
-                self.bundle = bundle(f'resources: []\n# revision {index}\n'.encode())
-                self.assertTrue(self.sync())
-                clock.return_value += 1
-            self.assertTrue(paths[0].exists())
-            current = self.status['status']['artifact'].copy()
-            clock.return_value += 3601
-            self.assertTrue(self.sync())
-            self.assertFalse(paths[0].exists())
-            self.assertEqual(self.status['status']['artifact'], current)
-
-    def test_adapter_rejects_bad_token_and_redirects(self):
-        # An empty artifact server is ready; bootstrap waits separately for the source.
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        wrong = self.root / 'wrong-token'
-        wrong.write_text('wrong')
-        self.adapter.token_file = wrong
-        self.assertFalse(self.sync())
-        self.assertNotIn('artifact', self.status['status'])
-        self.assertEqual(self.get(self.artifact_url + self.probe_path), b'ready\n')
-        self.adapter.token_file = self.token
-        test = self
-        redirected = []
-        requests_before = self.config_requests
-        class Redirect(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-            def do_GET(self):
-                self.send_response(302)
-                self.send_header('Location', test.config_url + '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
-                self.end_headers()
-                redirected.append(True)
-        with serve(Redirect) as redirect:
-            self.start_adapter(redirect + '/v1/nodes/lp-aaaaaaaaaaaaaaaa/config')
-            self.assertFalse(self.sync())
-        self.assertTrue(redirected)
-        self.assertEqual(self.config_requests, requests_before)
-        self.assertNotIn('artifact', self.status['status'])
-
-    def test_only_digest_artifacts_are_served(self):
-        (self.artifacts / 'credentials').write_text('secret')
-        for path in ('/credentials', '/artifacts/../token', '/artifacts/' + 'a' * 64 + '.tar.gz'):
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.get(self.artifact_url + path)
-            self.assertEqual(error.exception.code, 404)
+    def test_kustomize_uses_pinned_go_adapter_and_independent_management(self):
+        result = subprocess.run(['kubectl', 'kustomize', str(self.root / 'manifests/bootstrap')], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resources = list(yaml.safe_load_all(result.stdout))
+        deployment = next(r for r in resources if r['kind'] == 'Deployment')
+        container = deployment['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['command'], ['/usr/local/bin/livepeer-runtime', 'http-source'])
+        self.assertRegex(container['image'], r'@sha256:[0-9a-f]{64}$')
+        self.assertNotIn('python', str(deployment))
+        management = next(r for r in resources if r['kind'] == 'Kustomization')
+        self.assertFalse(management['spec']['wait'])
+        self.assertNotIn('dependsOn', management['spec'])
 
 
 if __name__ == '__main__':

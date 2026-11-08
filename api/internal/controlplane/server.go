@@ -17,6 +17,7 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/api/internal/migrations"
@@ -285,6 +286,16 @@ func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("ETag", `"`+digest+`"`)
 	w.Header().Set("X-Livepeer-Epoch", m.Epoch)
+	if m.Terminal {
+		pending, err := machineapps.Pending(r.Context(), s.db, m.NodeID, m.Epoch)
+		if err != nil {
+			s.databaseError(w, err)
+			return
+		}
+		if !pending {
+			w.Header().Set("X-Livepeer-App-Cleanup-Ready", "true")
+		}
+	}
 	w.Header().Set("X-Livepeer-Credential-Version", strconv.FormatInt(m.CredentialVersion, 10))
 	w.Header().Set("X-Livepeer-Terminal", strconv.FormatBool(m.Terminal))
 	w.WriteHeader(200)

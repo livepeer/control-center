@@ -4,6 +4,15 @@ resources:
 - flux.yaml
 patches:
 - target:
+    kind: NetworkPolicy
+    name: allow-egress|allow-scraping
+  patch: |
+    - op: replace
+      path: /spec/podSelector
+      value:
+        matchLabels:
+          app.kubernetes.io/part-of: flux
+- target:
     kind: Deployment
     name: kustomize-controller
   patch: |

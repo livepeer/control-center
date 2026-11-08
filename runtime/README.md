@@ -4,26 +4,28 @@
 Debian/Ubuntu amd64, systemd** host. It installs K3s, gVisor, Flux, an API-backed
 HTTP configuration adapter, system-upgrade-controller, and the standalone
 [`livepeer/node`](https://github.com/livepeer/node) orchestrator in offchain mode.
-It does not deploy runners or configure GPUs. Control Center can opt an enrolled
-machine into managed Cloudflare ingress as described below.
+Control Center assigns CPU reusable apps to isolated Pods; Node owns admission,
+sessions, capacity and private proxying. GPU setup and single-session lifetimes
+remain separate work. Managed Cloudflare ingress is optional.
 
 Runtime lives under `runtime/` in the Control Center repository. Run the
 commands below from that directory.
 
 Copy or clone the whole project onto the target machine. Host installation uses
-Bash and standard Linux utilities; Python runs only in the pinned HTTP service
-containers. Repository templates and installed paths are described under
-[Storage and host integration](#storage-and-host-integration).
+Bash and standard Linux utilities. The configuration adapter and App Reconciler
+are Go services; the tunnel broker and launcher remain Python services. See
+[storage and host integration](#storage-and-host-integration) for installed paths.
 
 ```bash
 # On the machine that will receive the cluster:
 sudo bash bootstrap-livepeer.sh --check-only
 sudo bash bootstrap-livepeer.sh --status
 export LIVEPEER_API_URL=https://your-control-center-api.example
-sudo --preserve-env=LIVEPEER_API_URL bash bootstrap-livepeer.sh --token <TOKEN>
+export LIVEPEER_RUNTIME_IMAGE=your-registry/livepeer-runtime@sha256:<published-digest>
+sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE bash bootstrap-livepeer.sh --token <TOKEN>
 
 # Or contain the installation under another absolute directory:
-sudo --preserve-env=LIVEPEER_API_URL bash bootstrap-livepeer.sh --token <TOKEN> --install-dir /srv/livepeer
+sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE bash bootstrap-livepeer.sh --token <TOKEN> --install-dir /srv/livepeer
 ```
 
 The default root is `/opt/livepeer`. Use the same `--install-dir` for subsequent
@@ -66,16 +68,34 @@ container registries. Downloads use fixed releases with checksum verification:
 | system-upgrade-controller | `v0.21.0` |
 | Livepeer Node | `v1.0.6` |
 
-The Python service, smoke-test BusyBox, and Livepeer images are pinned by digest.
+Runtime, tunnel, smoke-test BusyBox and Livepeer images must be pinned by digest.
 The upgrade job's kubectl helper uses `rancher/kubectl:v1.36.2`, within one minor
 of the installer's pinned Kubernetes version. Keep that helper within one minor
 of the Kubernetes version. Published checksums provide download integrity;
 the installer trusts the upstream HTTPS release endpoints.
 
-The HTTP adapter verifies the assignment envelope, digest and delivery generation
-before selecting an archive for Flux. App completion, reassignment after removal
-and normal machine removal require the Runtime lifecycle consumer (#113).
-See the [app registry and delivery contract](../docs/app-registry.md#runtime-delivery-and-completion-contract).
+Build the Go Runtime image from the repository root with
+`docker build -f runtime/Dockerfile -t <registry>/livepeer-runtime:<tag> .`, push
+it to your registry, and use its published digest for `LIVEPEER_RUNTIME_IMAGE`
+and backend `RUNTIME_IMAGE`. The installer saves the selected image for reruns.
+Deploy backend support before upgrading the adapter. Format 2 activates when the
+adapter reports support and the backend has a valid resolved Runtime image. The
+backend retains that image in machine state; terminal bundles retain their
+already selected format. Format 1 remains readable during migration.
+
+The bundled Node image is not sufficient for production app admission. Set
+backend `RUNTIME_NODE_IMAGE` to a compatible digest-pinned image once available.
+Until required Node capabilities are advertised, affected apps remain
+`dependency_pending`. Production activation requires the capabilities tracked in
+[Node #61](https://github.com/livepeer/node/issues/61),
+[#62](https://github.com/livepeer/node/issues/62),
+[#63](https://github.com/livepeer/node/issues/63), and
+[golang-runner #7](https://github.com/livepeer/golang-runner/issues/7).
+
+Explicit container stop signals require Kubernetes `ContainerStopSignals` on
+both the API server and kubelet, plus backend `APP_STOP_SIGNALS=true`. Keep that
+backend option disabled unless the cluster supports it; unsupported assignments
+are diagnosed without suppressing management repairs.
 
 ## Enrollment and desired configuration
 
@@ -141,6 +161,8 @@ tunnel UUID, local runner credential and installed K3s version.
 After the backend has removed an enrollment, use `--reenroll` with a fresh owner
 JWT to create a new epoch while retaining local data. The old adapter is stopped
 and cached epoch metadata/artifact status is fenced before the new one starts.
+The installer requires confirmed app cleanup for the retired epoch and archives
+its owner journal before starting a new lifetime.
 Use the same installation root. Re-enrollment does not accelerate the backend's
 external cleanup of the old epoch.
 
@@ -148,9 +170,10 @@ The connector fetches a fresh token before every start; running connectors can
 reconnect during a Control Center outage. Runtime reports applied state, while
 Control Center verifies external readiness. See the [tunnel runbook](../docs/machine-tunnels.md).
 
-Terminal configuration removes managed workloads after Flux applies it, retaining
-bootstrap resources and data volumes. Fetch/authentication failures preserve the
-last valid artifact and never trigger removal. Public Trickle is unsupported.
+Terminal configuration retains Node, routes, the App Reconciler and connector
+token while format 2 app cleanup receipts are pending. Accepted receipts select
+final cleanup; credential compromise overrides the hold. Fetch or authentication
+failures preserve the last valid artifact. Public Trickle is unsupported.
 
 ## Storage and host integration
 
@@ -161,12 +184,12 @@ last valid artifact and never trigger removal. Public Trickle is unsupported.
 | --- | --- |
 | `bin/`, `download/`, `runtimes/` | Verified binaries, versioned release caches, complete gVisor generations |
 | `lib/` | Bash recovery helpers used before each K3s launch |
-| `services/` | Separate container-side HTTP service programs and ConfigMap packaging |
+| `services/` | Tunnel broker, launcher and their shared Python client |
 | `credentials/`, `state/` | Enrollment, runner secret, installation marker |
 | `config/`, `systemd/` | K3s configuration, kubeconfig, runsc settings, service unit |
 | `k3s/`, `kubelet/` | Explicit K3s data directory and kubelet root |
 | `manifests/` | Bootstrap manifests |
-| `volumes/` | Orchestrator data, source artifacts, local-path provisioner storage |
+| `volumes/` | Orchestrator data, source artifacts, App Reconciler journal/artifacts, local-path storage |
 | `logs/` | Bootstrap, K3s, Pod, and smoke-test logs |
 
 K3s's data directory is explicitly `<root>/k3s`, never its default
@@ -261,8 +284,8 @@ lost credentials, repair a corrupted cluster database, or validate arbitrary
 operator edits. Back up `credentials/`, K3s state, and persistent volumes
 separately from disposable downloads and runtime generations.
 
-Before an upgrade, quiesce workloads and take a consistent filesystem backup
-or snapshot of the root and persistent volumes. For rollback, stop/quiesce the
+Before a host upgrade or filesystem rollback, quiesce workloads and take a
+consistent filesystem backup or snapshot of the root and persistent volumes. For rollback, stop/quiesce the
 cluster and restore matching binaries, database, credentials, configuration,
 and recorded version together. Replacing just a K3s binary can leave an
 incompatible database; database rollback is not automated.
@@ -303,14 +326,22 @@ curl -fsS http://127.0.0.1:8936/readyz
 curl -fsS http://127.0.0.1:8935/discovery
 ```
 
-An empty runner inventory is expected. Runner registration uses
-`credentials/runner-bootstrap.secret`. The initial destination grants are empty;
-before adding runners on private networks, configure the appropriate
-[`RunnerGrants` and `HealthGrants`](https://github.com/livepeer/node/blob/v1.0.6/docs/orchestrator.md).
+See the [app delivery and lifecycle contract](../docs/app-registry.md#runtime-delivery-and-completion-contract)
+for readiness and drain behavior. Public session URLs remain Node URLs.
+
+Back up `volumes/app-reconciler/` with cluster state and credentials. It contains
+the owner journal, including credentials, deadlines and cleanup decisions.
+Recovery needs the latest committed history; restoring an older checkpoint alone
+is unsafe. Missing or corrupt committed history reports `state_recovery_failed`
+and freezes app actions. Restore a consistent backup; management can still
+repair the Runtime image independently.
+
+Node restart or heartbeat expiry can lose sessions.
+Maintenance keeps admission frozen until the Node or K3s operation completes.
 
 No node has `livepeer.io/allow-upgrade=true` initially. To enable a planned
 upgrade, set `spec.version` to the target K3s version in the backend-owned
-`api/internal/controlplane/templates/upgrade-plan/plan.yaml` template (relative to
+`api/internal/controlplane/machineconfig/templates/upgrade-plan/plan.yaml` template (relative to
 the combined repository root) and redeploy
 the backend. After the reconciler publishes the bundle and Flux applies it,
 explicitly add that label to the intended node with
@@ -334,6 +365,10 @@ run from `runtime/`:
 bash tests/run.sh
 ```
 
+From the repository root, run `go test -race ./runtime/...` for archive,
+transport, SDK, probes and lifecycle checks. The full backend suite uses a
+disposable PostgreSQL database via `TEST_DATABASE_URL`.
+
 The runner checks Bash syntax, runs ShellCheck and Python tests, then runs the
 firewall traffic test in Docker. Python tests use temporary directories and
 localhost servers without root or a cluster. Optional offline Kustomize checks
@@ -342,21 +377,16 @@ root, `make test-runtime REMOTE=livepeer-t4` runs the same tests remotely; the
 [guide](../README.md#remote-runtime-tests) covers source selection, results,
 and cleanup.
 
-The firewall test mounts Runtime source read-only in a disposable
-`golang:1.27.2-bookworm` container, installs nftables, iproute2, curl, and Python
-inside it, and uses NET_ADMIN/SYS_ADMIN, AppArmor unconfined, and IPv4
-forwarding in private Docker namespaces. It checks simulated kube-proxy DNAT,
-blocked external management and cluster access, SSH, Pod egress, and safe
-reloads. Runtime firewall rules are never applied to the host.
+The firewall test uses a disposable privileged Docker container and private
+network namespaces; it does not apply rules to the host. The installer also
+runs a gVisor smoke test and saves results in `logs/gvisor-smoke.log`.
 
-The installer itself waits for node, controller, source, and workload readiness,
-then runs a gVisor Pod checking its kernel banner, cluster DNS, and the
-orchestrator readiness and discovery endpoints. Results are saved in
-`logs/gvisor-smoke.log`.
-
-For acceptance on a disposable supported VM, run the installer and verify the
-backend bundle is delivered and workloads become ready. Rerun the installer and
-confirm credentials and persistent data survive. Reboot and repeat readiness
-checks. Repeat with `/srv/livepeer` on a fresh VM and inspect process arguments
-and storage paths. Reboot and full K3s/gVisor integration require an actual
-supported host; the unit/HTTP tests do not substitute for those checks.
+Before production release, build and publish the Runtime image, then test on a
+disposable supported host with the pinned K3s, Flux and gVisor versions. Verify
+installation, rerun, reboot, persistent data and an alternate install directory.
+Test management repair while app reconciliation is broken, including recovery
+from missing committed state. With compatible Node and SDK revisions, run a
+two-machine, two-capability fixture covering both protocol modes, multiple
+replicas, routing, readiness loss, updates, removal, cancellation failure and
+recovery. Confirm that deadlines and pending physical cleanup are reported
+accurately. Unit tests and a mock Node do not replace this acceptance test.

@@ -79,3 +79,25 @@ subjects:
 - kind: ServiceAccount
   name: livepeer-http-source
   namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: livepeer-runtime-observe
+rules:
+- apiGroups: ['']
+  resources: [nodes]
+  verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: livepeer-runtime-observe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: livepeer-runtime-observe
+subjects:
+- kind: ServiceAccount
+  name: livepeer-http-source
+  namespace: flux-system

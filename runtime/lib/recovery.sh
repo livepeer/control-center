@@ -32,7 +32,7 @@ empty_bootstrap_layout() (
     relative=${path#"$INSTALL_DIR/"}
     case "$relative" in
       bin|config|manifests|manifests/flux|systemd|logs|services|credentials|state|download|volumes|\
-      volumes/http-source|volumes/orchestrator|kubelet|k3s|k3s/agent|k3s/agent/etc|\
+      volumes/http-source|volumes/orchestrator|volumes/app-reconciler|kubelet|k3s|k3s/agent|k3s/agent/etc|\
       k3s/agent/etc/containerd|k3s/agent/etc/kubelet.conf.d) ;;
       *) return 1 ;;
     esac

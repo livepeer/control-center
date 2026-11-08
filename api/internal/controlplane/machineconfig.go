@@ -12,7 +12,7 @@ func exposure(r tunnel.RoutingState) *machineconfig.Exposure {
 }
 func (s *Server) newConfigurationManager() *machineconfig.Manager {
 	p := s.params
-	return machineconfig.New(machineconfig.Config{RequireDrain: p.CloudflareEnabled, APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, Connector: machineconfig.ConnectorConfig{Image: p.CloudflareConnectorImage, NodeAddresses: p.TunnelNodeAddresses, PrivateControlCIDRs: p.TunnelPrivateControlCIDRs}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
+	return machineconfig.New(machineconfig.Config{RequireDrain: p.CloudflareEnabled, APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, StopSignals: p.AppStopSignals, Connector: machineconfig.ConnectorConfig{Image: p.CloudflareConnectorImage, NodeAddresses: p.TunnelNodeAddresses, PrivateControlCIDRs: p.TunnelPrivateControlCIDRs}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
 		Exposure: func(raw json.RawMessage) (*machineconfig.Exposure, error) {
 			var r tunnel.RoutingState
 			err := json.Unmarshal(raw, &r)

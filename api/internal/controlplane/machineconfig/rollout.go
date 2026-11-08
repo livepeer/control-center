@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
+	"github.com/livepeer/control-center/runtime/artifact"
 	"time"
 )
 
@@ -23,7 +24,7 @@ func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, erro
 // Gate holds the applied workload until a fresh report completes its drain.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
-	if s.config.DrainTimeout <= 0 && !s.config.RequireDrain && (desired.Exposure == nil || desired.Exposure.IngressDigest == "") {
+	if state.BundleFormat < 2 && s.config.DrainTimeout <= 0 && !s.config.RequireDrain && (desired.Exposure == nil || desired.Exposure.IngressDigest == "") {
 		return false, nil
 	}
 	old, manifest, err := s.applied(ctx, m)
@@ -32,12 +33,36 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	}
 	desired.State = *state
 	desired.State.HeldOrchestrator = ""
+	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
+	if state.BundleFormat >= 2 && state.ApplyingConfigDigest != "" {
+		if state.ApplyingConfigDigest == digest {
+			report, at, e := s.store.Report(ctx, m, "runtime")
+			if e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return false, e
+			}
+			if !report.Ready || report.Generation != state.Generation || report.ConfigDigest != digest || report.K3sVersion != state.ApplyingUpgradeVersion || time.Since(at) > s.config.StatusTTL {
+				state.RolloutReason = "rollout_pending"
+				return false, nil
+			}
+			state.ApplyingConfigDigest = ""
+			state.ApplyingUpgradeVersion = ""
+			state.PendingConfigDigest = ""
+			state.DrainRequested = false
+			state.ApprovedConfigDigest = digest
+			state.RolloutReason = ""
+			return false, nil
+		}
+		// Superseding an already released target retains the admission freeze.
+		state.ApplyingConfigDigest = ""
+		state.ApplyingUpgradeVersion = ""
+	}
 	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
 		return false, nil
 	}
-	if m.CredentialVersion == 0 || s.config.DrainTimeout <= 0 {
+	if m.CredentialVersion == 0 || s.drainTimeout(*state) <= 0 {
 		state.HeldOrchestrator = manifest
+		s.holdUpgrade(ctx, m, state)
 		return true, nil
 	}
 	if state.PendingConfigDigest != digest {
@@ -48,6 +73,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
 		state.HeldOrchestrator = manifest
+		s.holdUpgrade(ctx, m, state)
 	}
 	if old.ConfigDigest != digest {
 		done, err := s.drainComplete(ctx, m, state)
@@ -56,6 +82,14 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		}
 	}
 	state.HeldOrchestrator = ""
+	state.HeldUpgradePlan = ""
+	if state.BundleFormat >= 2 {
+		state.ApplyingConfigDigest = digest
+		state.ApplyingUpgradeVersion = upgradeVersion(desired)
+		state.Target = ""
+		state.RolloutReason = "rollout_pending"
+		return false, nil
+	}
 	state.PendingConfigDigest = ""
 	state.DrainRequested = false
 	state.Target = ""
@@ -73,6 +107,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	}
 	desired.State = *state
 	desired.State.HeldOrchestrator = ""
+	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
 	if !state.DrainRequested || state.Target != target {
 		state.PendingConfigDigest = ""
@@ -86,6 +121,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
 		state.HeldOrchestrator = manifest
+		s.holdUpgrade(ctx, m, state)
 	}
 	done, err := s.drainComplete(ctx, m, state)
 	return !done, err
@@ -98,11 +134,25 @@ func (s *State) CancelTarget() {
 	s.Target = ""
 	s.PendingConfigDigest = ""
 	s.HeldOrchestrator = ""
+	s.HeldUpgradePlan = ""
+	s.ApplyingConfigDigest = ""
+	s.ApplyingUpgradeVersion = ""
 	s.RolloutReason = ""
+}
+func (s *Manager) holdUpgrade(ctx context.Context, m Machine, state *State) {
+	if state.BundleFormat < 2 || state.HeldUpgradePlan != "" {
+		return
+	}
+	var data []byte
+	if s.store.DB.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&data) == nil {
+		if files, err := artifact.Read(data); err == nil {
+			state.HeldUpgradePlan = string(files["upgrade-plan/plan.yaml"])
+		}
+	}
 }
 
 func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (bool, error) {
-	if state.DrainStartedAt.IsZero() || time.Since(state.DrainStartedAt) > s.config.DrainTimeout {
+	if state.DrainStartedAt.IsZero() || (state.BundleFormat < 2 && time.Since(state.DrainStartedAt) > s.config.DrainTimeout) {
 		state.RolloutReason = "drain_timeout"
 		return false, nil
 	}
@@ -110,7 +160,7 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL {
+	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL && (state.BundleFormat < 2 || validDrainEvidence(m, *state, report, time.Now())) {
 		state.RolloutReason = ""
 		return true, nil
 	}

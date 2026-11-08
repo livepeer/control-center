@@ -144,6 +144,7 @@ render_template() {
   local temporary
   temporary=$(mktemp "${2}.render.XXXXXX")
   sed -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" -e "s|@NODE_ID@|$NODE_ID|g" \
+    -e "s|@RUNTIME_IMAGE@|$RUNTIME_IMAGE|g" \
     -e "s|@CONFIG_URL@|$CONFIG_URL|g" \
     -e "s|@CONTROL_TRANSPORT@|$(control_transport)|g" \
     -e "s|@MODPROBE@|$(command -v modprobe)|g" -e "s|@SYSCTL@|$(command -v sysctl)|g" \
@@ -170,8 +171,9 @@ prepare_installation() {
     "$INSTALL_DIR/volumes" "$INSTALL_DIR/kubelet" "$INSTALL_DIR/k3s/agent/etc/containerd" \
     "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d"
   install -d -m 0700 "$INSTALL_DIR/credentials" "$INSTALL_DIR/state" "$INSTALL_DIR/download" \
-    "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator"
-  chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator"
+    "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
+  chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
+  printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   chmod 0700 "$INSTALL_DIR/k3s" "$INSTALL_DIR/kubelet"
   write_once "$INSTALL_DIR/credentials/node-id" "$NODE_ID"
   write_once "$INSTALL_DIR/credentials/service-token" "$SERVICE_TOKEN"
@@ -188,7 +190,7 @@ stage_manifests() {
   copy_templates "$SCRIPT_DIR/manifests/bootstrap" "$INSTALL_DIR/manifests/bootstrap"
   copy_templates "$SCRIPT_DIR/manifests/flux" "$INSTALL_DIR/manifests/flux"
   render_template "$SCRIPT_DIR/manifests/upgrade-reconciliation.yaml" "$INSTALL_DIR/manifests/upgrade-reconciliation.yaml"
-  install -m 0644 "$SCRIPT_DIR/services/"*.py "$SCRIPT_DIR/services/kustomization.yaml" "$INSTALL_DIR/services/"
+  install -m 0644 "$SCRIPT_DIR/services/"*.py "$INSTALL_DIR/services/"
 }
 
 version_at_least() {
@@ -307,6 +309,7 @@ main() {
   if (( STATUS_ONLY )); then show_status; return; fi
   preflight
   (( CHECK_ONLY == 0 )) || return 0
+  runtime_image
   # Serialize enrollment reads as well as writes to prevent concurrent token changes.
   lock_installation
   check_existing_installation

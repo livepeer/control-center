@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
+	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/schema"
 	"log/slog"
 	"time"
@@ -16,6 +17,9 @@ type Config struct {
 	APIURL                  string
 	Connector               ConnectorConfig
 	DrainTimeout, StatusTTL time.Duration
+	RuntimeImage            string
+	NodeImage               string
+	StopSignals             bool
 }
 
 type Dependencies struct {
@@ -42,7 +46,17 @@ func New(config Config, deps Dependencies) *Manager {
 }
 
 func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
-	return Desired{Machine: m, State: state, Exposure: exposure, Connector: s.config.Connector, ControlAPIURL: s.config.APIURL}
+	image := state.RuntimeImage
+	if s.config.RuntimeImage != "" {
+		image = s.config.RuntimeImage
+	}
+	return Desired{Machine: m, State: state, Exposure: exposure, Connector: s.config.Connector, ControlAPIURL: s.config.APIURL, BundleFormat: state.BundleFormat, RuntimeImage: image, NodeImage: s.config.NodeImage, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout(state)}
+}
+func (s *Manager) drainTimeout(state State) time.Duration {
+	if state.BundleFormat >= 2 && s.config.DrainTimeout <= 0 {
+		return 12 * time.Hour
+	}
+	return s.config.DrainTimeout
 }
 
 func (s *Manager) Reconcile(ctx context.Context) error {
@@ -95,7 +109,8 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 	m.CredentialVersion = record.CredentialVersion
 	m.Terminal = record.Terminal
 	before := record.State
-	exposure, remove, err := s.plan(ctx, m, &record)
+	s.runtimeSettings(ctx, m, &record.State)
+	exposure, remove, err := s.planManagement(ctx, m, &record)
 	if err != nil {
 		return err
 	}
@@ -110,7 +125,8 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		record = lease.Record
 		m = lease.Machine
 		before = record.State
-		exposure, remove, err = s.plan(ctx, m, &record)
+		s.runtimeSettings(ctx, m, &record.State)
+		exposure, remove, err = s.planManagement(ctx, m, &record)
 		if err != nil {
 			return err
 		}
@@ -141,10 +157,30 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		lease.Release(ctx)
 		lease = nil
 	}
+	if record.BundleFormat >= 2 {
+		// An enrolled machine with no assignments still needs an authoritative empty intent.
+		// Reserve its first generation before delivery, so the first edit advances beyond it.
+		var revision int64
+		err := s.store.DB.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET apps_generation=1,revision=revision+1 WHERE node_id=$1 AND epoch=$2 AND revision=$3 AND apps_generation=0 AND EXISTS(SELECT FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$4) RETURNING revision`, m.NodeID, m.Epoch, record.Revision, m.CredentialVersion).Scan(&revision)
+		if err == nil {
+			record.Revision = revision
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	desired := s.Desired(m, record.State, exposure)
+	if m.Terminal && desired.BundleFormat >= 2 {
+		var prior []byte
+		if s.store.DB.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&prior) == nil {
+			desired.RetainedFiles, _ = artifact.Read(prior)
+		}
+	}
 	desired.Apps, err = machineapps.Snapshot(ctx, s.store.DB, m.NodeID, m.Epoch)
-	if err != nil {
+	if err != nil && desired.BundleFormat < 2 {
 		return err
+	}
+	if desired.BundleFormat >= 2 {
+		s.prepareApps(ctx, &desired, err)
 	}
 	data, digest, err := s.deps.Build(desired)
 	if err != nil {
@@ -152,7 +188,31 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		_, _ = s.store.DB.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error='generation_failed' WHERE node_id=$1 AND epoch=$2 AND revision=$3`, m.NodeID, m.Epoch, record.Revision)
 		return nil
 	}
-	return s.publish(ctx, m, record.Revision, data, digest, desired.Apps)
+	return s.publish(ctx, m, record.Revision, data, digest, desired.Apps, desired.AppsError)
+}
+
+func (s *Manager) planManagement(ctx context.Context, m Machine, record *Record) (*Exposure, bool, error) {
+	before := record.State
+	exposure, remove, err := s.plan(ctx, m, record)
+	if err == nil || before.BundleFormat < 2 {
+		return exposure, remove, err
+	}
+	// Lifecycle observations can hold a disruptive target, but cannot veto delivery
+	// of a management repair. Reuse the last delivered workload and route identity.
+	old, manifest, readErr := s.applied(ctx, m)
+	if readErr != nil {
+		return nil, false, err
+	}
+	record.State = before
+	record.HeldOrchestrator = manifest
+	s.holdUpgrade(ctx, m, &record.State)
+	record.RolloutReason = "lifecycle_observation_failed"
+	if old.IngressDigest != "" {
+		exposure = &Exposure{TunnelID: old.TunnelID, ServiceURL: old.ServiceURL, ProxyURLTemplate: old.ProxyURLTemplate, DiscoveryURL: old.DiscoveryURL, IngressDigest: old.IngressDigest, CredentialGeneration: old.TokenGeneration, ProviderVersion: old.ProviderVersion}
+	} else {
+		exposure = nil
+	}
+	return exposure, false, nil
 }
 
 // Plan from a snapshot first. Mutations are re-planned under a current lease.
@@ -187,7 +247,7 @@ func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposur
 
 // Publish serializes enrollment changes and artifact writes before reading the
 // shared rollout/provider revision, so a lock wait cannot publish a stale plan.
-func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data []byte, digest string, apps *schema.AppAssignmentSetV1) error {
+func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data []byte, digest string, apps *schema.AppAssignmentSetV1, appsError string) error {
 	tx, err := s.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -234,7 +294,7 @@ func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data [
 	if err = machineapps.RecordDelivery(ctx, tx, apps, digest, m.Terminal); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error=NULL WHERE node_id=$1 AND epoch=$2 AND apps_error IS NOT NULL`, m.NodeID, m.Epoch); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error=NULLIF($3,'') WHERE node_id=$1 AND epoch=$2 AND apps_error IS DISTINCT FROM NULLIF($3,'')`, m.NodeID, m.Epoch, appsError); err != nil {
 		return err
 	}
 	return tx.Commit()
