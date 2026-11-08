@@ -13,6 +13,7 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
 type fleetRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -44,7 +45,7 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 	s.CloseDiscovery()
 	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger, Transport: fleetRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
-		sources, err := s.DiscoverySources(r.Context())
+		sources, err := s.tunnels.DiscoverySources(r.Context())
 		if err != nil {
 			return nil, err
 		}
@@ -52,7 +53,7 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 			if source.URL != r.URL.String() {
 				continue
 			}
-			credential, err := s.ResolveAccessCredential(r.Context(), source.CredentialRef)
+			credential, err := s.tunnels.ResolveAccessCredential(r.Context(), source.CredentialRef)
 			if err != nil {
 				return nil, err
 			}
@@ -108,23 +109,24 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 	if status.Code != 200 || !strings.Contains(status.Body.String(), `"acknowledged":true`) {
 		t.Fatal("authorized freshness diagnostics missing", status.Code, status.Body.String())
 	}
-	sources, err := s.DiscoverySources(t.Context())
+	sources, err := s.tunnels.DiscoverySources(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, source := range sources {
-		credential, err := s.ResolveAccessCredential(t.Context(), source.CredentialRef)
+		credential, err := s.tunnels.ResolveAccessCredential(t.Context(), source.CredentialRef)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, output := range []string{response.Body.String(), status.Body.String()} {
-			for _, secret := range []string{credential.ClientID, credential.ClientSecret, source.CredentialRef, source.URL, s.params.CloudflareKeyring, s.params.CloudflareAPIToken, privateOrchestrator} {
+			for _, secret := range []string{credential.ClientID, credential.ClientSecret, source.CredentialRef, source.URL, s.params.CloudflareKeyring, s.params.CloudflareAPIToken, tunnel.PrivateOrchestrator} {
 				if strings.Contains(output, secret) {
 					t.Fatal("secret/private source leaked into API")
 				}
 			}
 		}
 	}
+	managerBeforeRotation := s.tunnels
 	rotate := request(t, s, "POST", "/api/admin/machines/"+a["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": a["epoch"], "kind": "access"})
 	requireStatus(t, rotate, 202)
 	driveTunnels(t, s)
@@ -134,6 +136,9 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 		t.Fatal("new version not acknowledged by actual collection", err)
 	}
 	driveTunnels(t, s)
+	if s.tunnels != managerBeforeRotation {
+		t.Fatal("ordinary reconciliation replaced manager with active discovery readers")
+	}
 	var active int
 	if err := s.db.QueryRow(`SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL`, a["node_id"], a["epoch"]).Scan(&active); err != nil || active != 1 {
 		t.Fatal("acknowledgement did not release predecessor token", err, active)
@@ -172,11 +177,14 @@ func TestFleetConfigurationAndPublicDisabledRoute(t *testing.T) {
 	}
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	s.params.CloudflareKeyring = `{"current":"test","keys":{"test":"` + key + `"}}`
+	if err := s.ConfigureTunnels(); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.ConfigureDiscovery(); err != nil {
 		t.Fatal(err)
 	}
 	defer s.CloseDiscovery()
-	if s.provider != nil {
+	if s.tunnels.Enabled() {
 		t.Fatal("reader unnecessarily acquired provisioning client")
 	}
 	if status := s.DiscoveryStatus(); !status.Enabled || status.InstanceID == "" || !status.SelectionStale {

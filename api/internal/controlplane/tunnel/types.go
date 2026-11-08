@@ -1,11 +1,11 @@
-package controlplane
+package tunnel
 
 import (
 	"context"
 	"time"
 )
 
-// RoutingState is the non-secret #111 desired-state input. Only the bundle
+// RoutingState is the non-secret desired-state input. Only the bundle
 // reconciler renders it. A source generation changes when its URL or credential
 // reference changes; transport health alone does not replace a Collector source.
 type RoutingState struct {

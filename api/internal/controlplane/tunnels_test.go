@@ -10,23 +10,21 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
-	"net/http/httptest"
-	"regexp"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 	"uuid"
 
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/api/internal/migrations"
 )
 
 type simulatedCloudflare struct {
 	mu             sync.Mutex
-	resources      map[string]CFResource
-	configurations map[string][]IngressRule
+	resources      map[string]tunnel.CFResource
+	configurations map[string][]tunnel.IngressRule
 	versions       map[string]int64
 	tokens         map[string]string
 	creates        map[string]int
@@ -36,22 +34,22 @@ type simulatedCloudflare struct {
 }
 
 func newSimulatedCloudflare() *simulatedCloudflare {
-	return &simulatedCloudflare{resources: map[string]CFResource{}, configurations: map[string][]IngressRule{}, versions: map[string]int64{}, tokens: map[string]string{}, creates: map[string]int{}, policies: map[string][]string{}}
+	return &simulatedCloudflare{resources: map[string]tunnel.CFResource{}, configurations: map[string][]tunnel.IngressRule{}, versions: map[string]int64{}, tokens: map[string]string{}, creates: map[string]int{}, policies: map[string][]string{}}
 }
-func (f *simulatedCloudflare) Find(_ context.Context, r CFResource) ([]CFResource, error) {
+func (f *simulatedCloudflare) Find(_ context.Context, r tunnel.CFResource) ([]tunnel.CFResource, error) {
 	return f.find(r, false)
 }
-func (f *simulatedCloudflare) FindOwned(_ context.Context, r CFResource) ([]CFResource, error) {
+func (f *simulatedCloudflare) FindOwned(_ context.Context, r tunnel.CFResource) ([]tunnel.CFResource, error) {
 	return f.find(r, true)
 }
-func (f *simulatedCloudflare) find(r CFResource, ownedOnly bool) ([]CFResource, error) {
+func (f *simulatedCloudflare) find(r tunnel.CFResource, ownedOnly bool) ([]tunnel.CFResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var found []CFResource
+	var found []tunnel.CFResource
 	if r.ID != "" {
 		v, ok := f.resources[r.ID]
 		if ok && (v.Kind != r.Kind || v.Name != r.Name || v.Host != r.Host) {
-			return nil, errResourceConflict
+			return nil, tunnel.ErrResourceConflict
 		}
 		if !r.Watch {
 			if ok {
@@ -59,14 +57,14 @@ func (f *simulatedCloudflare) find(r CFResource, ownedOnly bool) ([]CFResource, 
 				r.Target = v.Target
 				r.Proxied = v.Proxied
 				r.Pending = false
-				return []CFResource{r}, nil
+				return []tunnel.CFResource{r}, nil
 			}
 			return nil, nil
 		}
 	}
 	for _, v := range f.resources {
 		if !ownedOnly && r.ID == "" && (r.Kind == "app" || r.Kind == "dns") && v.Kind == r.Kind && v.Host == r.Host && v.Name != r.Name {
-			return nil, errResourceConflict
+			return nil, tunnel.ErrResourceConflict
 		}
 		if v.Kind == r.Kind && v.Name == r.Name && v.Host == r.Host {
 			copy := r
@@ -80,7 +78,7 @@ func (f *simulatedCloudflare) find(r CFResource, ownedOnly bool) ([]CFResource, 
 	}
 	return found, nil
 }
-func (f *simulatedCloudflare) Create(_ context.Context, r CFResource, target string) (CFResource, *AccessCredential, time.Time, error) {
+func (f *simulatedCloudflare) Create(_ context.Context, r tunnel.CFResource, target string) (tunnel.CFResource, *tunnel.AccessCredential, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r.ID = uuid.New().String()
@@ -99,14 +97,14 @@ func (f *simulatedCloudflare) Create(_ context.Context, r CFResource, target str
 	}
 	if r.Kind == f.lostKind {
 		f.lostKind = ""
-		return CFResource{}, nil, time.Time{}, &cloudflareFailure{status: 503, ambiguous: true}
+		return tunnel.CFResource{}, nil, time.Time{}, &tunnel.ProviderError{Status: 503, Ambiguous: true}
 	}
 	if r.Kind == "token" {
-		return r, &AccessCredential{ClientID: "client-" + r.ID, ClientSecret: "secret-" + r.ID}, time.Now().Add(24 * time.Hour), nil
+		return r, &tunnel.AccessCredential{ClientID: "client-" + r.ID, ClientSecret: "secret-" + r.ID}, time.Now().Add(24 * time.Hour), nil
 	}
 	return r, nil, time.Time{}, nil
 }
-func (f *simulatedCloudflare) Configure(_ context.Context, id string, rules []IngressRule) (int64, error) {
+func (f *simulatedCloudflare) Configure(_ context.Context, id string, rules []tunnel.IngressRule) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if ingressHash(rules) != ingressHash(f.configurations[id]) {
@@ -115,7 +113,7 @@ func (f *simulatedCloudflare) Configure(_ context.Context, id string, rules []In
 	}
 	return f.versions[id], nil
 }
-func (f *simulatedCloudflare) Protect(_ context.Context, r CFResource, ids []string) error {
+func (f *simulatedCloudflare) Protect(_ context.Context, r tunnel.CFResource, ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.policies[r.ID] = append([]string(nil), ids...)
@@ -135,7 +133,7 @@ func (f *simulatedCloudflare) RotateConnector(_ context.Context, id string) erro
 	f.tokens[id] = "rotated-tunnel-token-" + uuid.New().String()
 	return nil
 }
-func (f *simulatedCloudflare) Delete(_ context.Context, r CFResource, _ string) error {
+func (f *simulatedCloudflare) Delete(_ context.Context, r tunnel.CFResource, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.resources, r.ID)
@@ -147,7 +145,7 @@ func (f *simulatedCloudflare) Disconnect(context.Context, string) error {
 	f.disconnected++
 	return nil
 }
-func (f *simulatedCloudflare) Route(_ context.Context, r CFResource, target string) error {
+func (f *simulatedCloudflare) Route(_ context.Context, r tunnel.CFResource, target string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r.Target = target + ".cfargotunnel.com"
@@ -159,6 +157,7 @@ func (f *simulatedCloudflare) Route(_ context.Context, r CFResource, target stri
 func tunnelTestServer(t *testing.T) (*Server, *simulatedCloudflare) {
 	t.Helper()
 	s := newTestServer(t)
+	t.Cleanup(func() { testTunnelDependencies.Delete(s) })
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareTeamName: "test-team", CloudflareAPIToken: "backend-provisioning-only", CloudflareKeyring: `{"current":"one","keys":{"one":"` + key + `"}}`, CloudflareConnectorImage: "registry.example.invalid/connector@sha256:" + strings.Repeat("c", 64), CloudflareAccessLifetime: 24 * time.Hour, CloudflareRotateBefore: 6 * time.Hour, TunnelStatusTTL: 5 * time.Minute, TunnelDrainTimeout: time.Minute}
 	s.params.TunnelNodeAddresses = []string{"198.51.100.10/32"}
@@ -166,26 +165,40 @@ func tunnelTestServer(t *testing.T) (*Server, *simulatedCloudflare) {
 		t.Fatal(e)
 	}
 	fake := newSimulatedCloudflare()
-	s.provider = fake
-	s.endpointVerifier = func(_ context.Context, r RoutingState, c AccessCredential) error {
-		if r.ServiceURL == privateOrchestrator || c.ClientSecret == "" {
+	testTunnelDeps(s).Provider = fake
+	testTunnelDeps(s).VerifyEndpoints = func(_ context.Context, r tunnel.RoutingState, c tunnel.AccessCredential) error {
+		if r.ServiceURL == tunnel.PrivateOrchestrator || c.ClientSecret == "" {
 			t.Error("invalid simulated source")
 		}
 		return nil
 	}
+	configureTestTunnels(t, s)
 	return s, fake
 }
-func claimTestTunnel(t *testing.T, s *Server, c map[string]string) *tunnelLease {
+
+var testTunnelDependencies sync.Map
+
+func testTunnelDeps(s *Server) *tunnel.Dependencies {
+	d, _ := testTunnelDependencies.LoadOrStore(s, &tunnel.Dependencies{})
+	return d.(*tunnel.Dependencies)
+}
+
+func configureTestTunnels(t *testing.T, s *Server) {
 	t.Helper()
-	m, e := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
-	if e != nil {
-		t.Fatal(e)
+	s.tunnels = s.newTunnelManager(*testTunnelDeps(s))
+	if err := s.tunnels.Configure(s.params.PublicAPIURL); err != nil {
+		t.Fatal(err)
 	}
-	l, e := s.claimTunnel(t.Context(), m)
-	if e != nil {
-		t.Fatal(e)
-	}
-	return l
+}
+
+func ingressHash(r []tunnel.IngressRule) string {
+	b, _ := json.Marshal(r)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+func credentialRef(node, epoch string, version int64) string {
+	return "access/" + node + "/" + epoch + "/" + strconv.FormatInt(version, 10)
 }
 
 func driveTunnels(t *testing.T, s *Server) {
@@ -193,7 +206,7 @@ func driveTunnels(t *testing.T, s *Server) {
 	if _, e := s.db.Exec(`UPDATE lpcc.machine_tunnels SET next_attempt_at=now()`); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.reconcileTunnels(t.Context()); e != nil {
+	if e := s.tunnels.Reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.reconcile(t.Context()); e != nil {
@@ -214,13 +227,13 @@ func reportRuntime(t *testing.T, s *Server, c map[string]string, component strin
 	}
 	m.ControlAPIURL = s.params.PublicAPIURL
 	m.TunnelConfig = &s.params.TunnelParams
-	r := MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, ConfigDigest: orchestratorDigest(m), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
+	r := tunnel.MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, ConfigDigest: orchestratorDigest(m), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
 	r.Drained = component == "runner" && ready
 	if w := request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], r); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
-func readyTunnel(t *testing.T, s *Server, c map[string]string) RoutingState {
+func readyTunnel(t *testing.T, s *Server, c map[string]string) tunnel.RoutingState {
 	t.Helper()
 	reportRuntime(t, s, c, "runtime", false)
 	driveTunnels(t, s)
@@ -236,123 +249,6 @@ func readyTunnel(t *testing.T, s *Server, c map[string]string) RoutingState {
 	return state
 }
 
-func TestTunnelIngressContract(t *testing.T) {
-	rules := ingressFor("lp-aaaaaaaaaaaaaaaa", TunnelParams{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "aud")
-	match := func(host, path string) IngressRule {
-		for _, r := range rules {
-			hostOK := r.Hostname == "" || r.Hostname == host || strings.HasPrefix(r.Hostname, "*.") && strings.HasSuffix(host, r.Hostname[1:])
-			if hostOK && (r.Path == "" || regexp.MustCompile(r.Path).MatchString(path)) {
-				return r
-			}
-		}
-		t.Fatal("no catch-all")
-		return IngressRule{}
-	}
-	api := "api-lp-aaaaaaaaaaaaaaaa.example.invalid"
-	app := "proxy.apps-lp-aaaaaaaaaaaaaaaa.example.invalid"
-	for _, host := range []string{api, app} {
-		for _, path := range []string{"/discovery", "/prefix/discovery", "/runners/heartbeat", "/runner/a/session/b/channels", "/ai/trickle/x/0", "/metrics", "/readyz"} {
-			if match(host, path).Service != "http_status:404" {
-				t.Fatalf("exposed %s %s", host, path)
-			}
-		}
-	}
-	for _, path := range []string{"/apps/a/session", "/apps/a/session/b/stop", "/apps/a/session/b/payment", "/refresh-payment", "/apps/a/app/v1/complete", "/apps/a/session/b/app/ws", "/run/abc/media", "/proxy/abc"} {
-		if match(api, path).Service != privateOrchestrator {
-			t.Fatalf("missing client path %s", path)
-		}
-	}
-	protected := match("discovery-lp-aaaaaaaaaaaaaaaa.example.invalid", "/discovery")
-	if protected.OriginRequest == nil || !protected.OriginRequest.Access.Required || protected.OriginRequest.Access.Audience[0] != "aud" {
-		t.Fatal("discovery not audience protected")
-	}
-	if match("alias.example.invalid", "/discovery").Service != "http_status:404" {
-		t.Fatal("alias bypass")
-	}
-	for _, r := range rules {
-		if r.Service != privateOrchestrator && !strings.HasPrefix(r.Service, "http_status:") {
-			t.Fatal("direct app ingress")
-		}
-	}
-}
-func TestAccessKeyringBindingAndRotation(t *testing.T) {
-	k, e := parseAccessKeyring(`{"current":"a","keys":{"a":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)) + `"}}`)
-	if e != nil {
-		t.Fatal(e)
-	}
-	ref := "access/node/epoch/1"
-	secret := AccessCredential{"id", "high-entropy-secret"}
-	id, b, e := k.seal(ref, secret)
-	if e != nil || bytes.Contains(b, []byte(secret.ClientSecret)) {
-		t.Fatal("plaintext secret", e)
-	}
-	if v, e := k.open(id, ref, b); e != nil || v != secret {
-		t.Fatal(e)
-	}
-	for _, wrong := range []string{"access/other/epoch/1", "access/node/epoch/2"} {
-		if _, e := k.open(id, wrong, b); e == nil {
-			t.Fatal("credential reference substitution")
-		}
-	}
-	b[len(b)-1] ^= 1
-	if _, e := k.open(id, ref, b); e == nil {
-		t.Fatal("accepted ciphertext tampering")
-	}
-}
-func TestCloudflareClientBoundsAndRedaction(t *testing.T) {
-	marker := "never-log-provider-secret"
-	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer backend" {
-			t.Error("missing provisioning auth")
-		}
-		w.WriteHeader(503)
-		w.Write([]byte(marker))
-	}))
-	defer api.Close()
-	cf := &cloudflareHTTP{base: api.URL, client: api.Client(), params: TunnelParams{CloudflareAccountID: strings.Repeat("a", 32), CloudflareAPIToken: "backend"}}
-	_, e := cf.ConnectorToken(t.Context(), "tunnel")
-	if e == nil || strings.Contains(e.Error(), marker) {
-		t.Fatal("provider body exposed", e)
-	}
-}
-
-func TestCloudflareOwnershipAndDeletionReadback(t *testing.T) {
-	var removed, renamed, settled atomic.Bool
-	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "DELETE" {
-			removed.Store(settled.Load())
-			w.WriteHeader(204)
-			return
-		}
-		if removed.Load() {
-			w.WriteHeader(404)
-			return
-		}
-		name := "epoch-owner"
-		if renamed.Load() {
-			name = "foreign-owner"
-		}
-		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"id": "tunnel-id", "name": name, "config_src": "cloudflare"}})
-	}))
-	defer api.Close()
-	cf := &cloudflareHTTP{base: api.URL, client: api.Client(), params: TunnelParams{CloudflareAccountID: strings.Repeat("a", 32)}}
-	r := CFResource{Kind: "tunnel", ID: "tunnel-id", Name: "epoch-owner"}
-	if e := cf.Delete(t.Context(), r, ""); e == nil {
-		t.Fatal("unconfirmed provider deletion counted as absent")
-	}
-	renamed.Store(true)
-	if _, e := cf.Find(t.Context(), r); !errors.Is(e, errResourceConflict) {
-		t.Fatal("resource identity change was adopted", e)
-	}
-	renamed.Store(false)
-	settled.Store(true)
-	if e := cf.Delete(t.Context(), r, ""); e != nil {
-		t.Fatal(e)
-	}
-	if e := cf.Delete(t.Context(), r, ""); e != nil {
-		t.Fatal("deletion retry not idempotent", e)
-	}
-}
 func TestTunnelDurabilityPartialFailureAndIsolation(t *testing.T) {
 	s, f := tunnelTestServer(t)
 	a := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -385,13 +281,13 @@ func TestTunnelDurabilityPartialFailureAndIsolation(t *testing.T) {
 	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), "opaque-tunnel-token") {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	sources, e := s.DiscoverySources(t.Context())
+	sources, e := s.tunnels.DiscoverySources(t.Context())
 	if e != nil || len(sources) != 2 {
 		t.Fatal(e, len(sources))
 	}
-	var pair [2]AccessCredential
+	var pair [2]tunnel.AccessCredential
 	for i, v := range sources {
-		pair[i], e = s.ResolveAccessCredential(t.Context(), v.CredentialRef)
+		pair[i], e = s.tunnels.ResolveAccessCredential(t.Context(), v.CredentialRef)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -410,7 +306,7 @@ func TestTunnelDurabilityPartialFailureAndIsolation(t *testing.T) {
 			t.Fatal("secret in bundle")
 		}
 	}
-	if !strings.Contains(files["orchestrator.yaml"], stateA.ServiceURL) || !strings.Contains(files["orchestrator.yaml"], "RunnerServiceURL = \""+privateOrchestrator+"\"") {
+	if !strings.Contains(files["orchestrator.yaml"], stateA.ServiceURL) || !strings.Contains(files["orchestrator.yaml"], "RunnerServiceURL = \""+tunnel.PrivateOrchestrator+"\"") {
 		t.Fatal("incorrect Node routing")
 	}
 	if strings.Count(files["tunnel.yaml"], "mountPath: /credentials") != 1 || !strings.Contains(files["tunnel.yaml"], "medium: Memory") {
@@ -486,7 +382,7 @@ func TestEpochRetirementAndRefresh(t *testing.T) {
 	if w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/tunnel/connector-token", fresh["token"], map[string]any{}); w.Code != 401 {
 		t.Fatal("retired credential got new tunnel token")
 	}
-	if _, e := s.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], c["epoch"], state.AccessVersion)); e == nil {
+	if _, e := s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], c["epoch"], state.AccessVersion)); e == nil {
 		t.Fatal("retired source secret resolved")
 	}
 	digest := sha256.Sum256(terminal.Body.Bytes())
@@ -512,8 +408,8 @@ func TestTunnelRotationNeedsConsumerAcknowledgement(t *testing.T) {
 	if count != 2 {
 		t.Fatal("old token revoked before acknowledgement")
 	}
-	sources, _ := s.DiscoverySources(t.Context())
-	if e := s.AcknowledgeDiscovery(t.Context(), sources[0]); e != nil {
+	sources, _ := s.tunnels.DiscoverySources(t.Context())
+	if e := s.tunnels.AcknowledgeDiscovery(t.Context(), sources[0]); e != nil {
 		t.Fatal(e)
 	}
 	driveTunnels(t, s)
@@ -530,32 +426,16 @@ func TestTunnelRotationNeedsConsumerAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestSupabaseCascadeAndLeaseFencing(t *testing.T) {
+func TestSupabaseCascadeRetiresTunnels(t *testing.T) {
 	s, f := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("f", 64))
 	readyTunnel(t, s, c)
-	m, e := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
-	if e != nil {
-		t.Fatal(e)
-	}
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET next_attempt_at=now()`)
-	lease, e := s.claimTunnel(t.Context(), m)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = s.claimTunnel(t.Context(), m); e == nil {
-		t.Fatal("concurrent lease acquired")
-	}
 	if _, e := s.db.Exec(`DELETE FROM auth.users WHERE id=$1`, ownerA); e != nil {
 		t.Fatal(e)
 	}
-	if e = lease.save(t.Context()); !errors.Is(e, errTunnelFenced) {
-		t.Fatal("retired worker was not fenced", e)
-	}
-	lease.finish(t.Context(), false)
 	driveTunnels(t, s)
 	var retired, complete bool
-	e = s.db.QueryRow(`SELECT e.retired_at IS NOT NULL,(t.state->>'cleanup_complete')::boolean FROM lpcc.enrollments e JOIN lpcc.machine_tunnels t USING(node_id,epoch) WHERE e.node_id=$1`, c["node_id"]).Scan(&retired, &complete)
+	e := s.db.QueryRow(`SELECT e.retired_at IS NOT NULL,(t.state->>'cleanup_complete')::boolean FROM lpcc.enrollments e JOIN lpcc.machine_tunnels t USING(node_id,epoch) WHERE e.node_id=$1`, c["node_id"]).Scan(&retired, &complete)
 	if e != nil || !retired || !complete || len(f.resources) != 0 {
 		t.Fatal("cascade lost cleanup", retired, complete, e, len(f.resources))
 	}
@@ -570,15 +450,10 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	lease, e := s.claimTunnel(t.Context(), m)
-	if e != nil {
-		t.Fatal(e)
-	}
-	lease.state.IngressDigest = "configured-before-drain-intent"
-	if e = lease.save(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	lease.finish(t.Context(), false)
+	stateBefore := tunnel.RoutingFor(m.NodeID, s.params.CloudflareBaseDomain)
+	stateBefore.IngressDigest = "configured-before-drain-intent"
+	raw, _ := json.Marshal(stateBefore)
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_tunnels(node_id,epoch,state) VALUES($1,$2,$3)`, m.NodeID, m.Epoch, raw)
 	if e = s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
@@ -610,7 +485,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 		t.Fatal("unchanged desired state changed bundle")
 	}
 	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=jsonb_set(state,'{verified_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
-	sources, e := s.DiscoverySources(t.Context())
+	sources, e := s.tunnels.DiscoverySources(t.Context())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -654,11 +529,12 @@ func TestEndpointReplacementRequiresCurrentSourceAcknowledgement(t *testing.T) {
 	s, f := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("9", 64))
 	initial := readyTunnel(t, s, c)
-	sources, _ := s.DiscoverySources(t.Context())
-	if e := s.AcknowledgeDiscovery(t.Context(), sources[0]); e != nil {
+	sources, _ := s.tunnels.DiscoverySources(t.Context())
+	if e := s.tunnels.AcknowledgeDiscovery(t.Context(), sources[0]); e != nil {
 		t.Fatal(e)
 	}
 	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
 	driveTunnels(t, s)
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
@@ -678,11 +554,11 @@ func TestEndpointReplacementRequiresCurrentSourceAcknowledgement(t *testing.T) {
 	if apps != 2 {
 		t.Fatal("old source acknowledgement retired replacement protection", apps)
 	}
-	if e := s.AcknowledgeDiscovery(t.Context(), sources[0]); e == nil {
+	if e := s.tunnels.AcknowledgeDiscovery(t.Context(), sources[0]); e == nil {
 		t.Fatal("accepted old endpoint acknowledgement")
 	}
-	sources, _ = s.DiscoverySources(t.Context())
-	if e := s.AcknowledgeDiscovery(t.Context(), sources[0]); e != nil {
+	sources, _ = s.tunnels.DiscoverySources(t.Context())
+	if e := s.tunnels.AcknowledgeDiscovery(t.Context(), sources[0]); e != nil {
 		t.Fatal(e)
 	}
 	driveTunnels(t, s)
@@ -720,7 +596,7 @@ func TestLegacyEnrollmentMigrationRequiresHTTPSRefresh(t *testing.T) {
 		t.Fatal("legacy verifier lost", legacy, e)
 	}
 	requireStatus(t, request(t, s, "GET", "/v1/nodes/"+node+"/config", oldToken, nil), 200)
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", oldToken, MachineReport{}), 403)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", oldToken, tunnel.MachineReport{}), 403)
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
 	in := map[string]any{"fingerprint": strings.Repeat("6", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 0}
 	s.params.PublicAPIURL = "http://legacy.example.invalid"
@@ -755,8 +631,8 @@ func TestPrivateWorkloadUpdatePolicy(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			previous := strings.Replace(archiveFiles(t, data)["orchestrator.yaml"], "RunnerServiceURL = \""+privateOrchestrator+"\"", "# previous Node release used its ServiceURL fallback", 1)
-			m.Routing = &RoutingState{Generation: 1, HeldOrchestrator: previous}
+			previous := strings.Replace(archiveFiles(t, data)["orchestrator.yaml"], "RunnerServiceURL = \""+tunnel.PrivateOrchestrator+"\"", "# previous Node release used its ServiceURL fallback", 1)
+			m.Routing = &tunnel.RoutingState{Generation: 1, HeldOrchestrator: previous}
 			data, digest, e := buildBundle(m)
 			if e != nil {
 				t.Fatal(e)
@@ -780,24 +656,23 @@ func TestAccessCredentialReencryption(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("5", 64))
 	readyTunnel(t, s, c)
 	ref := credentialRef(c["node_id"], c["epoch"], 1)
-	before, e := s.ResolveAccessCredential(t.Context(), ref)
+	before, e := s.tunnels.ResolveAccessCredential(t.Context(), ref)
 	if e != nil {
 		t.Fatal(e)
 	}
 	oldKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32))
-	s.keys, e = parseAccessKeyring(`{"current":"two","keys":{"one":"` + oldKey + `","two":"` + newKey + `"}}`)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = s.ReencryptAccessCredentials(t.Context()); e != nil {
+	s.params.CloudflareKeyring = `{"current":"two","keys":{"one":"` + oldKey + `","two":"` + newKey + `"}}`
+	configureTestTunnels(t, s)
+	if e = s.tunnels.ReencryptAccessCredentials(t.Context()); e != nil {
 		t.Fatal(e)
 	}
 	if count(t, s, `SELECT count(*) FROM lpcc.access_credentials WHERE key_id='two'`) != 1 {
 		t.Fatal("ciphertext was not reencrypted")
 	}
-	delete(s.keys.keys, "one")
-	after, e := s.ResolveAccessCredential(t.Context(), ref)
+	s.params.CloudflareKeyring = `{"current":"two","keys":{"two":"` + newKey + `"}}`
+	configureTestTunnels(t, s)
+	after, e := s.tunnels.ResolveAccessCredential(t.Context(), ref)
 	if e != nil || before != after {
 		t.Fatal("key rotation changed credential", e)
 	}

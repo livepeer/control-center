@@ -1,4 +1,4 @@
-package controlplane
+package tunnel
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 )
 
 // Live provisioning has no account, domain, lifetime or image defaults.
-type TunnelParams struct {
+type Config struct {
 	CloudflareEnabled         bool          `env:"CLOUDFLARE_ENABLED" default:"false" descr:"Enable managed machine tunnels after infrastructure preflight"`
 	CloudflareIngressApproved bool          `env:"CLOUDFLARE_INGRESS_APPROVED" default:"false" descr:"Advertise only after the real ingress/direct-origin release gates pass"`
 	CloudflareAccountID       string        `env:"CLOUDFLARE_ACCOUNT_ID" optional:"true" descr:"Cloudflare account owning tunnels and Access"`
@@ -34,7 +34,7 @@ var cfIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var domainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
 var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
 
-func (p TunnelParams) validate(api string) error {
+func (p Config) Validate(api string) error {
 	if !p.CloudflareEnabled {
 		return nil
 	}
@@ -48,7 +48,7 @@ func (p TunnelParams) validate(api string) error {
 	if p.CloudflareAccessLifetime <= 0 || p.CloudflareRotateBefore <= 0 || p.CloudflareRotateBefore >= p.CloudflareAccessLifetime || p.TunnelStatusTTL < 2*time.Minute || p.TunnelDrainTimeout <= 0 {
 		return errors.New("configure tunnel status TTL of at least two minutes, positive drain limit and Access lifetime/rotation window")
 	}
-	if !imageDigestPattern.MatchString(p.CloudflareConnectorImage) {
+	if !ValidConnectorImage(p.CloudflareConnectorImage) {
 		return errors.New("CloudflareConnectorImage requires an immutable sha256 digest")
 	}
 	for _, raw := range append(append([]string{}, p.TunnelPrivateControlCIDRs...), p.TunnelNodeAddresses...) {
@@ -67,3 +67,5 @@ func (p TunnelParams) validate(api string) error {
 	}
 	return nil
 }
+
+func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }

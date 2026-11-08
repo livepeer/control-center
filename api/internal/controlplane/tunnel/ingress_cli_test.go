@@ -1,4 +1,4 @@
-package controlplane
+package tunnel
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ func TestPinnedCloudflaredIngress(t *testing.T) {
 	if e != nil || !strings.Contains(string(v), "version 2026.10.7 ") {
 		t.Fatal("requires pinned cloudflared", e)
 	}
-	rules := ingressFor("lp-aaaaaaaaaaaaaaaa", TunnelParams{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "audience")
+	rules := ingressFor("lp-aaaaaaaaaaaaaaaa", Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "audience")
 	data, _ := json.Marshal(map[string]any{"ingress": rules})
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if e := os.WriteFile(path, data, 0600); e != nil {
@@ -31,18 +31,18 @@ func TestPinnedCloudflaredIngress(t *testing.T) {
 		{"api-lp-aaaaaaaaaaaaaaaa", "/prefix/discovery", "http_status:404"},
 		{"api-lp-aaaaaaaaaaaaaaaa", "/runners/heartbeat", "http_status:404"},
 		{"api-lp-aaaaaaaaaaaaaaaa", "/runner/a/session/b/channels", "http_status:404"},
-		{"api-lp-aaaaaaaaaaaaaaaa", "/apps/a/session", privateOrchestrator},
-		{"api-lp-aaaaaaaaaaaaaaaa", "/apps/a/session/b/payment", privateOrchestrator},
-		{"api-lp-aaaaaaaaaaaaaaaa", "/apps/a/app/v1", privateOrchestrator},
-		{"api-lp-aaaaaaaaaaaaaaaa", "/run/a/x", privateOrchestrator},
-		{"api-lp-aaaaaaaaaaaaaaaa", "/proxy/a", privateOrchestrator},
-		{"api-lp-aaaaaaaaaaaaaaaa", "/refresh-payment", privateOrchestrator},
+		{"api-lp-aaaaaaaaaaaaaaaa", "/apps/a/session", PrivateOrchestrator},
+		{"api-lp-aaaaaaaaaaaaaaaa", "/apps/a/session/b/payment", PrivateOrchestrator},
+		{"api-lp-aaaaaaaaaaaaaaaa", "/apps/a/app/v1", PrivateOrchestrator},
+		{"api-lp-aaaaaaaaaaaaaaaa", "/run/a/x", PrivateOrchestrator},
+		{"api-lp-aaaaaaaaaaaaaaaa", "/proxy/a", PrivateOrchestrator},
+		{"api-lp-aaaaaaaaaaaaaaaa", "/refresh-payment", PrivateOrchestrator},
 		{"api-lp-aaaaaaaaaaaaaaaa", "/ai/trickle/a/0", "http_status:404"},
 		{"p.apps-lp-aaaaaaaaaaaaaaaa", "/discovery", "http_status:404"},
 		{"p.apps-lp-aaaaaaaaaaaaaaaa", "/app/discovery", "http_status:404"},
 		{"p.apps-lp-aaaaaaaaaaaaaaaa", "/readyz", "http_status:404"},
-		{"p.apps-lp-aaaaaaaaaaaaaaaa", "/v1/completions", privateOrchestrator},
-		{"discovery-lp-aaaaaaaaaaaaaaaa", "/discovery", privateOrchestrator},
+		{"p.apps-lp-aaaaaaaaaaaaaaaa", "/v1/completions", PrivateOrchestrator},
+		{"discovery-lp-aaaaaaaaaaaaaaaa", "/discovery", PrivateOrchestrator},
 		{"discovery-lp-aaaaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
 		{"alias", "/discovery", "http_status:404"},
 	} {

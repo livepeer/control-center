@@ -17,6 +17,7 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/api/internal/migrations"
 )
 
@@ -24,44 +25,43 @@ import (
 var MigrationFiles embed.FS
 
 type Machine struct {
-	NodeID            string        `json:"node_id"`
-	OwnerID           string        `json:"-"`
-	Fingerprint       string        `json:"fingerprint"`
-	Hostname          string        `json:"hostname"`
-	InstallDir        string        `json:"install_dir"`
-	K3sVersion        string        `json:"k3s_version"`
-	CreatedAt         time.Time     `json:"created_at"`
-	LastConfigFetchAt *time.Time    `json:"last_config_fetch_at"`
-	Epoch             string        `json:"-"`
-	CredentialVersion int64         `json:"-"`
-	Routing           *RoutingState `json:"-"`
-	Terminal          bool          `json:"-"`
-	ControlAPIURL     string        `json:"-"`
-	TunnelConfig      *TunnelParams `json:"-"`
-	DevelopmentHTTP   bool          `json:"development_http,omitempty"`
+	NodeID            string               `json:"node_id"`
+	OwnerID           string               `json:"-"`
+	Fingerprint       string               `json:"fingerprint"`
+	Hostname          string               `json:"hostname"`
+	InstallDir        string               `json:"install_dir"`
+	K3sVersion        string               `json:"k3s_version"`
+	CreatedAt         time.Time            `json:"created_at"`
+	LastConfigFetchAt *time.Time           `json:"last_config_fetch_at"`
+	Epoch             string               `json:"-"`
+	CredentialVersion int64                `json:"-"`
+	Routing           *tunnel.RoutingState `json:"-"`
+	Terminal          bool                 `json:"-"`
+	ControlAPIURL     string               `json:"-"`
+	TunnelConfig      *TunnelParams        `json:"-"`
+	DevelopmentHTTP   bool                 `json:"development_http,omitempty"`
 }
 
 type Server struct {
-	db               *sql.DB
-	params           Params
-	logger           *slog.Logger
-	client           *http.Client
-	build            func(Machine) ([]byte, string, error)
-	denialMu         sync.Mutex
-	denials          map[AdminAction]denialWindow
-	provider         TunnelProvider
-	keys             *accessKeyring
-	endpointVerifier func(context.Context, RoutingState, AccessCredential) error
-	endpointClient   *http.Client
-	discovery        *fleet.Manager
-	reconcileWake    chan struct{}
+	db            *sql.DB
+	params        Params
+	logger        *slog.Logger
+	client        *http.Client
+	build         func(Machine) ([]byte, string, error)
+	denialMu      sync.Mutex
+	denials       map[AdminAction]denialWindow
+	tunnels       *tunnel.Manager
+	discovery     *fleet.Manager
+	reconcileWake chan struct{}
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
-	return &Server{db: db, params: p, logger: logger, build: buildBundle, reconcileWake: make(chan struct{}, 1), client: &http.Client{
+	s := &Server{db: db, params: p, logger: logger, build: buildBundle, reconcileWake: make(chan struct{}, 1), client: &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
+	s.tunnels = s.newTunnelManager(tunnel.Dependencies{})
+	return s
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

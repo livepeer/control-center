@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
 func (s *Server) prepareMachineRemoval(r *http.Request, _ UserIdentity) (AdminApply, error) {
@@ -52,10 +54,10 @@ func (s *Server) prepareMachineRemoval(r *http.Request, _ UserIdentity) (AdminAp
 			return AdminChange{}, problem(409, "drain_deadline_required", "Configure a drain deadline before ordinary removal.")
 		}
 		var b []byte
-		var state RoutingState
+		var state tunnel.RoutingState
 		e = tx.QueryRowContext(ctx, `SELECT state FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch=$2 FOR UPDATE`, node, epoch).Scan(&b)
 		if errors.Is(e, sql.ErrNoRows) {
-			state = routingFor(node, s.params.CloudflareBaseDomain)
+			state = tunnel.RoutingFor(node, s.params.CloudflareBaseDomain)
 		} else if e != nil {
 			return AdminChange{}, e
 		} else if e = json.Unmarshal(b, &state); e != nil {
@@ -101,7 +103,7 @@ func (s *Server) prepareDrainRetry(r *http.Request, _ UserIdentity) (AdminApply,
 		if e = tx.QueryRowContext(ctx, `SELECT state FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch=$2 FOR UPDATE`, node, in.Epoch).Scan(&b); e != nil {
 			return AdminChange{}, e
 		}
-		var state RoutingState
+		var state tunnel.RoutingState
 		if e = json.Unmarshal(b, &state); e != nil {
 			return AdminChange{}, e
 		}
@@ -137,7 +139,7 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 	return func(ctx context.Context, tx *sql.Tx, _ UserIdentity) (AdminChange, error) {
 		var b []byte
 		var revision int64
-		var state RoutingState
+		var state tunnel.RoutingState
 		e := tx.QueryRowContext(ctx, `SELECT state,revision FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch::text=$2 FOR UPDATE`, node, in.Epoch).Scan(&b, &revision)
 		if errors.Is(e, sql.ErrNoRows) {
 			return AdminChange{}, problem(404, "tunnel_not_found", "Tunnel not found.")
@@ -167,29 +169,4 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 		}
 		return AdminChange{Target: AdminTarget{Kind: "tunnel", ID: node, Revision: in.Epoch + ":" + strconv.FormatInt(revision, 10)}, Changed: changed, Status: 202, Body: map[string]string{"status": "rotation_queued"}}, e
 	}, nil
-}
-
-func (l *tunnelLease) finishDrain(ctx context.Context) error {
-	done, e := l.drainComplete(ctx)
-	if e != nil || !done {
-		return e
-	}
-	_, e = l.s.db.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND EXISTS(SELECT FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$4 AND lease_until>now())`, l.m.NodeID, l.m.Epoch, l.id, l.revision)
-	return e
-}
-
-func (l *tunnelLease) drainComplete(ctx context.Context) (bool, error) {
-	if l.state.DrainStartedAt.IsZero() || time.Since(l.state.DrainStartedAt) > l.s.params.TunnelDrainTimeout {
-		l.state.Reason = "drain_timeout"
-		return false, l.save(ctx)
-	}
-	report, at, e := l.s.report(ctx, l.m, "runner")
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		return false, e
-	}
-	if report.Drained && report.Generation == l.state.Generation && time.Since(at) <= l.s.params.TunnelStatusTTL {
-		return true, nil
-	}
-	l.state.Reason = "drain_pending"
-	return false, l.save(ctx)
 }

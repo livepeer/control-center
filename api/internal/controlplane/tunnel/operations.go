@@ -1,4 +1,4 @@
-package controlplane
+package tunnel
 
 import (
 	"context"

@@ -93,7 +93,7 @@ func (p Params) PreValidate() error {
 	if err := p.DiscoveryParams.validate(); err != nil {
 		return err
 	}
-	if err := p.TunnelParams.validate(p.PublicAPIURL); err != nil {
+	if err := p.TunnelParams.Validate(p.PublicAPIURL); err != nil {
 		return err
 	}
 	if p.DefaultAdminEmail != "" {

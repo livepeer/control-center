@@ -7,6 +7,7 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
 // DiscoveryParams belongs to API configuration; the subsystem has no feature
@@ -35,12 +36,8 @@ func (s *Server) ConfigureDiscovery() error {
 	if !s.params.CloudflareIngressApproved {
 		return errors.New("fleet discovery requires approved protected machine ingress")
 	}
-	if s.keys == nil {
-		keys, err := parseAccessKeyring(s.params.CloudflareKeyring)
-		if err != nil {
-			return err
-		}
-		s.keys = keys
+	if err := s.tunnels.ConfigureCredentials(); err != nil {
+		return err
 	}
 	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger})
 	if err != nil {
@@ -84,7 +81,7 @@ func (s *Server) requestReconcile() {
 type discoveryStore struct{ server *Server }
 
 func (s discoveryStore) Sources(ctx context.Context) ([]fleet.Source, error) {
-	sources, err := s.server.DiscoverySources(ctx)
+	sources, err := s.server.tunnels.DiscoverySources(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -98,13 +95,13 @@ func (s discoveryStore) Sources(ctx context.Context) ([]fleet.Source, error) {
 	return result, nil
 }
 func (s discoveryStore) Resolve(ctx context.Context, ref string) (fleet.Credential, error) {
-	credential, err := s.server.ResolveAccessCredential(ctx, ref)
+	credential, err := s.server.tunnels.ResolveAccessCredential(ctx, ref)
 	if err != nil {
 		return fleet.Credential{}, err
 	}
 	return fleet.Credential{ClientID: credential.ClientID, ClientSecret: credential.ClientSecret}, nil
 }
 func (s discoveryStore) Acknowledge(ctx context.Context, source fleet.Source) error {
-	return s.server.AcknowledgeDiscovery(ctx, DiscoverySource{ID: source.ID, NodeID: source.NodeID, Epoch: source.Epoch,
+	return s.server.tunnels.AcknowledgeDiscovery(ctx, tunnel.DiscoverySource{ID: source.ID, NodeID: source.NodeID, Epoch: source.Epoch,
 		URL: source.URL, Generation: source.Generation, CredentialRef: source.CredentialRef, CredentialVersion: source.CredentialVersion})
 }

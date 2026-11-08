@@ -1,4 +1,4 @@
-package controlplane
+package tunnel
 
 import (
 	"bytes"
@@ -15,21 +15,21 @@ import (
 	"time"
 )
 
-var errResourceConflict = errors.New("Cloudflare resource ownership conflict")
-var errUnsafeProtection = errors.New("Cloudflare Access protection readback is unsafe")
+var ErrResourceConflict = errors.New("Cloudflare resource ownership conflict")
+var ErrUnsafeProtection = errors.New("Cloudflare Access protection readback is unsafe")
 var errAmbiguousCreate = errors.New("Cloudflare create outcome unknown; waiting for owned resource")
 
-type cloudflareFailure struct {
-	status    int
-	ambiguous bool
+type ProviderError struct {
+	Status    int
+	Ambiguous bool
 }
 
-func (e *cloudflareFailure) Error() string {
-	return fmt.Sprintf("Cloudflare operation failed (status %d)", e.status)
+func (e *ProviderError) Error() string {
+	return fmt.Sprintf("Cloudflare operation failed (status %d)", e.Status)
 }
 
 type cloudflareHTTP struct {
-	params TunnelParams
+	params Config
 	client *http.Client
 	base   string
 }
@@ -67,7 +67,7 @@ func (c *cloudflareHTTP) call(ctx context.Context, method, path string, in, out 
 	req.Header.Set("Content-Type", "application/json")
 	resp, e := c.client.Do(req)
 	if e != nil {
-		return 0, &cloudflareFailure{ambiguous: method != "GET"}
+		return 0, &ProviderError{Ambiguous: method != "GET"}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 && method == http.MethodDelete {
@@ -77,7 +77,7 @@ func (c *cloudflareHTTP) call(ctx context.Context, method, path string, in, out 
 		return 0, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, &cloudflareFailure{status: resp.StatusCode, ambiguous: resp.StatusCode >= 500}
+		return 0, &ProviderError{Status: resp.StatusCode, Ambiguous: resp.StatusCode >= 500}
 	}
 	var envelope struct {
 		Success bool            `json:"success"`
@@ -88,10 +88,10 @@ func (c *cloudflareHTTP) call(ctx context.Context, method, path string, in, out 
 	}
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4<<20+1))
 	if e != nil || len(b) > 4<<20 || json.Unmarshal(b, &envelope) != nil || !envelope.Success {
-		return 0, &cloudflareFailure{status: resp.StatusCode, ambiguous: method != "GET"}
+		return 0, &ProviderError{Status: resp.StatusCode, Ambiguous: method != "GET"}
 	}
 	if out != nil && json.Unmarshal(envelope.Result, out) != nil {
-		return 0, &cloudflareFailure{status: resp.StatusCode, ambiguous: method != "GET"}
+		return 0, &ProviderError{Status: resp.StatusCode, Ambiguous: method != "GET"}
 	}
 	return envelope.Info.TotalPages, nil
 }
@@ -125,13 +125,13 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 	if r.ID != "" {
 		var o cfObject
 		_, e := c.call(ctx, "GET", c.resourcePath(r)+"/"+url.PathEscape(r.ID), nil, &o)
-		var failure *cloudflareFailure
-		missing := errors.As(e, &failure) && failure.status == 404
+		var failure *ProviderError
+		missing := errors.As(e, &failure) && failure.Status == 404
 		if e != nil && !missing {
 			return nil, e
 		}
 		if !missing && (!resourceOwned(r, o) || o.ID != r.ID) {
-			return nil, errResourceConflict
+			return nil, ErrResourceConflict
 		}
 		if !missing && (r.Kind != "tunnel" || o.DeletedAt == nil || o.DeletedAt.IsZero()) {
 			v := observedResource(r, o)
@@ -160,8 +160,8 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 		var objects []cfObject
 		pages, e := c.call(ctx, "GET", c.resourcePath(r)+"?"+q.Encode(), nil, &objects)
 		if e != nil {
-			var failure *cloudflareFailure
-			if ownedOnly && errors.As(e, &failure) && failure.status == 404 {
+			var failure *ProviderError
+			if ownedOnly && errors.As(e, &failure) && failure.Status == 404 {
 				return nil, nil
 			}
 			return nil, e
@@ -171,11 +171,11 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 			switch r.Kind {
 			case "dns":
 				if !ownedOnly && o.Name == r.Host && !owned {
-					return nil, errResourceConflict
+					return nil, ErrResourceConflict
 				}
 			case "app":
 				if !ownedOnly && o.Domain == r.Host && !owned {
-					return nil, errResourceConflict
+					return nil, ErrResourceConflict
 				}
 			}
 			if owned && o.ID != "" && (selected == nil || o.ID != selected.ID) && (r.Kind != "tunnel" || o.DeletedAt == nil || o.DeletedAt.IsZero()) {
@@ -296,8 +296,8 @@ func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []Ingre
 		return current.Version, nil
 	}
 	if e != nil {
-		var failure *cloudflareFailure
-		if !errors.As(e, &failure) || failure.status != 404 {
+		var failure *ProviderError
+		if !errors.As(e, &failure) || failure.Status != 404 {
 			return 0, e
 		}
 	}
@@ -320,7 +320,7 @@ func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens 
 	}
 	for _, p := range policies {
 		if p.ID != policy.ID {
-			return errResourceConflict
+			return ErrResourceConflict
 		}
 	}
 	include := make([]any, 0, len(tokens))
@@ -343,7 +343,7 @@ func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens 
 		return e
 	}
 	if read.Decision != "non_identity" || len(read.Include) != len(tokens) {
-		return errUnsafeProtection
+		return ErrUnsafeProtection
 	}
 	seen := map[string]bool{}
 	for _, v := range read.Include {
@@ -351,7 +351,7 @@ func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens 
 	}
 	for _, id := range tokens {
 		if !seen[id] {
-			return errUnsafeProtection
+			return ErrUnsafeProtection
 		}
 	}
 	return nil

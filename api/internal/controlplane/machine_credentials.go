@@ -12,8 +12,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 	"uuid"
+
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
 func (s *Server) enrollmentToken(m Machine) string {
@@ -146,7 +147,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	if !s.params.CloudflareEnabled || s.provider == nil || m.CredentialVersion == 0 {
+	if !s.params.CloudflareEnabled || !s.tunnels.Enabled() || m.CredentialVersion == 0 {
 		fail(w, 403, "connector delivery is not enabled for this enrollment")
 		return
 	}
@@ -155,7 +156,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	safe, e := s.secureRuntime(r.Context(), m)
+	safe, e := s.tunnels.SecureRuntime(r.Context(), tunnelMachine(m))
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -164,7 +165,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "secure configuration is not applied")
 		return
 	}
-	token, e := s.providerFor(state).ConnectorToken(r.Context(), state.TunnelID)
+	token, e := s.tunnels.ConnectorToken(r.Context(), state)
 	if e != nil {
 		fail(w, 503, "connector credential temporarily unavailable")
 		return
@@ -191,7 +192,7 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "legacy credentials authorize configuration only; refresh over HTTPS")
 		return
 	}
-	var report MachineReport
+	var report tunnel.MachineReport
 	if e = machineInput(r, &report); e != nil {
 		s.respondError(w, e)
 		return
@@ -241,11 +242,6 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 200, map[string]string{"status": "accepted"})
 }
-func (s *Server) secureRuntime(ctx context.Context, m Machine) (bool, error) {
-	var yes bool
-	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id AND m.enrollment_epoch=r.epoch WHERE r.node_id=$1 AND r.epoch=$2 AND component='runtime' AND r.credential_version=$3 AND m.credential_version=$3 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$4))`, m.NodeID, m.Epoch, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
-	return yes, e
-}
 func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), true)
 	if e != nil {
@@ -283,15 +279,4 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) RetireMachine(ctx context.Context, node string) error {
 	_, e := s.db.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1`, node)
 	return e
-}
-
-func (s *Server) report(ctx context.Context, m Machine, component string) (MachineReport, time.Time, error) {
-	var b []byte
-	var at time.Time
-	var v MachineReport
-	e := s.db.QueryRowContext(ctx, `SELECT report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND epoch=$2 AND component=$3 AND credential_version=$4`, m.NodeID, m.Epoch, component, m.CredentialVersion).Scan(&b, &at)
-	if e == nil {
-		e = json.Unmarshal(b, &v)
-	}
-	return v, at, e
 }

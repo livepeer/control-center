@@ -1,11 +1,10 @@
-package controlplane
+package tunnel
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,31 +14,13 @@ import (
 
 var errTunnelFenced = errors.New("tunnel lease or generation superseded")
 
-func (s *Server) ConfigureTunnels() error {
-	if !s.params.CloudflareEnabled {
-		return nil
-	}
-	if e := s.params.TunnelParams.validate(s.params.PublicAPIURL); e != nil {
-		return e
-	}
-	if s.params.CloudflareAPIToken == "" {
-		return errors.New("Cloudflare provisioning credential is required")
-	}
-	keys, e := parseAccessKeyring(s.params.CloudflareKeyring)
-	if e != nil {
-		return e
-	}
-	s.keys = keys
-	s.provider = &cloudflareHTTP{params: s.params.TunnelParams, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: "https://api.cloudflare.com/client/v4"}
-	return nil
-}
-func (s *Server) loadTunnel(ctx context.Context, node, epoch string) (RoutingState, int64, error) {
+func (s *Manager) Load(ctx context.Context, node, epoch string) (RoutingState, int64, error) {
 	var b []byte
 	var rev int64
 	var state RoutingState
 	e := s.db.QueryRowContext(ctx, `SELECT state,revision FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch=$2`, node, epoch).Scan(&b, &rev)
 	if errors.Is(e, sql.ErrNoRows) {
-		return state, 0, problem(409, "tunnel_pending", "Tunnel is not provisioned.")
+		return state, 0, ErrPending
 	}
 	if e == nil {
 		e = json.Unmarshal(b, &state)
@@ -48,7 +29,7 @@ func (s *Server) loadTunnel(ctx context.Context, node, epoch string) (RoutingSta
 }
 
 type tunnelLease struct {
-	s        *Server
+	s        *Manager
 	m        Machine
 	id       string
 	revision int64
@@ -56,8 +37,8 @@ type tunnelLease struct {
 	provider TunnelProvider
 }
 
-func (s *Server) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, error) {
-	initial := routingFor(m.NodeID, s.params.CloudflareBaseDomain)
+func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, error) {
+	initial := RoutingFor(m.NodeID, s.params.CloudflareBaseDomain)
 	if m.Terminal {
 		initial.Lifecycle = "removed"
 	}
@@ -93,7 +74,7 @@ func (s *Server) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, erro
 	return l, e
 }
 
-func (s *Server) providerFor(state RoutingState) TunnelProvider {
+func (s *Manager) providerFor(state RoutingState) TunnelProvider {
 	if cf, ok := s.provider.(*cloudflareHTTP); ok && state.AccountID != "" {
 		copy := *cf
 		copy.params.CloudflareAccountID = state.AccountID
@@ -135,7 +116,7 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 			}
 		}
 		if len(candidates) > 1 {
-			return r, errResourceConflict
+			return r, ErrResourceConflict
 		}
 		if len(candidates) == 1 {
 			oldKey := candidates[0]
@@ -159,7 +140,7 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 		exists = false
 	}
 	if exists && r.Absent {
-		return r, errResourceConflict
+		return r, ErrResourceConflict
 	}
 	if !exists {
 		operation := max(r.OperationVersion, 1)
@@ -197,7 +178,7 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 		}
 		if bound != "" {
 			if r.ID != "" && r.ID != bound {
-				return r, errResourceConflict
+				return r, ErrResourceConflict
 			}
 			r.ID = bound
 		} else {
@@ -267,8 +248,8 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	}
 	created, credential, expiry, e := l.provider.Create(ctx, r, r.CreationTarget)
 	if e != nil {
-		var failure *cloudflareFailure
-		if errors.As(e, &failure) && !failure.ambiguous {
+		var failure *ProviderError
+		if errors.As(e, &failure) && !failure.Ambiguous {
 			r.Pending = false
 			l.state.Resources[key] = r
 			_ = l.save(ctx)
@@ -294,9 +275,9 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	return created, nil
 }
 
-// DiscoverySources and ResolveAccessCredential are the #115/#116 internal
+// DiscoverySources and ResolveAccessCredential are internal discovery
 // interfaces. No browser or machine endpoint exposes Collector credentials.
-func (s *Server) DiscoverySources(ctx context.Context) ([]DiscoverySource, error) {
+func (s *Manager) DiscoverySources(ctx context.Context) ([]DiscoverySource, error) {
 	rows, e := s.db.QueryContext(ctx, `SELECT node_id,epoch::text,state FROM lpcc.machine_tunnels ORDER BY node_id,epoch`)
 	if e != nil {
 		return nil, e
@@ -328,7 +309,7 @@ func (s *Server) DiscoverySources(ctx context.Context) ([]DiscoverySource, error
 	}
 	return sources, rows.Err()
 }
-func (s *Server) ResolveAccessCredential(ctx context.Context, ref string) (AccessCredential, error) {
+func (s *Manager) ResolveAccessCredential(ctx context.Context, ref string) (AccessCredential, error) {
 	var empty AccessCredential
 	parts := strings.Split(ref, "/")
 	if len(parts) != 4 || parts[0] != "access" || s.keys == nil {
@@ -346,8 +327,8 @@ func (s *Server) ResolveAccessCredential(ctx context.Context, ref string) (Acces
 	}
 	return s.keys.open(key, ref, b)
 }
-func (s *Server) AcknowledgeDiscovery(ctx context.Context, source DiscoverySource) error {
-	r, _, e := s.loadTunnel(ctx, source.NodeID, source.Epoch)
+func (s *Manager) AcknowledgeDiscovery(ctx context.Context, source DiscoverySource) error {
+	r, _, e := s.Load(ctx, source.NodeID, source.Epoch)
 	if e != nil {
 		return e
 	}
@@ -364,7 +345,7 @@ func (s *Server) AcknowledgeDiscovery(ctx context.Context, source DiscoverySourc
 	}
 	return nil
 }
-func (s *Server) ReencryptAccessCredentials(ctx context.Context) error {
+func (s *Manager) ReencryptAccessCredentials(ctx context.Context) error {
 	rows, e := s.db.QueryContext(ctx, `SELECT node_id,epoch::text,version,key_id,ciphertext FROM lpcc.access_credentials WHERE key_id<>$1`, s.keys.current)
 	if e != nil {
 		return e
@@ -403,4 +384,20 @@ func (s *Server) ReencryptAccessCredentials(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Manager) SecureRuntime(ctx context.Context, m Machine) (bool, error) {
+	var yes bool
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id AND m.enrollment_epoch=r.epoch WHERE r.node_id=$1 AND r.epoch=$2 AND component='runtime' AND r.credential_version=$3 AND m.credential_version=$3 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$4))`, m.NodeID, m.Epoch, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
+	return yes, e
+}
+func (s *Manager) report(ctx context.Context, m Machine, component string) (MachineReport, time.Time, error) {
+	var b []byte
+	var at time.Time
+	var v MachineReport
+	e := s.db.QueryRowContext(ctx, `SELECT report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND epoch=$2 AND component=$3 AND credential_version=$4`, m.NodeID, m.Epoch, component, m.CredentialVersion).Scan(&b, &at)
+	if e == nil {
+		e = json.Unmarshal(b, &v)
+	}
+	return v, at, e
 }

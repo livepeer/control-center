@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+
+	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
 func routeEnabled(m Machine) bool {
 	return !m.Terminal && m.Routing != nil && m.Routing.IngressDigest != "" && (m.Routing.Lifecycle == "active" || m.Routing.Lifecycle == "draining")
 }
 func templateValues(m Machine) *strings.Replacer {
-	service, proxy := privateOrchestrator, ""
+	service, proxy := tunnel.PrivateOrchestrator, ""
 	if routeEnabled(m) {
 		service = m.Routing.ServiceURL
 		proxy = m.Routing.ProxyURLTemplate
@@ -66,8 +68,8 @@ type runtimeDesired struct {
 }
 
 func desiredRuntime(m Machine) runtimeDesired {
-	d := runtimeDesired{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: orchestratorDigest(m), ServiceURL: privateOrchestrator, APIURL: m.ControlAPIURL}
-	d.RunnerServiceURL = privateOrchestrator
+	d := runtimeDesired{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: orchestratorDigest(m), ServiceURL: tunnel.PrivateOrchestrator, APIURL: m.ControlAPIURL}
+	d.RunnerServiceURL = tunnel.PrivateOrchestrator
 	if m.Routing != nil {
 		d.Generation = m.Routing.Generation
 		d.DrainRequested = m.Routing.DrainRequested
@@ -108,7 +110,7 @@ func addRoutingBundle(files map[string][]byte, m Machine) error {
 	if !routeEnabled(m) {
 		return nil
 	}
-	if m.TunnelConfig == nil || !imageDigestPattern.MatchString(m.TunnelConfig.CloudflareConnectorImage) {
+	if m.TunnelConfig == nil || !tunnel.ValidConnectorImage(m.TunnelConfig.CloudflareConnectorImage) {
 		return fmt.Errorf("connector image is not pinned")
 	}
 	routingJSON, e := json.MarshalIndent(d, "", "  ")

@@ -1,4 +1,4 @@
-package controlplane
+package tunnel
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 )
 
 func (l *tunnelLease) protectionFailure(ctx context.Context, cause error) error {
-	if !errors.Is(cause, errResourceConflict) && !errors.Is(cause, errUnsafeProtection) {
+	if !errors.Is(cause, ErrResourceConflict) && !errors.Is(cause, ErrUnsafeProtection) {
 		return cause
 	}
 	// Persist restoration intent before I/O, including an ambiguous deny response.
@@ -50,7 +50,7 @@ func (l *tunnelLease) applyAccessPolicies(ctx context.Context, ids []string) (bo
 			}
 		}
 		if !selected {
-			return false, l.protectionFailure(ctx, errResourceConflict)
+			return false, l.protectionFailure(ctx, ErrResourceConflict)
 		}
 		if e = l.removeDuplicates(ctx, r, found); e != nil {
 			return false, e

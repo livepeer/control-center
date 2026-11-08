@@ -1,4 +1,4 @@
-package controlplane
+package tunnel
 
 import (
 	"context"
@@ -16,18 +16,20 @@ import (
 	"time"
 )
 
-func (s *Server) RunTunnels(ctx context.Context) {
+func (s *Manager) Run(ctx context.Context, interval time.Duration, after func()) {
 	if s.provider == nil {
 		return
 	}
 	run := func() {
-		if e := s.reconcileTunnels(ctx); e != nil && ctx.Err() == nil {
+		if e := s.Reconcile(ctx); e != nil && ctx.Err() == nil {
 			s.logger.Error("tunnel reconciliation failed", "reason", "reconcile_failed")
 		}
-		s.requestReconcile()
+		if after != nil {
+			after()
+		}
 	}
 	run()
-	ticker := time.NewTicker(s.params.ConfigReconcileInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -38,21 +40,21 @@ func (s *Server) RunTunnels(ctx context.Context) {
 		}
 	}
 }
-func (s *Server) reconcileTunnels(ctx context.Context) error {
+func (s *Manager) Reconcile(ctx context.Context) error {
 	if s.provider == nil {
 		return nil
 	}
 	if e := s.ReencryptAccessCredentials(ctx); e != nil {
 		return e
 	}
-	rows, e := s.db.QueryContext(ctx, `SELECT e.node_id,e.epoch::text,e.owner_id::text,e.fingerprint,e.hostname,e.install_dir,e.k3s_version,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL OR EXISTS(SELECT FROM lpcc.machines m WHERE m.node_id=e.node_id AND m.enrollment_epoch=e.epoch)`)
+	rows, e := s.db.QueryContext(ctx, `SELECT e.node_id,e.epoch::text,e.install_dir,e.k3s_version,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL OR EXISTS(SELECT FROM lpcc.machines m WHERE m.node_id=e.node_id AND m.enrollment_epoch=e.epoch)`)
 	if e != nil {
 		return e
 	}
 	var machines []Machine
 	for rows.Next() {
 		var m Machine
-		if e = rows.Scan(&m.NodeID, &m.Epoch, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); e != nil {
+		if e = rows.Scan(&m.NodeID, &m.Epoch, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); e != nil {
 			rows.Close()
 			return e
 		}
@@ -72,12 +74,12 @@ func (s *Server) reconcileTunnels(ctx context.Context) error {
 			if m.CredentialVersion == 0 {
 				continue
 			}
-			safe, e = s.secureRuntime(ctx, m)
+			safe, e = s.SecureRuntime(ctx, m)
 			if e != nil {
 				return e
 			}
 			if !safe {
-				state, _, err := s.loadTunnel(ctx, m.NodeID, m.Epoch)
+				state, _, err := s.Load(ctx, m.NodeID, m.Epoch)
 				if err != nil || state.TunnelID == "" && state.Lifecycle != "draining" {
 					continue
 				}
@@ -117,7 +119,7 @@ func (s *Server) reconcileTunnels(ctx context.Context) error {
 			if !safe && !l.m.Terminal {
 				l.state.Reason = "runtime_offline"
 			}
-			if errors.Is(e, errResourceConflict) && safe {
+			if errors.Is(e, ErrResourceConflict) && safe {
 				l.state.Reason = "ownership_conflict"
 			}
 			_ = l.save(pass)
@@ -130,7 +132,7 @@ func (s *Server) reconcileTunnels(ctx context.Context) error {
 	return nil
 }
 func (l *tunnelLease) provision(ctx context.Context) error {
-	p := l.s.params.TunnelParams
+	p := l.s.params
 	existingTunnel := l.state.TunnelID != ""
 	if existingTunnel {
 		if e := l.maintainCredentials(ctx); e != nil {
@@ -138,7 +140,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		}
 	}
 	if l.state.AccountID != p.CloudflareAccountID || l.state.ZoneID != p.CloudflareZoneID || l.state.TeamName != p.CloudflareTeamName {
-		return problem(409, "cloudflare_scope_changed", "Retire the previous provider scope before changing account, zone or team.")
+		return errors.New("retire the previous provider scope before changing account, zone or team")
 	}
 	var predecessor bool
 	if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_tunnels WHERE node_id=$1 AND epoch<>$2 AND COALESCE((state->>'cleanup_complete')::boolean,false)=false)`, l.m.NodeID, l.m.Epoch).Scan(&predecessor); e != nil {
@@ -149,7 +151,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Reason = "predecessor_cleanup_pending"
 		return l.save(ctx)
 	}
-	desired := routingFor(l.m.NodeID, p.CloudflareBaseDomain)
+	desired := RoutingFor(l.m.NodeID, p.CloudflareBaseDomain)
 	if waiting, e := l.stageEndpoints(ctx, desired); e != nil || waiting {
 		return e
 	}
@@ -196,7 +198,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	for _, key := range keys {
 		r := l.state.Resources[key]
 		if r.Kind == "app" && !r.Absent && !strings.HasPrefix(key, prefix) && r.ID != "" && r.Audience != "" {
-			rules = append(rules[:len(rules)-1], IngressRule{Hostname: r.Host, Path: `^/discovery$`, Service: privateOrchestrator, OriginRequest: &OriginRequest{Access: &IngressAccess{Required: true, TeamName: p.CloudflareTeamName, Audience: []string{r.Audience}}}}, IngressRule{Service: "http_status:404"})
+			rules = append(rules[:len(rules)-1], IngressRule{Hostname: r.Host, Path: `^/discovery$`, Service: PrivateOrchestrator, OriginRequest: &OriginRequest{Access: &IngressAccess{Required: true, TeamName: p.CloudflareTeamName, Audience: []string{r.Audience}}}}, IngressRule{Service: "http_status:404"})
 		}
 	}
 	version, e := l.provider.Configure(ctx, tunnel.ID, rules)
@@ -214,13 +216,11 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if waiting, e := l.gateNodeConfiguration(ctx); e != nil || waiting {
 		return e
 	}
-	m := l.m
-	m.Routing = &l.state
 	runtime, at, e := l.s.report(ctx, l.m, "runtime")
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return e
 	}
-	if !runtime.Ready || runtime.Generation != l.state.Generation || runtime.ConfigDigest != orchestratorDigest(m) || time.Since(at) > p.TunnelStatusTTL {
+	if !runtime.Ready || runtime.Generation != l.state.Generation || runtime.ConfigDigest != l.s.rollout.DesiredDigest(l.m, l.state) || time.Since(at) > p.TunnelStatusTTL {
 		l.state.Ready = false
 		return l.save(ctx)
 	}
@@ -439,7 +439,7 @@ func (l *tunnelLease) retireAccessTokens(ctx context.Context, expiredOnly bool) 
 	}
 	return nil
 }
-func (s *Server) activeAccessIDs(ctx context.Context, m Machine) ([]string, error) {
+func (s *Manager) activeAccessIDs(ctx context.Context, m Machine) ([]string, error) {
 	rows, e := s.db.QueryContext(ctx, `SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL AND expires_at>now() ORDER BY version`, m.NodeID, m.Epoch)
 	if e != nil {
 		return nil, e
@@ -472,7 +472,7 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 	}
 	sort.Strings(keys)
 	app := l.state.Resources[prefix+"app"]
-	rules := ingressFor(l.m.NodeID, l.s.params.TunnelParams, app.Audience)
+	rules := ingressFor(l.m.NodeID, l.s.params, app.Audience)
 	version, e := l.provider.Configure(ctx, l.state.TunnelID, rules)
 	if e != nil {
 		return e
@@ -522,8 +522,8 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 		}
 		if present {
 			if _, e := l.provider.Configure(ctx, l.state.TunnelID, []IngressRule{{Service: "http_status:404"}}); e != nil {
-				var f *cloudflareFailure
-				if !errors.As(e, &f) || f.status != 404 {
+				var f *ProviderError
+				if !errors.As(e, &f) || f.Status != 404 {
 					return e
 				}
 			}
@@ -564,14 +564,8 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 	return l.save(ctx)
 }
 
-func (s *Server) verifyEndpoints(ctx context.Context, state RoutingState, credential AccessCredential) error {
+func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, credential AccessCredential) error {
 	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	if s.endpointClient != nil {
-		copy := *s.endpointClient
-		copy.Timeout = 3 * time.Second
-		copy.CheckRedirect = client.CheckRedirect
-		client = &copy
-	}
 	get := func(raw, method string, auth bool) (int, json.RawMessage, error) {
 		req, e := http.NewRequestWithContext(ctx, method, raw, nil)
 		if e != nil {
