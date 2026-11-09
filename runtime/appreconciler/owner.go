@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/transport"
 	runner "github.com/livepeer/golang-runner"
 )
@@ -96,6 +97,9 @@ type Cancellation struct {
 }
 
 func AppOptions(i *Instance, ready bool) (runner.AppOptions, error) {
+	if contract.ReservedProxyID(i.AppID) {
+		return runner.AppOptions{}, errors.New("reserved_app_identity")
+	}
 	d := i.Definition
 	price, err := runner.NewPriceInfo(d.Price.Amount, d.Price.Currency, d.Price.Unit)
 	if err != nil {

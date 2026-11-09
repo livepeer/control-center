@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
@@ -16,8 +17,18 @@ func (s *Server) newTunnelManager(deps tunnel.Dependencies) *tunnel.Manager {
 }
 
 func (s *Server) ConfigureTunnels() error {
+	if err := s.params.validateTunnels(); err != nil {
+		return err
+	}
 	s.tunnels = s.newTunnelManager(tunnel.Dependencies{})
 	return s.tunnels.Configure(s.params.PublicAPIURL)
+}
+
+func (p Params) validateTunnels() error {
+	if p.CloudflareEnabled && !machineconfig.ValidConnectorImage(p.RuntimeImage) {
+		return errors.New("RuntimeImage requires an immutable sha256 digest when CloudflareEnabled")
+	}
+	return p.TunnelParams.Validate(p.PublicAPIURL)
 }
 
 func (s *Server) RunTunnels(ctx context.Context) {

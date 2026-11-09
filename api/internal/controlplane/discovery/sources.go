@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"github.com/livepeer/control-center/runtime/contract"
 	"net/url"
 	"regexp"
 	"sort"
@@ -258,14 +259,14 @@ func publicRunnerURL(source Source, raw string) bool {
 		return false
 	}
 	if u.Host == base.Host && (u.Path == base.Path || strings.HasPrefix(u.Path, strings.TrimRight(base.Path, "/")+"/")) {
-		return true
+		return u.Path != "" && u.Path != "/"
 	}
 	before, after, ok := strings.Cut(source.ProxyURLTemplate, "{proxy}")
 	if !ok || !strings.HasPrefix(raw, before) || !strings.HasSuffix(raw, after) || len(raw) <= len(before)+len(after) {
 		return false
 	}
 	id := raw[len(before) : len(raw)-len(after)]
-	if len(id) > 63 || strings.Contains(id, ".") || !proxyIDPattern.MatchString(id) {
+	if len(id) > 63 || strings.Contains(id, ".") || !proxyIDPattern.MatchString(id) || contract.ReservedProxyID(id) {
 		return false
 	}
 	return true

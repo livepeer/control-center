@@ -32,6 +32,43 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 	legacyDesired := m
 	legacyDesired.BundleFormat = 2
 	legacy := build(legacyDesired)
+	for _, manifest := range [][]byte{files["system/connector/tunnel.yaml"], legacy["management/tunnel.yaml"]} {
+		if len(manifest) == 0 {
+			t.Fatal("missing connector manifest")
+		}
+		var deployment struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Name, Image  string
+							VolumeMounts []any `yaml:"volumeMounts"`
+						}
+					}
+				}
+			}
+		}
+		decoder := yaml.NewDecoder(bytes.NewReader(manifest))
+		found := false
+		for {
+			if err := decoder.Decode(&deployment); err == io.EOF {
+				break
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range deployment.Spec.Template.Spec.Containers {
+				if c.Name == "node-proxy" {
+					found = true
+					if c.Image != m.RuntimeImage || len(c.VolumeMounts) != 0 {
+						t.Fatal("Node proxy needs the Go helper without credential mounts")
+					}
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing Node proxy")
+		}
+	}
 	if strings.Contains(string(files["management/kustomization.yaml"]), "orchestrator.yaml") || files["system/node/orchestrator.yaml"] == nil {
 		t.Fatal("system inventories were not partitioned")
 	}
@@ -84,6 +121,46 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 				if err := os.WriteFile(path, b, 0600); err != nil {
 					t.Fatal(err)
 				}
+			}
+		}
+	}
+}
+
+func TestProxyRoutingFollowsHeldNodeConfiguration(t *testing.T) {
+	for _, format := range []int{2, 3} {
+		m := Desired{Machine: Machine{NodeID: "lp-aaaaaaaaaaaaaaaa", InstallDir: "/opt/livepeer"}, BundleFormat: format, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}}
+		build := func() map[string][]byte {
+			t.Helper()
+			bundle, _, err := Build(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, err := artifact.Read(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return files
+		}
+		prefix, nodeFile, proxyFile := "management/", "orchestrator.yaml", "tunnel.yaml"
+		if format == 3 {
+			prefix, nodeFile, proxyFile = "system/", "node/orchestrator.yaml", "connector/tunnel.yaml"
+		}
+		private := build()
+		m.Exposure = &Exposure{TunnelID: "tunnel", ServiceURL: "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.a.invalid", ProxyURLTemplate: "https://{proxy}.lp-aaaaaaaaaaaaaaaa.a.invalid", IngressDigest: "ingress"}
+		a := build()
+		m.State.HeldOrchestrator = string(a[prefix+nodeFile])
+		m.Exposure.ServiceURL = "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.b.invalid"
+		m.Exposure.ProxyURLTemplate = "https://{proxy}.lp-aaaaaaaaaaaaaaaa.b.invalid"
+		for _, held := range []string{m.State.HeldOrchestrator, string(private[prefix+nodeFile])} {
+			m.State.HeldOrchestrator = held
+			files := build()
+			manifest := string(files[prefix+proxyFile])
+			_, manifest, _ = strings.Cut(manifest, "- name: node-proxy\n")
+			if strings.Contains(manifest, "lp-aaaaaaaaaaaaaaaa.b.invalid") || !strings.Contains(manifest, "--service-url") {
+				t.Fatal("guard advanced beyond held Node configuration", format, manifest)
+			}
+			if strings.Contains(held, "lp-aaaaaaaaaaaaaaaa.a.invalid") && !strings.Contains(manifest, "https://{proxy}.lp-aaaaaaaaaaaaaaaa.a.invalid") {
+				t.Fatal("guard lost held public proxy template", format)
 			}
 		}
 	}

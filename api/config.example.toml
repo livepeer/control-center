@@ -50,6 +50,7 @@ DiscoveryGrants = []
 # CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
 # CloudflareKeyringFile = "secrets/collector-access-keyring.json"
 # CloudflareConnectorImage = "<REGISTRY>/livepeer-tunnel@sha256:<IMAGE_DIGEST>"
+# RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required for managed tunnels
 # RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # format 3; keep the legacy pin during migration
 # CloudflareAccessLifetime = "<TOKEN_LIFETIME>"
 # CloudflareRotateBefore = "<ROTATION_WINDOW>"

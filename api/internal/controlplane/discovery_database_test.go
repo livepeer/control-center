@@ -148,6 +148,13 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 	if strings.Count(request(t, s, "GET", "/discovery", "", nil).Body.String(), `"app":"test"`) != 1 {
 		t.Fatal("machine removal did not withdraw only that source")
 	}
+	// Durable prior approval must not keep unsupported legacy endpoints public,
+	// including before the tunnel worker runs again.
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=state-'endpoint_suffix' WHERE node_id=$1`, b["node_id"])
+	reconcileDiscovery(t, s)
+	if strings.Contains(request(t, s, "GET", "/discovery", "", nil).Body.String(), `"app":"test"`) {
+		t.Fatal("already-approved legacy source remained advertised")
+	}
 	// A process restart begins cold, then discovers from the same managed state.
 	stop()
 	if err := s.ConfigureDiscovery(); err != nil {

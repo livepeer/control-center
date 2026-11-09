@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/nodeproxy"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -89,12 +90,12 @@ func start(ctx context.Context, client transport.Requester, tokenPath, name, uid
 	return err
 }
 
-// Probe reports best effort; only cloudflared's local /ready determines its result.
+// Probe reports best effort; local connector and Node proxy health determine its result.
 func Probe(ctx context.Context, socket, marker string) bool {
-	return probe(ctx, transport.NewLocal(socket), marker, "http://127.0.0.1:20241", processIdentity)
+	return probe(ctx, transport.NewLocal(socket), marker, "http://127.0.0.1:20241", processIdentity, nodeproxy.Ready(ctx))
 }
 
-func probe(ctx context.Context, client transport.Requester, marker, base string, identity func() (string, error)) bool {
+func probe(ctx context.Context, client transport.Requester, marker, base string, identity func() (string, error), proxyReady bool) bool {
 	read := func(path string, limit int64) ([]byte, bool) {
 		requestCtx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
@@ -108,6 +109,7 @@ func probe(ctx context.Context, client transport.Requester, marker, base string,
 		return b, err == nil && int64(len(b)) <= limit && response.StatusCode == http.StatusOK
 	}
 	_, ready := read("/ready", 1024)
+	ready = ready && proxyReady
 	b, configOK := read("/config", 256<<10)
 	var config struct {
 		Version int64 `json:"version"`

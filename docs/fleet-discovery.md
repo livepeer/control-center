@@ -15,8 +15,8 @@ service or Node release.
 3. Set `CloudflareIngressApproved = true` and `DiscoveryEnabled = true` in
    the existing API deployment. Expose public,
    read-only `GET /discovery` through its HTTPS proxy and restrict the API origin.
-   Clients need no source credentials. Grant private destinations with
-   `DiscoveryGrants` only when explicitly required.
+   Reading this aggregate requires no source credentials. Grant private
+   destinations with `DiscoveryGrants` only when explicitly required.
 
 Keep Access credentials, the keyring and provisioning tokens out of bundles,
 ConfigMaps, application environments, browser responses, logs and command flags.

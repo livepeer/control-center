@@ -96,7 +96,7 @@ func (f *recoveryCloudflare) Delete(_ context.Context, r CFResource, _ string) e
 	return nil
 }
 func TestTunnelIngressContract(t *testing.T) {
-	rules := ingressFor("lp-aaaaaaaaaaaaaaaa", Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "aud")
+	rules := ingressFor(RoutingFor("lp-aaaaaaaaaaaaaaaa", "example.invalid", "aaaaaaa").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "aud")
 	match := func(host, path string) IngressRule {
 		for _, r := range rules {
 			hostOK := r.Hostname == "" || r.Hostname == host || strings.HasPrefix(r.Hostname, "*.") && strings.HasSuffix(host, r.Hostname[1:])
@@ -107,8 +107,8 @@ func TestTunnelIngressContract(t *testing.T) {
 		t.Fatal("no catch-all")
 		return IngressRule{}
 	}
-	api := "api-lp-aaaaaaaaaaaaaaaa.example.invalid"
-	app := "proxy.apps-lp-aaaaaaaaaaaaaaaa.example.invalid"
+	api := "api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid"
+	app := "proxy.lp-aaaaaaaaaaaaaaaa.example.invalid"
 	for _, host := range []string{api, app} {
 		for _, path := range []string{"/discovery", "/prefix/discovery", "/runners/heartbeat", "/runner/a/session/b/channels", "/ai/trickle/x/0", "/metrics", "/readyz"} {
 			if match(host, path).Service != "http_status:404" {
@@ -117,11 +117,20 @@ func TestTunnelIngressContract(t *testing.T) {
 		}
 	}
 	for _, path := range []string{"/apps/a/session", "/apps/a/session/b/stop", "/apps/a/session/b/payment", "/refresh-payment", "/apps/a/app/v1/complete", "/apps/a/session/b/app/ws", "/run/abc/media", "/proxy/abc"} {
-		if match(api, path).Service != PrivateOrchestrator {
+		rule := match(api, path)
+		if rule.Service != ConnectorOrigin || rule.OriginRequest == nil || rule.OriginRequest.Access == nil || !rule.OriginRequest.Access.Required || rule.OriginRequest.Access.Audience[0] != "aud" || rule.OriginRequest.HTTPHostHeader != endpointHost(PrivateOrchestrator) {
 			t.Fatalf("missing client path %s", path)
 		}
 	}
-	protected := match("discovery-lp-aaaaaaaaaaaaaaaa.example.invalid", "/discovery")
+	for _, host := range []string{api, "discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", "api.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery.lp-aaaaaaaaaaaaaaaa.example.invalid"} {
+		if match(host, "/unknown").Service != "http_status:404" {
+			t.Fatal("exact hostname fell through to wildcard", host)
+		}
+	}
+	if rule := match(app, "/v1/completions"); rule.Service != ConnectorOrigin || rule.OriginRequest != nil {
+		t.Fatal("proxy Host was not preserved")
+	}
+	protected := match("discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", "/discovery")
 	if protected.OriginRequest == nil || !protected.OriginRequest.Access.Required || protected.OriginRequest.Access.Audience[0] != "aud" {
 		t.Fatal("discovery not audience protected")
 	}
@@ -129,7 +138,7 @@ func TestTunnelIngressContract(t *testing.T) {
 		t.Fatal("alias bypass")
 	}
 	for _, r := range rules {
-		if r.Service != PrivateOrchestrator && !strings.HasPrefix(r.Service, "http_status:") {
+		if r.Service != ConnectorOrigin && !strings.HasPrefix(r.Service, "http_status:") {
 			t.Fatal("direct app ingress")
 		}
 	}

@@ -371,6 +371,8 @@ func TestPendingTargetWithoutStoredHoldKeepsAppliedWorkload(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
 	initial := readyTunnel(t, s, c)
 	m, prior := priorMachineConfiguration(t, s, c, &initial)
+	// Reconstruct a pre-certificate history for the older rollout migration.
+	execSQL(t, s.db, `DELETE FROM lpcc.machine_certificate_refs; DELETE FROM lpcc.machine_certificates`)
 	files, err := fs.Sub(MigrationFiles, "migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -618,6 +620,8 @@ func TestRetirementReasonSurvivesOldDrainReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This fixture reconstructs the historical rollout schema, without owned certificates.
+	execSQL(t, s.db, `DELETE FROM lpcc.machine_certificate_refs; DELETE FROM lpcc.machine_certificates`)
 	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
 		if err = migrations.Down(t.Context(), s.db, files); err != nil {
 			t.Fatal(err)

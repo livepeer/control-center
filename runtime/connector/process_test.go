@@ -93,15 +93,25 @@ func TestProbeReadinessDoesNotDependOnConfigOrSocketDelivery(t *testing.T) {
 		return nil, nil, ctx.Err()
 	})
 	start := time.Now()
-	if !probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("e", 64), nil }) || !delivered {
+	if !probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("e", 64), nil }, true) || !delivered {
 		t.Fatal("report outage changed local readiness")
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("reporting consumed readiness deadline")
 	}
 	delivered = false
-	if !probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("f", 64), nil }) || delivered {
+	if !probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("f", 64), nil }, true) || delivered {
 		t.Fatal("replacement PID 1 reused its predecessor's marker or lost local readiness")
+	}
+	client = requestFunc(func(_ context.Context, _ string, value any, _ int64) ([]byte, http.Header, error) {
+		delivered = true
+		if value.(Observation).Ready {
+			t.Fatal("unavailable Node proxy reported ready")
+		}
+		return nil, nil, nil
+	})
+	if probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("e", 64), nil }, false) || !delivered {
+		t.Fatal("Node proxy readiness was not enforced and reported")
 	}
 }
 

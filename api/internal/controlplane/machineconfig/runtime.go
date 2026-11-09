@@ -8,6 +8,8 @@ import (
 	"github.com/livepeer/control-center/runtime/contract"
 	"regexp"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 func routeEnabled(m Desired) bool {
@@ -147,11 +149,18 @@ func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !ValidConnectorImage(m.Connector.Image) {
 		return fmt.Errorf("connector image is not pinned")
 	}
+	if !ValidConnectorImage(m.RuntimeImage) {
+		return fmt.Errorf("Node proxy Runtime image is not pinned")
+	}
 	routingJSON, e := json.MarshalIndent(d, "", "  ")
 	if e != nil {
 		return e
 	}
-	files["tunnel.yaml"] = []byte(tunnelManifest(m, string(routingJSON)))
+	var node struct{ ServiceURL, ProxyURLTemplate string }
+	if _, err := toml.Decode(orchestratorConfiguration(m), &node); err != nil || node.ServiceURL == "" {
+		return fmt.Errorf("invalid effective Node routing configuration")
+	}
+	files["tunnel.yaml"] = []byte(tunnelManifest(m, string(routingJSON), nodeProxyContainer(m, node.ServiceURL, node.ProxyURLTemplate)))
 	files["tunnel-network.yaml"] = []byte(tunnelNetwork(m))
 	files["kustomization.yaml"] = []byte(strings.Replace(string(files["kustomization.yaml"]), "- orchestrator.yaml", "- orchestrator.yaml\n- tunnel.yaml\n- tunnel-network.yaml", 1))
 	return nil

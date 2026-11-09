@@ -35,6 +35,22 @@ func (l *tunnelLease) protectPolicy(ctx context.Context, r CFResource, ids []str
 
 func (l *tunnelLease) applyAccessPolicies(ctx context.Context, ids []string) (bool, error) {
 	protected := false
+	for _, app := range l.state.Resources {
+		if app.Kind != "app" || app.ID == "" || app.Absent {
+			continue
+		}
+		found, err := l.provider.Find(ctx, app)
+		if err != nil {
+			return false, l.protectionFailure(ctx, err)
+		}
+		present := false
+		for _, candidate := range found {
+			present = present || candidate.ID == app.ID
+		}
+		if !present {
+			return false, l.protectionFailure(ctx, ErrUnsafeProtection)
+		}
+	}
 	for _, r := range l.state.Resources {
 		if r.Kind != "policy" || r.ID == "" || r.Absent {
 			continue

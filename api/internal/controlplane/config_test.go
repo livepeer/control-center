@@ -24,6 +24,20 @@ func TestOpenDBRejectsPlaintextRoutes(t *testing.T) {
 	}
 }
 
+func TestTunnelStartupRequiresRuntimeImage(t *testing.T) {
+	for _, image := range []string{"", "registry.invalid/runtime:latest"} {
+		p := testParams()
+		p.CloudflareEnabled = true
+		p.RuntimeImage = image
+		if p.PreValidate() == nil {
+			t.Fatal("startup accepted managed tunnels without a Runtime pin")
+		}
+		if err := New(nil, p, nil).ConfigureTunnels(); err == nil || !strings.Contains(err.Error(), "RuntimeImage") {
+			t.Fatal("provisioning configured without a Runtime pin", err)
+		}
+	}
+}
+
 func TestTOMLConfig(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

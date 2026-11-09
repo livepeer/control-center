@@ -23,19 +23,21 @@ import (
 )
 
 type simulatedCloudflare struct {
-	mu             sync.Mutex
-	resources      map[string]tunnel.CFResource
-	configurations map[string][]tunnel.IngressRule
-	versions       map[string]int64
-	tokens         map[string]string
-	creates        map[string]int
-	lostKind       string
-	disconnected   int
-	policies       map[string][]string
+	certificatePacks  map[string]tunnel.CertificatePack
+	certificateStatus string
+	mu                sync.Mutex
+	resources         map[string]tunnel.CFResource
+	configurations    map[string][]tunnel.IngressRule
+	versions          map[string]int64
+	tokens            map[string]string
+	creates           map[string]int
+	lostKind          string
+	disconnected      int
+	policies          map[string][]string
 }
 
 func newSimulatedCloudflare() *simulatedCloudflare {
-	return &simulatedCloudflare{resources: map[string]tunnel.CFResource{}, configurations: map[string][]tunnel.IngressRule{}, versions: map[string]int64{}, tokens: map[string]string{}, creates: map[string]int{}, policies: map[string][]string{}}
+	return &simulatedCloudflare{certificatePacks: map[string]tunnel.CertificatePack{}, resources: map[string]tunnel.CFResource{}, configurations: map[string][]tunnel.IngressRule{}, versions: map[string]int64{}, tokens: map[string]string{}, creates: map[string]int{}, policies: map[string][]string{}}
 }
 func (f *simulatedCloudflare) Find(_ context.Context, r tunnel.CFResource) ([]tunnel.CFResource, error) {
 	return f.find(r, false)
@@ -162,6 +164,7 @@ func tunnelTestServer(t *testing.T) (*Server, *simulatedCloudflare) {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareTeamName: "test-team", CloudflareAPIToken: "backend-provisioning-only", CloudflareKeyring: `{"current":"one","keys":{"one":"` + key + `"}}`, CloudflareConnectorImage: "registry.example.invalid/connector@sha256:" + strings.Repeat("c", 64), CloudflareAccessLifetime: 24 * time.Hour, CloudflareRotateBefore: 6 * time.Hour, TunnelStatusTTL: 5 * time.Minute, TunnelDrainTimeout: time.Minute}
 	s.params.TunnelNodeAddresses = []string{"198.51.100.10/32"}
+	s.params.RuntimeImage = "registry.example.invalid/runtime@sha256:" + strings.Repeat("d", 64)
 	if e := s.ConfigureTunnels(); e != nil {
 		t.Fatal(e)
 	}
@@ -452,7 +455,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	stateBefore := tunnel.RoutingFor(m.NodeID, s.params.CloudflareBaseDomain)
+	stateBefore := tunnel.RoutingFor(m.NodeID, s.params.CloudflareBaseDomain, "aaaaaaa")
 	stateBefore.IngressDigest = "configured-before-drain-intent"
 	raw, _ := json.Marshal(stateBefore.RoutingState)
 	rollout, _ := json.Marshal(stateBefore.State)

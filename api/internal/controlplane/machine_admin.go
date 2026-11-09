@@ -110,6 +110,9 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 		if lifecycle != "active" {
 			return AdminChange{}, problem(409, "tunnel_inactive", "Tunnel is not active.")
 		}
+		if state.EndpointSuffix == "" {
+			return AdminChange{}, problem(409, "legacy_endpoints_require_retirement", "Retire this legacy enrollment before rotating its tunnel credentials.")
+		}
 		previous := string(b)
 		if in.Kind == "connector" {
 			state.RotateTunnel = true

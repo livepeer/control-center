@@ -27,7 +27,7 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			old := tunnel.RoutingFor(m.NodeID, "example.invalid")
+			old := tunnel.RoutingFor(m.NodeID, "example.invalid", "aaaaaaa")
 			raw, _ := json.Marshal(old.RoutingState)
 			rollout, _ := json.Marshal(old.State)
 			execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,epoch,state,rollout) VALUES($1,$2,$3,$4)`, m.NodeID, m.Epoch, string(raw), string(rollout))
@@ -215,9 +215,16 @@ func TestEndpointFailurePreservesConnectorAndRollbackReusesOwnership(t *testing.
 	testTunnelDeps(s).Provider = &appCreateFailure{f}
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
+	driveTunnels(t, s)
+	if _, exists := f.certificatePacks[initial.CertificatePackID]; !exists {
+		t.Fatal("failed replacement deleted predecessor certificate coverage")
+	}
 	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
 	bundle := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
 	files := archiveFiles(t, bundle.Body.Bytes())
+	if !strings.Contains(files["tunnel.yaml"], initial.ProxyURLTemplate) || !strings.Contains(files["tunnel.yaml"], initial.ServiceURL) {
+		t.Fatal("failed replacement advanced guard beyond held Node routing")
+	}
 	if state.IngressDigest != initial.IngressDigest || files["tunnel.yaml"] == "" || files["tunnel-network.yaml"] == "" {
 		t.Fatal("failed replacement pruned last connector", state, files["kustomization.yaml"])
 	}

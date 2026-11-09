@@ -505,7 +505,7 @@ func TestFleetPublicURLBoundary(t *testing.T) {
 	for _, test := range []struct {
 		url   string
 		valid bool
-	}{{"https://orch.example/apps/a/session", true}, {"https://a.apps.example", true}, {"http://10.0.0.1/app", false}, {"https://other.example/app", false}, {"https://user:token@orch.example/app", false}, {"https://orch.example/app?token=secret", false}, {"https://a.b.apps.example", false}} {
+	}{{"https://orch.example/apps/a/session", true}, {"https://a.apps.example", true}, {"http://10.0.0.1/app", false}, {"https://other.example/app", false}, {"https://user:token@orch.example/app", false}, {"https://orch.example/app?token=secret", false}, {"https://a.b.apps.example", false}, {"https://api.apps.example", false}, {"https://api-aaaaaaa.apps.example", false}, {"https://discovery.apps.example", false}, {"https://discovery-aaaaaaa.apps.example", false}, {"https://orch.example", false}} {
 		entry := shared.Entry[runner]{Address: source.ServiceURL, Runners: []runner{{URL: test.url}}}
 		if publicEntry(source, entry) != test.valid {
 			t.Error("wrong publication decision", test.url)

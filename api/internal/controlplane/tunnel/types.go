@@ -10,6 +10,9 @@ import (
 // reconciler renders it. A source generation changes when its URL or credential
 // reference changes; transport health alone does not replace a Collector source.
 type RoutingState struct {
+	EndpointSuffix       string                `json:"endpoint_suffix"`
+	CertificatePackID    string                `json:"certificate_pack_id,omitempty"`
+	CertificateStatus    string                `json:"certificate_status,omitempty"`
 	EndpointGeneration   int64                 `json:"endpoint_generation"`
 	AccountID            string                `json:"account_id"`
 	ZoneID               string                `json:"zone_id"`
@@ -49,6 +52,7 @@ type CFResource struct {
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
 	Host              string    `json:"host,omitempty"`
+	Hosts             []string  `json:"hosts,omitempty"`
 	Pending           bool      `json:"pending,omitempty"`
 	Audience          string    `json:"audience,omitempty"`
 	Target            string    `json:"target,omitempty"`
@@ -91,6 +95,7 @@ type DiscoverySource struct {
 // TunnelProvider is injectable: tests use simulated services, never an account.
 // Implementations must bound responses and must not return provider error bodies.
 type TunnelProvider interface {
+	CertificateProvider
 	Find(context.Context, CFResource) ([]CFResource, error)
 	FindOwned(context.Context, CFResource) ([]CFResource, error)
 	Create(context.Context, CFResource, string) (CFResource, *AccessCredential, time.Time, error)

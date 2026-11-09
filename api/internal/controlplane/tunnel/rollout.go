@@ -27,13 +27,6 @@ func (l *tunnelLease) gateNodeConfiguration(ctx context.Context) (bool, error) {
 }
 
 func (l *tunnelLease) stageEndpoints(ctx context.Context, desired Snapshot) (bool, error) {
-	if l.state.Target != "" && l.state.Target != desired.ServiceURL {
-		l.state.State.CancelTarget()
-		l.state.Ready = false
-		if err := l.save(ctx); err != nil {
-			return false, err
-		}
-	}
 	if desired.ServiceURL == l.state.ServiceURL {
 		return false, nil
 	}

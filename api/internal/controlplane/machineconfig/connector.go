@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-func tunnelManifest(m Desired, routing string) string {
+func tunnelManifest(m Desired, routing, proxyContainer string) string {
 	if m.BundleFormat >= 3 {
-		return managedTunnelManifest(m)
+		return managedTunnelManifest(m, proxyContainer)
 	}
 	image := m.Connector.Image
 	return fmt.Sprintf(`apiVersion: v1
@@ -78,11 +78,12 @@ spec:
           capabilities: {drop: [ALL]}
         readinessProbe:
           exec:
-            command: [python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:20241/ready',timeout=2)"]
+            command: [python3, -c, "import urllib.request; [urllib.request.urlopen(u,timeout=1) for u in ['http://127.0.0.1:20241/ready','http://127.0.0.1:8935/readyz']]"]
+          timeoutSeconds: 5
         volumeMounts:
         - {name: socket, mountPath: /broker, readOnly: true}
         - {name: token, mountPath: /run/tunnel}
-      volumes:
+%s      volumes:
       - name: config
         configMap: {name: livepeer-tunnel}
       - name: machine
@@ -91,7 +92,26 @@ spec:
         emptyDir: {medium: Memory, sizeLimit: 1Mi}
       - name: token
         emptyDir: {medium: Memory, sizeLimit: 1Mi}
-`, strings.ReplaceAll(routing, "\n", "\n    "), m.Exposure.CredentialGeneration, image, image, image)
+`, strings.ReplaceAll(routing, "\n", "\n    "), m.Exposure.CredentialGeneration, image, image, image, proxyContainer)
+}
+
+func nodeProxyContainer(m Desired, serviceURL, template string) string {
+	return fmt.Sprintf(`      - name: node-proxy
+        image: '%s'
+        command: [/usr/local/bin/livepeer-runtime, node-proxy]
+        args: [--service-url, %q, --proxy-url-template, %q]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 64Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        readinessProbe:
+          exec:
+            command: [/usr/local/bin/livepeer-runtime, node-proxy-probe]
+          timeoutSeconds: 2
+`, m.RuntimeImage, serviceURL, template)
 }
 func tunnelNetwork(m Desired) string {
 	v4 := []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4"}

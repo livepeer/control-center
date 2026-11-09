@@ -2,7 +2,8 @@
 
 Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime
 runs the connector; Node routes application traffic to private workloads.
-Discovery uses a separate hostname protected by Cloudflare Access.
+API and discovery use separate hostnames protected by one Cloudflare Access
+application.
 
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
@@ -19,11 +20,10 @@ network policy assumes Runtime's fixed Pod/Service ranges. Verify actual
 CNI/DNAT behavior; update exclusions before introducing any new network ranges
 or node addresses. Management connectivity remains #95's responsibility.
 
-Cloudflare issues and renews certificates. Infrastructure must supply coverage
-for API, discovery and one-label generated proxy hosts under each machine's
-wildcard. Control Center creates no certificate resources. An ordinary zone
-wildcard does not necessarily cover this deeper app namespace; review
-[Universal SSL coverage](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/).
+Control Center orders an Advanced certificate for the zone apex and each machine's
+wildcard; Cloudflare handles validation and renewal. Enable Advanced Certificate
+Manager on an authoritative Cloudflare zone, allow certificate quota headroom, and
+grant the provisioning token zone-scoped SSL and Certificates Write permission.
 
 Configure `api/config.example.toml` using operator-selected values. Both feature
 flags default false. `CloudflareEnabled` permits provisioning and external
@@ -42,8 +42,9 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
   -t <REGISTRY>/livepeer-tunnel:<RELEASE> runtime/services
 ```
 
-The image downloads cloudflared 2026.10.7 and verifies the upstream artifact's
-SHA256 and copies the helper from the pinned Go Runtime image. Set
+The image verifies the SHA256 of cloudflared 2026.10.7 and copies the helper from
+the pinned Go Runtime image. Both connector formats use that Runtime image for
+the credential-free loopback proxy sidecar. Set
 `RuntimeConnectorImage` to its published digest before enabling managed ingress
 on format 3. `CloudflareConnectorImage` remains the legacy format 1/2 image. Startup disables
 automatic updates and enables path normalization. Changing the selected image
@@ -53,9 +54,9 @@ replaces the connector Deployment.
 
 | Class | Delivery / storage | Consumers |
 | --- | --- | --- |
-| Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel/Access and zone DNS write permissions | Control Center only |
+| Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel/Access and zone DNS/certificate write permissions | Control Center only |
 | Machine Tunnel token | Provider API → authenticated Control Center endpoint → management agent's scoped Unix socket → private tmpfs file mode 0600 | cloudflared process only |
-| Collector Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Authorized #115/#116 integration only |
+| API/discovery Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Authorized backend API callers and discovery Collector |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
 the `flux-system/livepeer-service-auth` Secret. In format 3, only the management
@@ -111,8 +112,9 @@ terminal artifact and acknowledge its epoch and digest.
 
 Reports merge independently and use server receipt time. The agent checks Node's
 applied revision, completed rollout/config digest, metrics `/readyz`, private
-discovery address and installed K3s version. Connector reports use a fresh local
-probe, the observed configuration version and an incarnation-bound token grant.
+discovery address and installed K3s version. Format 3 connector reports use a fresh
+local probe of cloudflared and the proxy, the observed configuration version and
+an incarnation-bound token grant.
 Probe reporting is best effort within its five-second deadline; missing evidence
 expires without restarting cloudflared. Source readiness expires with
 `TunnelStatusTTL`; an offline source remains available
@@ -124,8 +126,8 @@ Retirement is recorded even when machine deletion cascades from Supabase Auth.
 Enrollment commits a private-only bundle without contacting Cloudflare. Existing
 private Node workloads remain in place during additive upgrades until the
 controlled routing rollout. The worker creates or recovers a tunnel, source
-token, hostname-wide Access application and Service Auth-only policy. It installs audience-validating
-ingress before publishing routing. Managed Node configuration changes publish a drain
+token, an Access application covering both hostnames and a Service Auth-only
+policy. It installs audience-validating ingress before publishing routing. Managed Node configuration changes publish a drain
 intent while retaining the previous workload. A fresh matching Runtime #113/#94 drain report
 releases the replacement; an expired deadline blocks and requires intervention.
 Token-generation changes replace the connector; remote-only ingress changes do
@@ -134,10 +136,15 @@ Private machines outside managed rollout retain their existing update behavior
 while provisioning is disabled. Cancelling an endpoint change releases its drain;
 retrying the same unfinished target preserves the original deadline.
 
-After Runtime readiness, three proxied CNAMEs point at the tunnel UUID: API,
-discovery and wildcard apps. TLS, authenticated discovery, unauthenticated
-rejection and public-path probes must succeed for each endpoint generation.
-The actual Host is preserved (`httpHostHeader` stays unset). Paths are matched
+After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
+`api-<suffix>.<node>.<domain>`, `discovery-<suffix>.<node>.<domain>` and `*.<node>.<domain>`.
+The shared random base32 suffix is persisted per enrollment. API and discovery
+share Access service credentials. TLS, authenticated API/discovery,
+unauthenticated rejection and authenticated isolation probes must succeed for each
+endpoint generation. API/discovery forwarding sets Host to the private orchestrator;
+wildcard application forwarding preserves the actual Host.
+The loopback proxy rejects malformed, port-bearing, nested or reserved application
+Hosts and removes Access headers and cookies before requests reach Node. Paths are matched
 independently of HTTP method; Node enforces endpoint methods. The allowlist is
 reservation, client session stop/payment, payment refresh, application paths,
 `/run` and `/proxy`. Reserved discovery, runner/control, metrics, health and
@@ -161,8 +168,8 @@ Confirmed unsafe Access protection disables routes until verified protection is 
 A rollback uses a new
 generation and the prior restrictive settings; it never restores a revoked
 credential. Account/zone/team changes require retiring the previous scope first.
-Retain migration 004 and its enrollment/resource ledger during software rollback;
-never run its down migration while owned resources or terminal delivery remain.
+Retain migrations 004 and 008 and their enrollment/resource/certificate ledgers during software rollback;
+never run their down migrations while owned resources or terminal delivery remain.
 An older API that understands only legacy HMAC credentials cannot serve modern
 enrollments; rollback to a compatible release rather than changing their verifier.
 Domain replacements drain and retain predecessor discovery protection until

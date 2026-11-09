@@ -137,7 +137,7 @@ func (c *Controller) observe(o Observation) error {
 			}
 			for n, entry := range o.Entries {
 				i := s.Instances[entry.InstanceID]
-				if i == nil || n >= len(o.Apps) || (i.AppID != "" && i.AppID != o.Apps[n].ID) {
+				if i == nil || n >= len(o.Apps) || contract.ReservedProxyID(o.Apps[n].ID) || (i.AppID != "" && i.AppID != o.Apps[n].ID) {
 					return errors.New("app_identity")
 				}
 				i.AppID = o.Apps[n].ID

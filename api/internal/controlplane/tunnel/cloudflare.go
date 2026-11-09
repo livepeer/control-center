@@ -11,7 +11,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -97,21 +100,67 @@ func (c *cloudflareHTTP) call(ctx context.Context, method, path string, in, out 
 }
 
 type cfObject struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Domain       string          `json:"domain"`
-	Audience     string          `json:"aud"`
-	Type         string          `json:"type"`
-	Comment      string          `json:"comment"`
-	ConfigSrc    string          `json:"config_src"`
-	Tags         json.RawMessage `json:"tags"`
-	ClientID     string          `json:"client_id"`
-	ClientSecret string          `json:"client_secret"`
-	ExpiresAt    time.Time       `json:"expires_at"`
-	CreatedAt    time.Time       `json:"created_at"`
-	DeletedAt    *time.Time      `json:"deleted_at"`
-	Content      string          `json:"content"`
-	Proxied      bool            `json:"proxied"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	Domain         string              `json:"domain"`
+	Audience       string              `json:"aud"`
+	Type           string              `json:"type"`
+	Comment        string              `json:"comment"`
+	ConfigSrc      string              `json:"config_src"`
+	Tags           json.RawMessage     `json:"tags"`
+	ClientID       string              `json:"client_id"`
+	ClientSecret   string              `json:"client_secret"`
+	ExpiresAt      time.Time           `json:"expires_at"`
+	CreatedAt      time.Time           `json:"created_at"`
+	DeletedAt      *time.Time          `json:"deleted_at"`
+	Content        string              `json:"content"`
+	Proxied        bool                `json:"proxied"`
+	Destinations   []accessDestination `json:"destinations"`
+	ServiceAuth401 bool                `json:"service_auth_401_redirect"`
+}
+
+type accessDestination struct {
+	Type      string            `json:"type"`
+	URI       string            `json:"uri"`
+	Overrides []json.RawMessage `json:"overrides,omitempty"`
+}
+
+func sameHosts(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
+}
+
+func safeApplication(r CFResource, o cfObject) bool {
+	if len(r.Hosts) == 0 {
+		return true
+	} // historical cleanup records
+	if !o.ServiceAuth401 || len(o.Destinations) != len(r.Hosts) {
+		return false
+	}
+	hosts := make([]string, 0, len(o.Destinations))
+	for _, d := range o.Destinations {
+		if d.Type != "public" || len(d.Overrides) != 0 {
+			return false
+		}
+		hosts = append(hosts, d.URI)
+	}
+	return sameHosts(hosts, r.Hosts)
+}
+
+func applicationOverlaps(r CFResource, o cfObject) bool {
+	for _, wanted := range append(slices.Clone(r.Hosts), r.Host) {
+		for _, candidate := range append([]accessDestination{{URI: o.Domain}}, o.Destinations...) {
+			host := strings.ToLower(strings.SplitN(candidate.URI, "/", 2)[0])
+			// Access permits a wildcard within each DNS label, including api-*.
+			pattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(host), `\*`, `[^.]*`) + "$"
+			if regexp.MustCompile(pattern).MatchString(strings.ToLower(wanted)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *cloudflareHTTP) Find(ctx context.Context, r CFResource) ([]CFResource, error) {
@@ -133,11 +182,14 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 		if !missing && (!resourceOwned(r, o) || o.ID != r.ID) {
 			return nil, ErrResourceConflict
 		}
+		if !missing && !ownedOnly && r.Kind == "app" && !safeApplication(r, o) {
+			return nil, ErrUnsafeProtection
+		}
 		if !missing && (r.Kind != "tunnel" || o.DeletedAt == nil || o.DeletedAt.IsZero()) {
 			v := observedResource(r, o)
 			selected = &v
 		}
-		if !r.Watch {
+		if !r.Watch && r.Kind != "app" {
 			if selected != nil {
 				return []CFResource{*selected}, nil
 			}
@@ -174,8 +226,11 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 					return nil, ErrResourceConflict
 				}
 			case "app":
-				if !ownedOnly && o.Domain == r.Host && !owned {
+				if !ownedOnly && applicationOverlaps(r, o) && !owned {
 					return nil, ErrResourceConflict
+				}
+				if owned && !ownedOnly && !safeApplication(r, o) {
+					return nil, ErrUnsafeProtection
 				}
 			}
 			if owned && o.ID != "" && (selected == nil || o.ID != selected.ID) && (r.Kind != "tunnel" || o.DeletedAt == nil || o.DeletedAt.IsZero()) {
@@ -234,6 +289,12 @@ func (c *cloudflareHTTP) Create(ctx context.Context, r CFResource, tunnel string
 		input["domain"] = r.Host
 		input["type"] = "self_hosted"
 		input["app_launcher_visible"] = false
+		input["service_auth_401_redirect"] = true
+		destinations := make([]accessDestination, 0, len(r.Hosts))
+		for _, host := range r.Hosts {
+			destinations = append(destinations, accessDestination{Type: "public", URI: host})
+		}
+		input["destinations"] = destinations
 	case "policy":
 		input["decision"] = "non_identity"
 		input["include"] = []any{map[string]any{"service_token": map[string]string{"token_id": tunnel}}}
@@ -253,6 +314,9 @@ func (c *cloudflareHTTP) Create(ctx context.Context, r CFResource, tunnel string
 	r.ID = o.ID
 	r.Pending = false
 	r.Audience = o.Audience
+	if r.Kind == "app" && (!resourceOwned(r, o) || !safeApplication(r, o)) {
+		return r, nil, time.Time{}, ErrUnsafeProtection
+	}
 	if r.Kind == "token" {
 		if o.ClientID == "" || o.ClientSecret == "" {
 			return r, nil, time.Time{}, errAmbiguousCreate
@@ -286,7 +350,7 @@ func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []Ingre
 	_, e := c.call(ctx, "GET", path, nil, &current)
 	clean := func(r []IngressRule) []IngressRule {
 		for i := range r {
-			if r[i].OriginRequest != nil && r[i].OriginRequest.Access == nil {
+			if r[i].OriginRequest != nil && r[i].OriginRequest.Access == nil && r[i].OriginRequest.HTTPHostHeader == "" {
 				r[i].OriginRequest = nil
 			}
 		}
@@ -314,13 +378,22 @@ func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []Ingre
 }
 func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens []string) error {
 	// Dedicated application: an unexpected policy could bypass Service Auth.
-	var policies []cfObject
-	if _, e := c.call(ctx, "GET", c.resourcePath(policy), nil, &policies); e != nil {
-		return e
-	}
-	for _, p := range policies {
-		if p.ID != policy.ID {
-			return ErrResourceConflict
+	for page := 1; ; page++ {
+		if page > 100 {
+			return errors.New("Cloudflare policy listing exceeds limit")
+		}
+		var policies []cfObject
+		pages, err := c.call(ctx, "GET", c.resourcePath(policy)+"?per_page=100&page="+strconv.Itoa(page), nil, &policies)
+		if err != nil {
+			return err
+		}
+		for _, p := range policies {
+			if p.ID != policy.ID {
+				return ErrResourceConflict
+			}
+		}
+		if pages > 0 && page >= pages || pages == 0 && len(policies) < 100 {
+			break
 		}
 	}
 	include := make([]any, 0, len(tokens))
@@ -332,22 +405,26 @@ func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens 
 		return e
 	}
 	var read struct {
-		Decision string `json:"decision"`
-		Include  []struct {
-			Token struct {
-				ID string `json:"token_id"`
-			} `json:"service_token"`
-		} `json:"include"`
+		Decision string                       `json:"decision"`
+		Include  []map[string]json.RawMessage `json:"include"`
+		Exclude  []json.RawMessage            `json:"exclude"`
+		Require  []json.RawMessage            `json:"require"`
 	}
 	if _, e := c.call(ctx, "GET", c.resourcePath(policy)+"/"+url.PathEscape(policy.ID), nil, &read); e != nil {
 		return e
 	}
-	if read.Decision != "non_identity" || len(read.Include) != len(tokens) {
+	if read.Decision != "non_identity" || len(read.Include) != len(tokens) || len(read.Exclude) != 0 || len(read.Require) != 0 {
 		return ErrUnsafeProtection
 	}
 	seen := map[string]bool{}
 	for _, v := range read.Include {
-		seen[v.Token.ID] = true
+		var token struct {
+			ID string `json:"token_id"`
+		}
+		if len(v) != 1 || json.Unmarshal(v["service_token"], &token) != nil || token.ID == "" {
+			return ErrUnsafeProtection
+		}
+		seen[token.ID] = true
 	}
 	for _, id := range tokens {
 		if !seen[id] {

@@ -88,7 +88,7 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 		}
 		pass, cancel := context.WithTimeout(ctx, 60*time.Second)
 		l, e := s.claimTunnel(pass, m)
-		if errors.Is(e, sql.ErrNoRows) {
+		if errors.Is(e, sql.ErrNoRows) || errors.Is(e, errLegacyEndpoints) {
 			cancel()
 			continue
 		}
@@ -130,7 +130,7 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 		stop()
 		cancel()
 	}
-	return nil
+	return s.reconcileUnusedCertificates(ctx)
 }
 func (l *tunnelLease) provision(ctx context.Context) error {
 	p := l.s.params
@@ -152,7 +152,34 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Reason = "predecessor_cleanup_pending"
 		return l.save(ctx)
 	}
-	desired := RoutingFor(l.Machine.NodeID, p.CloudflareBaseDomain)
+	desired := RoutingFor(l.Machine.NodeID, p.CloudflareBaseDomain, l.state.EndpointSuffix)
+	if l.state.Target != "" && l.state.Target != desired.ServiceURL {
+		l.state.State.CancelTarget()
+		l.state.Ready = false
+		if err := l.save(ctx); err != nil {
+			return err
+		}
+	}
+	keepCertificates := []string{wildcardHost(l.state.ProxyURLTemplate), wildcardHost(desired.ProxyURLTemplate)}
+	// Predecessor routes can outlive endpoint staging. Their DNS intents keep
+	// coverage until retirePredecessorRoutes releases it after route cleanup.
+	for _, resource := range l.state.Resources {
+		if resource.Kind == "dns" && strings.HasPrefix(resource.Host, "*.") {
+			keepCertificates = append(keepCertificates, resource.Host)
+		}
+	}
+	if err := l.releaseCertificates(ctx, keepCertificates...); err != nil {
+		return err
+	}
+	certificateReady, err := l.ensureCertificate(ctx, desired.ProxyURLTemplate)
+	if err != nil {
+		return err
+	}
+	if !certificateReady {
+		l.state.Ready = false
+		l.state.Reason = "certificate_pending"
+		return l.save(ctx)
+	}
 	if waiting, e := l.stageEndpoints(ctx, desired); e != nil || waiting {
 		return e
 	}
@@ -169,10 +196,10 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	}
 	tokenKey := "token-" + strconv.FormatInt(l.state.AccessVersion, 10)
 	token := l.state.Resources[tokenKey] // Validated by credential maintenance above.
-	discoveryHost := strings.TrimSuffix(strings.TrimPrefix(l.state.DiscoveryURL, "https://"), "/discovery")
+	discoveryHost := endpointHost(l.state.DiscoveryURL)
 	app, e := l.ensure(ctx, prefix+"app", "app", discoveryHost, "")
 	if e != nil {
-		return e
+		return l.protectionFailure(ctx, e)
 	}
 	if app.Audience == "" {
 		return errors.New("Access application audience is missing")
@@ -189,7 +216,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		return e
 	}
 	l.credentialPoliciesReady(len(tokens))
-	rules := ingressFor(l.Machine.NodeID, p, app.Audience)
+	rules := ingressFor(l.state.RoutingState, p, app.Audience)
 	// Keep predecessor discovery hosts protected throughout endpoint replacement.
 	keys := make([]string, 0, len(l.state.Resources))
 	for key := range l.state.Resources {
@@ -199,7 +226,17 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	for _, key := range keys {
 		r := l.state.Resources[key]
 		if r.Kind == "app" && !r.Absent && !strings.HasPrefix(key, prefix) && r.ID != "" && r.Audience != "" {
-			rules = append(rules[:len(rules)-1], IngressRule{Hostname: r.Host, Path: `^/discovery$`, Service: PrivateOrchestrator, OriginRequest: &OriginRequest{Access: &IngressAccess{Required: true, TeamName: p.CloudflareTeamName, Audience: []string{r.Audience}}}}, IngressRule{Service: "http_status:404"})
+			// Old API hosts must precede the current proxy wildcard as well.
+			previous := []IngressRule{}
+			for _, host := range r.Hosts {
+				path := `^/discovery$`
+				if host != r.Host {
+					path = clientPath
+					previous = append(previous, IngressRule{Hostname: host, Path: reservedPath, Service: "http_status:404"})
+				}
+				previous = append(previous, IngressRule{Hostname: host, Path: path, Service: ConnectorOrigin, OriginRequest: protectedOrigin(p, r.Audience)}, IngressRule{Hostname: host, Service: "http_status:404"})
+			}
+			rules = append(previous, rules...)
 		}
 	}
 	version, e := l.provider.Configure(ctx, tunnel.ID, rules)
@@ -233,7 +270,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Ready = false
 		return l.save(ctx)
 	}
-	hosts := []string{strings.TrimPrefix(l.state.ServiceURL, "https://"), discoveryHost, "*.apps-" + l.Machine.NodeID + "." + p.CloudflareBaseDomain}
+	hosts := []string{endpointHost(l.state.ServiceURL), discoveryHost, "*." + l.Machine.NodeID + "." + p.CloudflareBaseDomain}
 	for i, host := range hosts {
 		if _, e = l.ensure(ctx, prefix+"dns-"+strconv.Itoa(i), "dns", host, tunnel.ID); e != nil {
 			return e
@@ -470,11 +507,11 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 		}
 	}
 	if len(keys) == 0 {
-		return nil
+		return l.releaseCertificates(ctx, wildcardHost(l.state.ProxyURLTemplate))
 	}
 	sort.Strings(keys)
 	app := l.state.Resources[prefix+"app"]
-	rules := ingressFor(l.Machine.NodeID, l.s.params, app.Audience)
+	rules := ingressFor(l.state.RoutingState, l.s.params, app.Audience)
 	version, e := l.provider.Configure(ctx, l.state.TunnelID, rules)
 	if e != nil {
 		return e
@@ -494,7 +531,7 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return l.releaseCertificates(ctx, wildcardHost(l.state.ProxyURLTemplate))
 }
 func (l *tunnelLease) cleanup(ctx context.Context) error {
 	if l.state.BundleFormat >= 2 && !l.state.Compromised && !l.state.CompromisedAccess && !l.state.ConnectorRevoked {
@@ -575,19 +612,45 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 	if _, e := l.s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2`, l.Machine.NodeID, l.Machine.Epoch); e != nil {
 		return e
 	}
+	if err := l.releaseCertificates(ctx, ""); err != nil {
+		return err
+	}
 	l.state.CleanupComplete = true
 	l.state.Reason = "removed"
 	return l.save(ctx)
 }
 
 func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, credential AccessCredential) error {
-	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return verifyEndpointClient(ctx, state, credential, client)
+}
+
+func verifyEndpointClient(ctx context.Context, state RoutingState, credential AccessCredential, client *http.Client) error {
+	// Only these two exact HTTPS origins may receive an Access credential.
+	protected := map[string]bool{}
+	for _, raw := range []string{state.ServiceURL, state.DiscoveryURL} {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("invalid protected endpoint")
+		}
+		protected[u.Scheme+"://"+u.Host] = true
+	}
+	// Enforce redirect rejection even for injected test transports.
+	copy := *client
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &copy
 	get := func(raw, method string, auth bool) (int, json.RawMessage, error) {
 		req, e := http.NewRequestWithContext(ctx, method, raw, nil)
 		if e != nil {
 			return 0, nil, e
 		}
 		if auth {
+			if req.URL.User != nil || !protected[req.URL.Scheme+"://"+req.URL.Host] || credential.ClientID == "" || credential.ClientSecret == "" {
+				return 0, nil, errors.New("request is outside protected endpoint scope")
+			}
 			req.Header.Set("CF-Access-Client-Id", credential.ClientID)
 			req.Header.Set("CF-Access-Client-Secret", credential.ClientSecret)
 		}
@@ -616,12 +679,35 @@ func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, crede
 		return errors.New("discovery address mismatch")
 	}
 	code, _, _ = get(state.DiscoveryURL, "GET", false)
-	if code != 401 && code != 403 && code != 302 {
+	if code != 401 && code != 403 {
 		return errors.New("discovery is not Access protected")
 	}
+	// This route accepts POST only. GET exercises authenticated Node routing
+	// without reserving a session or requiring an installed app.
+	apiProbe := strings.TrimRight(state.ServiceURL, "/") + "/apps/lpcc-readiness/session"
+	code, _, e = get(apiProbe, "GET", true)
+	if e != nil || code != http.StatusMethodNotAllowed {
+		return errors.New("authorized API is not ready")
+	}
+	code, _, e = get(apiProbe, "GET", false)
+	if e != nil || code != 401 && code != 403 {
+		return errors.New("API is not Access protected")
+	}
+	code, _, e = get(strings.TrimSuffix(state.DiscoveryURL, "/discovery")+"/apps/lpcc-readiness/session", "GET", true)
+	if e != nil || code != 404 {
+		return errors.New("discovery route isolation is not verified")
+	}
 	hosts := []string{state.ServiceURL, strings.Replace(state.ProxyURLTemplate, "{proxy}", "lpcc-readiness", 1)}
-	for _, host := range hosts {
-		for _, path := range []string{"/discovery", "/%64iscovery", "/./discovery", "//discovery", "/apps/x/app/../../discovery", "/ai/trickle/private/0", "/runners/heartbeat", "/runner/x/session/y/channels", "/metrics", "/readyz"} {
+	for i, host := range hosts {
+		for _, check := range []struct {
+			path            string
+			allowBadRequest bool
+		}{
+			{"/discovery", false}, {"/%64iscovery", true}, {"/./discovery", true}, {"//discovery", true},
+			{"/apps/x/app/../../discovery", true}, {"/ai/trickle/private/0", false}, {"/runners/heartbeat", false},
+			{"/runner/x/session/y/channels", false}, {"/metrics", false}, {"/readyz", false},
+		} {
+			path := check.path
 			method := "GET"
 			if strings.Contains(path, "runners") || strings.Contains(path, "channels") {
 				method = "POST"
@@ -630,11 +716,14 @@ func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, crede
 			if e != nil {
 				return e
 			}
-			probe, _ := url.Parse(path)
+			probe, e := url.ParseRequestURI(path)
+			if e != nil {
+				return e
+			}
 			u.Path = probe.Path
 			u.RawPath = probe.RawPath
-			code, _, e = get(u.String(), method, false)
-			if e != nil || code != 404 && code != 403 && code != 400 {
+			code, _, e = get(u.String(), method, i == 0)
+			if e != nil || code != 404 && !(check.allowBadRequest && code == 400) {
 				return fmt.Errorf("public route isolation is not verified")
 			}
 		}

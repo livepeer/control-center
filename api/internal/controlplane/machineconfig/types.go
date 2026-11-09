@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const PrivateOrchestrator = "http://orchestrator.livepeer.svc.cluster.local:8935"
+const PrivateOrchestrator = contract.PrivateOrchestrator
 
 type Machine struct {
 	NodeID, Epoch, InstallDir, K3sVersion string

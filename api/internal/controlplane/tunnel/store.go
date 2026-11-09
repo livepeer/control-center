@@ -13,6 +13,7 @@ import (
 )
 
 var errTunnelFenced = machineconfig.ErrFenced
+var errLegacyEndpoints = errors.New("legacy tunnel hostnames require retirement")
 
 func (s *Manager) Load(ctx context.Context, node, epoch string) (Snapshot, int64, error) {
 	r, err := (machineconfig.Store{DB: s.db}).Load(ctx, node, epoch)
@@ -52,21 +53,39 @@ type tunnelLease struct {
 }
 
 func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, error) {
-	initial := RoutingFor(m.NodeID, s.params.CloudflareBaseDomain)
-	raw, _ := json.Marshal(initial.RoutingState)
-	lease, err := (machineconfig.Store{DB: s.db}).Claim(ctx, m, raw, true)
+	lease, err := (machineconfig.Store{DB: s.db}).Claim(ctx, m, json.RawMessage(`{}`), true)
 	if err != nil {
 		return nil, err
 	}
 	l := &tunnelLease{Lease: lease, s: s, state: Snapshot{State: lease.State}}
+	initialized := false
 	if err = json.Unmarshal(lease.Routing, &l.state.RoutingState); err != nil {
 		lease.Release(ctx)
 		return nil, err
 	}
-	if l.state.ServiceURL == "" {
-		l.state.RoutingState = initial.RoutingState
+	if !l.Machine.Terminal && l.state.EndpointSuffix == "" {
+		if l.state.ServiceURL != "" {
+			if l.state.Ready || l.state.Reason != "legacy_endpoints_require_retirement" {
+				l.state.Ready = false
+				l.state.Reason = "legacy_endpoints_require_retirement"
+				if err := l.save(ctx); err != nil {
+					lease.Release(ctx)
+					return nil, err
+				}
+			}
+			lease.Release(ctx)
+			return nil, errLegacyEndpoints
+		}
+		suffix, err := s.newEndpointSuffix(ctx, m)
+		if err != nil {
+			lease.Release(ctx)
+			return nil, err
+		}
+		l.state.RoutingState = RoutingFor(m.NodeID, s.params.CloudflareBaseDomain, suffix).RoutingState
+		initialized = true
 	}
 	if l.state.AccountID == "" {
+		initialized = initialized || s.params.CloudflareAccountID != ""
 		l.state.AccountID = s.params.CloudflareAccountID
 		l.state.ZoneID = s.params.CloudflareZoneID
 		l.state.TeamName = s.params.CloudflareTeamName
@@ -74,6 +93,13 @@ func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, err
 	l.provider = s.providerFor(l.state.RoutingState)
 	if l.state.Resources == nil {
 		l.state.Resources = map[string]CFResource{}
+		initialized = true
+	}
+	if initialized {
+		if err := l.save(ctx); err != nil {
+			lease.Release(ctx)
+			return nil, err
+		}
 	}
 	return l, nil
 }
@@ -140,6 +166,9 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	if !exists {
 		operation := max(r.OperationVersion, 1)
 		r = CFResource{Kind: kind, Name: resourceName(l.Machine, key), Host: host, CreationTarget: target, OperationVersion: operation}
+		if kind == "app" {
+			r.Hosts = []string{endpointHost(l.state.ServiceURL), host}
+		}
 		if operation > 1 {
 			r.Name += "-op" + strconv.FormatInt(operation, 10)
 		}
@@ -295,7 +324,7 @@ func (s *Manager) DiscoverySources(ctx context.Context) ([]DiscoverySource, erro
 		if r.TunnelID == "" {
 			continue
 		}
-		blocked := r.Quarantined || r.Reason == "ownership_conflict" || r.Reason == "predecessor_cleanup_pending" || r.Reason == "ingress_validation_required"
+		blocked := r.EndpointSuffix == "" || r.Quarantined || r.Reason == "ownership_conflict" || r.Reason == "predecessor_cleanup_pending" || r.Reason == "ingress_validation_required"
 		r.applyRolloutStatus()
 		ready, reason := r.Ready, r.Reason
 		if r.VerifiedGeneration != r.SourceGeneration {
