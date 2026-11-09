@@ -13,6 +13,7 @@ type Status struct {
 	Initialized          bool           `json:"initialized"`
 	ReconciledAt         *time.Time     `json:"reconciled_at,omitempty"`
 	ReconciliationFailed bool           `json:"reconciliation_failed"`
+	SelectionExpiresAt   *time.Time     `json:"selection_expires_at,omitempty"`
 	SelectionStale       bool           `json:"selection_stale"`
 	Refreshes            uint64         `json:"refreshes"`
 	RefreshFailures      uint64         `json:"refresh_failures"`
@@ -32,6 +33,7 @@ type SourceStatus struct {
 	State               string     `json:"state"`
 	Failures            int        `json:"failures"`
 	LastSuccess         *time.Time `json:"last_success,omitempty"`
+	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 	Stale               bool       `json:"stale"`
 	CachedRunners       int        `json:"cached_runners"`
 	LastAttempt         *time.Time `json:"last_attempt,omitempty"`
@@ -60,6 +62,8 @@ func (f *Manager) Status() Status {
 	if !f.reconciledAt.IsZero() {
 		stamp := f.reconciledAt
 		status.ReconciledAt = &stamp
+		expiry := stamp.Add(2 * f.selectionInterval)
+		status.SelectionExpiresAt = &expiry
 	}
 	selected := make([]SourceStatus, len(f.selected))
 	for i, source := range f.selected {
@@ -93,6 +97,10 @@ func (f *Manager) Status() Status {
 	for i, source := range f.selected {
 		s := selected[i]
 		s.Stale = s.LastSuccess == nil || now.Sub(*s.LastSuccess) > 2*f.interval
+		if s.LastSuccess != nil {
+			expiry := s.LastSuccess.Add(2 * f.interval)
+			s.ExpiresAt = &expiry
+		}
 		if auth := f.transport.selection.Load(); auth != nil {
 			s.CredentialAvailable = auth.sources[source.URL].available
 		}

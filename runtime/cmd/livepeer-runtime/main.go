@@ -120,6 +120,7 @@ func appReconciler(ctx context.Context, args []string) error {
 	if *managementSocket != "" {
 		reports = transport.NewLocal(*managementSocket)
 	}
+	reports = &transport.Reports{Client: reports, Directory: filepath.Join(*directory, "reports")}
 	kube, err := transport.InCluster()
 	if err != nil {
 		return err
@@ -203,9 +204,9 @@ func appReconciler(ctx context.Context, args []string) error {
 				}
 			} else if err == nil {
 				stateLost.Store(false)
-				if lastDiagnosis != "" {
+				if lastDiagnosis != "" || !time.Now().Before(nextDiagnosis) {
 					appreconciler.DiagnoseMetadata(ctx, journal.View().Metadata, controller.Reporter, "")
-					lastDiagnosis = ""
+					lastDiagnosis, nextDiagnosis = "", time.Now().Add(30*time.Second)
 				}
 			}
 			select {
@@ -243,12 +244,13 @@ func httpSource(ctx context.Context, args []string) error {
 		return err
 	}
 	store := artifact.Store{Directory: *directory}
-	source := httpsource.Source{Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, SystemWorkloads: *socketRoot != ""}
+	ordered := &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}
+	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, SystemWorkloads: *socketRoot != ""}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	socketErrors := make(chan error, 1)
 	if *socketRoot != "" {
-		integration := &connector.Integration{Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
+		integration := &connector.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
 		integration.Restore()
 		sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired})
 		if err != nil {
@@ -261,9 +263,9 @@ func httpSource(ctx context.Context, args []string) error {
 				cancel()
 			}
 		}()
-		go reportsLoop(ctx, integration.Report)
+		go reportsLoop(ctx, "connector", 5*time.Second, integration.Report)
 	}
-	go reportsLoop(ctx, source.Report)
+	go reportsLoop(ctx, "runtime", 20*time.Second, source.Report)
 	err = serve(ctx, *listen, store, func(ctx context.Context) {
 		ticker := time.NewTicker(*interval)
 		defer ticker.Stop()
@@ -285,13 +287,13 @@ func httpSource(ctx context.Context, args []string) error {
 	return err
 }
 
-func reportsLoop(ctx context.Context, report func(context.Context) error) {
-	ticker := time.NewTicker(20 * time.Second)
+func reportsLoop(ctx context.Context, component string, interval time.Duration, report func(context.Context) error) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		attempt, cancel := context.WithTimeout(ctx, 25*time.Second)
-		if report(attempt) != nil && ctx.Err() == nil {
-			slog.Error("Runtime observation report unavailable")
+		if err := report(attempt); err != nil && ctx.Err() == nil {
+			slog.Error("Runtime observation report unavailable", "component", component, "reason", transport.ReportErrorCode(err))
 		}
 		cancel()
 		select {

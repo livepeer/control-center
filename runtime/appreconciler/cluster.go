@@ -15,6 +15,7 @@ import (
 
 type Pod struct {
 	UID, ResourceVersion, Phase string
+	Reason                      string
 	Deleting                    bool
 	Finalizers                  []string
 	StopSignal                  string
@@ -88,7 +89,22 @@ func (k Kubernetes) Read(ctx context.Context) (View, error) {
 				} `json:"containers"`
 			} `json:"spec"`
 			Status struct {
-				Phase string `json:"phase"`
+				Phase      string `json:"phase"`
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+					Reason string `json:"reason"`
+				} `json:"conditions"`
+				ContainerStatuses []struct {
+					State struct {
+						Waiting *struct {
+							Reason string `json:"reason"`
+						} `json:"waiting"`
+						Terminated *struct {
+							Reason string `json:"reason"`
+						} `json:"terminated"`
+					} `json:"state"`
+				} `json:"containerStatuses"`
 			} `json:"status"`
 		} `json:"items"`
 	}
@@ -99,6 +115,28 @@ func (k Kubernetes) Read(ctx context.Context) (View, error) {
 		value := Pod{UID: p.Metadata.UID, ResourceVersion: p.Metadata.ResourceVersion, Phase: p.Status.Phase, Deleting: p.Metadata.DeletionTimestamp != nil, Finalizers: p.Metadata.Finalizers}
 		if len(p.Spec.Containers) == 1 {
 			value.StopSignal = p.Spec.Containers[0].Lifecycle.StopSignal
+		}
+		for _, condition := range p.Status.Conditions {
+			if condition.Status == "False" {
+				if condition.Type == "PodReadyToStartContainers" && value.Reason == "" {
+					value.Reason = "sandbox_pending"
+				}
+				if reason := workloadReason(condition.Reason); reason != "" {
+					value.Reason = reason
+				}
+			}
+		}
+		for _, container := range p.Status.ContainerStatuses {
+			if container.State.Waiting != nil {
+				if reason := workloadReason(container.State.Waiting.Reason); reason != "" {
+					value.Reason = reason
+				}
+			}
+			if container.State.Terminated != nil {
+				if reason := workloadReason(container.State.Terminated.Reason); reason != "" {
+					value.Reason = reason
+				}
+			}
 		}
 		v.Pods[p.Metadata.Name] = value
 	}
@@ -210,4 +248,20 @@ func (k Kubernetes) Release(ctx context.Context, name string, pod Pod) error {
 		return nil
 	}
 	return err
+}
+
+func workloadReason(reason string) string {
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+		return "image_pull_failed"
+	case "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+		return "container_start_failed"
+	case "CrashLoopBackOff", "Error":
+		return "process_failed"
+	case "OOMKilled":
+		return "memory_limit"
+	case "Unschedulable":
+		return "scheduling_refused"
+	}
+	return ""
 }

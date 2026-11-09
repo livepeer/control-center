@@ -14,3 +14,22 @@
 .administration>h3{display:flex;align-items:center;gap:10px}
 
 .app-catalog{margin:2rem 0;padding:1.5rem 0;border-top:1px solid #dce1da;border-bottom:1px solid #dce1da}.catalog-actions,.catalog-history{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}.catalog-list{list-style:none;padding:0;display:grid;gap:.75rem}.catalog-list li{display:flex;gap:1rem;align-items:center;flex-wrap:wrap}.catalog-detail pre,.catalog-editor pre{max-height:30rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f5f0;padding:1rem;border-radius:.6rem}.catalog-editor textarea{display:block;box-sizing:border-box;width:100%;min-height:24rem;padding:1rem;font:13px/1.6 ui-monospace,monospace;border:1px solid #aab5a3;border-radius:.6rem}.catalog-digest{display:block;overflow-wrap:anywhere;margin:1rem 0}.catalog-history{margin:1rem 0}.catalog-history h4{width:100%}
+
+/* Shared owner/admin observed state. Evidence keeps its own timestamps and identity. */
+.machine-observation { margin: 28px 0; padding: 24px; border: 1px solid var(--border, #dce1dc); border-radius: 12px; background: var(--surface, #fff); }
+.machine-observation code { overflow-wrap: anywhere; white-space: normal; font-size: 11px; }
+.machine-observation td { vertical-align: top; }
+.status-identities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
+.status-identity { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 14px; border: 1px solid var(--border, #dce1dc); border-radius: 8px; }
+.status-identity span { font-size: 13px; }
+.status-path { margin: 18px 0; padding: 12px 16px; background: #f3f5f0; border-radius: 8px; }
+.observed-assignment { margin: 18px 0; padding: 18px; border: 1px solid var(--border, #dce1dc); border-radius: 8px; }
+.observed-assignment h4 { margin: 0 0 12px; }
+.observed-assignment p, .status-path p { font-size: 13px; line-height: 1.65; }
+.observed-assignment details { margin-top: 14px; }
+.observed-assignment summary { cursor: pointer; }
+.instance-evidence { border-top: 1px solid var(--border, #dce1dc); margin-top: 12px; padding-top: 12px; }
+@media (max-width: 900px) { .status-identities { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .machine-observation { padding: 16px; } .status-identities { grid-template-columns: 1fr; } }
+
+.machine-status.stale { background: #fff3df; color: #845700; }

@@ -134,6 +134,11 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 	}
 	f.selected = next
 	f.configured = sources
+	for id := range f.provenance {
+		if !seenIDs[id] {
+			delete(f.provenance, id)
+		}
+	}
 	f.reconciledAt = time.Now().UTC()
 	f.reconcileFailed = false
 	f.transport.mu.Lock()

@@ -416,7 +416,7 @@ func (s *Manager) ReencryptAccessCredentials(ctx context.Context) error {
 
 func (s *Manager) SecureRuntime(ctx context.Context, m Machine) (bool, error) {
 	var yes bool
-	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id AND m.enrollment_epoch=r.epoch WHERE r.node_id=$1 AND r.epoch=$2 AND component='runtime' AND r.credential_version=$3 AND m.credential_version=$3 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$4))`, m.NodeID, m.Epoch, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id AND m.enrollment_epoch=r.epoch WHERE r.node_id=$1 AND r.epoch=$2 AND component='runtime' AND r.credential_version=$3 AND m.credential_version=$3 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$4) AND (COALESCE((report->>'report_version')::int,0)=0 OR (COALESCE((report->>'clock_uncertain')::boolean,false)=false AND (report->>'observed_at')::timestamptz>now()-make_interval(secs=>$4) AND (report->>'observed_at')::timestamptz<=now()+interval '5 seconds')))`, m.NodeID, m.Epoch, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
 	return yes, e
 }
 func (s *Manager) report(ctx context.Context, m Machine, component string) (MachineReport, time.Time, error) {

@@ -331,3 +331,25 @@ func TestRegressionRestartedOrderedOwnerSendsSequencedHeartbeat(t *testing.T) {
 		t.Fatalf("restored ordered credential sent sequence=%d instead of reserved sequence=8", submitted)
 	}
 }
+
+func TestSDKOwnerClassifiesAuthenticationFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("private-credential-sentinel"))
+	}))
+	defer server.Close()
+	o, err := NewSDKOwner(server.URL, "bootstrap", transport.HTTPClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close(context.Background())
+	set := testutil.Assignment(t)
+	options, _ := AppOptions(&Instance{Name: "one", AppID: "app", Definition: set.Entries[0].Revision.Definition}, false)
+	identity := Identity{RunnerID: "owner", Credential: "issued"}
+	request := OwnerRequest{Epoch: "epoch", Hash: "hash", Identity: identity, Entries: []Registration{{InstanceID: "i", Options: options}}}
+	var failure OwnerFailure
+	hooks := OwnerHooks{Identity: func() Identity { return identity }, Reserve: func(string) (uint64, error) { return 1, nil }, Observe: func(Observation) error { return nil }, Failure: func(f OwnerFailure) { failure = f }}
+	if err := o.Sync(t.Context(), request, hooks); err == nil || !transport.IsStatus(err, 401) || failure.Reason != "registration_auth_failed" || !failure.Reset {
+		t.Fatal("authentication failure lost its classification", err, failure)
+	}
+}

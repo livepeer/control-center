@@ -140,6 +140,7 @@ type testOwner struct {
 	cancels, unregisters int
 	rejectAbove, rejects int
 	caps                 *Capabilities
+	syncFailure          func(OwnerRequest, OwnerHooks) error
 }
 
 func (o *testOwner) Capabilities() Capabilities {
@@ -151,6 +152,9 @@ func (o *testOwner) Capabilities() Capabilities {
 func (o *testOwner) Accepted() OwnerRequest      { return o.accepted }
 func (o *testOwner) Close(context.Context) error { return nil }
 func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error {
+	if o.syncFailure != nil {
+		return o.syncFailure(r, h)
+	}
 	if o.rejectAbove > 0 && len(r.Entries) > o.rejectAbove {
 		o.rejects++
 		return ErrResourceRefused
@@ -260,6 +264,47 @@ func TestRejectedAdditionIsDeferredWithoutMaskingFailureOrDelayingWithdrawal(t *
 	tick(t, c)
 	if len(o.accepted.Entries) != 1 || o.accepted.Entries[0].Options.Status != "draining" {
 		t.Fatal("addition retry delay also delayed safety withdrawal")
+	}
+}
+
+func TestOwnerFailureKeepsClassificationAndUsesCurrentRecoveryDecision(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(map[bool]string{false: "node_unavailable", true: "registration_auth_failed"}[reset], func(t *testing.T) {
+			c, input, k, o, reports, _ := fixtureController(t)
+			set := *input.value.Payload.Intent
+			set.Entries[0].Replicas = 1
+			input.set(t, set)
+			registerApps(t, c, k)
+			set.Generation++
+			set.Entries[0].Generation++
+			set.Entries[0].Replicas = 2
+			input.set(t, set)
+			tick(t, c)
+			k.apply(c)
+			calls := 0
+			reason := "node_unavailable"
+			if reset {
+				reason = "registration_auth_failed"
+			}
+			o.syncFailure = func(r OwnerRequest, h OwnerHooks) error {
+				calls++
+				h.Failure(OwnerFailure{Epoch: r.Epoch, Hash: r.Hash, Reason: reason, Reset: reset})
+				if reset {
+					return &transport.HTTPError{Status: 401}
+				}
+				return errors.New("node_request_failed")
+			}
+			if c.Tick(t.Context()) == nil {
+				t.Fatal("fixture failure ignored")
+			}
+			s := c.Journal.View()
+			if s.OwnerReason != reason || reports.reports[len(reports.reports)-1].Apps.Reason != reason || (reset && s.RejectedOwnerHash != "") {
+				t.Fatal("classified failure became generic or resource backoff", s.OwnerReason, s.RejectedOwnerHash)
+			}
+			if reset && calls != 1 {
+				t.Fatal("resumed invalid accepted credential after auth failure", calls)
+			}
+		})
 	}
 }
 func (r *testReporter) Receipt(_ context.Context, _ contract.Metadata, value Receipt) error {

@@ -3,6 +3,7 @@ package httpsource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,10 +22,11 @@ import (
 )
 
 type fakeKube struct {
-	last  *transport.Artifact
-	ready bool
-	reply func(string) any
-	err   error
+	last       *transport.Artifact
+	ready      bool
+	reply      func(string) any
+	err        error
+	publishErr error
 }
 
 func cacheBundle(t *testing.T, store artifact.Store, m contract.Metadata, files map[string][]byte) string {
@@ -186,6 +188,9 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 }
 
 func (k *fakeKube) Publish(_ context.Context, _ string, a *transport.Artifact, ready bool, _ string) error {
+	if k.publishErr != nil {
+		return k.publishErr
+	}
 	if a != nil {
 		copy := *a
 		k.last = &copy
@@ -375,6 +380,13 @@ func TestSourcePreservesArtifactAndIsolatesInvalidAppInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := f.kube.last.Digest
+	observed := f.source.reporting.Load().DownloadedAt
+	if err := f.source.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !f.source.reporting.Load().DownloadedAt.Equal(observed) {
+		t.Fatal("unchanged validated download renewed original observation")
+	}
 	f.mu.Lock()
 	f.status = 503
 	f.mu.Unlock()
@@ -420,6 +432,9 @@ func TestSourcePreservesArtifactAndIsolatesInvalidAppInput(t *testing.T) {
 	f.set(t, files, m)
 	if err = f.source.Sync(ctx); err != nil {
 		t.Fatal("invalid predecessor fenced valid app generation", err)
+	}
+	if !f.source.reporting.Load().DownloadedAt.After(observed) {
+		t.Fatal("changed artifact kept predecessor download time")
 	}
 	// A restarted adapter retains both terminal and generation fences.
 	m.Generation = 1
@@ -487,6 +502,37 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 	if report["ready"] != true || report["bundle_sha256"] != old[7:] {
 		t.Fatal("invented applied archive", report)
 	}
+	// A failed render can retain the same app generation while metadata changes.
+	// Failed publication must not revoke readiness of verified identical management.
+	data, err := f.source.Store.Get(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := artifact.Read(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained, err := transport.ReadMetadata(files["runtime.json"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(t, files, retained)
+	if err := f.source.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	retained.AppsError, retained.RequestedAppsGeneration = "generation_failed", 2
+	f.set(t, files, retained)
+	f.kube.publishErr = errors.New("publication_failed")
+	if err := f.source.Sync(t.Context()); err == nil {
+		t.Fatal("fixture publication succeeded")
+	}
+	if err := f.source.Report(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if report := f.lastReport(); report["ready"] != true || report["bundle_sha256"] != old[7:] || report["delivery_reason"] != "fetch_or_publication_failed" || report["apps_error"] != "generation_failed" {
+		t.Fatal("retained app input suppressed management reporting", report)
+	}
+	f.kube.publishErr = nil
 	_, changed := cache(3, "changed node")
 	if f.source.appOnlyChange(old, changed) {
 		t.Fatal("ignored infrastructure change")
@@ -526,5 +572,16 @@ func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *test
 	os.WriteFile(filepath.Join(s.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)
 	if s.componentUnchanged("livepeer-node", old, current) {
 		t.Fatal("trusted corrupt archive")
+	}
+}
+
+func TestAppValidationFailureRemainsReportableWithoutPayloadExcerpt(t *testing.T) {
+	f := newFixture(t)
+	if err := f.source.report(t.Context(), f.meta, "", "payload excerpt credential-sentinel", false); err != nil {
+		t.Fatal(err)
+	}
+	report := f.lastReport()
+	if report["apps_error"] != "invalid_app_payload" {
+		t.Fatal("raw validation error crossed status wire", report)
 	}
 }

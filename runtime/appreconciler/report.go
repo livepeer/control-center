@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/contract"
@@ -11,6 +12,9 @@ import (
 )
 
 type Report struct {
+	ReportVersion     int                `json:"report_version,omitempty"`
+	ObservedAt        time.Time          `json:"observed_at,omitempty"`
+	ClockUncertain    bool               `json:"clock_uncertain,omitempty"`
 	Epoch             string             `json:"epoch"`
 	CredentialVersion int64              `json:"credential_version"`
 	Component         string             `json:"component"`
@@ -41,7 +45,7 @@ func DiagnoseMetadata(ctx context.Context, m contract.Metadata, reporter Reporte
 	if reason == "" {
 		status = "ready"
 	}
-	_ = reporter.Status(ctx, Report{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: 2, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
+	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: 2, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
 }
 
 func (r ControlReporter) Status(ctx context.Context, value Report) error {
@@ -98,32 +102,85 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		status.DesiredGeneration = s.Payload.Intent.Generation
 		status.DesiredDigest = s.Payload.Index.IntentDigest
 	}
+	status.Staged = stageIdentity(s, s.Staged)
+	status.Published = stageIdentity(s, s.Published)
+	status.Applied = stageIdentity(s, s.Applied)
+	assignments := map[string]*contract.AssignmentStatus{}
+	if s.Payload.Intent != nil {
+		for _, a := range s.Payload.Intent.Entries {
+			status.Assignments = append(status.Assignments, contract.AssignmentStatus{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Reason: s.AssignmentReasons[a.RevisionID]})
+		}
+		for n := range status.Assignments {
+			assignments[status.Assignments[n].RevisionID] = &status.Assignments[n]
+		}
+	}
 	clean := true
-	for _, id := range instanceIDs(&s) {
+	ids := instanceIDs(&s)
+	sort.SliceStable(ids, func(a, b int) bool {
+		x, y := s.Instances[ids[a]], s.Instances[ids[b]]
+		return (x.Phase != "removed" || !x.RegistrationGone) && (y.Phase == "removed" && y.RegistrationGone)
+	})
+	status.InstancesTotal = len(ids)
+	for _, id := range ids {
 		i := s.Instances[id]
 		if i.Phase != "removed" || !i.RegistrationGone {
 			clean = false
 		}
 		sessions := -1
+		nodeAt, nodeExpiry := time.Time{}, time.Time{}
+		accepted := uint64(0)
 		if p, exists := proofs[id]; exists && !s.ClockUncertain && !p.Observation.At.After(now.Add(time.Second)) && now.Before(p.Observation.At.Add(p.Observation.TTL)) {
 			sessions = len(p.App.SessionIDs)
+			nodeAt, nodeExpiry, accepted = p.Observation.At, p.Observation.At.Add(p.Observation.TTL), p.Observation.Sequence
 		}
 		if i.RegistrationGone {
 			sessions = 0
 		}
+		registered := s.Identity.Confirmed && i.AppID != "" && !i.RegistrationGone && !nodeAt.IsZero()
+		var probe *contract.ProbeStatus
+		if c.Probes != nil {
+			probe = c.Probes.Status(id, i.PodUID)
+		}
+		if a := assignments[i.Group.RevisionID]; a != nil && a.ActivationGeneration == i.Group.ActivationGeneration {
+			a.Instances++
+			if ready[id] && i.WithdrawalID == "" {
+				a.Ready++
+			}
+			if probe != nil && i.WithdrawalID == "" && (a.ProbeExpiresAt.IsZero() || probe.ExpiresAt.Before(a.ProbeExpiresAt)) {
+				a.ProbeExpiresAt = probe.ExpiresAt
+			}
+			if registered {
+				a.Registered++
+				if a.NodeExpiresAt.IsZero() || nodeExpiry.Before(a.NodeExpiresAt) {
+					a.NodeExpiresAt = nodeExpiry
+				}
+			}
+			if i.WithdrawalID != "" && (i.Phase != "removed" || !i.RegistrationGone) {
+				a.CleanupPending++
+			}
+		}
 		if len(status.Instances) >= 128 {
 			continue
 		}
-		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: s.Identity.Confirmed && i.AppID != "" && !i.RegistrationGone, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, CancelAttemptAt: i.CancelAttemptAt, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt})
+		timeout, _ := time.ParseDuration(i.Definition.Lifecycle.StartupTimeout)
+		workload := view.Pods[i.Name].Reason
+		if i.PodUID != "" && i.Definition.Lifecycle.StopSignal != nil && !i.StopVerified {
+			workload = "stop_signal_unverified"
+		}
+		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, CancelAttemptAt: i.CancelAttemptAt, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: accepted, StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
-	report := Report{Epoch: s.Metadata.Epoch, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}
+	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
+	report := Report{ReportVersion: 1, ClockUncertain: s.ClockUncertain, Epoch: s.Metadata.Epoch, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}
 	if fault != "" {
 		report.Ready = false
 		report.Reason = "failed"
 	}
 	if s.Metadata.DrainRequested || s.Metadata.Terminal {
+		if s.Metadata.Terminal {
+			report.Ready = false
+		}
 		report.Reason = "drain_pending"
-		if clean && s.Identity.RunnerID == "" && s.MaintenanceWithdrawal != "" && !s.ClockUncertain {
+		if !s.Metadata.Terminal && clean && s.Identity.RunnerID == "" && s.MaintenanceWithdrawal != "" && !s.ClockUncertain {
 			// No live owner can renew admission. This observation follows a successful Kube read
 			// and durable owner retirement, rather than renewing an old heartbeat proof.
 			report.Drained = true
@@ -138,12 +195,16 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 			}
 		}
 	}
+	if err := boundReport(&report); err != nil {
+		return err
+	}
 	if err := c.Journal.Update(func(s *State) error {
 		report.Sequence = 0
 		old := s.Report
 		if old != nil {
 			copy := *old
 			copy.Sequence = 0
+			copy.ObservedAt = time.Time{}
 			a, _ := json.Marshal(copy)
 			b, _ := json.Marshal(report)
 			if string(a) == string(b) && now.Before(s.ReportObservedAt.Add(30*time.Second)) {
@@ -153,6 +214,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		s.ReportSequence++
 		s.ReportObservedAt = now
 		report.Sequence = s.ReportSequence
+		report.ObservedAt = now
 		s.Report = &report
 		return nil
 	}); err != nil {
@@ -160,7 +222,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 	}
 	s = c.Journal.View()
 	var statusErr error
-	if !s.Metadata.Terminal && (s.Report.Sequence > s.ReportDeliveredSequence || !now.Before(s.ReportDeliveredAt.Add(30*time.Second))) {
+	if s.Report.Sequence > s.ReportDeliveredSequence || !now.Before(s.ReportDeliveredAt.Add(30*time.Second)) {
 		statusErr = c.Reporter.Status(ctx, *s.Report)
 		if statusErr == nil {
 			if err := c.Journal.Update(func(current *State) error {
@@ -277,4 +339,30 @@ func instanceReason(i *Instance, ready bool, now time.Time) string {
 		return "readiness_failed"
 	}
 	return ""
+}
+
+func stageIdentity(s State, digest string) *contract.StageIdentity {
+	if digest == "" {
+		return nil
+	}
+	snapshot := s.Snapshots[digest]
+	return &contract.StageIdentity{Generation: snapshot.AppsGeneration, AppsDigest: snapshot.IntentDigest, ArtifactDigest: digest}
+}
+
+// Leave ample envelope space for the final sequence/time and never trim drain proof.
+func boundReport(r *Report) error {
+	for {
+		b, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		if len(b) <= contract.MaxStatusBytes-512 {
+			return nil
+		}
+		if len(r.Apps.Instances) == 0 {
+			return errors.New("report_size")
+		}
+		r.Apps.Instances = r.Apps.Instances[:len(r.Apps.Instances)-1]
+		r.Apps.InstancesOmitted++
+	}
 }

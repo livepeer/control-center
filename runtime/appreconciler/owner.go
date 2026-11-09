@@ -352,7 +352,11 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 			o.caps = Capabilities{}
 			o.mu.Unlock()
 		}
-		h.failure("node_request_failed", reset)
+		reason := "node_request_failed"
+		if response.StatusCode == 401 || response.StatusCode == 403 {
+			reason = "registration_auth_failed"
+		}
+		h.failure(reason, reset)
 		// Returning a sanitized transport error also prevents the SDK's automatic 401 bootstrap retry.
 		return nil, &transport.HTTPError{Status: response.StatusCode}
 	}

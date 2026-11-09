@@ -124,6 +124,10 @@ func (s Store) Report(ctx context.Context, m Machine, component string) (Report,
 	err := s.DB.QueryRowContext(ctx, `SELECT report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND epoch=$2 AND component=$3 AND credential_version=$4`, m.NodeID, m.Epoch, component, m.CredentialVersion).Scan(&raw, &at)
 	if err == nil {
 		err = json.Unmarshal(raw, &r)
+		at = ObservationTime(r, at)
+		if r.ReportVersion > 0 && component == "connector" && (r.ConnectorObservedAt.IsZero() || !time.Now().Before(r.ConnectorExpiresAt)) {
+			at = time.Time{}
+		}
 	}
 	return r, at, err
 }

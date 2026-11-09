@@ -242,6 +242,9 @@ func (c *Controller) Tick(ctx context.Context) error {
 	input, inputErr := c.Input.Read(ctx)
 	now = c.now() // Input/API latency must not keep an expired Node proof fresh.
 	inputReason := ""
+	if inputErr != nil {
+		inputReason = "input_unavailable"
+	}
 	if inputErr == nil {
 		m := input.Metadata
 		if before.InputDigest != "" && (m.NodeID != before.Metadata.NodeID || m.Epoch != before.Metadata.Epoch || m.CredentialVersion < before.Metadata.CredentialVersion || (before.Metadata.Terminal && !m.Terminal)) {
@@ -258,6 +261,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 		s.LastClock = now
 		s.ClockUncertain = false
 		s.SchedulingReason = ""
+		s.AssignmentReasons = map[string]string{}
 		s.InputReason = inputReason
 		if inputErr == nil {
 			m := input.Metadata
@@ -336,6 +340,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 			for _, g := range s.Payload.Index.Groups {
 				a := assignments[g.RevisionID]
 				if !a.StartAllowed {
+					s.AssignmentReasons[a.RevisionID] = "cleanup_prerequisite"
 					continue
 				}
 				if id := s.Heads[g.Key]; id != "" && s.Instances[id] != nil && s.Instances[id].Phase != "removed" {
@@ -348,6 +353,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 					}
 				}
 				if blocked {
+					s.AssignmentReasons[a.RevisionID] = "cleanup_pending"
 					continue
 				}
 				count := 0
@@ -369,6 +375,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 				}
 				if !archiveRoom || bytes > appbundle.MaxRenderedBytes || count >= appbundle.MaxInstances || !fits(s.Instances, a.Revision.Definition, view.Budget) {
 					s.SchedulingReason = "resource_refused"
+					s.AssignmentReasons[a.RevisionID] = "resource_refused"
 					continue
 				}
 				id := randomID()
@@ -514,7 +521,7 @@ func instanceIDs(s *State) []string {
 	return ids
 }
 func (c *Controller) publish(ctx context.Context, s State, now time.Time) error {
-	snapshot := Snapshot{Included: map[string]bool{}, Retired: map[string]bool{}, IntentDigest: s.Payload.Index.IntentDigest}
+	snapshot := Snapshot{Included: map[string]bool{}, Retired: map[string]bool{}, IntentDigest: s.Payload.Index.IntentDigest, AppsGeneration: s.Payload.Intent.Generation}
 	for _, id := range instanceIDs(&s) {
 		i := s.Instances[id]
 		if i.Phase == "retired" || i.Phase == "removed" {
@@ -631,14 +638,24 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 		}); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		c.fault = ""
+		c.mu.Unlock()
 		s = c.Journal.View()
 	}
 	r.Epoch = s.OwnerEpoch
 	err := c.Owner.Sync(ctx, r, c.hooks())
 	if err != nil {
-		reason := "registration_pending"
+		c.mu.Lock()
+		reason := c.fault
+		recovery = c.recoverOwner
+		c.mu.Unlock()
 		if errors.Is(err, ErrResourceRefused) {
 			reason = "resource_refused"
+		} else if transport.IsStatus(err, 401) || transport.IsStatus(err, 403) {
+			reason = "registration_auth_failed"
+		} else if reason == "" {
+			reason = "registration_pending"
 		}
 		c.failed(OwnerFailure{Epoch: r.Epoch, Hash: r.Hash, Reason: reason})
 		accepted := c.Owner.Accepted()

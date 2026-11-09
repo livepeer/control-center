@@ -68,9 +68,10 @@ type Instance struct {
 	TerminatedAt       time.Time           `json:"terminated_at,omitempty"`
 }
 type Snapshot struct {
-	Included     map[string]bool `json:"included"`
-	Retired      map[string]bool `json:"retired"`
-	IntentDigest string          `json:"intent_digest"`
+	Included       map[string]bool `json:"included"`
+	Retired        map[string]bool `json:"retired"`
+	IntentDigest   string          `json:"intent_digest"`
+	AppsGeneration int64           `json:"apps_generation,omitempty"`
 }
 type Receipt struct {
 	RevisionID           string `json:"revision_id"`
@@ -108,6 +109,7 @@ type State struct {
 	OwnerRecreatedAt        time.Time            `json:"owner_recreated_at,omitempty"`
 	Retirement              *contract.Evidence   `json:"retirement,omitempty"`
 	Report                  *Report              `json:"report,omitempty"`
+	AssignmentReasons       map[string]string    `json:"assignment_reasons,omitempty"`
 	SchedulingReason        string               `json:"scheduling_reason,omitempty"`
 	InputReason             string               `json:"input_reason,omitempty"`
 	RejectedOwnerHash       string               `json:"rejected_owner_hash,omitempty"`

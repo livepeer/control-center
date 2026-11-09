@@ -1,9 +1,14 @@
 package appreconciler
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/internal/testutil"
+	"github.com/livepeer/control-center/schema"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,7 +106,7 @@ func TestIdleUnknownCapabilitiesAndClockFaultDoNotInventWorkProof(t *testing.T) 
 		t.Fatal(err)
 	}
 	fault := r.reports[len(r.reports)-1]
-	if fault.Ready || fault.Drained || fault.Evidence != nil || fault.Apps.Reason != "clock_uncertain" {
+	if fault.Ready || fault.Drained || fault.Evidence != nil || !fault.ClockUncertain || fault.Apps.Reason != "clock_uncertain" {
 		t.Fatal("clock fault left stale readiness or manufactured completion", fault)
 	}
 }
@@ -131,5 +136,74 @@ func TestRetainedHeartbeatCountsDoNotBecomeWithdrawalProof(t *testing.T) {
 	}
 	if c.empty(c.Journal.View().Instances["retained"], *now) {
 		t.Fatal("attached current withdrawal context to an uncaptured retained observation")
+	}
+}
+
+func TestReportBudgetPreservesProofAndOmissionCounts(t *testing.T) {
+	r := Report{Sequence: ^uint64(0), ObservedAt: time.Now(), Apps: contract.AppStatus{Instances: []contract.InstanceStatus{}, InstancesTotal: 128}, Evidence: &contract.Evidence{Target: "sha256:" + strings.Repeat("a", 64), OwnerID: strings.Repeat("x", 128), WithdrawalID: "withdrawal", ObservedAt: time.Now(), ExpiresAt: time.Now().Add(time.Second)}}
+	proof := *r.Evidence
+	for n := 0; n < 128; n++ {
+		r.Apps.Instances = append(r.Apps.Instances, contract.InstanceStatus{InstanceID: fmt.Sprint(n), AppID: strings.Repeat("a", 128), RunnerID: strings.Repeat("r", 128), PodUID: strings.Repeat("p", 128), Reason: strings.Repeat("e", 128), WorkloadReason: strings.Repeat("w", 128), RevisionID: strings.Repeat("b", 36), NodeObservedAt: time.Now(), NodeExpiresAt: time.Now().Add(time.Minute), StartupDeadline: time.Now(), Deadline: time.Now(), CancelAttemptAt: time.Now(), TerminatedAt: time.Now(), RemovalPublishedAt: time.Now(), DrainExpiredAt: time.Now()})
+	}
+	if err := boundReport(&r); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(r)
+	if len(b) > contract.MaxStatusBytes || r.Evidence == nil || *r.Evidence != proof || r.Apps.InstancesOmitted == 0 || len(r.Apps.Instances)+r.Apps.InstancesOmitted != 128 {
+		t.Fatal("diagnostics crowded out proof or lost omission counts", len(b), r.Apps.InstancesOmitted)
+	}
+}
+
+func TestAssignmentRefusalIsSpecificBeforeInstanceCreation(t *testing.T) {
+	c, input, k, _, r, _ := fixtureController(t)
+	set := *input.value.Payload.Intent
+	var second schema.AppAssignment
+	raw, _ := json.Marshal(set.Entries[0])
+	if err := json.Unmarshal(raw, &second); err != nil {
+		t.Fatal(err)
+	}
+	second.RevisionID = "22222222-2222-4222-8222-222222222222"
+	second.Revision.RevisionID = second.RevisionID
+	set.Entries = append(set.Entries, second)
+	input.set(t, set)
+	// Enough for only the first assignment's requested replicas.
+	limit := resources(set.Entries[0].Revision.Definition.Resources.Limits)
+	k.view.Budget = Resources{limit.CPU * int64(set.Entries[0].Replicas), limit.Memory * int64(set.Entries[0].Replicas), limit.Storage * int64(set.Entries[0].Replicas)}
+	tick(t, c)
+	last := r.reports[len(r.reports)-1]
+	if len(last.Apps.Assignments) != 2 {
+		t.Fatal("missing assignment summaries")
+	}
+	found := false
+	for _, a := range last.Apps.Assignments {
+		if a.RevisionID == second.RevisionID {
+			found = a.Reason == "resource_refused" && a.Instances == 0
+		}
+	}
+	if !found {
+		t.Fatal("refusal was not bound to the assignment", last.Apps.Assignments)
+	}
+}
+
+func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {
+	c, _, k, _, reports, now := fixtureController(t)
+	registerApps(t, c, k)
+	c.Probes = NewProbes()
+	for id, i := range c.Journal.View().Instances {
+		c.Probes.values[id] = &health{uid: i.PodUID, observedAt: *now, observedDue: now.Add(5 * time.Second), timeout: 2 * time.Second, success: false, failures: 3, started: true}
+	}
+	if err := c.report(t.Context(), map[string]bool{}, k.view, *now); err != nil {
+		t.Fatal(err)
+	}
+	a := reports.reports[len(reports.reports)-1].Apps.Assignments[0]
+	if a.Ready != 0 || !a.ProbeExpiresAt.Equal(now.Add(8*time.Second)) {
+		t.Fatal("fresh failing probes became unknown", a)
+	}
+	*now = now.Add(9 * time.Second)
+	if err := c.report(t.Context(), map[string]bool{}, k.view, *now); err != nil {
+		t.Fatal(err)
+	}
+	if got := reports.reports[len(reports.reports)-1].Apps.Assignments[0]; !got.ProbeExpiresAt.Equal(a.ProbeExpiresAt) || now.Before(got.ProbeExpiresAt) {
+		t.Fatal("delivery renewed failing evidence", got)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/transport"
 	"github.com/livepeer/control-center/schema"
 )
@@ -18,10 +19,15 @@ type health struct {
 	started        bool
 	failures       int
 	next           time.Time
+	observedAt     time.Time
+	observedDue    time.Time
+	success        bool
+	timeout        time.Duration
 }
 type probeResult struct {
 	id, uid string
 	success bool
+	at      time.Time
 }
 type Probes struct {
 	mu      sync.Mutex
@@ -87,6 +93,7 @@ func (p *Probes) Poll(ctx context.Context, instances map[string]*Instance, view 
 				continue
 			}
 			h.pending = false
+			h.observedAt, h.success, h.observedDue = r.at, r.success, h.next
 			if r.success {
 				h.ready = true
 				h.started = true
@@ -130,6 +137,7 @@ consumed:
 		interval, _ := time.ParseDuration(i.Definition.Health.Readiness.Interval)
 		h.next = now.Add(interval)
 		timeout, _ := time.ParseDuration(i.Definition.Health.Readiness.Timeout)
+		h.timeout = timeout
 		target := privateURL(i.Name, i.Definition.HTTP.Port)
 		if p.Address != nil {
 			target = p.Address(i)
@@ -163,10 +171,20 @@ consumed:
 				}
 			}
 			select {
-			case p.results <- probeResult{id, uid, ok}:
+			case p.results <- probeResult{id: id, uid: uid, success: ok, at: time.Now().UTC()}:
 			case <-ctx.Done():
 			}
 		}()
 	}
 	return ready
+}
+
+func (p *Probes) Status(id, uid string) *contract.ProbeStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.values[id]
+	if h == nil || h.uid != uid || h.observedAt.IsZero() {
+		return nil
+	}
+	return &contract.ProbeStatus{ObservedAt: h.observedAt, DueAt: h.observedDue, ExpiresAt: h.observedDue.Add(h.timeout + time.Second), Success: h.success, Failures: h.failures, Started: h.started}
 }

@@ -36,6 +36,7 @@ type Manager struct {
 	refreshes, failures uint64
 	refreshDuration     time.Duration
 	pendingRefresh      map[string]uint64
+	provenance          map[string]snapshotProvenance
 }
 
 func New(config Config, deps Dependencies) (*Manager, error) {
@@ -87,8 +88,19 @@ func New(config Config, deps Dependencies) (*Manager, error) {
 func (f *Manager) Run(ctx context.Context) { f.collector.Run(ctx, f.interval) }
 func (f *Manager) Close()                  { f.collector.Close() }
 func (f *Manager) observation(endpoint string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.transport.mu.Lock()
+	defer f.transport.mu.Unlock()
 	for _, snapshot := range f.collector.Snapshots() {
 		if snapshot.URL == endpoint {
+			// Preserve the previous decode's provenance before a new attempt
+			// replaces its transport marker, even if nobody has read status.
+			for _, source := range f.selected {
+				if source.URL == endpoint {
+					f.snapshotCurrent(source, snapshot, f.transport.attempts[endpoint])
+				}
+			}
 			return snapshot.QueriedAt
 		}
 	}
@@ -101,6 +113,7 @@ type runner struct {
 	URL        string `json:"url"`
 	App        string `json:"app"`
 	ObservedAt string `json:"observed_at"`
+	Version    string `json:"version,omitempty"`
 	data       json.RawMessage
 }
 
@@ -111,7 +124,7 @@ func (r *runner) UnmarshalJSON(data []byte) error {
 		return errors.New("discovery runner must be an object")
 	}
 	var value runner
-	fields := map[string]*string{"url": &value.URL, "app": &value.App, "observed_at": &value.ObservedAt}
+	fields := map[string]*string{"url": &value.URL, "app": &value.App, "observed_at": &value.ObservedAt, "version": &value.Version}
 	seen := map[string]bool{}
 	for decoder.More() {
 		token, err := decoder.Token()
@@ -151,14 +164,21 @@ func (r runner) DiscoveryIdentity() (string, string, string) {
 	return r.URL, r.App, r.ObservedAt
 }
 
-func (f *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
+type publishedRunner struct {
+	runner
+	sourceID  string
+	queriedAt time.Time
+}
+
+// Keep membership and public responses on the same filtering and winner rules.
+// Each winning record retains the source snapshot that supplied it.
+func (f *Manager) publicInventory(snapshots []shared.Snapshot[runner]) []shared.Entry[publishedRunner] {
 	selected := make(map[string]Source, len(f.selected))
 	for _, source := range f.selected {
 		selected[source.URL] = source
 	}
-	entries := []shared.Entry[runner]{}
-	for _, snapshot := range f.collector.Snapshots() {
+	entries := []shared.Entry[publishedRunner]{}
+	for _, snapshot := range snapshots {
 		source, ok := selected[snapshot.URL]
 		if !ok {
 			continue
@@ -167,18 +187,24 @@ func (f *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !publicAddress(source, entry.Address) {
 				continue
 			}
-			published := shared.Entry[runner]{Address: entry.Address, Runners: []runner{}}
+			published := shared.Entry[publishedRunner]{Address: entry.Address, Runners: []publishedRunner{}}
 			for _, candidate := range entry.Runners {
 				if publicRunnerURL(source, candidate.URL) {
-					published.Runners = append(published.Runners, candidate)
+					published.Runners = append(published.Runners, publishedRunner{candidate, source.ID, snapshot.QueriedAt})
 				}
 			}
 			entries = append(entries, published)
 		}
 	}
+	return shared.Merge(entries)
+}
+
+func (f *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	entries := f.publicInventory(f.collector.Snapshots())
 	f.mu.Unlock()
-	result := []shared.Entry[runner]{}
-	for _, entry := range shared.Merge(entries) {
+	result := []shared.Entry[publishedRunner]{}
+	for _, entry := range entries {
 		if len(entry.Runners) > 0 {
 			result = append(result, entry)
 		}

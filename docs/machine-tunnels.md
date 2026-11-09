@@ -107,10 +107,13 @@ development mode cannot enable live provisioning.
 
 Machine endpoints provide configuration, connector tokens, component status
 and terminal removal acknowledgement. They are origin-bound, reject redirects
-and return `Cache-Control: no-store`. Retired credentials can fetch only their
-terminal artifact and acknowledge its epoch and digest.
+and return `Cache-Control: no-store`. Retired credentials can fetch their terminal
+artifact, acknowledge its epoch and digest, and send scoped cleanup diagnostics.
+See [machine and app status](machine-status.md) for evidence and recovery rules.
 
-Reports merge independently and use server receipt time. The agent checks Node's
+Reports merge independently. Upgraded reports retain their original observation
+time and expiry; delivery retries do not renew evidence. Legacy reports provide
+limited evidence based on receipt time. The agent checks Node's
 applied revision, completed rollout/config digest, metrics `/readyz`, private
 discovery address and installed K3s version. Format 3 connector reports use a fresh
 local probe of cloudflared and the proxy, the observed configuration version and

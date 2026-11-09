@@ -209,35 +209,9 @@ func (s *Server) prepareRevoke(r *http.Request, _ UserIdentity) (AdminApply, err
 	}, nil
 }
 
-// Deliberately separate from Machine, which includes installation metadata and
-// suppresses owner_id in owner-scoped responses.
-type FleetMachine struct {
-	NodeID            string     `json:"node_id"`
-	Epoch             string     `json:"epoch"`
-	Hostname          string     `json:"hostname"`
-	OwnerID           string     `json:"owner_id"`
-	K3sVersion        string     `json:"k3s_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	LastConfigFetchAt *time.Time `json:"last_config_fetch_at"`
-}
-
 func (s *Server) fleetMachines(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT node_id,enrollment_epoch::text,hostname,owner_id::text,k3s_version,created_at,last_config_fetch_at FROM lpcc.machines ORDER BY created_at DESC,node_id`)
+	machines, err := s.observedMachineList(r.Context(), "", true)
 	if err != nil {
-		s.respondError(w, err)
-		return
-	}
-	defer rows.Close()
-	machines := []FleetMachine{}
-	for rows.Next() {
-		var m FleetMachine
-		if err := rows.Scan(&m.NodeID, &m.Epoch, &m.Hostname, &m.OwnerID, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt); err != nil {
-			s.respondError(w, err)
-			return
-		}
-		machines = append(machines, m)
-	}
-	if err := rows.Err(); err != nil {
 		s.respondError(w, err)
 		return
 	}

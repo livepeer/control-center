@@ -84,6 +84,11 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 	if _, _, err = client.Request(t.Context(), "status", payload, 1024); !transport.IsStatus(err, 403) {
 		t.Fatal("cross-enrollment report passed")
 	}
+	payload["epoch"] = "epoch"
+	payload["padding"] = strings.Repeat("x", contract.MaxStatusBytes)
+	if _, _, err = client.Request(t.Context(), "status", payload, 1024); !transport.IsStatus(err, 403) {
+		t.Fatal("oversized status crossed app socket", err)
+	}
 	if control.calls != 2 {
 		t.Fatal("unauthorized operation reached Control Center")
 	}

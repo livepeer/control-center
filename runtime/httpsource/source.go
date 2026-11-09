@@ -33,6 +33,7 @@ type Kubernetes interface {
 }
 type Source struct {
 	Control         *transport.Control
+	Reporter        transport.Requester
 	Kube            Kubernetes
 	Store           artifact.Store
 	ArtifactURL     string
@@ -41,13 +42,16 @@ type Source struct {
 	mu              sync.Mutex
 	published       atomic.Pointer[delivery]
 	reporting       atomic.Pointer[delivery]
+	deliveryFailure atomic.Bool
 }
 
 type delivery struct {
-	Metadata contract.Metadata
-	Digest   string
-	AppError string
-	Handoff  bool
+	Metadata     contract.Metadata
+	Digest       string
+	AppError     string
+	Handoff      bool
+	Downloaded   *contract.StageIdentity
+	DownloadedAt time.Time
 }
 
 // Desired never lends authority from a different installed enrollment.
@@ -80,6 +84,7 @@ func (s *Source) Sync(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err := s.sync(ctx)
+	s.deliveryFailure.Store(err != nil)
 	if err != nil {
 		_ = s.Kube.Publish(ctx, SourceName, nil, false, "FetchFailed")
 	}
@@ -133,6 +138,9 @@ func (s *Source) sync(ctx context.Context) error {
 	}
 	if m.Terminal && m.BundleFormat >= contract.BundleFormat {
 		inputDigest := artifact.Digest(data)
+		if m.TerminalInputDigest != "" {
+			inputDigest = m.TerminalInputDigest
+		}
 		if previous != nil && previous.TerminalInputDigest != "" && previous.TerminalInputDigest != inputDigest {
 			return errors.New("terminal_bundle_changed")
 		}
@@ -160,10 +168,11 @@ func (s *Source) sync(ctx context.Context) error {
 		// Advertise installed format support even when legacy app input is invalid.
 		// The backend can then deliver a management-only repair using format 2.
 		if !m.Terminal {
-			s.reporting.Store(&delivery{Metadata: m, AppError: appErr.Error()})
+			s.reporting.Store(&delivery{Metadata: m, AppError: appErrorReason(appErr.Error())})
 		}
 		return appErr
 	}
+	inputDigest := artifact.Digest(data)
 	data, handoff, err := s.systemLayout(ctx, files, data, m)
 	if err != nil {
 		if !m.Terminal {
@@ -184,7 +193,7 @@ func (s *Source) sync(ctx context.Context) error {
 			delivered.AppsGeneration = 0
 			delivered.AppsDigest = ""
 		}
-		delivered.AppsError = appErr.Error()
+		delivered.AppsError = appErrorReason(appErr.Error())
 	}
 	b, err := json.Marshal(delivered)
 	if err != nil {
@@ -198,13 +207,23 @@ func (s *Source) sync(ctx context.Context) error {
 		return err
 	}
 	a := transport.Artifact{Digest: digest, Revision: digest, Path: "artifacts/" + digest[7:] + ".tar.gz", URL: strings.TrimRight(s.ArtifactURL, "/") + "/artifacts/" + digest[7:] + ".tar.gz", Size: len(data), LastUpdateTime: info.ModTime().UTC().Format(time.RFC3339)}
+	d := &delivery{Metadata: m, Digest: digest, AppError: delivered.AppsError, Handoff: handoff}
+	if appErr == nil {
+		d.Downloaded = &contract.StageIdentity{Generation: m.AppsGeneration, AppsDigest: m.AppsDigest, ArtifactDigest: inputDigest}
+		d.DownloadedAt = time.Now().UTC()
+		if prior := s.reporting.Load(); prior != nil && prior.Metadata.Epoch == m.Epoch && prior.Downloaded != nil && *prior.Downloaded == *d.Downloaded {
+			d.DownloadedAt = prior.DownloadedAt
+		}
+	} else if prior := s.reporting.Load(); prior != nil && prior.Metadata.Epoch == m.Epoch {
+		d.Downloaded, d.DownloadedAt = prior.Downloaded, prior.DownloadedAt
+	}
+	s.reporting.Store(d)
 	if err = s.Kube.Publish(ctx, SourceName, &a, true, "Succeeded"); err != nil {
 		return err
 	}
 	if err = artifact.AtomicWrite(filepath.Join(s.Store.Directory, digest[7:]+".seen"), []byte(digest), 0600); err != nil {
 		return errors.New("cache_publication_commit")
 	}
-	d := &delivery{Metadata: m, Digest: digest, AppError: delivered.AppsError, Handoff: handoff}
 	s.published.Store(d)
 	s.reporting.Store(d)
 	s.gc(ctx, digest)
@@ -338,7 +357,7 @@ func (s *Source) appOnlyChange(previous, current string) bool {
 	}
 	a, ga, ea := infrastructure(previous)
 	b, gb, eb := infrastructure(current)
-	return ea == nil && eb == nil && gb > ga && bytes.Equal(a, b)
+	return ea == nil && eb == nil && gb >= ga && bytes.Equal(a, b)
 }
 
 func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appError string, handoff bool) error {
@@ -491,8 +510,19 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 	if s.SystemWorkloads && (m.BundleFormat >= contract.SystemBundleFormat || s.systemCapable(m, revision)) {
 		format = contract.SystemBundleFormat
 	}
-	_, _, err := s.Control.Request(ctx, "status", map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
-		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": format, "apps_error": appError}, 16384)
+	reporter := s.Reporter
+	if reporter == nil {
+		reporter = s.Control
+	}
+	payload := map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
+		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": format, "apps_error": appErrorReason(appError), "observed_at": time.Now().UTC()}
+	if d := s.reporting.Load(); d != nil {
+		payload["downloaded"], payload["downloaded_at"] = d.Downloaded, d.DownloadedAt
+	}
+	if s.deliveryFailure.Load() {
+		payload["delivery_reason"] = "fetch_or_publication_failed"
+	}
+	_, _, err := reporter.Request(ctx, "status", payload, 16384)
 	return err
 }
 
@@ -544,5 +574,16 @@ func (s *Source) gc(ctx context.Context, current string) {
 			_ = os.Remove(filepath.Join(s.Store.Directory, f.name))
 			_ = os.Remove(filepath.Join(s.Store.Directory, strings.TrimSuffix(f.name, ".tar.gz")+".seen"))
 		}
+	}
+}
+
+// Validation errors may contain field paths or payload excerpts. Only bounded
+// operational classifications cross the status wire.
+func appErrorReason(message string) string {
+	switch message {
+	case "", "generation_failed", "unsupported_instance_mode", "unsupported_stop_signal", "resource_refused", "app_index", "app_unavailable", "app_digest", "app_identity", "app_groups", "app_group_identity", "app_resource_digest", "app_resource", "app_membership", "app_generation", "unexpected_app_input", "missing_app_input", "app_manifest", "stale_app_input", "invalid_legacy_app_input":
+		return message
+	default:
+		return "invalid_app_payload"
 	}
 }

@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /api/bootstrap-token", s.bootstrapToken)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
+	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/admin/administrators", s.adminRead(s.listAdministrators))
 	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
@@ -151,22 +152,8 @@ func (s *Server) listMachines(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, err)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT node_id,hostname,install_dir,k3s_version,created_at,last_config_fetch_at FROM lpcc.machines WHERE owner_id=$1 ORDER BY created_at DESC`, owner.ID)
+	machines, err := s.observedMachineList(r.Context(), owner.ID, false)
 	if err != nil {
-		s.databaseError(w, err)
-		return
-	}
-	defer rows.Close()
-	machines := []Machine{}
-	for rows.Next() {
-		var m Machine
-		if err := rows.Scan(&m.NodeID, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt); err != nil {
-			s.databaseError(w, err)
-			return
-		}
-		machines = append(machines, m)
-	}
-	if err := rows.Err(); err != nil {
 		s.databaseError(w, err)
 		return
 	}

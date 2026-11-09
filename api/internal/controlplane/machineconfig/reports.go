@@ -13,6 +13,7 @@ import (
 
 var ErrStatusAhead = errors.New("status generation is ahead of desired state")
 var ErrStaleStatus = errors.New("stale status")
+var ErrReportOrder = errors.New("report ordering state must be restored")
 
 // RecordReport binds observations to the current enrollment credential and
 // rejects observations ahead of the persisted machine rollout. It returns
@@ -25,12 +26,37 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 	if report.Generation > max(record.Generation, 1) {
 		return false, ErrStatusAhead
 	}
-	var previous Report
-	if report.Component == "runner" && (record.BundleFormat >= 2 || report.BundleFormat >= 2) {
-		previous, _, err = s.store.Report(ctx, m, "runner")
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	previous, _, err := s.store.Report(ctx, m, report.Component)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if report.ReportVersion != 0 {
+		if report.ReportVersion != 1 || report.Sequence == 0 || report.ObservedAt.IsZero() {
+			return false, ErrStaleStatus
+		}
+		if report.Sequence == previous.Sequence {
+			report.ClockUncertain = report.ClockUncertain || previous.ClockUncertain
+		} else {
+			report.ClockUncertain = report.ClockUncertain || report.ObservedAt.After(time.Now().Add(5*time.Second)) || (!previous.ClockUncertain && !previous.ObservedAt.IsZero() && report.ObservedAt.Before(previous.ObservedAt))
+		}
+		if err := s.validateObservations(ctx, m, report); err != nil {
 			return false, err
 		}
+	}
+	if m.Terminal {
+		if report.ReportVersion != 1 || (report.Component != "runner" && report.Component != "app-reconciler") || report.Generation != record.Generation || report.Drained || report.Evidence != nil {
+			return false, ErrStaleStatus
+		}
+	}
+	reasons := map[string]bool{"ready": true, "applying": true, "offline": true, "failed": true, "drain_pending": true, "removed": true, "tls_pending": true}
+	if !reasons[report.Reason] {
+		report.Reason = "failed"
+	}
+	if report.ReportVersion == 1 && report.Sequence == previous.Sequence && reflect.DeepEqual(previous, report) {
+		return false, nil
+	}
+
+	if report.Component == "runner" && (record.BundleFormat >= 2 || report.BundleFormat >= 2) {
 		if report.BundleFormat != 2 || report.Sequence == 0 || report.Apps == nil || len(report.Apps.Instances) > 128 {
 			return false, ErrStaleStatus
 		}
@@ -41,16 +67,25 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 			}
 			seen[i.InstanceID] = true
 		}
-		if report.Drained && !validDrainEvidence(m, record.State, report, time.Now()) {
+		if report.Drained && (report.ClockUncertain || !validDrainEvidence(m, record.State, report, time.Now())) {
 			return false, ErrStaleStatus
 		}
 	}
-	reasons := map[string]bool{"ready": true, "applying": true, "offline": true, "failed": true, "drain_pending": true, "removed": true, "tls_pending": true}
-	if !reasons[report.Reason] {
-		report.Reason = "failed"
-	}
 	raw, _ := json.Marshal(report)
-	result, err := s.store.DB.ExecContext(ctx, `INSERT INTO lpcc.machine_reports(node_id,epoch,component,generation,credential_version,report) SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$5) ON CONFLICT(node_id,epoch,component) DO UPDATE SET generation=EXCLUDED.generation,credential_version=EXCLUDED.credential_version,report=EXCLUDED.report,received_at=now() WHERE lpcc.machine_reports.generation<=EXCLUDED.generation AND lpcc.machine_reports.credential_version<=EXCLUDED.credential_version AND ($3<>'runner' OR COALESCE((lpcc.machine_reports.report->>'bundle_format')::int,0)<2 OR COALESCE((lpcc.machine_reports.report->>'sequence')::numeric,0)<COALESCE((EXCLUDED.report->>'sequence')::numeric,0))`, m.NodeID, m.Epoch, report.Component, report.Generation, m.CredentialVersion, string(raw))
+	result, err := s.store.DB.ExecContext(ctx, `INSERT INTO lpcc.machine_reports(node_id,epoch,component,generation,credential_version,report)
+ SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT FROM lpcc.enrollments e WHERE e.node_id=$1 AND e.epoch=$2 AND e.credential_version=$5
+ AND ((NOT $7 AND e.retired_at IS NULL) OR ($7 AND e.retired_at IS NOT NULL AND e.terminal_sha256 IS NOT NULL)))
+ ON CONFLICT(node_id,epoch,component) DO UPDATE SET generation=EXCLUDED.generation,credential_version=EXCLUDED.credential_version,report=EXCLUDED.report,received_at=now()
+ WHERE lpcc.machine_reports.generation<=EXCLUDED.generation AND lpcc.machine_reports.credential_version<=EXCLUDED.credential_version
+ AND ($3<>'runner' OR COALESCE((EXCLUDED.report->>'report_version')::int,0)=0 OR
+ (COALESCE((lpcc.machine_reports.report#>>'{apps,desired_generation}')::bigint,0)<=COALESCE((EXCLUDED.report#>>'{apps,desired_generation}')::bigint,0)
+ AND (COALESCE((lpcc.machine_reports.report#>>'{apps,desired_generation}')::bigint,0)<>COALESCE((EXCLUDED.report#>>'{apps,desired_generation}')::bigint,0)
+ OR COALESCE(lpcc.machine_reports.report#>>'{apps,desired_digest}','')=COALESCE(EXCLUDED.report#>>'{apps,desired_digest}',''))))
+ AND COALESCE((lpcc.machine_reports.report->>'report_version')::int,0)<=COALESCE((EXCLUDED.report->>'report_version')::int,0)
+ AND (lpcc.machine_reports.credential_version<EXCLUDED.credential_version
+ OR ($3<>'runner' AND COALESCE((EXCLUDED.report->>'report_version')::int,0)=0)
+ OR ($3='runner' AND COALESCE((lpcc.machine_reports.report->>'bundle_format')::int,0)<2 AND COALESCE((EXCLUDED.report->>'report_version')::int,0)=0)
+ OR COALESCE((lpcc.machine_reports.report->>'sequence')::numeric,0)<COALESCE((EXCLUDED.report->>'sequence')::numeric,0))`, m.NodeID, m.Epoch, report.Component, report.Generation, m.CredentialVersion, string(raw), m.Terminal)
 	if err != nil {
 		return false, err
 	}
@@ -60,7 +95,13 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 		if e == nil && reflect.DeepEqual(old, report) {
 			return false, nil
 		}
+		if report.Component != "runner" && old.CredentialVersion == report.CredentialVersion && (old.ReportVersion > report.ReportVersion || (report.ReportVersion > 0 && old.Sequence >= report.Sequence)) {
+			return false, ErrReportOrder
+		}
 		return false, ErrStaleStatus
+	}
+	if m.Terminal {
+		return false, nil
 	}
 	drainWake := report.Component == "runner" && report.Drained && record.DrainRequested && report.Generation == record.Generation
 	if report.BundleFormat >= 2 && previous.Drained && previous.Generation == report.Generation && previous.Evidence != nil && report.Evidence != nil && previous.Evidence.Target == report.Evidence.Target && time.Now().Before(previous.Evidence.ExpiresAt) {

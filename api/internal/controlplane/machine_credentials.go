@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -58,7 +59,11 @@ func machineInput(r *http.Request, v any) error {
 	return boundedMachineInput(r, v, 16384)
 }
 func boundedMachineInput(r *http.Request, v any, limit int64) error {
-	dec := json.NewDecoder(io.LimitReader(r.Body, limit+1))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil || int64(len(raw)) > limit {
+		return problem(400, "invalid_request", "Provide one bounded machine request.")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if dec.Decode(v) != nil || dec.Decode(new(any)) != io.EOF {
 		return problem(400, "invalid_request", "Provide one bounded machine request.")
@@ -212,7 +217,7 @@ func (s *Server) retainedConnector(ctx context.Context, m Machine, format int) (
 	return machineapps.Pending(ctx, s.db, m.NodeID, m.Epoch)
 }
 func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
-	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), false)
+	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), true)
 	if e != nil {
 		s.respondError(w, e)
 		return
@@ -236,7 +241,9 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	wake, err := s.configs.RecordReport(r.Context(), configurationMachine(m), report)
 	if err != nil {
-		if errors.Is(err, machineconfig.ErrStatusAhead) || errors.Is(err, machineconfig.ErrStaleStatus) {
+		if errors.Is(err, machineconfig.ErrReportOrder) {
+			fail(w, http.StatusPreconditionFailed, err.Error())
+		} else if errors.Is(err, machineconfig.ErrStatusAhead) || errors.Is(err, machineconfig.ErrStaleStatus) {
 			fail(w, 409, err.Error())
 		} else {
 			s.databaseError(w, err)

@@ -3,9 +3,10 @@ import type { Session } from '@supabase/supabase-js'
 import { api, APIError } from './api'
 import { Catalog } from './catalog'
 import { MachineApps } from './machine-apps'
+import { MachineStatus, machineStatusSummary } from './machine-status'
 
 type Grant = { grant_id: string; email: string; user_id: string | null; current_email: string | null; revision: number; state: 'pending' | 'bound' | 'account_missing' }
-type FleetMachine = { node_id: string; epoch: string; hostname: string; owner_id: string; k3s_version: string; created_at: string; last_config_fetch_at: string | null }
+type FleetMachine = { terminal?: boolean; report_state?: string; lifecycle?: string; node_id: string; epoch: string; hostname: string; owner_id: string; k3s_version: string; created_at: string; last_config_fetch_at: string | null }
 type Capability = 'loading' | 'admin' | 'ordinary' | 'unavailable'
 
 // Keyed by account in Dashboard. Request versions reject obsolete successes
@@ -118,7 +119,10 @@ export function Administration({ session }: { session: Session }) {
     </div>
     <Catalog session={session} authorityFailure={error => { invalidate(error.status === 503 ? 'unavailable' : 'ordinary'); setAccessProblem(error.message) }} />
     <h3>Machine fleet <span className="count">{machines.length}</span></h3>
-    <div className="machine-panel table-scroll"><table><thead><tr><th>MACHINE</th><th>OWNER</th><th>K3S VERSION</th><th>LAST CONFIG REQUEST</th><th>APPS</th></tr></thead><tbody>{machines.map(machine => <tr key={machine.node_id}><td><strong>{machine.hostname}</strong><code>{machine.node_id}</code></td><td><code>{machine.owner_id}</code></td><td>{machine.k3s_version}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td><td><button className="button" aria-label={`Manage apps for ${machine.hostname}`} disabled={!machine.epoch} onClick={() => setSelectedMachine(machine.node_id)}>Manage apps</button></td></tr>)}</tbody></table>{machines.length === 0 && <p className="admin-empty muted">No machines enrolled.</p>}</div>
-    {machines.filter(m => m.node_id === selectedMachine).map(machine => <MachineApps key={`${session.user.id}:${machine.node_id}:${machine.epoch}`} session={session} machine={machine} authorityFailure={error => { invalidate(error.status === 503 ? 'unavailable' : 'ordinary'); setAccessProblem(error.message) }} />)}
+    <div className="machine-panel table-scroll"><table><thead><tr><th>MACHINE</th><th>OWNER</th><th>K3S VERSION</th><th>LAST CONFIG REQUEST</th><th>APPS</th><th>RUNTIME</th></tr></thead><tbody>{machines.map(machine => <tr key={`${machine.node_id}:${machine.epoch}`}><td><strong>{machine.hostname}</strong><code>{machine.node_id}</code></td><td><code>{machine.owner_id}</code></td><td>{machine.k3s_version}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td><td><button className="button" aria-label={`Manage apps for ${machine.hostname}`} disabled={!machine.epoch} onClick={() => setSelectedMachine(`${machine.node_id}:${machine.epoch}`)}>{machine.terminal ? 'Inspect cleanup' : 'Manage apps'}</button>{machine.terminal && <p>Retired — cleanup pending</p>}</td><td><button className="button" aria-label={`Inspect Runtime for ${machine.hostname}`} disabled={!machine.epoch} onClick={() => setSelectedMachine(`${machine.node_id}:${machine.epoch}`)}>Runtime status</button><p className="muted">{machineStatusSummary(machine)}</p></td></tr>)}</tbody></table>{machines.length === 0 && <p className="admin-empty muted">No machines enrolled.</p>}</div>
+    {machines.filter(m => `${m.node_id}:${m.epoch}` === selectedMachine).map(machine => <div key={`${session.user.id}:${machine.node_id}:${machine.epoch}`}>
+      <MachineStatus session={session} machine={machine} authorityFailure={error => { invalidate('ordinary'); setAccessProblem(error.message) }} />
+      {!machine.terminal && <MachineApps session={session} machine={machine} authorityFailure={error => { invalidate(error.status === 503 ? 'unavailable' : 'ordinary'); setAccessProblem(error.message) }} />}
+    </div>)}
   </section>
 }

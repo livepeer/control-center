@@ -6,9 +6,10 @@ import { ArrowDown, ArrowRight, Check, CheckCheck, ChevronRight, Copy, Cpu, LogO
 import './style.css'
 import { api } from './api'
 import { Administration } from './administration'
+import { MachineStatus, machineStatusSummary } from './machine-status'
 
 type Config = { supabase_url: string; supabase_publishable_key: string; public_api_url: string }
-type Machine = { node_id: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
+type Machine = { node_id: string; epoch?: string; terminal?: boolean; lifecycle?: string; report_state?: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
 type Enrollment = { token: string; expires_at: string }
 
 function Brand({ dark = false }: { dark?: boolean }) {
@@ -91,6 +92,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
   const [machines, setMachines] = useState<Machine[] | null>(null)
   const [tokenProblem, setTokenProblem] = useState('')
   const [machineProblem, setMachineProblem] = useState('')
+  const [selectedMachine, setSelectedMachine] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const [now, setNow] = useState(Date.now())
@@ -149,9 +151,10 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
       </div>
       <section id="machines" className="machines-section" aria-labelledby="machines-title"><div className="section-heading"><div><h2 id="machines-title">Your machines<span className="count">{machines?.length ?? '—'}</span></h2><p className="muted">Every connected machine, in one place.</p></div><span className="auto-refresh"><span className="status-dot active" />Updates automatically</span></div>
         {machineProblem && <Notice>{machineProblem}</Notice>}
-        <div className="machine-panel">{machines === null ? <div className="empty-state"><RefreshCw size={22} className="spin" /><h3>Loading your machines…</h3></div> : machines.length === 0 ? <div className="empty-state"><div className="empty-icon"><Server size={25} /><span><Plus size={12} /></span></div><h3>Your first machine starts here.</h3><p>Run the command above. Your machine will appear<br />here as soon as enrollment succeeds.</p><a href="#connect-title" className="text-link">Ready when you are<ArrowRight size={15} /></a></div> : <div className="table-scroll"><table><thead><tr><th>MACHINE</th><th>STATUS</th><th>REGISTERED</th><th>LAST CONFIG REQUEST</th></tr></thead><tbody>{machines.map(machine => <tr key={machine.node_id}><td><div className="machine-name"><span className="machine-glyph"><Server size={17} /></span><div><strong>{machine.hostname}</strong><code>{machine.node_id}</code></div></div></td><td><span className={`machine-status ${machine.last_config_fetch_at ? 'delivered' : ''}`}><span className="status-dot active" />{machine.last_config_fetch_at ? 'Config requested' : 'Registered'}</span></td><td>{new Date(machine.created_at).toLocaleString()}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td></tr>)}</tbody></table></div>}</div>
-        <p className="table-note">Registration and configuration requests are shown here. Installation progress stays in your terminal.</p>
+        <div className="machine-panel">{machines === null ? <div className="empty-state"><RefreshCw size={22} className="spin" /><h3>Loading your machines…</h3></div> : machines.length === 0 ? <div className="empty-state"><div className="empty-icon"><Server size={25} /><span><Plus size={12} /></span></div><h3>Your first machine starts here.</h3><p>Run the command above. Your machine will appear<br />here as soon as enrollment succeeds.</p><a href="#connect-title" className="text-link">Ready when you are<ArrowRight size={15} /></a></div> : <div className="table-scroll"><table><thead><tr><th>MACHINE</th><th>STATUS</th><th>ENROLLED / RETIRED</th><th>LAST CONFIG REQUEST</th><th>RUNTIME</th></tr></thead><tbody>{machines.map(machine => <tr key={`${machine.node_id}:${machine.epoch || ''}`}><td><div className="machine-name"><span className="machine-glyph"><Server size={17} /></span><div><strong>{machine.hostname}</strong><code>{machine.node_id}</code></div></div></td><td><span className={`machine-status ${['stale', 'clock_uncertain'].includes(machine.report_state || '') ? 'stale' : machine.report_state === 'observed' ? 'delivered' : ''}`}><span className={`status-dot ${machine.report_state === 'observed' && !machine.terminal ? 'active' : ''}`} />{machineStatusSummary(machine)}</span></td><td>{new Date(machine.created_at).toLocaleString()}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td><td><button className="button" disabled={!machine.epoch} aria-label={`View status for ${machine.hostname}`} onClick={() => setSelectedMachine(`${machine.node_id}:${machine.epoch}`)}>View status</button></td></tr>)}</tbody></table></div>}</div>
+        <p className="table-note">Enrollment and configuration requests do not establish application health. Open Runtime status for rollout and configured health evidence.</p>
       </section>
+      {machines?.filter(m => `${m.node_id}:${m.epoch}` === selectedMachine && m.epoch).map(m => <MachineStatus key={`${session.user.id}:${m.node_id}:${m.epoch}`} session={session} machine={{ ...m, epoch: m.epoch! }} />)}
       <Administration key={session.user.id} session={session} />
       <footer className="dashboard-footer"><span>LIVEPEER / CONTROL CENTER</span><span>YOUR MACHINES. OPEN POSSIBILITIES.</span></footer>
     </main>

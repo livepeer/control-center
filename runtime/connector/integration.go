@@ -57,6 +57,7 @@ type Observation struct {
 
 type Integration struct {
 	Control        *transport.Control
+	Reporter       transport.Requester
 	Kube           Kubernetes
 	Desired        func() (contract.Metadata, bool)
 	StateFile      string
@@ -250,11 +251,13 @@ func (i *Integration) Report(ctx context.Context) error {
 		return nil
 	}
 	ready := false
+	observedAt := time.Time{}
 	tokenGeneration, providerVersion := int64(0), int64(0)
 	i.mu.Lock()
 	if podValid && i.grant == grant && matches(*grant, m) {
 		tokenGeneration = grant.TokenGeneration
 		if observation := i.observation; observation != nil && observation.Association == *grant && !observation.observedAt.IsZero() && time.Since(observation.observedAt) <= observationTTL {
+			observedAt = observation.observedAt
 			providerVersion = observation.ProviderVersion
 			ready = observation.Ready && providerVersion > 0 && providerVersion == m.ProviderVersion
 		}
@@ -264,6 +267,10 @@ func (i *Integration) Report(ctx context.Context) error {
 	if ready {
 		reason = "ready"
 	}
-	_, _, err := i.Control.Request(ctx, "status", map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "connector", "generation": m.Generation, "token_generation": tokenGeneration, "provider_version": providerVersion, "ready": ready, "https": strings.HasPrefix(i.Control.ConfigURL, "https://"), "reason": reason}, 16384)
+	reporter := i.Reporter
+	if reporter == nil {
+		reporter = i.Control
+	}
+	_, _, err := reporter.Request(ctx, "status", map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "connector", "generation": m.Generation, "token_generation": tokenGeneration, "provider_version": providerVersion, "ready": ready, "https": strings.HasPrefix(i.Control.ConfigURL, "https://"), "reason": reason, "observed_at": time.Now().UTC(), "connector_observed_at": observedAt, "connector_expires_at": observedAt.Add(observationTTL)}, 16384)
 	return err
 }
