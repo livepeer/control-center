@@ -21,6 +21,21 @@ Ingress rules deny discovery, runner, metrics, health, and Trickle paths on the
 public API and application hosts. Unknown hosts and unmatched API paths return
 404. Discovery requires the expected Access audience.
 
+## Cloudflare API token permissions
+
+Create a custom token scoped to the relevant account and zone:
+
+| Scope | Permission | Access | Why |
+| --- | --- | --- | --- |
+| Account | Cloudflare One Connector: cloudflared | Edit | Manage tunnels, connector credentials and connections |
+| Account | Access: Apps and Policies | Edit | Protect machines with Cloudflare Service Auth applications and policies |
+| Account | Access: Service Tokens | Edit | Authenticate machine requests to Nodes |
+| Zone | DNS | Edit | Manage machine and wildcard CNAMEs and any validation records |
+| Zone | SSL and Certificates | Edit | Manage Advanced Certificate packs for machine wildcard coverage |
+
+SSL and Certificates is under Cache & Performance in the token builder. Enable
+Advanced Certificate Manager (ACM) for the zone before ordering certificates.
+
 ## Reconciliation and readiness
 
 PostgreSQL, Cloudflare, and the machine can fail independently. Reconciliation

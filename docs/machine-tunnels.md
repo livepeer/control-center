@@ -12,7 +12,8 @@ normally. A Trickle-dependent app can appear in discovery and fail for clients.
 Supply account and zone IDs, a dedicated base domain, Zero Trust team, scoped
 backend API credential, token lifetime/rotation window, observation TTL, drain
 deadline, quotas with overlapping-token/hostname headroom, and all fleet node
-and management address exclusions. Private Control Center exceptions are
+and management address exclusions. Use the [required API token permissions](../api/internal/controlplane/tunnel/README.md#cloudflare-api-token-permissions)
+when creating the backend credential. Private Control Center exceptions are
 individual private /32 or /128 addresses on HTTPS port 443. The generated
 network policy assumes Runtime's fixed Pod/Service ranges. Verify actual
 CNI/DNAT behavior; update exclusions before introducing any new network ranges

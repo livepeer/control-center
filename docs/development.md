@@ -1,0 +1,63 @@
+# Development
+
+The repository contains the Go API (`api/`), web UI (`ui/`), and host bootstrap
+and tests (`runtime/`), with one Go module at the repository root. Run the
+commands below from the repository root.
+
+## Run locally
+
+Requires Go 1.27.3+, Node.js 22.12+, TLS-enabled PostgreSQL 15+, and authentication.
+Configure credentials and sign-in using
+[api/config.example.toml](../api/config.example.toml) and the
+[operations runbook](operations.md). Then run:
+
+```sh
+go mod download
+npm --prefix ui ci
+make api
+# In another terminal:
+make ui
+```
+
+Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
+
+## Development checks
+
+```sh
+make test
+make build
+npm --prefix ui run test:browser
+```
+
+Database tests skip without `TEST_DATABASE_URL` for a disposable PostgreSQL
+instance with database and test-role creation privileges. Browser tests use
+Chrome and mocks.
+
+## Remote Runtime tests
+
+```sh
+make test-runtime REMOTE=<ssh-host>
+make test-runtime REMOTE=<ssh-host> REF=<commit>
+```
+
+The first command tests current `runtime/` files, including uncommitted changes;
+`REF` selects a repository commit. Only `runtime/` is transferred.
+
+The local machine needs Git, Python 3.10+, and OpenSSH configured for the remote
+host. The Linux remote user needs Bash, Python 3.10+, ShellCheck, jq, bzip2,
+standard shell, archive and checksum utilities, and access without sudo to a
+Docker daemon over a Unix socket. Image retrieval and container package
+installation need network access. Optional kubectl/PyYAML checks report skips
+when unavailable.
+
+The runner checks Bash syntax, runs ShellCheck and Python tests, then exercises
+firewall traffic in a disposable Docker container. See
+[Runtime verification](../runtime/README.md#verification) for test scope and
+host acceptance checks.
+
+Logs and results are written to `.remote-test-results/<run-id>/`; `result.json`
+records test and cleanup outcomes. The command returns nonzero for test,
+transport, or cleanup failures. Interrupted runs may retain a remote container
+or temporary directory; inspect the resource identifiers printed by the helper
+before removing those resources or rerunning. Delete the local run directory
+when its results are no longer needed.

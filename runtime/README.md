@@ -397,8 +397,8 @@ Kustomization conditions, then follow the [recovery steps](#interrupted-installa
 
 ## Verification
 
-On Linux, with the tools listed in the [remote-test guide](../README.md#remote-runtime-tests),
-run from `runtime/`:
+On Linux, with the tools listed in the
+[remote-test guide](../docs/development.md#remote-runtime-tests), run from `runtime/`:
 
 ```bash
 bash tests/run.sh
@@ -412,8 +412,8 @@ The runner checks Bash syntax, runs ShellCheck and Python tests, then runs the
 firewall traffic test in Docker. Python tests use temporary directories and
 localhost servers without root or a cluster. Optional offline Kustomize checks
 use `kubectl` and PyYAML and report skips if unavailable. From the repository
-root, `make test-runtime REMOTE=livepeer-t4` runs the same tests remotely; the
-[guide](../README.md#remote-runtime-tests) covers source selection, results,
+root, `make test-runtime REMOTE=<ssh-host>` runs the same tests remotely; the
+[guide](../docs/development.md#remote-runtime-tests) covers running tests, results,
 and cleanup.
 
 The firewall test uses a disposable privileged Docker container and private
