@@ -19,9 +19,7 @@ type Machine struct {
 
 // State is the enrollment's workload rollout, independent of any provider.
 type State struct {
-	BundleFormat           int       `json:"bundle_format,omitempty"`
-	RuntimeImage           string    `json:"runtime_image,omitempty"`
-	SystemConnectorImage   string    `json:"system_connector_image,omitempty"`
+	ConnectorImage         string    `json:"connector_image,omitempty"`
 	HeldUpgradePlan        string    `json:"held_upgrade_plan,omitempty"`
 	ApplyingConfigDigest   string    `json:"applying_config_digest,omitempty"`
 	ApplyingUpgradeVersion string    `json:"applying_upgrade_version,omitempty"`
@@ -52,9 +50,8 @@ type Exposure struct {
 }
 
 type ConnectorConfig struct {
-	Image                              string
-	ManagedImage                       string
-	NodeAddresses, PrivateControlCIDRs []string
+	Image         string
+	NodeAddresses []string
 }
 
 type Desired struct {
@@ -64,7 +61,6 @@ type Desired struct {
 	Exposure                *Exposure
 	Connector               ConnectorConfig
 	ControlAPIURL           string
-	BundleFormat            int
 	RuntimeImage            string
 	NodeImage               string
 	StopSignals             bool

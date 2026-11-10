@@ -11,8 +11,6 @@ import (
 var (
 	ErrNotFound          = errors.New("machine not found")
 	ErrEnrollmentChanged = errors.New("machine enrollment changed")
-	ErrLegacyDrain       = errors.New("legacy enrollment cannot drain")
-	ErrDeadlineRequired  = errors.New("configure a drain deadline")
 	ErrDrainChanged      = errors.New("drain intent changed")
 	ErrDrainNotExpired   = errors.New("drain deadline has not expired")
 )
@@ -26,9 +24,8 @@ type Change struct {
 // Remove participates in the caller's authorization and audit transaction.
 func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, force bool) (Change, error) {
 	var current string
-	var version int64
 	result := Change{Epoch: epoch, Lifecycle: "removed"}
-	err := tx.QueryRowContext(ctx, `SELECT enrollment_epoch::text,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&current, &version)
+	err := tx.QueryRowContext(ctx, `SELECT enrollment_epoch::text FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
 		var retired bool
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.enrollments WHERE node_id=$1 AND epoch::text=$2 AND retired_at IS NOT NULL)`, node, epoch).Scan(&retired)
@@ -52,9 +49,6 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, fo
 		result.Changed = true
 		return result, err
 	}
-	if version == 0 {
-		return result, ErrLegacyDrain
-	}
 	var raw []byte
 	state := InitialState(false)
 	err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 FOR UPDATE`, node, epoch).Scan(&raw)
@@ -65,9 +59,6 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node, epoch string, fo
 	}
 	if err != nil {
 		return result, err
-	}
-	if s.drainTimeout(state) <= 0 {
-		return result, ErrDeadlineRequired
 	}
 	result.Changed = state.Lifecycle != "draining"
 	if result.Changed {
@@ -107,13 +98,10 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node, epoch string
 	if err = json.Unmarshal(raw, &state); err != nil {
 		return result, err
 	}
-	if s.drainTimeout(state) <= 0 {
-		return result, ErrDeadlineRequired
-	}
 	if !state.DrainRequested || state.Generation != generation || state.Lifecycle == "removed" {
 		return result, ErrDrainChanged
 	}
-	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.drainTimeout(state) {
+	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.drainTimeout() {
 		return result, ErrDrainNotExpired
 	}
 	state.Generation++

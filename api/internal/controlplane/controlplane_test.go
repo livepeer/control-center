@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,7 +25,7 @@ const ownerB = "22222222-2222-4222-8222-222222222222"
 const ownerC = "33333333-3333-4333-8333-333333333333"
 
 func testParams() Params {
-	return Params{JWTSigningSecret: strings.Repeat("a", 32), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
+	return Params{RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), RuntimeNodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64), RuntimeConnectorImage: "registry.invalid/connector@sha256:" + strings.Repeat("c", 64), AppStopSignals: true, JWTSigningSecret: strings.Repeat("a", 32), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
 }
 
 func TestEnrollmentAuthorization(t *testing.T) {
@@ -161,6 +162,36 @@ func request(t *testing.T, s *Server, method, path, token string, body any) *htt
 	return w
 }
 
+func currentReport(t *testing.T, s *Server, node string, report machineconfig.Report) machineconfig.Report {
+	t.Helper()
+	report.ReportVersion = 1
+	report.ObservedAt = time.Now().UTC()
+	var previous uint64
+	err := s.db.QueryRow(`SELECT COALESCE((report->>'sequence')::numeric,0) FROM lpcc.machine_reports WHERE node_id=$1 AND epoch::text=$2 AND component=$3`, node, report.Epoch, report.Component).Scan(&previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatal(err)
+	}
+	report.Sequence = previous + 1
+	return report
+}
+
+func credentials(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]string{}
+	var resultValue string
+	for _, key := range []string{"node_id", "epoch", "token", "config_url"} {
+		if err := json.Unmarshal(raw[key], &resultValue); err != nil {
+			t.Fatal(err)
+		}
+		result[key] = resultValue
+	}
+	return result
+}
+
 func enroll(t *testing.T, s *Server, owner, fingerprint string) map[string]string {
 	t.Helper()
 	token, _, _ := signEnrollment(s.params.JWTSigningSecret, owner, time.Now())
@@ -168,11 +199,7 @@ func enroll(t *testing.T, s *Server, owner, fingerprint string) map[string]strin
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	var result map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	return result
+	return credentials(t, w.Body.Bytes())
 }
 
 func TestEnrollmentAndConfigFlow(t *testing.T) {
@@ -235,6 +262,9 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 	s := newTestServer(t)
 	credentials := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	id := credentials["node_id"]
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	var beforeDigest string
 	var beforeTime time.Time
 	if err := s.db.QueryRow(`SELECT sha256,generated_at FROM lpcc.machine_configs WHERE node_id=$1`, id).Scan(&beforeDigest, &beforeTime); err != nil {

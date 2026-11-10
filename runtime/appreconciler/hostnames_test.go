@@ -21,7 +21,7 @@ func TestReservedHostnamesCannotBecomeAcceptedAppIdentities(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			observation := Observation{Epoch: request.Epoch, Hash: request.Hash, RunnerID: request.Identity.RunnerID, PreviousCredential: before.Identity.Credential, ReservedSequence: sequence, Sequence: sequence, At: c.now(), TTL: 30 * time.Second, Capabilities: owner.Capabilities(), Entries: request.Entries}
+			observation := Observation{Epoch: request.Epoch, Hash: request.Hash, RunnerID: request.Identity.RunnerID, PreviousCredential: before.Identity.Credential, ReservedSequence: sequence, Sequence: sequence, At: c.now(), TTL: 30 * time.Second, Entries: request.Entries}
 			for _, entry := range request.Entries {
 				observation.Apps = append(observation.Apps, AppObservation{ID: entry.Options.ID, Status: "ready"})
 			}

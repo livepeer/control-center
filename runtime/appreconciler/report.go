@@ -45,7 +45,7 @@ func DiagnoseMetadata(ctx context.Context, m contract.Metadata, reporter Reporte
 	if reason == "" {
 		status = "ready"
 	}
-	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: 2, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
+	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
 }
 
 func (r ControlReporter) Status(ctx context.Context, value Report) error {
@@ -72,16 +72,6 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		proofs[id] = p
 	}
 	c.mu.Unlock()
-	needsOwner := false
-	for _, i := range s.Instances {
-		pod := view.Pods[i.Name]
-		if !i.RegistrationGone && (i.AppID != "" || (i.Phase != "removed" && i.WithdrawalID == "" && pod.UID != "" && pod.Phase == "Running" && !pod.Deleting)) {
-			needsOwner = true
-		}
-	}
-	if needsOwner && !c.Owner.Capabilities().AdmissionSafe() && fault == "" {
-		fault = "dependency_pending"
-	}
 	if s.Metadata.AppsError != "" {
 		fault = s.Metadata.AppsError
 	}
@@ -167,7 +157,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		if i.PodUID != "" && i.Definition.Lifecycle.StopSignal != nil && !i.StopVerified {
 			workload = "stop_signal_unverified"
 		}
-		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, CancelAttemptAt: i.CancelAttemptAt, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: accepted, StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
+		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: accepted, StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
 	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
 	report := Report{ReportVersion: 1, ClockUncertain: s.ClockUncertain, Epoch: s.Metadata.Epoch, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}

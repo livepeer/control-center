@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -35,15 +34,14 @@ func (i *testInputs) set(t *testing.T, set schema.AppAssignmentSetV1) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i.value = Input{Metadata: contract.Metadata{NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: 2, AppsGeneration: set.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}, Payload: p, Digest: artifact.Digest([]byte(p.Digest()))}
+	i.value = Input{Metadata: contract.Metadata{NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, AppsGeneration: set.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}, Payload: p, Digest: artifact.Digest([]byte(p.Digest()))}
 }
 
 type testCluster struct {
-	view          View
-	published     string
-	fail          bool
-	releases      int
-	beforePublish func()
+	view      View
+	published string
+	fail      bool
+	releases  int
 }
 
 func newCluster() *testCluster {
@@ -51,9 +49,6 @@ func newCluster() *testCluster {
 }
 func (k *testCluster) Read(context.Context) (View, error) { return k.view, nil }
 func (k *testCluster) Publish(_ context.Context, a *transport.Artifact) error {
-	if k.beforePublish != nil {
-		k.beforePublish()
-	}
 	if k.fail {
 		return errors.New("publication_down")
 	}
@@ -62,43 +57,6 @@ func (k *testCluster) Publish(_ context.Context, a *transport.Artifact) error {
 	return nil
 }
 
-func TestDueCancellationBatchPrecedesPublicationAndPreservesFirstAttempt(t *testing.T) {
-	c, _, k, o, _, now := fixtureController(t)
-	registerApps(t, c, k)
-	c.Journal.Update(func(s *State) error {
-		for _, i := range s.Instances {
-			o.sessions[i.AppID] = []string{"busy"}
-			withdraw(i, *now, s.Metadata)
-			i.Forced, i.Phase = true, "retired"
-		}
-		return nil
-	})
-	k.beforePublish = func() {
-		if o.cancels != 2 {
-			t.Fatal("published forced exclusion before all due cancellation attempts", o.cancels)
-		}
-	}
-	tick(t, c)
-	k.beforePublish = nil
-	first := map[string]time.Time{}
-	for id, i := range c.Journal.View().Instances {
-		first[id] = i.CancelAttemptAt
-	}
-	tick(t, c)
-	if o.cancels != 2 {
-		t.Fatal("cancellation retry ignored backoff")
-	}
-	*now = now.Add(31 * time.Second)
-	tick(t, c)
-	if o.cancels != 4 {
-		t.Fatal("cancellation tombstones were not retried")
-	}
-	for id, i := range c.Journal.View().Instances {
-		if i.CancelAttemptAt != first[id] {
-			t.Fatal("retry changed the original attempt time")
-		}
-	}
-}
 func (k *testCluster) Release(_ context.Context, name string, pod Pod) error {
 	if !pod.Deleting || k.view.Pods[name].UID != pod.UID {
 		return errors.New("wrong_release")
@@ -132,23 +90,16 @@ func (k *testCluster) apply(c *Controller) {
 }
 
 type testOwner struct {
-	cancelMu             sync.Mutex
 	accepted             OwnerRequest
 	sessions             map[string][]string
 	down                 bool
 	unregisterFail       bool
-	cancels, unregisters int
+	unregisters          int
 	rejectAbove, rejects int
-	caps                 *Capabilities
+	credential           string
 	syncFailure          func(OwnerRequest, OwnerHooks) error
 }
 
-func (o *testOwner) Capabilities() Capabilities {
-	if o.caps != nil {
-		return *o.caps
-	}
-	return Capabilities{true, true, true}
-}
 func (o *testOwner) Accepted() OwnerRequest      { return o.accepted }
 func (o *testOwner) Close(context.Context) error { return nil }
 func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error {
@@ -166,7 +117,11 @@ func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error 
 	if err != nil {
 		return err
 	}
-	obs := Observation{Epoch: r.Epoch, Hash: r.Hash, RunnerID: r.Identity.RunnerID, Credential: "issued-secret", PreviousCredential: r.Identity.Credential, ReservedSequence: n, Sequence: n, Bootstrap: r.Identity.Credential == "", At: h.Now(), TTL: 30 * time.Second, Capabilities: o.Capabilities(), Entries: r.Entries}
+	credential := o.credential
+	if credential == "" {
+		credential = "issued-secret"
+	}
+	obs := Observation{Epoch: r.Epoch, Hash: r.Hash, RunnerID: r.Identity.RunnerID, Credential: credential, PreviousCredential: r.Identity.Credential, ReservedSequence: n, Sequence: n, Bootstrap: r.Identity.Credential == "" || r.Recover, At: h.Now(), TTL: 30 * time.Second, Entries: r.Entries}
 	submitted := map[string]bool{}
 	for _, e := range r.Entries {
 		id := e.Options.ID
@@ -185,19 +140,12 @@ func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error 
 		return err
 	}
 	o.accepted = r
-	o.accepted.Identity = Identity{RunnerID: r.Identity.RunnerID, Credential: "issued-secret", Confirmed: true}
+	o.accepted.Identity = Identity{RunnerID: r.Identity.RunnerID, Credential: credential, Confirmed: !obs.Bootstrap}
 	for n := range o.accepted.Entries {
 		o.accepted.Entries[n].Options.ID = obs.Apps[n].ID
 	}
 	return nil
 }
-func (o *testOwner) Cancel(context.Context, string, OwnerHooks) error {
-	o.cancelMu.Lock()
-	defer o.cancelMu.Unlock()
-	o.cancels++
-	return errors.New("cancel_down")
-}
-
 func TestMaintenanceWithoutAcceptedPayloadDoesNotPublishEmpty(t *testing.T) {
 	c, input, k, _, r, _ := fixtureController(t)
 	input.value.Payload = appbundle.Unavailable()
@@ -262,7 +210,7 @@ func TestRejectedAdditionIsDeferredWithoutMaskingFailureOrDelayingWithdrawal(t *
 	set.Entries[0].Revision = nil
 	input.set(t, set)
 	tick(t, c)
-	if len(o.accepted.Entries) != 1 || o.accepted.Entries[0].Options.Status != "draining" {
+	if len(o.accepted.Entries) != 1 || o.accepted.Entries[0].Options.Status != "not-ready" {
 		t.Fatal("addition retry delay also delayed safety withdrawal")
 	}
 }
@@ -339,6 +287,34 @@ func registerApps(t *testing.T, c *Controller, k *testCluster) {
 	k.apply(c)
 	tick(t, c)
 	tick(t, c)
+}
+
+func TestRecreatedOwnerDoesNotConfirmOldWork(t *testing.T) {
+	c, _, cluster, _, _, _ := fixtureController(t)
+	registerApps(t, c, cluster)
+	owner := &testOwner{credential: "recreated-secret", sessions: map[string][]string{}}
+	c.Owner, c.proofs, c.recoverOwner = owner, nil, true
+	ready := map[string]bool{}
+	for id := range c.Journal.View().Instances {
+		ready[id] = true
+	}
+	if err := c.syncOwner(t.Context(), c.Journal.View(), ready, cluster.view); err != nil {
+		t.Fatal(err)
+	}
+	s := c.Journal.View()
+	if s.Identity.Credential != owner.credential || s.Identity.Confirmed || s.AcceptedSequence != 0 || len(c.proofs) != 0 {
+		t.Fatal("recreated owner supplied confirmed work evidence", s.Identity)
+	}
+	for _, entry := range owner.Accepted().Entries {
+		if entry.Options.Status != "not-ready" {
+			t.Fatal("recovery admitted new work", entry)
+		}
+	}
+	for _, i := range s.Instances {
+		if !i.Forced || i.WithdrawalID == "" || i.Reason != "node_registration_recreated" {
+			t.Fatal("recreated owner did not withdraw the old incarnation", i)
+		}
+	}
 }
 
 func TestWithdrawalRetainsSessionsAndRequiresExactExclusionBeforeFinalizer(t *testing.T) {
@@ -419,11 +395,8 @@ func TestDeadlinePublishesWithoutNodeAndKeepsCleanupUnconfirmed(t *testing.T) {
 		t.Fatal("ignored publisher failure")
 	}
 	s = c.Journal.View()
-	if o.cancels == 0 {
-		t.Fatal("failed withdrawal heartbeats prevented deadline cancellation")
-	}
 	for _, i := range s.Instances {
-		if i.Phase != "retired" || !i.Forced || !i.Deadline.Equal(deadline) {
+		if i.Phase != "retired" || !i.Forced || !i.Deadline.Equal(deadline) || i.Reason != "cleanup_unconfirmed" {
 			t.Fatal("deadline lost", i)
 		}
 	}

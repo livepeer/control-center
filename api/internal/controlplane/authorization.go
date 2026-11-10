@@ -171,8 +171,7 @@ func (s *Server) adminRead(next func(http.ResponseWriter, *http.Request, UserIde
 	}
 }
 
-// AdminAction names are server constants, never request values. #110/#111 add
-// their catalog/assignment actions here without introducing another policy.
+// AdminAction names are server constants, never request values.
 type AdminAction string
 
 // AdminChange describes the persisted state and response. No-op operations return

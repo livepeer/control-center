@@ -70,7 +70,7 @@ parse_args() {
     die 'installation directory must be an absolute path without spaces or shell metacharacters'
   command -v realpath >/dev/null || die 'missing command: realpath (coreutils)'
   [[ "$INSTALL_DIR" == "$(realpath -m -- "$INSTALL_DIR")" ]] ||
-    die 'installation directory must be canonical (no trailing slash, dot components, or symlinks)'
+    die 'installation directory cannot contain repeated or trailing slashes, . or .. directory names, or symlinks'
 }
 
 # Enrollment credentials are separate from the short-lived bootstrap JWT.
@@ -78,7 +78,7 @@ parse_args() {
 authenticate_node() {
   local credentials="$INSTALL_DIR/credentials" key fingerprint request response api status
   NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; ENROLLMENT_EPOCH=''; CREDENTIAL_VERSION=0
-  if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" ]]; }; then
+  if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
     for key in node-id service-token config-url; do
       [[ -f "$credentials/$key" && -s "$credentials/$key" ]] || die "saved credential is missing or invalid: $key; restore it from backup"
     done
@@ -88,10 +88,7 @@ authenticate_node() {
     NODE_ID=$(cat "$credentials/node-id")
     SERVICE_TOKEN=$(cat "$credentials/service-token")
     CONFIG_URL=$(cat "$credentials/config-url")
-    if [[ -f "$credentials/identity.json" ]]; then
-      ENROLLMENT_EPOCH=$(jq -r '.epoch' "$credentials/identity.json")
-      CREDENTIAL_VERSION=$(jq -r '.credential_version' "$credentials/identity.json")
-    fi
+    [[ -s "$credentials/identity.json" ]] && read_identity "$(cat "$credentials/identity.json")" || die 'invalid saved enrollment identity; restore it from backup'
   else
     [[ -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires --token TOKEN'
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
@@ -122,10 +119,9 @@ authenticate_node() {
     NODE_ID=$(printf '%s' "$response" | jq -er '.node_id | select(type == "string")') || die 'invalid enrollment response: node_id'
     SERVICE_TOKEN=$(printf '%s' "$response" | jq -er '.token | select(type == "string")') || die 'invalid enrollment response: token'
     CONFIG_URL=$(printf '%s' "$response" | jq -er '.config_url | select(type == "string")') || die 'invalid enrollment response: config_url'
-    ENROLLMENT_EPOCH=$(printf '%s' "$response" | jq -r '.epoch // ""')
-    CREDENTIAL_VERSION=$(printf '%s' "$response" | jq -r '.credential_version // "0"')
+    read_identity "$response" || die 'invalid enrollment identity metadata'
     if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} != 1 ]]; then
-      [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" && "$ENROLLMENT_EPOCH" =~ ^[a-f0-9-]{36}$ && "$CREDENTIAL_VERSION" =~ ^[1-9][0-9]*$ ]] || die 'enrollment returned invalid HTTPS identity metadata'
+      [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" ]] || die 'enrollment returned invalid HTTPS configuration URL'
     fi
     [[ "$NODE_ID" == "lp-${fingerprint:0:16}" ]] || die 'enrollment returned an unexpected node identity'
   fi
@@ -193,11 +189,7 @@ prepare_installation() {
 stage_manifests() {
   copy_templates "$SCRIPT_DIR/manifests/bootstrap" "$INSTALL_DIR/manifests/bootstrap"
   copy_templates "$SCRIPT_DIR/manifests/flux" "$INSTALL_DIR/manifests/flux"
-  render_template "$SCRIPT_DIR/manifests/upgrade-reconciliation.yaml" "$INSTALL_DIR/manifests/upgrade-reconciliation.yaml"
-  rm -f -- "$INSTALL_DIR/services/control_client.py" "$INSTALL_DIR/services/tunnel_broker.py" \
-    "$INSTALL_DIR/services/tunnel_launcher.py" "$INSTALL_DIR/services/http_source.py" \
-    "$INSTALL_DIR/services/http_common.py" "$INSTALL_DIR/services/artifacts.py"
-  rmdir "$INSTALL_DIR/services" 2>/dev/null || true
+
 }
 
 version_at_least() {
@@ -243,7 +235,7 @@ write_host_configuration() {
 kube() { "$INSTALL_DIR/bin/k3s" kubectl --kubeconfig "$INSTALL_DIR/config/kubeconfig.yaml" --request-timeout=30s "$@"; }
 
 bootstrap_cluster() {
-  local _attempt ready=0 upgrade_owner
+  local _attempt ready=0
   for _attempt in {1..120}; do
     if kube get --raw=/readyz >/dev/null 2>&1 && [[ -n $(kube get nodes -o name) ]]; then ready=1; break; fi
     sleep 5
@@ -262,8 +254,6 @@ bootstrap_cluster() {
   kube -n livepeer create secret generic runner-bootstrap \
     --from-file="secret=$INSTALL_DIR/credentials/runner-bootstrap.secret" --dry-run=client -o yaml | kube apply -f -
   kube apply -k "$INSTALL_DIR/manifests/bootstrap"
-  upgrade_owner=$(kube -n flux-system get kustomization/livepeer-upgrade-plan --ignore-not-found -o jsonpath='{.metadata.labels.livepeer\.io/system-workload}')
-  if [[ "$upgrade_owner" != true ]]; then kube apply -f "$INSTALL_DIR/manifests/upgrade-reconciliation.yaml"; fi
   kube -n flux-system rollout status deployment/livepeer-http-source --timeout=300s
   kube -n flux-system wait externalartifact/livepeer-service --for=condition=Ready --timeout=300s
   kube -n flux-system wait kustomization/livepeer --for=condition=Ready --timeout=600s

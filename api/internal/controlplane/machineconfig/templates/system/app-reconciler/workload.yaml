@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: livepeer-app-reconciler}}
+  template:
+    metadata: {labels: {app: livepeer-app-reconciler}}
+    spec:
+      serviceAccountName: livepeer-app-reconciler
+      automountServiceAccountToken: true
+      nodeSelector: {livepeer.io/node-id: '@NODE_ID@'}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: reconciler
+        image: '@RUNTIME_IMAGE@'
+        command: [/usr/local/bin/livepeer-runtime, app-reconciler]
+        args:
+        - --directory
+        - /state
+        - --artifact-url
+        - http://livepeer-app-reconciler.flux-system.svc.cluster.local:8080
+        - --adapter-url
+        - http://livepeer-http-source.flux-system.svc.cluster.local:8080
+        - --config-url-file
+        - /credentials/config-url
+        - --management-socket
+        - /management/control.sock
+        - --identity-file
+        - /credentials/identity.json
+        - --transport
+        - '@CONTROL_TRANSPORT@'
+        - --bootstrap-secret-file
+        - /runner/secret
+        ports: [{name: http, containerPort: 8080}]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 512Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 10}
+        readinessProbe: {httpGet: {path: /readyz, port: http}}
+        volumeMounts:
+        - {name: state, mountPath: /state}
+        - {name: management, mountPath: /management, readOnly: true}
+        - {name: credentials, mountPath: /credentials, readOnly: true}
+        - {name: runner, mountPath: /runner, readOnly: true}
+      volumes:
+      - name: state
+        hostPath: {path: '@INSTALL_DIR@/volumes/app-reconciler', type: Directory}
+      - name: credentials
+        secret:
+          secretName: livepeer-service-auth
+          defaultMode: 288
+          items:
+          - {key: identity.json, path: identity.json}
+          - {key: config-url, path: config-url}
+      - name: management
+        hostPath: {path: '@INSTALL_DIR@/volumes/management-sockets/apps', type: Directory}
+      - name: runner
+        secret: {secretName: livepeer-runner-bootstrap, defaultMode: 288}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+spec:
+  selector: {app: livepeer-app-reconciler}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-app-reconciler, namespace: flux-system}
+spec:
+  podSelector: {matchLabels: {app: livepeer-app-reconciler}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: kustomize-controller}}}]
+    ports: [{protocol: TCP, port: 8080}]

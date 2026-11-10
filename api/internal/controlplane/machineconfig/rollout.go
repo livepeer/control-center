@@ -24,9 +24,6 @@ func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, erro
 // Gate holds the applied workload until a fresh report completes its drain.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
-	if state.BundleFormat < 2 && s.config.DrainTimeout <= 0 && !s.config.RequireDrain && (desired.Exposure == nil || desired.Exposure.IngressDigest == "") {
-		return false, nil
-	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
@@ -35,7 +32,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
-	if state.BundleFormat >= 2 && state.ApplyingConfigDigest != "" {
+	if state.ApplyingConfigDigest != "" {
 		if state.ApplyingConfigDigest == digest {
 			report, at, e := s.store.Report(ctx, m, "runtime")
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
@@ -60,11 +57,6 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
 		return false, nil
 	}
-	if m.CredentialVersion == 0 || s.drainTimeout(*state) <= 0 {
-		state.HeldOrchestrator = manifest
-		s.holdUpgrade(ctx, m, state)
-		return true, nil
-	}
 	if state.PendingConfigDigest != digest {
 		if !state.DrainRequested || state.PendingConfigDigest != "" {
 			state.Generation++
@@ -83,18 +75,10 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	}
 	state.HeldOrchestrator = ""
 	state.HeldUpgradePlan = ""
-	if state.BundleFormat >= 2 {
-		state.ApplyingConfigDigest = digest
-		state.ApplyingUpgradeVersion = upgradeVersion(desired)
-		state.Target = ""
-		state.RolloutReason = "rollout_pending"
-		return false, nil
-	}
-	state.PendingConfigDigest = ""
-	state.DrainRequested = false
+	state.ApplyingConfigDigest = digest
+	state.ApplyingUpgradeVersion = upgradeVersion(desired)
 	state.Target = ""
-	state.ApprovedConfigDigest = digest
-	state.RolloutReason = ""
+	state.RolloutReason = "rollout_pending"
 	return false, nil
 }
 
@@ -140,7 +124,7 @@ func (s *State) CancelTarget() {
 	s.RolloutReason = ""
 }
 func (s *Manager) holdUpgrade(ctx context.Context, m Machine, state *State) {
-	if state.BundleFormat < 2 || state.HeldUpgradePlan != "" {
+	if state.HeldUpgradePlan != "" {
 		return
 	}
 	var data []byte
@@ -152,7 +136,7 @@ func (s *Manager) holdUpgrade(ctx context.Context, m Machine, state *State) {
 }
 
 func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (bool, error) {
-	if state.DrainStartedAt.IsZero() || (state.BundleFormat < 2 && time.Since(state.DrainStartedAt) > s.config.DrainTimeout) {
+	if state.DrainStartedAt.IsZero() || time.Since(state.DrainStartedAt) > s.drainTimeout() {
 		state.RolloutReason = "drain_timeout"
 		return false, nil
 	}
@@ -160,7 +144,7 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL && (state.BundleFormat < 2 || validDrainEvidence(m, *state, report, time.Now())) {
+	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL && validDrainEvidence(m, *state, report, time.Now()) {
 		state.RolloutReason = ""
 		return true, nil
 	}

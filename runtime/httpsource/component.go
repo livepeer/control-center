@@ -30,16 +30,6 @@ func (s *Source) componentUnchanged(name, previous, current string) bool {
 		if err != nil {
 			return nil, "", "", err
 		}
-		// These revisions apply the immutable transfer path, even though the same
-		// archive also carries newer canonical definitions for later activation.
-		if marker := files["system-layout-publication.json"]; len(marker) > 0 && name != "livepeer-upgrade-plan" {
-			var publication struct {
-				Phase string `json:"phase"`
-			}
-			if transport.Decode(marker, &publication) != nil || publication.Phase != "pruning" {
-				return nil, "", "", errors.New("component_transfer_revision")
-			}
-		}
 		selected := map[string][]byte{}
 		for path, b := range files {
 			if strings.HasPrefix(path, prefix) {

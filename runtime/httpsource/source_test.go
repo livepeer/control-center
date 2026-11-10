@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +32,7 @@ type fakeKube struct {
 
 func cacheBundle(t *testing.T, store artifact.Store, m contract.Metadata, files map[string][]byte) string {
 	t.Helper()
-	files = copyFiles(files)
+	files = maps.Clone(files)
 	if files["kustomization.yaml"] == nil {
 		files["kustomization.yaml"] = []byte("resources: []\n")
 	}
@@ -45,72 +46,6 @@ func cacheBundle(t *testing.T, store artifact.Store, m contract.Metadata, files 
 		t.Fatal(err)
 	}
 	return digest
-}
-
-func TestSystemCapabilityWaitsForThisEpochAppliedInventory(t *testing.T) {
-	f := newFixture(t)
-	f.source.SystemWorkloads = true
-	m := f.meta
-	m.BundleFormat = 2
-	cache := func(node, epoch string) string {
-		prior := m
-		prior.NodeID = node
-		prior.Epoch = epoch
-		return cacheBundle(t, f.source.Store, prior, nil)
-	}
-	old := cache(m.NodeID, "previous-epoch")
-	current := cache(m.NodeID, m.Epoch)
-	revision := old
-	f.kube.reply = func(path string) any {
-		if path == fluxPath+"livepeer" {
-			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": revision, "conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}}
-		}
-		return nil
-	}
-	check := func(want int) {
-		t.Helper()
-		if err := f.source.report(t.Context(), m, current, "invalid_legacy_app_input", false); err != nil {
-			t.Fatal(err)
-		}
-		if got := f.lastReport()["bundle_format"]; got != float64(want) {
-			t.Fatal("capability", got, "want", want)
-		}
-	}
-	check(2) // A stopped Flux writer must not get stuck behind premature format3 input.
-	legacy := m
-	legacy.BundleFormat = 1
-	legacy.AppsGeneration = 1
-	legacy.AppsDigest = "sha256:" + strings.Repeat("f", 64)
-	f.set(t, map[string][]byte{"kustomization.yaml": []byte("resources: []\n")}, legacy)
-	if err := f.source.Sync(t.Context()); err == nil {
-		t.Fatal("invalid legacy app input accepted")
-	}
-	if err := f.source.Report(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if r := f.lastReport(); r["bundle_format"] != float64(2) || r["apps_error"] == "" {
-		t.Fatal("invalid legacy input lost repair capability", r)
-	}
-	revision = cache("lp-bbbbbbbbbbbbbbbb", m.Epoch)
-	check(2)
-	revision = current
-	check(3) // No workload health prerequisite.
-	revision = old
-	state := layoutState{Stage: "complete", Epoch: "previous-epoch", Transfer: old}
-	write := func() {
-		b, _ := json.Marshal(state)
-		if err := artifact.AtomicWrite(filepath.Join(f.source.Store.Directory, "system-layout.json"), b, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write()
-	check(3) // Completed ownership survives reenrollment.
-	state.Stage = "handoff"
-	write()
-	check(2)
-	state.Epoch = m.Epoch
-	write()
-	check(3)
 }
 
 func TestDownloadsDoNotHoldPublishedAuthorityOrObservationReporting(t *testing.T) {
@@ -152,7 +87,7 @@ func TestDownloadsDoNotHoldPublishedAuthorityOrObservationReporting(t *testing.T
 func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 	f := newFixture(t)
 	m := f.meta
-	m.BundleFormat = contract.SystemBundleFormat
+	m.BundleFormat = contract.BundleFormat
 	cache := func(connector string) string {
 		return cacheBundle(t, f.source.Store, m, map[string][]byte{"system/node/node.yaml": []byte("same Node inputs"), "system/connector/connector.yaml": []byte(connector)})
 	}
@@ -179,7 +114,7 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})
-	if err := f.source.report(t.Context(), m, current, "", false); err != nil {
+	if err := f.source.report(t.Context(), m, current, ""); err != nil {
 		t.Fatal(err)
 	}
 	if report := f.lastReport(); report["ready"] != true || report["bundle_sha256"] != old[7:] {
@@ -215,7 +150,6 @@ func (k *fakeKube) Request(_ context.Context, _ string, path string, _ any, out 
 
 func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 	f := newFixture(t)
-	f.source.SystemWorkloads = true
 	cache := func(label string, age time.Duration) string {
 		digest := cacheBundle(t, f.source.Store, f.meta, map[string][]byte{"label": []byte(label)})
 		stamp := time.Now().Add(-age)
@@ -266,7 +200,7 @@ type sourceFixture struct {
 func newFixture(t *testing.T) *sourceFixture {
 	t.Helper()
 	set := testutil.Assignment(t)
-	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
+	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -295,7 +229,7 @@ func newFixture(t *testing.T) *sourceFixture {
 	token := filepath.Join(root, "token")
 	os.WriteFile(token, []byte(strings.Repeat("b", 64)), 0600)
 	identity := filepath.Join(root, "identity")
-	b, _ := json.Marshal(map[string]any{"epoch": set.Epoch, "credential_version": "1"})
+	b, _ := json.Marshal(map[string]any{"epoch": set.Epoch, "credential_version": 1})
 	os.WriteFile(identity, b, 0600)
 	control, err := transport.NewControl(server.URL+"/v1/nodes/"+set.NodeID+"/config", token, true)
 	if err != nil {
@@ -310,7 +244,7 @@ func TestTerminalSelectionIsGatedAndNeverRepublishesRetainedWorkload(t *testing.
 	f := newFixture(t)
 	m := f.meta
 	m.Terminal = true
-	m.BundleFormat = 2
+	m.BundleFormat = contract.BundleFormat
 	p := appbundle.Unavailable()
 	m.AppsPayloadDigest = p.Digest()
 	files := map[string][]byte{"kustomization.yaml": []byte("resources: []\n"), "node.txt": []byte("retained")}
@@ -398,7 +332,7 @@ func TestSourcePreservesArtifactAndIsolatesInvalidAppInput(t *testing.T) {
 	}
 	m := f.meta
 	m.Generation = 2
-	m.BundleFormat = 2
+	m.BundleFormat = contract.BundleFormat
 	m.AppsGeneration = 7
 	m.AppsDigest = "sha256:" + strings.Repeat("f", 64)
 	f.set(t, map[string][]byte{"kustomization.yaml": []byte("resources: []\n"), "orchestrator.yaml": []byte("management repair")}, m)
@@ -458,11 +392,11 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 			t.Fatal(err)
 		}
 		m := f.meta
-		m.BundleFormat = 2
+		m.BundleFormat = contract.BundleFormat
 		m.AppsGeneration = generation
 		m.AppsDigest = p.Index.IntentDigest
 		m.AppsPayloadDigest = p.Digest()
-		files := map[string][]byte{"kustomization.yaml": []byte("resources:\n- management\n"), "management/orchestrator.yaml": []byte(node)}
+		files := map[string][]byte{"kustomization.yaml": []byte("resources:\n- management\n"), "system/node/orchestrator.yaml": []byte(node)}
 		for name, b := range p.Files {
 			files[name] = b
 		}
@@ -470,7 +404,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 	}
 	_, old := cache(1, "same node")
 	m, current := cache(2, "same node")
-	if !f.source.appOnlyChange(old, current) {
+	if !f.source.componentUnchanged("livepeer-node", old, current) {
 		t.Fatal("did not isolate app-only payload change")
 	}
 	f.kube.reply = func(path string) any {
@@ -495,7 +429,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})
-	if err := f.source.report(context.Background(), m, current, "", false); err != nil {
+	if err := f.source.report(context.Background(), m, current, ""); err != nil {
 		t.Fatal(err)
 	}
 	report := f.lastReport()
@@ -534,11 +468,11 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 	}
 	f.kube.publishErr = nil
 	_, changed := cache(3, "changed node")
-	if f.source.appOnlyChange(old, changed) {
+	if f.source.componentUnchanged("livepeer-node", old, changed) {
 		t.Fatal("ignored infrastructure change")
 	}
 	os.WriteFile(filepath.Join(f.source.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)
-	if err := f.source.report(context.Background(), m, current, "", false); err != nil {
+	if err := f.source.report(context.Background(), m, current, ""); err != nil {
 		t.Fatal(err)
 	}
 	if f.lastReport()["ready"] != false {
@@ -549,25 +483,16 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *testing.T) {
 	s := &Source{Store: artifact.Store{Directory: t.TempDir()}}
 	cache := func(epoch, node, connector string) string {
-		m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: 3}
+		m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
 		return cacheBundle(t, s.Store, m, map[string][]byte{"system/node/kustomization.yaml": []byte(node), "system/connector/kustomization.yaml": []byte(connector)})
 	}
-	old := cache("epoch", "same node", "old connector")
-	current := cache("epoch", "same node", "broken connector")
+	old := cache("11111111-1111-4111-8111-111111111111", "same node", "old connector")
+	current := cache("11111111-1111-4111-8111-111111111111", "same node", "broken connector")
 	if !s.componentUnchanged("livepeer-node", old, current) || s.componentUnchanged("livepeer-connector", old, current) {
 		t.Fatal("component evidence coupled")
 	}
-	if s.componentUnchanged("livepeer-node", old, cache("new epoch", "same node", "old connector")) {
+	if s.componentUnchanged("livepeer-node", old, cache("22222222-2222-4222-8222-222222222222", "same node", "old connector")) {
 		t.Fatal("borrowed old enrollment proof")
-	}
-	data, _ := s.Store.Get(current)
-	files, _ := artifact.Read(data)
-	files["system-layout-publication.json"] = []byte(`{"phase":"adopting"}`)
-	files[".system-transfer/node/kustomization.yaml"] = []byte("older applied node")
-	data, _ = artifact.Pack(files)
-	adopting, _ := s.Store.Put(data)
-	if s.componentUnchanged("livepeer-node", adopting, current) {
-		t.Fatal("credited the unapplied canonical path in an adoption archive")
 	}
 	os.WriteFile(filepath.Join(s.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)
 	if s.componentUnchanged("livepeer-node", old, current) {
@@ -577,7 +502,7 @@ func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *test
 
 func TestAppValidationFailureRemainsReportableWithoutPayloadExcerpt(t *testing.T) {
 	f := newFixture(t)
-	if err := f.source.report(t.Context(), f.meta, "", "payload excerpt credential-sentinel", false); err != nil {
+	if err := f.source.report(t.Context(), f.meta, "", "payload excerpt credential-sentinel"); err != nil {
 		t.Fatal(err)
 	}
 	report := f.lastReport()

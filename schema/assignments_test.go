@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -24,23 +23,13 @@ func assignmentFixture(t *testing.T) AppAssignmentSetV1 {
 }
 func TestAssignmentContractAndCompactRemoval(t *testing.T) {
 	s := assignmentFixture(t)
-	manifest, digest, err := AssignmentConfigMap(s)
+	canonical, err := CanonicalAssignmentSet(s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var object struct {
-		Data map[string]string `json:"data"`
-	}
-	if err = json.Unmarshal(manifest, &object); err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := DecodeAssignmentSet([]byte(object.Data["desired.json"]))
+	decoded, err := DecodeAssignmentSet(canonical)
 	if err != nil {
 		t.Fatal(err)
-	}
-	canonical, _ := CanonicalAssignmentSet(decoded)
-	if Digest(canonical) != digest {
-		t.Fatal("digest differs")
 	}
 	if decoded.Entries[0].Revision.Definition.Instances.Replicas != 2 || decoded.Entries[0].Replicas != 3 {
 		t.Fatal("override mutated revision")

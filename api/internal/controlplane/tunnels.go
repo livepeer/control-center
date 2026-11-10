@@ -28,6 +28,9 @@ func (p Params) validateTunnels() error {
 	if p.CloudflareEnabled && !machineconfig.ValidConnectorImage(p.RuntimeImage) {
 		return errors.New("RuntimeImage requires an immutable sha256 digest when CloudflareEnabled")
 	}
+	if p.CloudflareEnabled && !machineconfig.ValidConnectorImage(p.RuntimeConnectorImage) {
+		return errors.New("RuntimeConnectorImage requires an immutable sha256 digest when CloudflareEnabled")
+	}
 	return p.TunnelParams.Validate(p.PublicAPIURL)
 }
 

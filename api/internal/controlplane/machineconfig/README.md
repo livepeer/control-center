@@ -9,20 +9,14 @@ auditing, and wiring.
 
 ## Rollout and removal
 
-When draining is configured, a workload replacement holds the applied workload
-and requests a drain. A recent runner report must match the requested generation
-and current enrollment credential before the replacement is released. An expired
-drain requires an authorized retry. Normal removal uses the same protocol, then
-retires the enrollment and publishes a terminal bundle that retains storage;
-this also works without a tunnel.
+A workload replacement holds the applied workload while it drains. A fresh runner
+report must match the requested generation and current enrollment credential
+before replacement proceeds. An expired drain requires an authorized retry. Normal
+removal also waits for draining, then retires the enrollment and publishes a
+terminal bundle that retains storage, with or without a tunnel.
 
-Without a drain deadline, private updates keep their existing behavior. When
-managed ingress requires a controlled rollout, the applied workload is held if
-no deadline is configured. With draining configured, a legacy version-zero
-credential also holds the workload until the machine refreshes its HTTPS
-credential. Removing the drain settings does not silently cancel a pending
-rollout. The report freshness limit uses `TunnelStatusTTL`, defaulting to two
-minutes when unset; `TunnelDrainTimeout` supplies the deadline.
+`TunnelDrainTimeout` sets the drain deadline; an unset or nonpositive value uses
+12 hours. `TunnelStatusTTL` sets report freshness and defaults to two minutes.
 
 The [tunnel manager](../tunnel/README.md) orders endpoint replacement. A completed
 drain alone does not establish external readiness.

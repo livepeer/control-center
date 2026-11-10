@@ -20,9 +20,6 @@ import (
 )
 
 func (s *Server) enrollmentToken(m Machine) string {
-	if m.CredentialVersion == 0 {
-		return machineToken(s.params.MachineTokenSecret, m.OwnerID, m.NodeID)
-	}
 	mac := hmac.New(sha256.New, []byte(s.params.MachineTokenSecret))
 	mac.Write([]byte("machine:v2:" + m.OwnerID + ":" + m.NodeID + ":" + m.Epoch + ":" + strconv.FormatInt(m.CredentialVersion, 10)))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -91,7 +88,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op, e := uuid.Parse(in.OperationID)
-	if e != nil || op == (uuid.UUID{}) || in.ExpectedVersion < 0 {
+	if e != nil || op == (uuid.UUID{}) || in.ExpectedVersion < 1 {
 		fail(w, 400, "invalid refresh operation")
 		return
 	}
@@ -162,7 +159,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	if !s.params.CloudflareEnabled || !s.tunnels.Enabled() || m.CredentialVersion == 0 {
+	if !s.params.CloudflareEnabled || !s.tunnels.Enabled() {
 		fail(w, 403, "connector delivery is not enabled for this enrollment")
 		return
 	}
@@ -171,7 +168,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	retained, e := s.retainedConnector(r.Context(), m, state.BundleFormat)
+	retained, e := s.retainedConnector(r.Context(), m)
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -203,15 +200,15 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	latest, _, e := s.loadTunnel(r.Context(), m.NodeID, m.Epoch)
-	stillRetained, retainErr := s.retainedConnector(r.Context(), m, latest.BundleFormat)
+	stillRetained, retainErr := s.retainedConnector(r.Context(), m)
 	if e != nil || retainErr != nil || (m.Terminal && (!stillRetained || latest.CompromisedAccess)) || (!stillRetained && latest.Lifecycle != "active") || latest.TunnelID != state.TunnelID || latest.CredentialGeneration != state.CredentialGeneration || latest.RotateTunnel || latest.Compromised || latest.Quarantined || latest.ConnectorRevoked {
 		fail(w, 409, "tunnel changed during credential retrieval")
 		return
 	}
 	respond(w, 200, map[string]any{"token": token, "epoch": m.Epoch, "tunnel_id": state.TunnelID, "generation": state.Generation, "credential_generation": state.CredentialGeneration, "provider_version": state.ProviderVersion})
 }
-func (s *Server) retainedConnector(ctx context.Context, m Machine, format int) (bool, error) {
-	if !m.Terminal || format < 2 {
+func (s *Server) retainedConnector(ctx context.Context, m Machine) (bool, error) {
+	if !m.Terminal {
 		return false, nil
 	}
 	return machineapps.Pending(ctx, s.db, m.NodeID, m.Epoch)
@@ -220,10 +217,6 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), true)
 	if e != nil {
 		s.respondError(w, e)
-		return
-	}
-	if m.CredentialVersion == 0 {
-		fail(w, 403, "legacy credentials authorize configuration only; refresh over HTTPS")
 		return
 	}
 	var report machineconfig.Report
@@ -296,7 +289,7 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]string{"status": "removed"})
 }
 
-// RetireMachine is the shared #111 removal operation. Its caller must authorize
+// RetireMachine removes a machine. Its caller must authorize
 // administrator policy in the same transaction when exposed through an API.
 func (s *Server) RetireMachine(ctx context.Context, node string) error {
 	_, e := s.db.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1`, node)

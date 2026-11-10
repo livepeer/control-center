@@ -100,8 +100,10 @@ resolve to whole seconds. Quote fractional CPU values and prices; TOML floats
 are not accepted. Shared memory and scratch sizes together must fit within the
 memory limit.
 
-Paths must be canonical and absolute. Scratch mounts cannot overlap each other
-or system and secret paths. HTTP readiness paths must be local absolute paths
+Working directories and scratch mount paths must start with `/` and cannot contain
+repeated slashes, trailing slashes, or `.` or `..` directory segments. The working
+directory may be `/`; scratch mounts cannot. Scratch mounts cannot overlap each
+other or system and secret paths. HTTP readiness paths must be local absolute paths
 without a query, fragment, or traversal. The validator reports the affected
 field when a setting is invalid.
 
@@ -194,13 +196,9 @@ leave desired state and the last valid bundle intact.
 
 ### Runtime delivery and completion contract
 
-Format 2 bundles contain management resources and a separate `app-desired/`
-payload. Its versioned index binds canonical assignment intent to rendered Pod
-and Service groups by digest. The root Kustomization applies management only;
-a separate Flux source and Kustomization apply app snapshots. If app rendering
-fails, management can still update using the last valid app payload, or an
-unavailable payload that does not authorize removal. Format 1 retains the
-assignment ConfigMap for migration; it is not a second app apply path.
+Management resources and app workloads are delivered separately. If app
+rendering fails, management can still update while Runtime retains the last valid
+app configuration.
 
 Each assignment identifies a pinned revision, desired `present`/`absent` state,
 `generation`, stable `activation_generation` and cleanup policy. Present entries
@@ -208,18 +206,24 @@ include the definition, effective replicas and `start_allowed`; queued targets
 also carry `start_after: {source_revision_id, source_removal_generation}`.
 Activation survives scaling and removal; reassignment after cleanup creates a
 new activation. Absent entries retain identity and bounded drain/stop policy.
-The canonical intent digest is independent of the rendered payload and bundle
-digests. App-only edits preserve the Node and tunnel rollout generation.
+The desired configuration digest is independent of the rendered payload and
+bundle digests. App-only edits preserve the Node and tunnel rollout generation.
 
-The App Reconciler supports CPU reusable instances in persistent and single-shot
-protocol modes. Single-session lifetimes are unsupported. Each incarnation has
-an immutable gVisor Pod and private Service; readiness controls new admission,
-while the Service remains available to existing work. Removal withdraws
-admission and waits for fresh Node confirmation that sessions are empty. It
-then publishes an exclusion and waits for Flux inventory and actual resource
-absence before reporting completion. At the drain deadline it attempts Node
-cancellation and publishes removal even if cancellation fails; cancellation
-retries continue and physical cleanup can remain pending.
+Runtime supports CPU reusable instances in persistent and single-shot protocol
+modes. Single-session lifetimes are unsupported. Each instance has a gVisor Pod
+and private Service. Runtime reports each instance’s readiness to Node. Node
+lists ready instances in its discovery response and checks readiness and capacity
+before accepting new sessions or single-shot requests. Control Center collects
+these responses into its cached fleet listing.
+
+For removal, Runtime reports the instance as not ready to Node. Node removes it
+from discovery and stops taking new work while existing sessions drain. The Pod
+and Service remain available to existing work. Once Node confirms the sessions
+are empty, Runtime removes their definitions from the published workload
+configuration; Flux and Kubernetes then delete the resources. A local maintenance
+deadline can initiate removal even when Node is unavailable. Control-plane
+outages can delay deletion. Runtime reports completion after the resources and
+registration are cleaned up.
 
 Runtime reports with the machine service credential to
 `POST /v1/nodes/{node_id}/apps/{revision_id}/status`. The strict JSON body is limited
@@ -259,11 +263,6 @@ deletion retain terminal instructions and history. Terminal removal acknowledgem
 also requires app cleanup. A retired enrollment can fetch its terminal bundle and
 acknowledge exact terminal app cleanup, but cannot report active state or
 administer apps. Terminal snapshots are write-once, and old-epoch cleanup cannot
-affect reenrollment. For format 2, Node, routes, the Reconciler and connector
-credentials remain available until app cleanup receipts complete; credential
-compromise overrides that hold.
-
-Deploy the additive migration with assignment-aware API and Runtime code. Software
-rollback must retain assignment rendering and decoding; otherwise freeze publication
-during recovery. A pre-assignment bundle writer must not resume. The down migration
-refuses to discard existing assignment history.
+affect reenrollment. Node, routes, the Reconciler and connector credentials
+remain available until app cleanup receipts complete; credential compromise
+overrides that hold.

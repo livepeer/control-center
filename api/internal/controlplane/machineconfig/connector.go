@@ -4,96 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"strings"
 )
-
-func tunnelManifest(m Desired, routing, proxyContainer string) string {
-	if m.BundleFormat >= 3 {
-		return managedTunnelManifest(m, proxyContainer)
-	}
-	image := m.Connector.Image
-	return fmt.Sprintf(`apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: livepeer-tunnel
-  namespace: flux-system
-data:
-  routing.json: |
-    %s
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: livepeer-tunnel
-  namespace: flux-system
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: livepeer-tunnel
-  template:
-    metadata:
-      labels:
-        app: livepeer-tunnel
-      annotations:
-        livepeer.io/token-generation: '%d'
-        livepeer.io/process-image: '%s'
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        fsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-      - name: broker
-        image: %s
-        command: [python3, -B, /app/tunnel_broker.py]
-        args: [--config, /config/routing.json, --token-file, /credentials/token, --socket, /broker/private/token.sock]
-        resources:
-          requests: {cpu: 25m, memory: 32Mi}
-          limits: {memory: 128Mi}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: {drop: [ALL]}
-        volumeMounts:
-        - {name: config, mountPath: /config, readOnly: true}
-        - {name: machine, mountPath: /credentials, readOnly: true}
-        - {name: socket, mountPath: /broker}
-      - name: connector
-        image: %s
-        command: [python3, -B, /app/tunnel_launcher.py]
-        args: [--socket, /broker/private/token.sock, --token-path, /run/tunnel/private/token]
-        resources:
-          requests: {cpu: 50m, memory: 64Mi}
-          limits: {memory: 256Mi}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: {drop: [ALL]}
-        readinessProbe:
-          exec:
-            command: [python3, -c, "import urllib.request; [urllib.request.urlopen(u,timeout=1) for u in ['http://127.0.0.1:20241/ready','http://127.0.0.1:8935/readyz']]"]
-          timeoutSeconds: 5
-        volumeMounts:
-        - {name: socket, mountPath: /broker, readOnly: true}
-        - {name: token, mountPath: /run/tunnel}
-%s      volumes:
-      - name: config
-        configMap: {name: livepeer-tunnel}
-      - name: machine
-        secret: {secretName: livepeer-service-auth, defaultMode: 288}
-      - name: socket
-        emptyDir: {medium: Memory, sizeLimit: 1Mi}
-      - name: token
-        emptyDir: {medium: Memory, sizeLimit: 1Mi}
-`, strings.ReplaceAll(routing, "\n", "\n    "), m.Exposure.CredentialGeneration, image, image, image, proxyContainer)
-}
 
 func nodeProxyContainer(m Desired, serviceURL, template string) string {
 	return fmt.Sprintf(`      - name: node-proxy
@@ -149,12 +60,7 @@ spec:
     - ipBlock: {cidr: '::/0', except: %s}
     ports: [{protocol: TCP, port: 443}, {protocol: TCP, port: 7844}, {protocol: UDP, port: 7844}]
 `, list(v4), list(v6))
-	if m.BundleFormat < 3 {
-		for _, cidr := range m.Connector.PrivateControlCIDRs {
-			result += fmt.Sprintf("  - to:\n    - ipBlock: {cidr: %q}\n    ports: [{protocol: TCP, port: 443}]\n", cidr)
-		}
-	}
-	return result + "---\n" + nodeNetwork()
+	return result
 }
 
 func nodeNetwork() string {

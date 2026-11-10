@@ -39,7 +39,7 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: 2, Reason: "applying"}), 200)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], currentReport(t, s, c["node_id"], machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "applying"})), 200)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 
 func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfig.Report {
 	now := time.Now().UTC()
-	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: 2, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: 1}}}}
+	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: 1}}}}
 }
 
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
@@ -175,7 +175,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	}
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 200)
 	runtime := r
-	runtime.Component, runtime.Apps, runtime.BundleFormat = "runtime", nil, 2
+	runtime.Component, runtime.Apps, runtime.BundleFormat = "runtime", nil, contract.BundleFormat
 	for _, sequence := range []uint64{3, 4} {
 		runtime.Sequence = sequence
 		runtime.ObservedAt = runtime.ObservedAt.Add(time.Second)
@@ -234,14 +234,11 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 200)
 	r.ReportVersion = 0
 	r.Sequence = 0
-	requireStatus(t, request(t, s, "POST", p, c["token"], r), 412)
+	requireStatus(t, request(t, s, "POST", p, c["token"], r), 409)
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
 	w = request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"fingerprint": strings.Repeat("a", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
 	requireStatus(t, w, 200)
-	var credential map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &credential); err != nil {
-		t.Fatal(err)
-	}
+	credential := credentials(t, w.Body.Bytes())
 	r.CredentialVersion = 2
 	// Credential rotation resets order, never the accepted report contract.
 	requireStatus(t, request(t, s, "POST", p, credential["token"], r), 409)
@@ -285,7 +282,19 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &httpsource.Source{Control: control, Reporter: &transport.Reports{Client: control, Directory: filepath.Join(directory, "reports")}, Kube: &transport.Kube{Base: kube.URL, Client: kube.Client()}, Store: artifact.Store{Directory: filepath.Join(directory, "artifacts")}, ArtifactURL: "http://adapter.invalid"}
+	identity := filepath.Join(directory, "identity.json")
+	if err := os.WriteFile(identity, []byte(fmt.Sprintf(`{"epoch":%q,"credential_version":1}`, m.Epoch)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reportDir := filepath.Join(directory, "reports")
+	if err := os.MkdirAll(reportDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	counter := filepath.Join(reportDir, "runtime-"+strings.TrimPrefix(artifact.Digest([]byte(m.Epoch)), "sha256:")+".json")
+	if err := os.WriteFile(counter, []byte(fmt.Sprintf(`{"epoch":%q,"credential_version":1,"sequence":1}`, m.Epoch)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	source := &httpsource.Source{IdentityFile: identity, Control: control, Reporter: &transport.Reports{Client: control, Directory: reportDir}, Kube: &transport.Kube{Base: kube.URL, Client: kube.Client()}, Store: artifact.Store{Directory: filepath.Join(directory, "artifacts")}, ArtifactURL: "http://adapter.invalid"}
 	if err := source.Sync(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -354,14 +363,14 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	prior.Apps.DesiredGeneration = terminal.AppsGeneration
 	prior.Apps.DesiredDigest = terminal.AppsDigest
 	prior.Apps.Assignments = nil
-	prior.Apps.Instances[0].Reason = "cancellation_unconfirmed"
+	prior.Apps.Instances[0].Reason = "cleanup_unconfirmed"
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], prior), 200)
 	diagnosis := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), Epoch: m.Epoch, CredentialVersion: 1, Component: "app-reconciler", Generation: terminal.Generation, Sequence: 1, Reason: "failed", Apps: &contract.AppStatus{Reason: "state_recovery_failed", Instances: []contract.InstanceStatus{}}}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], diagnosis), 200)
 	read := "/api/machines/" + m.NodeID + "/status?epoch=" + m.Epoch
 	w = request(t, s, "GET", read, "session-a", nil)
 	requireStatus(t, w, 200)
-	if !strings.Contains(w.Body.String(), "cancellation_unconfirmed") {
+	if !strings.Contains(w.Body.String(), "cleanup_unconfirmed") {
 		t.Fatal("intermediate terminal cleanup hidden")
 	}
 	list := request(t, s, "GET", "/api/machines", "session-a", nil)
@@ -553,7 +562,7 @@ func TestLargeObservedReportCrossesRelayAndIngestion(t *testing.T) {
 		if err != nil || len(body) > contract.MaxStatusBytes {
 			t.Fatal("invalid bounded fixture", len(body), err)
 		}
-		if detailed && len(body) < contract.MaxStatusBytes-2048 {
+		if detailed && len(body) < contract.MaxStatusBytes-8192 {
 			t.Fatal("fixture no longer exercises the byte boundary", len(body))
 		}
 		t.Logf("ingesting %d instances, %d omitted, %d serialized bytes", len(r.Apps.Instances), r.Apps.InstancesOmitted, len(body))

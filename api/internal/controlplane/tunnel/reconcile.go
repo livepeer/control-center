@@ -72,9 +72,6 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 		}
 		safe := false
 		if !m.Terminal {
-			if m.CredentialVersion == 0 {
-				continue
-			}
 			safe, e = s.SecureRuntime(ctx, m)
 			if e != nil {
 				return e
@@ -88,7 +85,7 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 		}
 		pass, cancel := context.WithTimeout(ctx, 60*time.Second)
 		l, e := s.claimTunnel(pass, m)
-		if errors.Is(e, sql.ErrNoRows) || errors.Is(e, errLegacyEndpoints) {
+		if errors.Is(e, sql.ErrNoRows) {
 			cancel()
 			continue
 		}
@@ -534,7 +531,7 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 	return l.releaseCertificates(ctx, wildcardHost(l.state.ProxyURLTemplate))
 }
 func (l *tunnelLease) cleanup(ctx context.Context) error {
-	if l.state.BundleFormat >= 2 && !l.state.Compromised && !l.state.CompromisedAccess && !l.state.ConnectorRevoked {
+	if !l.state.Compromised && !l.state.CompromisedAccess && !l.state.ConnectorRevoked {
 		pending, err := machineapps.Pending(ctx, l.s.db, l.Machine.NodeID, l.Machine.Epoch)
 		if err != nil {
 			return err

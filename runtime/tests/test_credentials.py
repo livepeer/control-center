@@ -21,10 +21,11 @@ class CredentialTransitions(unittest.TestCase):
         (self.root / 'credentials/node-id').write_text('lp-' + 'a' * 16)
         (self.root / 'credentials/service-token').write_text('b' * 64)
         (self.root / 'credentials/runner-bootstrap.secret').write_text('runner-bootstrap')
-        (self.root / 'credentials/config-url').write_text('http://legacy.example.invalid/v1/nodes/lp-' + 'a' * 16 + '/config')
+        (self.root / 'credentials/config-url').write_text('https://control.example.invalid/v1/nodes/lp-' + 'a' * 16 + '/config')
+        (self.root / 'credentials/identity.json').write_text(json.dumps({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}))
         (self.root / 'state/k3s-version').write_text('v1.37.10+k3s1')
 
-    def transition(self, fail='', mode='refresh', race=False):
+    def transition(self, fail='', mode='refresh', epoch='22222222-2222-4222-8222-222222222222'):
         script = r'''
 set -Eeuo pipefail
 source "$1"
@@ -49,10 +50,7 @@ kube() {
   printf 'kube %s\n' "$*" >> "$INSTALL_DIR/steps"
   if [[ "$*" == *'get deployment/kustomize-controller'* ]]; then printf '1'; fi
   if [[ "$FAIL_AT" == stop && "$*" == *'wait pod'* ]]; then return 1; fi
-  if [[ "$FAIL_AT" == new-transfer && "$*" == *'wait externalartifact/livepeer-service'* ]]; then
-    printf '%s\n' '{"stage":"handoff","epoch":"22222222-2222-4222-8222-222222222222"}' > "$INSTALL_DIR/volumes/http-source/system-layout.json"
-    return 1
-  fi
+  if [[ "$FAIL_AT" == artifact && "$*" == *'wait externalartifact/livepeer-service'* ]]; then return 1; fi
   if [[ "$*" == *'create secret generic livepeer-service-auth'* ]]; then
     [[ $(cat "$INSTALL_DIR/credentials/config-url") == https://* ]]
     [[ $(cat "$INSTALL_DIR/credentials/service-token") == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ]]
@@ -68,7 +66,6 @@ curl() {
     previous=$arg
   done
   if [[ -n "$headers" ]]; then
-    if [[ "$TEST_LAYOUT_RACE" == 1 ]]; then printf '%s\n' '{"stage":"handoff","epoch":"old-epoch"}' > "$INSTALL_DIR/volumes/http-source/system-layout.json"; fi
     printf 'HTTP/1.1 200 OK\r\nX-Livepeer-Terminal: true\r\nX-Livepeer-App-Cleanup-Ready: true\r\n' > "$headers"
     printf '200'
     return 0
@@ -79,14 +76,26 @@ curl() {
     previous=$arg
   done
   [[ "$FAIL_AT" != request ]] || return 1
-  printf '{"node_id":"lp-aaaaaaaaaaaaaaaa","token":"%s","epoch":"22222222-2222-4222-8222-222222222222","credential_version":"1","config_url":"https://control.example.invalid/v1/nodes/lp-aaaaaaaaaaaaaaaa/config"}\n200' \
-    cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  printf '{"node_id":"lp-aaaaaaaaaaaaaaaa","token":"%s","epoch":"%s","credential_version":1,"config_url":"https://control.example.invalid/v1/nodes/lp-aaaaaaaaaaaaaaaa/config"}\n200' \
+    cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "$TEST_EPOCH"
 }
 transition_credentials
 '''
         return subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY), str(self.root)],
-                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode,
-                                   'TEST_LAYOUT_RACE': '1' if race else '0'}, text=True, capture_output=True)
+                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_EPOCH': epoch},
+                              text=True, capture_output=True)
+
+    def test_identity_requires_uuid_and_positive_numeric_version(self):
+        for identity, valid in [
+            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}, True),
+            ({'epoch': 'a' * 36, 'credential_version': 1}, False),
+            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': '1'}, False),
+            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 0}, False),
+            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1.5}, False),
+        ]:
+            result = subprocess.run(['bash', '-c', 'source "$1"; read_identity "$2"',
+                                     'fixture', str(LIBRARY), json.dumps(identity)], capture_output=True)
+            self.assertEqual(result.returncode == 0, valid, identity)
 
     def test_interrupted_request_resumes_same_operation_after_consumers_stop(self):
         result = self.transition('request')
@@ -121,45 +130,29 @@ transition_credentials
         self.assertEqual((self.root / 'credentials/service-token').read_text(), 'b' * 64)
         self.assertTrue((self.root / 'state/credential-transition.json').exists())
 
-    def test_reenrollment_rechecks_transfer_after_stopping_publishers(self):
-        result = self.transition(mode='reenroll', race=True)
+    def test_reenrollment_resume_preserves_prior_owner_state(self):
+        state = self.root / 'volumes/app-reconciler/state'
+        state.mkdir(parents=True)
+        (state / 'journal').write_text('previous owner')
+        result = self.transition('artifact', mode='reenroll')
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.root / 'requests').exists())
-        self.assertEqual((self.root / 'credentials/service-token').read_text(), 'b' * 64)
-        self.assertFalse((self.root / 'state/credential-transition.json').exists())
-
-        steps = (self.root / 'steps').read_text()
-        self.assertIn('scale deployment/livepeer-http-source --replicas=1', steps)
-        self.assertIn('scale deployment/kustomize-controller --replicas=1', steps)
-        # A resumed transition must perform the same stopped-publisher check.
-        (self.root / 'state/credential-transition.json').write_text(json.dumps({
-            'mode': 'reenroll', 'api': 'https://control.example.invalid',
-            'operation': '11111111-1111-4111-8111-111111111111', 'expected': 0,
-            'previous_epoch': 'legacy', 'cleanup_verified': True,
-            'runtime_transition_format': 3, 'flux_replicas': 1,
-        }))
-        result = self.transition(mode='reenroll')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.root / 'requests').exists())
-        self.assertFalse((self.root / 'state/credential-transition.json').exists())
-
-    def test_new_enrollment_transfer_can_resume_but_unrelated_epoch_cannot(self):
-        result = self.transition('new-transfer', mode='reenroll')
-        self.assertNotEqual(result.returncode, 0)
-        marker = self.root / 'state/credential-transition.json'
-        transition = json.loads(marker.read_text())
-        self.assertEqual(transition['issued_epoch'], '22222222-2222-4222-8222-222222222222')
-        self.assertTrue(transition['layout_verified'])
-        layout = self.root / 'volumes/http-source/system-layout.json'
-        layout.write_text(json.dumps({'stage': 'handoff', 'epoch': '33333333-3333-4333-8333-333333333333'}))
-        before = (self.root / 'requests').read_bytes()
-        result = self.transition(mode='reenroll')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.root / 'requests').read_bytes(), before)
-        layout.write_text(json.dumps({'stage': 'handoff', 'epoch': transition['issued_epoch']}))
+        archived = state.parent / 'state.11111111-1111-4111-8111-111111111111/journal'
+        self.assertEqual(archived.read_text(), 'previous owner')
+        self.assertTrue((self.root / 'state/credential-transition.json').exists())
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(marker.exists())
+        self.assertEqual(archived.read_text(), 'previous owner')
+        self.assertFalse((self.root / 'state/credential-transition.json').exists())
+        self.assertTrue((state.parent / 'reenrolled-22222222-2222-4222-8222-222222222222').exists())
+
+    def test_reenrollment_resume_rejects_a_different_issued_identity(self):
+        self.assertNotEqual(self.transition('artifact', mode='reenroll').returncode, 0)
+        identity = (self.root / 'credentials/identity.json').read_bytes()
+        result = self.transition(mode='reenroll', epoch='33333333-3333-4333-8333-333333333333')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('different identity', result.stderr)
+        self.assertEqual((self.root / 'credentials/identity.json').read_bytes(), identity)
+        self.assertTrue((self.root / 'state/credential-transition.json').exists())
 
 
 if __name__ == '__main__':

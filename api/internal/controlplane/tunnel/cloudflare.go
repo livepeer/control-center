@@ -134,8 +134,8 @@ func sameHosts(a, b []string) bool {
 
 func safeApplication(r CFResource, o cfObject) bool {
 	if len(r.Hosts) == 0 {
-		return true
-	} // historical cleanup records
+		return false
+	}
 	if !o.ServiceAuth401 || len(o.Destinations) != len(r.Hosts) {
 		return false
 	}

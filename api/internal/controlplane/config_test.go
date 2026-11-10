@@ -25,6 +25,11 @@ func TestOpenDBRejectsPlaintextRoutes(t *testing.T) {
 }
 
 func TestTunnelStartupRequiresRuntimeImage(t *testing.T) {
+	p := testParams()
+	p.RuntimeImage = ""
+	if err := p.PreValidate(); err == nil || !strings.Contains(err.Error(), "RuntimeImage") {
+		t.Fatal("startup accepted a missing Runtime image", err)
+	}
 	for _, image := range []string{"", "registry.invalid/runtime:latest"} {
 		p := testParams()
 		p.CloudflareEnabled = true
@@ -50,6 +55,7 @@ JWTSigningSecretFile = "enrollment"
 MachineTokenSecretFile = "machine"
 SupabaseURL = "https://auth.example"
 SupabasePublishableKey = "public-key"
+RuntimeImage = "registry.invalid/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ConfigReconcileInterval = "75s"
 DefaultAdminEmail = "first@example.invalid"
 `,
@@ -89,7 +95,7 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
 	t.Setenv("REGISTRY_PAYMENT_MODE", "")
-	for _, name := range []string{"CONTROL_CENTER_CONFIG", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL"} {
+	for _, name := range []string{"CONTROL_CENTER_CONFIG", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE"} {
 		t.Setenv(name, "")
 	}
 }

@@ -52,8 +52,7 @@ type assignmentInput struct {
 // publication and credential changes. The policy lock is already held.
 func lockAppMachine(ctx context.Context, tx *sql.Tx, node, epoch string) (string, error) {
 	var current string
-	var credential int64
-	err := tx.QueryRowContext(ctx, `SELECT enrollment_epoch::text,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&current, &credential)
+	err := tx.QueryRowContext(ctx, `SELECT enrollment_epoch::text FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", problem(404, "machine_not_found", "Machine not found.")
 	}
@@ -62,9 +61,6 @@ func lockAppMachine(ctx context.Context, tx *sql.Tx, node, epoch string) (string
 	}
 	if current != epoch {
 		return "", problem(409, "epoch_changed", "Machine enrollment changed.")
-	}
-	if credential == 0 {
-		return "", problem(409, "legacy_drain_unsupported", "Refresh machine credentials before assigning apps.")
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,epoch,state) VALUES($1,$2,'{}') ON CONFLICT DO NOTHING`, node, epoch)
 	if err != nil {
@@ -474,7 +470,7 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("revision_id")
-	if !appID(id) || m.CredentialVersion == 0 || report.Epoch != m.Epoch || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || report.ActivationGeneration < 1 || !digestRefPattern(report.AppsDigest) || (report.Phase != "applied" && report.Phase != "failed" && report.Phase != "removed") {
+	if !appID(id) || report.Epoch != m.Epoch || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || report.ActivationGeneration < 1 || !digestRefPattern(report.AppsDigest) || (report.Phase != "applied" && report.Phase != "failed" && report.Phase != "removed") {
 		s.respondError(w, problem(409, "invalid_app_status", "Status does not match an enrolled assignment."))
 		return
 	}

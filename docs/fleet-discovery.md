@@ -94,7 +94,7 @@ publication. Collection is stale after two refresh intervals; selection is stale
 after two reconciliation intervals. These thresholds do not evict inventory.
 Response sizes over 1 MiB are logged, without truncating inventory; consumers may reject them.
 
-Status supports #117's correlation with assignment, bundle and registration
+Status supports correlation with assignment, bundle and registration
 reports. It cannot prove an applied deployment or external app reachability:
 a recent collection does not make every record current. Status and logs exclude
 credentials and source URLs; session and credential identities are not metric
@@ -108,10 +108,8 @@ collection.
 
 ## Release checks
 
-Simulated source/TLS tests and isolated database tests do not establish live
-Cloudflare or private-app behavior. Before production enablement, complete #118's
-checks with two managed machines: Access, DNS, TLS and direct-origin bypass;
-actual Node/SDK/private-gVisor routing; enrollment and app convergence; partial
-outage and recovery; rotation, removal and cold restart. Verify the #111, #114
-and #117 integrations, record sanitized source timelines and compatible aggregate
-output within the consumer size limit. Evaluation remains under #44/#90/#91.
+Before production enablement, test two managed machines for Access, DNS, TLS,
+direct-origin bypass, Node/SDK routing to private gVisor apps, enrollment and app
+convergence, outages and recovery, rotation, removal and cold restart. Record
+sanitized source timelines and check aggregate output against the consumer size
+limit.

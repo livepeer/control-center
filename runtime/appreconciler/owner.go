@@ -21,14 +21,6 @@ import (
 
 var routeID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
-type Capabilities struct {
-	Confirmation bool `json:"registration_confirmation"`
-	Ordered      bool `json:"ordered_mutations"`
-	Cancellation bool `json:"app_cancellation"`
-}
-
-func (c Capabilities) AdmissionSafe() bool { return c.Confirmation && c.Ordered }
-
 type Registration struct {
 	InstanceID   string
 	WithdrawalID string
@@ -63,10 +55,8 @@ type Observation struct {
 	Bootstrap                         bool
 	At                                time.Time
 	TTL                               time.Duration
-	Capabilities                      Capabilities
 	Entries                           []Registration
 	Apps                              []AppObservation
-	Partial                           bool
 }
 type OwnerFailure struct {
 	Epoch, Hash string
@@ -74,26 +64,18 @@ type OwnerFailure struct {
 	Reason      string
 }
 type OwnerHooks struct {
-	Identity            func() Identity
-	Reserve             func(string) (uint64, error)
-	ReserveCancellation func(string) (Cancellation, error)
-	Observe             func(Observation) error
-	Failure             func(OwnerFailure)
-	Now                 func() time.Time
-	PermitReady         func(Registration) bool
+	Identity    func() Identity
+	Reserve     func(string) (uint64, error)
+	Observe     func(Observation) error
+	Failure     func(OwnerFailure)
+	Now         func() time.Time
+	PermitReady func(Registration) bool
 }
 type Owner interface {
-	Capabilities() Capabilities
 	Sync(context.Context, OwnerRequest, OwnerHooks) error
-	Cancel(context.Context, string, OwnerHooks) error
 	Unregister(context.Context, Identity) error
 	Accepted() OwnerRequest
 	Close(context.Context) error
-}
-type Cancellation struct {
-	Epoch, Hash, InstanceID, AppID, WithdrawalID, PodUID string
-	Identity                                             Identity
-	Sequence                                             uint64
 }
 
 func AppOptions(i *Instance, ready bool) (runner.AppOptions, error) {
@@ -106,11 +88,8 @@ func AppOptions(i *Instance, ready bool) (runner.AppOptions, error) {
 		return runner.AppOptions{}, err
 	}
 	status := "not-ready"
-	if ready {
+	if ready && i.WithdrawalID == "" {
 		status = "ready"
-	}
-	if i.WithdrawalID != "" {
-		status = "draining"
 	}
 	return runner.AppOptions{ID: i.AppID, App: d.Name, Version: d.AppVersion, RunnerURL: privateURL(i.Name, d.HTTP.Port), Mode: d.Runner.Mode, PriceInfo: price, Capacity: d.Instances.CapacityPerInstance, Status: status, Proxy: true}, nil
 }
@@ -120,7 +99,7 @@ func privateURL(name string, port int) string {
 func formatPort(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 // SDKOwner uses the SDK's HTTPClient extension; the SDK still owns heartbeat and O2R loops.
-// The middleware supplies the narrow observation/order hooks tracked by golang-runner #7.
+// The middleware observes registration responses and serializes mutations.
 type SDKOwner struct {
 	lifecycle       sync.Mutex
 	mutations       sync.Mutex
@@ -130,7 +109,6 @@ type SDKOwner struct {
 	current         *runner.Runner
 	currentHash     string
 	currentEpoch    string
-	caps            Capabilities
 	accepted        OwnerRequest
 }
 
@@ -144,7 +122,6 @@ func NewSDKOwner(base, bootstrap string, client *http.Client) (*SDKOwner, error)
 	}
 	return &SDKOwner{base: strings.TrimRight(base, "/"), bootstrap: bootstrap, client: client}, nil
 }
-func (o *SDKOwner) Capabilities() Capabilities { o.mu.Lock(); defer o.mu.Unlock(); return o.caps }
 func (o *SDKOwner) Accepted() OwnerRequest {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -217,13 +194,12 @@ type wireApp struct {
 	SessionIDs *[]string `json:"session_ids"`
 }
 type wireResponse struct {
-	RunnerID     string       `json:"runner_id"`
-	Credential   string       `json:"heartbeat_secret"`
-	Orchestrator string       `json:"orchestrator"`
-	TTL          string       `json:"heartbeat_ttl"`
-	Sequence     uint64       `json:"mutation_sequence"`
-	Capabilities Capabilities `json:"capabilities"`
-	Apps         []wireApp    `json:"apps"`
+	RunnerID     string    `json:"runner_id"`
+	Credential   string    `json:"heartbeat_secret"`
+	Orchestrator string    `json:"orchestrator"`
+	TTL          string    `json:"heartbeat_ttl"`
+	Sequence     uint64    `json:"seq"`
+	Apps         []wireApp `json:"apps"`
 	O2R          *struct {
 		URL string `json:"url"`
 	} `json:"o2r"`
@@ -278,8 +254,6 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("sdk_request")
 	}
 	bootstrap := req.Header.Get("Authorization") == o.bootstrap
-	caps := o.Capabilities()
-	changed := false
 	var rawApps []map[string]json.RawMessage
 	if transport.Decode(body["apps"], &rawApps) != nil {
 		return nil, errors.New("sdk_request")
@@ -303,25 +277,18 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 			apps[n].Status = "not-ready"
 			rawApps[n]["status"], _ = json.Marshal("not-ready")
 			app.Status = "not-ready"
-			changed = true
 		}
-		if app.Status == "ready" && (bootstrap || !caps.AdmissionSafe()) {
-			h.failure("dependency_pending", false)
-			return nil, ErrDependency
-		}
-	}
-	sequence := uint64(0)
-	if caps.Ordered || !bootstrap {
-		sequence = reserved
-		body["mutation_sequence"], _ = json.Marshal(sequence)
-		changed = true
-	}
-	if changed {
-		body["apps"], _ = json.Marshal(rawApps)
-		raw, err = json.Marshal(body)
-		if err != nil {
+		if app.Status == "ready" && bootstrap {
+			h.failure("sdk_request", false)
 			return nil, errors.New("sdk_request")
 		}
+	}
+	sequence := reserved
+	body["seq"], _ = json.Marshal(sequence)
+	body["apps"], _ = json.Marshal(rawApps)
+	raw, err = json.Marshal(body)
+	if err != nil {
+		return nil, errors.New("sdk_request")
 	}
 	request := req.Clone(req.Context())
 	request.Body = io.NopCloser(bytes.NewReader(raw))
@@ -347,11 +314,6 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 			return nil, ErrResourceRefused
 		}
 		reset := response.StatusCode == 401
-		if reset {
-			o.mu.Lock()
-			o.caps = Capabilities{}
-			o.mu.Unlock()
-		}
 		reason := "node_request_failed"
 		if response.StatusCode == 401 || response.StatusCode == 403 {
 			reason = "registration_auth_failed"
@@ -367,7 +329,7 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("heartbeat_response")
 	}
 	var wire wireResponse
-	if transport.Decode(data, &wire) != nil || !routeID.MatchString(wire.RunnerID) || len(wire.Apps) < len(apps) || (h.request.Identity.RunnerID != "" && wire.RunnerID != h.request.Identity.RunnerID) || (wire.Orchestrator != "" && strings.TrimRight(wire.Orchestrator, "/") != o.base) || (bootstrap && wire.Credential == "") || (!bootstrap && (caps.Ordered || wire.Capabilities.Ordered) && wire.Sequence != sequence) {
+	if transport.Decode(data, &wire) != nil || !routeID.MatchString(wire.RunnerID) || len(wire.Apps) < len(apps) || (h.request.Identity.RunnerID != "" && wire.RunnerID != h.request.Identity.RunnerID) || (wire.Orchestrator != "" && strings.TrimRight(wire.Orchestrator, "/") != o.base) || (bootstrap && wire.Credential == "") || (!bootstrap && wire.Sequence != sequence) {
 		h.failure("heartbeat_response", false)
 		return nil, errors.New("heartbeat_response")
 	}
@@ -384,10 +346,7 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 			return nil, errors.New("o2r_origin")
 		}
 	}
-	if !wire.Capabilities.Ordered {
-		sequence = 0
-	}
-	observation := Observation{Epoch: h.request.Epoch, Hash: h.request.Hash, RunnerID: wire.RunnerID, Credential: wire.Credential, PreviousCredential: h.lineage, ReservedSequence: reserved, Sequence: sequence, Bootstrap: bootstrap, At: observedAt, TTL: ttl, Capabilities: wire.Capabilities, Entries: append([]Registration(nil), h.request.Entries...)}
+	observation := Observation{Epoch: h.request.Epoch, Hash: h.request.Hash, RunnerID: wire.RunnerID, Credential: wire.Credential, PreviousCredential: h.lineage, ReservedSequence: reserved, Sequence: sequence, Bootstrap: bootstrap, At: observedAt, TTL: ttl, Entries: append([]Registration(nil), h.request.Entries...)}
 	seen := map[string]bool{}
 	for index, app := range wire.Apps {
 		if !routeID.MatchString(app.ID) || (app.Status != "ready" && app.Status != "not-ready" && app.Status != "draining") || app.SessionIDs == nil || seen[app.ID] || (index < len(apps) && apps[index].ID != "" && app.ID != apps[index].ID) {
@@ -416,57 +375,12 @@ func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
 		accepted.Entries[i].Options.ID = wire.Apps[i].ID
 	}
 	o.mu.Lock()
-	o.caps = wire.Capabilities
 	o.accepted = accepted
 	o.mu.Unlock()
 	response.Body = io.NopCloser(bytes.NewReader(data))
 	return response, nil
 }
 
-func (o *SDKOwner) Cancel(ctx context.Context, instanceID string, h OwnerHooks) error {
-	o.mutations.Lock()
-	defer o.mutations.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !o.Capabilities().Cancellation || !o.Capabilities().Ordered {
-		return ErrDependency
-	}
-	r, err := h.ReserveCancellation(instanceID)
-	if err != nil {
-		return err
-	}
-	b, _ := json.Marshal(map[string]uint64{"mutation_sequence": r.Sequence})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, o.base+"/runners/"+url.PathEscape(r.Identity.RunnerID)+"/apps/"+url.PathEscape(r.AppID)+"/cancel", bytes.NewReader(b))
-	req.Header.Set("Authorization", r.Identity.Credential)
-	req.Header.Set("Content-Type", "application/json")
-	now := time.Now()
-	if h.Now != nil {
-		now = h.Now()
-	}
-	resp, err := o.client.Do(req)
-	if err != nil {
-		return errors.New("node_unavailable")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return &transport.HTTPError{Status: resp.StatusCode}
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return errors.New("cancel_response")
-	}
-	var result struct {
-		RunnerID string  `json:"runner_id"`
-		Sequence uint64  `json:"mutation_sequence"`
-		App      wireApp `json:"app"`
-	}
-	if transport.Decode(data, &result) != nil || result.RunnerID != r.Identity.RunnerID || result.Sequence != r.Sequence || result.App.ID != r.AppID || result.App.Status != "draining" || result.App.SessionIDs == nil || len(*result.App.SessionIDs) != 0 {
-		return errors.New("cancel_response")
-	}
-	target := Registration{InstanceID: r.InstanceID, WithdrawalID: r.WithdrawalID, PodUID: r.PodUID, Options: runner.AppOptions{ID: r.AppID}}
-	return h.Observe(Observation{Epoch: r.Epoch, Hash: r.Hash, RunnerID: r.Identity.RunnerID, PreviousCredential: r.Identity.Credential, ReservedSequence: r.Sequence, Sequence: r.Sequence, At: now.UTC(), TTL: 30 * time.Second, Capabilities: o.Capabilities(), Entries: []Registration{target}, Apps: []AppObservation{{r.AppID, "draining", []string{}}}, Partial: true})
-}
 func (o *SDKOwner) Unregister(ctx context.Context, identity Identity) error {
 	if identity.RunnerID == "" {
 		return errors.New("owner_identity_missing")

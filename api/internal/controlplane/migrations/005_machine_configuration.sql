@@ -1,15 +1,6 @@
 -- UP
 ALTER TABLE lpcc.machine_tunnels RENAME TO machine_states;
 ALTER TABLE lpcc.machine_states ADD COLUMN rollout JSONB NOT NULL DEFAULT '{"lifecycle":"active","generation":1}';
-UPDATE lpcc.machine_states SET rollout = jsonb_strip_nulls(jsonb_build_object(
- 'lifecycle',COALESCE(state->'lifecycle','"active"'::jsonb),
- 'generation',COALESCE(state->'generation','1'::jsonb),
- 'drain_requested',state->'drain_requested','drain_started_at',state->'drain_started_at',
- 'target',state->'endpoint_drain_url','held_orchestrator',state->'held_orchestrator',
- 'pending_config_digest',state->'pending_config_digest','approved_config_digest',state->'approved_config_digest',
- 'rollout_reason',CASE WHEN state->>'reason' IN ('drain_pending','drain_timeout') THEN state->'reason' END));
-UPDATE lpcc.machine_states SET state=jsonb_set(state,'{ready_generation}',COALESCE(state->'generation','1'::jsonb));
-UPDATE lpcc.machine_states SET state=state-ARRAY['lifecycle','generation','drain_requested','drain_started_at','held_orchestrator','pending_config_digest','approved_config_digest','endpoint_drain_url'];
 CREATE OR REPLACE FUNCTION lpcc.retire_machine() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
  SET search_path=pg_catalog,lpcc AS $$
 BEGIN
@@ -21,9 +12,11 @@ BEGIN
  RETURN OLD;
 END $$;
 -- DOWN
-UPDATE lpcc.machine_states SET state='{"endpoint_generation":1,"credential_generation":1,"source_generation":1,"access_version":1,"resources":{}}'::jsonb || state;
-UPDATE lpcc.machine_states SET state=jsonb_set(state,'{ready}','false') WHERE COALESCE((state->>'ready_generation')::bigint,0)<>(rollout->>'generation')::bigint;
-UPDATE lpcc.machine_states SET state=(state-'ready_generation') || (rollout-'target'-'rollout_reason') || jsonb_strip_nulls(jsonb_build_object('endpoint_drain_url',rollout->'target','reason',COALESCE(CASE WHEN rollout->>'lifecycle'<>'removed' THEN NULLIF(rollout->>'rollout_reason','') END,state->>'reason')));
+DO $$ BEGIN
+ IF EXISTS(SELECT FROM lpcc.machine_states) THEN
+  RAISE EXCEPTION 'retain machine configuration schema while enrollment state exists';
+ END IF;
+END $$;
 ALTER TABLE lpcc.machine_states DROP COLUMN rollout;
 ALTER TABLE lpcc.machine_states RENAME TO machine_tunnels;
 CREATE OR REPLACE FUNCTION lpcc.retire_machine() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER

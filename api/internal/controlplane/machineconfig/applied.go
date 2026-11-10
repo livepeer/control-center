@@ -26,7 +26,7 @@ func ReadApplied(data []byte) (Runtime, string, error) {
 		if e != nil {
 			return d, "", e
 		}
-		if h.Name != "runtime.json" && h.Name != "orchestrator.yaml" && h.Name != "management/orchestrator.yaml" && h.Name != "system/node/orchestrator.yaml" {
+		if h.Name != "runtime.json" && h.Name != "system/node/orchestrator.yaml" {
 			continue
 		}
 		if h.Size > 1<<20 || h.Typeflag != tar.TypeReg {
@@ -44,12 +44,8 @@ func ReadApplied(data []byte) (Runtime, string, error) {
 			manifest = string(b)
 		}
 	}
-	// Pre-migration bundles lack runtime.json; derive their exact Node digest.
-	if manifest == "" {
-		return d, "", errors.New("stored bundle has no Node workload")
-	}
-	if d.ConfigDigest == "" {
-		d.ConfigDigest = Digest(Desired{State: State{HeldOrchestrator: manifest}})
+	if manifest == "" || d.ConfigDigest == "" {
+		return d, "", errors.New("stored bundle has no Node workload or digest")
 	}
 	return d, manifest, nil
 }

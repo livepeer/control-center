@@ -1,18 +1,16 @@
 -- UP
 ALTER TABLE lpcc.machines ADD COLUMN enrollment_epoch UUID NOT NULL DEFAULT gen_random_uuid();
-ALTER TABLE lpcc.machines ADD COLUMN credential_version BIGINT NOT NULL DEFAULT 0 CHECK(credential_version>=0);
+ALTER TABLE lpcc.machines ADD COLUMN credential_version BIGINT NOT NULL DEFAULT 1 CHECK(credential_version>0);
 ALTER TABLE lpcc.machines ADD COLUMN tunnel_eligible BOOLEAN NOT NULL DEFAULT false;
 CREATE TABLE lpcc.enrollments (
  node_id TEXT NOT NULL, epoch UUID NOT NULL, owner_id UUID NOT NULL,
  fingerprint TEXT NOT NULL, hostname TEXT NOT NULL, install_dir TEXT NOT NULL, k3s_version TEXT NOT NULL,
- credential_version BIGINT NOT NULL CHECK(credential_version>=0),
+ credential_version BIGINT NOT NULL CHECK(credential_version>0),
  retired_at TIMESTAMPTZ, removal_ack_at TIMESTAMPTZ,
  terminal_bundle BYTEA, terminal_sha256 TEXT,
  PRIMARY KEY(node_id,epoch),
  CHECK((terminal_bundle IS NULL)=(terminal_sha256 IS NULL))
 );
-INSERT INTO lpcc.enrollments(node_id,epoch,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version)
- SELECT node_id,enrollment_epoch,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines;
 CREATE TABLE lpcc.credential_refreshes (
  node_id TEXT NOT NULL, epoch UUID NOT NULL, operation_id UUID NOT NULL,
  expected_version BIGINT NOT NULL, resulting_version BIGINT NOT NULL,

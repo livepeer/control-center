@@ -121,9 +121,6 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 // ObservationTime is shared by status projections and safety gates. Receipt
 // time may cap a measurement's age but cannot make an old observation younger.
 func ObservationTime(r Report, received time.Time) time.Time {
-	if r.ReportVersion == 0 {
-		return received
-	}
 	if r.ClockUncertain || r.ObservedAt.IsZero() {
 		return time.Time{}
 	}

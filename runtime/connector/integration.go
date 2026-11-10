@@ -136,7 +136,7 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func matches(a Association, m contract.Metadata) bool {
-	return m.BundleFormat >= contract.SystemBundleFormat && !m.TerminalCleanup && a.Epoch == m.Epoch && a.CredentialVersion == m.CredentialVersion && a.TunnelID != "" && a.TunnelID == m.TunnelID && a.TokenGeneration > 0 && a.TokenGeneration == m.TokenGeneration
+	return !m.TerminalCleanup && a.Epoch == m.Epoch && a.CredentialVersion == m.CredentialVersion && a.TunnelID != "" && a.TunnelID == m.TunnelID && a.TokenGeneration > 0 && a.TokenGeneration == m.TokenGeneration
 }
 
 func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
@@ -239,7 +239,7 @@ func (i *Integration) checkPod(ctx context.Context, launch Launch) error {
 // Report requires fresh local evidence and the same live Kubernetes incarnation.
 func (i *Integration) Report(ctx context.Context) error {
 	m, ok := i.Desired()
-	if !ok || m.BundleFormat < contract.SystemBundleFormat || m.Terminal || m.TunnelID == "" {
+	if !ok || m.Terminal || m.TunnelID == "" {
 		return nil
 	}
 	i.mu.Lock()
@@ -247,7 +247,7 @@ func (i *Integration) Report(ctx context.Context) error {
 	i.mu.Unlock()
 	podValid := grant != nil && i.checkPod(ctx, grant.Launch) == nil
 	m, ok = i.Desired()
-	if !ok || m.BundleFormat < contract.SystemBundleFormat || m.Terminal || m.TunnelID == "" {
+	if !ok || m.Terminal || m.TunnelID == "" {
 		return nil
 	}
 	ready := false

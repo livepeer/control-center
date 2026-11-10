@@ -33,17 +33,6 @@ func (p *podFixture) Request(_ context.Context, method, path string, _ any, resu
 	return transport.Decode(b, result)
 }
 
-func TestLegacyConnectorKeepsItsExistingReporter(t *testing.T) {
-	f := fixture(t)
-	f.m.BundleFormat = 2
-	if err := f.i.Report(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.reports) != 0 || f.pod.calls != 0 {
-		t.Fatal("new management agent overwrote the legacy broker report")
-	}
-}
-
 func TestOverlappingStartsCannotOverwriteTheNewerLaunch(t *testing.T) {
 	f := fixture(t)
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -159,7 +148,7 @@ type integrationFixture struct {
 
 func fixture(t *testing.T) *integrationFixture {
 	t.Helper()
-	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "epoch", CredentialVersion: 1, Generation: 7, BundleFormat: contract.SystemBundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/tunnel/connector-token"}}
+	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "epoch", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/tunnel/connector-token"}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("b", 64) {
 			t.Error("wrong machine credential")

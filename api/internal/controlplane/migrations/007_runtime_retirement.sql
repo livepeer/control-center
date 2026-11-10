@@ -7,9 +7,8 @@ CREATE FUNCTION lpcc.capture_runtime_retirement() RETURNS trigger LANGUAGE plpgs
  SET search_path=pg_catalog,lpcc AS $$
 BEGIN
  UPDATE lpcc.enrollments e SET retained_bundle=c.bundle
- FROM lpcc.machine_configs c,lpcc.machine_states s
+ FROM lpcc.machine_configs c
  WHERE e.node_id=OLD.node_id AND e.epoch=OLD.enrollment_epoch AND c.node_id=OLD.node_id
- AND s.node_id=e.node_id AND s.epoch=e.epoch AND COALESCE((s.rollout->>'bundle_format')::integer,1)>=2
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;

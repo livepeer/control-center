@@ -47,7 +47,7 @@ func (c *Controller) now() time.Time {
 	return time.Now().UTC()
 }
 func (c *Controller) hooks() OwnerHooks {
-	return OwnerHooks{Identity: func() Identity { return c.Journal.View().Identity }, Reserve: c.Journal.Reserve, ReserveCancellation: c.Journal.ReserveCancellation, Observe: c.observe, Failure: c.failed, Now: c.now, PermitReady: func(r Registration) bool {
+	return OwnerHooks{Identity: func() Identity { return c.Journal.View().Identity }, Reserve: c.Journal.Reserve, Observe: c.observe, Failure: c.failed, Now: c.now, PermitReady: func(r Registration) bool {
 		uid, eligible := c.Journal.Eligible(r.InstanceID, r.Options.ID)
 		return eligible && c.Probes != nil && c.Probes.Ready(r.InstanceID, uid)
 	}}
@@ -112,50 +112,39 @@ func (c *Controller) observe(o Observation) error {
 		if !o.Bootstrap && !credentialChanged && o.Sequence > 0 && o.Sequence <= s.AcceptedSequence {
 			return ErrSuperseded
 		}
-		if o.Partial {
-			for _, e := range o.Entries {
-				i := s.Instances[e.InstanceID]
-				if i == nil || i.AppID != e.Options.ID || i.WithdrawalID != e.WithdrawalID || i.PodUID != e.PodUID {
-					return ErrSuperseded
-				}
-			}
-		}
 		if o.Bootstrap || credentialChanged {
 			s.AcceptedSequence = 0
 		} else if o.Sequence > 0 {
 			s.AcceptedSequence = o.Sequence
 		}
 		s.Identity.RunnerID = o.RunnerID
-		if !o.Partial {
-			s.Identity.Confirmed = !o.Bootstrap && !credentialChanged && o.Capabilities.AdmissionSafe() && o.Sequence > 0
-			known := map[string]bool{}
-			for id, i := range s.Instances {
-				if i.AppID != "" {
-					known[i.AppID] = true
-				}
-				_ = id
-			}
-			for n, entry := range o.Entries {
-				i := s.Instances[entry.InstanceID]
-				if i == nil || n >= len(o.Apps) || contract.ReservedProxyID(o.Apps[n].ID) || (i.AppID != "" && i.AppID != o.Apps[n].ID) {
-					return errors.New("app_identity")
-				}
-				i.AppID = o.Apps[n].ID
+		s.Identity.Confirmed = !o.Bootstrap && !credentialChanged && o.Sequence > 0
+		known := map[string]bool{}
+		for _, i := range s.Instances {
+			if i.AppID != "" {
 				known[i.AppID] = true
 			}
-			for _, app := range o.Apps {
-				if !known[app.ID] {
-					return errors.New("unknown_owner_registration")
-				}
+		}
+		for n, entry := range o.Entries {
+			i := s.Instances[entry.InstanceID]
+			if i == nil || n >= len(o.Apps) || contract.ReservedProxyID(o.Apps[n].ID) || (i.AppID != "" && i.AppID != o.Apps[n].ID) {
+				return errors.New("app_identity")
 			}
-			seen := map[string]bool{}
-			for _, app := range o.Apps {
-				seen[app.ID] = true
+			i.AppID = o.Apps[n].ID
+			known[i.AppID] = true
+		}
+		for _, app := range o.Apps {
+			if !known[app.ID] {
+				return errors.New("unknown_owner_registration")
 			}
-			for _, i := range s.Instances {
-				if i.Phase == "removed" && i.AppID != "" && !seen[i.AppID] {
-					i.RegistrationGone = true
-				}
+		}
+		seen := map[string]bool{}
+		for _, app := range o.Apps {
+			seen[app.ID] = true
+		}
+		for _, i := range s.Instances {
+			if i.Phase == "removed" && i.AppID != "" && !seen[i.AppID] {
+				i.RegistrationGone = true
 			}
 		}
 		return nil
@@ -169,28 +158,21 @@ func (c *Controller) observe(o Observation) error {
 	s := c.Journal.View()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.proofs == nil {
-		c.proofs = map[string]proof{}
-	}
-	if !o.Partial {
-		c.proofs = map[string]proof{}
-		c.fault = ""
-		c.recoverOwner = false
-	}
-	if o.Bootstrap || credentialChanged || !o.Capabilities.AdmissionSafe() || o.Sequence == 0 {
+	c.proofs = map[string]proof{}
+	c.fault = ""
+	c.recoverOwner = false
+	if o.Bootstrap || credentialChanged || o.Sequence == 0 {
 		return nil
 	}
 	byID := map[string]AppObservation{}
 	for _, app := range o.Apps {
 		byID[app.ID] = app
 	}
-	if !o.Partial {
-		for id, i := range s.Instances {
-			if app, exists := byID[i.AppID]; exists {
-				// Authoritative retained-app counts are useful diagnostics. Without
-				// a captured withdrawal/UID they are deliberately not cleanup proof.
-				c.proofs[id] = proof{Observation: o, App: app}
-			}
+	for id, i := range s.Instances {
+		if app, exists := byID[i.AppID]; exists {
+			// Authoritative retained-app counts are useful diagnostics. Without
+			// a captured withdrawal/UID they are deliberately not cleanup proof.
+			c.proofs[id] = proof{Observation: o, App: app}
 		}
 	}
 	for _, e := range o.Entries {
@@ -328,7 +310,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 					i.Phase = "retired"
 					i.RetiredAt = now
 					if unconfirmed {
-						i.Reason = "cancellation_unconfirmed"
+						i.Reason = "cleanup_unconfirmed"
 						if !now.Before(i.Deadline) {
 							i.DrainExpiredAt = i.Deadline
 						}
@@ -417,10 +399,6 @@ func (c *Controller) Tick(ctx context.Context) error {
 	// Owner requests are bounded; a failed safety withdrawal cannot prevent
 	// deadline removal publication, and artifact failure cannot keep old readiness.
 	s = c.Journal.View()
-	if err := c.cancelDue(ctx, now); err != nil {
-		return err
-	}
-	s = c.Journal.View()
 	publishErr := c.publish(ctx, s, now)
 	s = c.Journal.View()
 	if publishErr == nil && view.Applied != "" && view.Applied == s.Published && view.Artifact == s.Published {
@@ -463,44 +441,6 @@ func (c *Controller) Tick(ctx context.Context) error {
 	return errors.Join(inputErr, publishErr, ownerErr, reportErr, c.collect(view, now))
 }
 
-// All due targets share one request-timeout budget. A failed or unavailable
-// cancellation never withholds the already committed forced exclusion.
-func (c *Controller) cancelDue(ctx context.Context, now time.Time) error {
-	s := c.Journal.View()
-	if s.Identity.Retiring || s.Identity.Credential == "" {
-		return nil
-	}
-	due := []string{}
-	for _, id := range instanceIDs(&s) {
-		i := s.Instances[id]
-		if i.Forced && !i.RegistrationGone && i.AppID != "" && !c.empty(i, now) && !now.Before(i.NextCancelAt) {
-			due = append(due, id)
-		}
-	}
-	if len(due) == 0 {
-		return nil
-	}
-	if err := c.Journal.Update(func(s *State) error {
-		for _, id := range due {
-			i := s.Instances[id]
-			if i.CancelAttemptAt.IsZero() {
-				i.CancelAttemptAt = now
-			}
-			i.NextCancelAt = now.Add(30 * time.Second)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	batch, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	var wg sync.WaitGroup
-	for _, id := range due {
-		wg.Go(func() { _ = c.Owner.Cancel(batch, id, c.hooks()) })
-	}
-	wg.Wait()
-	return nil
-}
 func withdraw(i *Instance, now time.Time, m contract.Metadata) {
 	if i.WithdrawalID == "" {
 		i.WithdrawalID = randomID()
@@ -585,6 +525,8 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 	c.mu.Lock()
 	recovery := c.recoverOwner
 	c.mu.Unlock()
+	// A restored identity first needs a non-ready scoped heartbeat in this process.
+	confirmed := s.Identity.Confirmed && c.Owner.Accepted().Identity == s.Identity
 	entries := []Registration{}
 	for _, id := range instanceIDs(&s) {
 		i := s.Instances[id]
@@ -599,7 +541,7 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 			continue
 		}
 		signalOK := i.Definition.Lifecycle.StopSignal == nil || (exists && pod.StopSignal == *i.Definition.Lifecycle.StopSignal)
-		options, err := AppOptions(i, i.AppID != "" && ready[id] && signalOK && i.WithdrawalID == "" && s.Identity.Confirmed && !s.ClockUncertain && !recovery && c.Owner.Capabilities().AdmissionSafe())
+		options, err := AppOptions(i, i.AppID != "" && ready[id] && signalOK && i.WithdrawalID == "" && confirmed && !s.ClockUncertain && !recovery)
 		if err != nil {
 			return err
 		}
@@ -683,11 +625,12 @@ func (c *Controller) resumeAccepted(ctx context.Context, s State, ready map[stri
 	if len(accepted.Entries) == 0 || accepted.Identity.RunnerID != s.Identity.RunnerID || recovery {
 		return nil
 	}
+	confirmed := s.Identity.Confirmed && accepted.Identity == s.Identity
 	accepted.Identity = s.Identity
 	for n, e := range accepted.Entries {
 		if i := s.Instances[e.InstanceID]; i != nil {
 			e.WithdrawalID, e.PodUID = i.WithdrawalID, i.PodUID
-			e.Options, _ = AppOptions(i, i.AppID != "" && ready[i.ID] && i.WithdrawalID == "" && s.Identity.Confirmed && !s.ClockUncertain && c.Owner.Capabilities().AdmissionSafe())
+			e.Options, _ = AppOptions(i, i.AppID != "" && ready[i.ID] && i.WithdrawalID == "" && confirmed && !s.ClockUncertain)
 			accepted.Entries[n] = e
 		}
 	}

@@ -36,7 +36,7 @@ CloudflareIngressApproved = false
 
 # Fleet discovery shares the API process and existing TLS proxy. It requires
 # approved machine ingress and CloudflareKeyringFile; no provisioning API token
-# is needed when CloudflareEnabled is false. Source inventory comes from #112.
+# is needed when CloudflareEnabled is false.
 DiscoveryEnabled = false
 DiscoveryRefreshInterval = "5m"
 DiscoveryMaxFailedRefreshes = 6
@@ -49,12 +49,10 @@ DiscoveryGrants = []
 # CloudflareTeamName = "<ZERO_TRUST_TEAM>"
 # CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
 # CloudflareKeyringFile = "secrets/collector-access-keyring.json"
-# CloudflareConnectorImage = "<REGISTRY>/livepeer-tunnel@sha256:<IMAGE_DIGEST>"
-# RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required for managed tunnels
-# RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # format 3; keep the legacy pin during migration
+RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required; build instructions in runtime/README.md
+# RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # Runtime helper and cloudflared
 # CloudflareAccessLifetime = "<TOKEN_LIFETIME>"
 # CloudflareRotateBefore = "<ROTATION_WINDOW>"
 # TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
 # TunnelDrainTimeout = "<DRAIN_DEADLINE>"
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
-# TunnelPrivateControlCIDRs = ["<PRIVATE_CONTROL_CENTER_IP/32>"] # if needed

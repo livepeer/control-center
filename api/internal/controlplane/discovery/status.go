@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Status is the #117 read contract. Source freshness does not attest
+// Status describes fleet discovery. Source freshness does not attest
 // applied assignments, registration identity, or external app reachability.
 type Status struct {
 	Enabled              bool           `json:"enabled"`

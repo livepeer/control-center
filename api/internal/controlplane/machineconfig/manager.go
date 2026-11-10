@@ -13,7 +13,6 @@ import (
 )
 
 type Config struct {
-	RequireDrain            bool
 	APIURL                  string
 	Connector               ConnectorConfig
 	DrainTimeout, StatusTTL time.Duration
@@ -46,21 +45,15 @@ func New(config Config, deps Dependencies) *Manager {
 }
 
 func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
-	image := state.RuntimeImage
-	if s.config.RuntimeImage != "" {
-		image = s.config.RuntimeImage
-	}
 	connector := s.config.Connector
-	if state.BundleFormat >= 3 {
-		connector.Image = state.SystemConnectorImage
-		if connector.ManagedImage != "" {
-			connector.Image = connector.ManagedImage
-		}
+	connector.Image = state.ConnectorImage
+	if s.config.Connector.Image != "" {
+		connector.Image = s.config.Connector.Image
 	}
-	return Desired{Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, BundleFormat: state.BundleFormat, RuntimeImage: image, NodeImage: s.config.NodeImage, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout(state)}
+	return Desired{Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
 }
-func (s *Manager) drainTimeout(state State) time.Duration {
-	if state.BundleFormat >= 2 && s.config.DrainTimeout <= 0 {
+func (s *Manager) drainTimeout() time.Duration {
+	if s.config.DrainTimeout <= 0 {
 		return 12 * time.Hour
 	}
 	return s.config.DrainTimeout
@@ -116,7 +109,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 	m.CredentialVersion = record.CredentialVersion
 	m.Terminal = record.Terminal
 	before := record.State
-	s.runtimeSettings(ctx, m, &record)
+	s.connectorSettings(m, &record)
 	exposure, remove, err := s.planManagement(ctx, m, &record)
 	if err != nil {
 		return err
@@ -132,7 +125,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		record = lease.Record
 		m = lease.Machine
 		before = record.State
-		s.runtimeSettings(ctx, m, &record)
+		s.connectorSettings(m, &record)
 		exposure, remove, err = s.planManagement(ctx, m, &record)
 		if err != nil {
 			return err
@@ -164,31 +157,24 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		lease.Release(ctx)
 		lease = nil
 	}
-	if record.BundleFormat >= 2 {
-		// An enrolled machine with no assignments still needs an authoritative empty intent.
-		// Reserve its first generation before delivery, so the first edit advances beyond it.
-		var revision int64
-		err := s.store.DB.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET apps_generation=1,revision=revision+1 WHERE node_id=$1 AND epoch=$2 AND revision=$3 AND apps_generation=0 AND EXISTS(SELECT FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$4) RETURNING revision`, m.NodeID, m.Epoch, record.Revision, m.CredentialVersion).Scan(&revision)
-		if err == nil {
-			record.Revision = revision
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
+	// An enrolled machine with no assignments still needs an authoritative empty intent.
+	// Reserve its first generation before delivery, so the first edit advances beyond it.
+	var revision int64
+	err = s.store.DB.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET apps_generation=1,revision=revision+1 WHERE node_id=$1 AND epoch=$2 AND revision=$3 AND apps_generation=0 AND EXISTS(SELECT FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$4) RETURNING revision`, m.NodeID, m.Epoch, record.Revision, m.CredentialVersion).Scan(&revision)
+	if err == nil {
+		record.Revision = revision
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
 	desired := s.Desired(m, record.State, exposure)
-	if m.Terminal && desired.BundleFormat >= 2 {
+	if m.Terminal {
 		var prior []byte
 		if s.store.DB.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&prior) == nil {
 			desired.RetainedFiles, _ = artifact.Read(prior)
 		}
 	}
 	desired.Apps, err = machineapps.Snapshot(ctx, s.store.DB, m.NodeID, m.Epoch)
-	if err != nil && desired.BundleFormat < 2 {
-		return err
-	}
-	if desired.BundleFormat >= 2 {
-		s.prepareApps(ctx, &desired, err)
-	}
+	s.prepareApps(ctx, &desired, err)
 	data, digest, err := s.deps.Build(desired)
 	if err != nil {
 		s.deps.Logger.Error("keeping previous configuration", "node_id", m.NodeID, "reason", "generation_failed")
@@ -201,7 +187,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 func (s *Manager) planManagement(ctx context.Context, m Machine, record *Record) (*Exposure, bool, error) {
 	before := record.State
 	exposure, remove, err := s.plan(ctx, m, record)
-	if err == nil || before.BundleFormat < 2 {
+	if err == nil {
 		return exposure, remove, err
 	}
 	// Lifecycle observations can hold a disruptive target, but cannot veto delivery

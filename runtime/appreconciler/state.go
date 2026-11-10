@@ -24,7 +24,6 @@ import (
 )
 
 var ErrStateLost = errors.New("state_recovery_failed")
-var ErrDependency = errors.New("dependency_pending")
 var ErrSuperseded = errors.New("superseded_owner_snapshot")
 var ErrClock = errors.New("clock_uncertain")
 var ErrResourceRefused = errors.New("resource_refused")
@@ -62,8 +61,6 @@ type Instance struct {
 	RegistrationGone   bool                `json:"registration_gone"`
 	RetiredAt          time.Time           `json:"retired_at,omitempty"`
 	DrainExpiredAt     time.Time           `json:"drain_expired_at,omitempty"`
-	CancelAttemptAt    time.Time           `json:"cancel_attempt_at,omitempty"`
-	NextCancelAt       time.Time           `json:"next_cancel_at,omitempty"`
 	RemovalPublishedAt time.Time           `json:"removal_published_at,omitempty"`
 	TerminatedAt       time.Time           `json:"terminated_at,omitempty"`
 }
@@ -303,24 +300,6 @@ func (j *Journal) Reserve(expectedHash string) (uint64, error) {
 	return sequence, err
 }
 
-// Called inside the SDK mutation lock: capture the current owner and immutable
-// cancellation target in the same durable commit as its sequence reservation.
-func (j *Journal) ReserveCancellation(id string) (Cancellation, error) {
-	var r Cancellation
-	err := j.Update(func(s *State) error {
-		i := s.Instances[id]
-		if i == nil || !i.Forced || i.WithdrawalID == "" || i.AppID == "" || i.RegistrationGone || s.Identity.Retiring || s.Identity.Credential == "" || s.OwnerHash == "" || s.OwnerEpoch == "" {
-			return ErrSuperseded
-		}
-		if s.MutationSequence == ^uint64(0) {
-			return errors.New("mutation_sequence_exhausted")
-		}
-		s.MutationSequence++
-		r = Cancellation{Epoch: s.OwnerEpoch, Hash: s.OwnerHash, Identity: s.Identity, InstanceID: id, AppID: i.AppID, WithdrawalID: i.WithdrawalID, PodUID: i.PodUID, Sequence: s.MutationSequence}
-		return nil
-	})
-	return r, err
-}
 func receiptKey(r Receipt) string {
 	return fmt.Sprintf("%s/%d/%s", r.RevisionID, r.Generation, r.Phase)
 }

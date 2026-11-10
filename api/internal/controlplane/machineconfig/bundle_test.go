@@ -12,7 +12,7 @@ import (
 )
 
 func TestConfigurationBundle(t *testing.T) {
-	m := Desired{Machine: Machine{NodeID: "lp-" + strings.Repeat("a", 16), InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}}
+	m := Desired{Machine: Machine{NodeID: "lp-" + strings.Repeat("a", 16), Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64)}
 	first, digest, err := Build(m)
 	if err != nil {
 		t.Fatal(err)
@@ -22,21 +22,21 @@ func TestConfigurationBundle(t *testing.T) {
 		t.Fatal("archive is not deterministic", err)
 	}
 	files := archiveFiles(t, first)
-	for _, name := range []string{"kustomization.yaml", "orchestrator.yaml", "suc.yaml", "suc-crd.yaml", "upgrade-plan/kustomization.yaml", "upgrade-plan/plan.yaml"} {
+	for _, name := range []string{"kustomization.yaml", "system/node/orchestrator.yaml", "system/upgrade-controller/suc.yaml", "system/upgrade-controller/suc-crd.yaml", "upgrade-plan/kustomization.yaml", "upgrade-plan/plan.yaml"} {
 		if _, ok := files[name]; !ok {
 			t.Fatal("missing", name)
 		}
 	}
 	for name, expected := range map[string]string{
-		"suc-crd.yaml": "1393ba034e7691273fc519b721a7f72a0cdbef8c7b051c9e408be96090b8478d",
-		"suc.yaml":     "81ef8c40f85b8822c87e0cf790612fc6d4dcf1eebb83f89e522bc929ef85e18c",
+		"system/upgrade-controller/suc-crd.yaml": "1393ba034e7691273fc519b721a7f72a0cdbef8c7b051c9e408be96090b8478d",
+		"system/upgrade-controller/suc.yaml":     "81ef8c40f85b8822c87e0cf790612fc6d4dcf1eebb83f89e522bc929ef85e18c",
 	} {
 		hash := sha256.Sum256([]byte(files[name]))
 		if hex.EncodeToString(hash[:]) != expected {
 			t.Fatalf("rendering changed pinned asset %s", name)
 		}
 	}
-	if strings.Contains(files["orchestrator.yaml"], "@INSTALL_DIR@") || strings.Contains(files["orchestrator.yaml"], "@NODE_ID@") || !strings.Contains(files["orchestrator.yaml"], "/srv/livepeer/volumes/orchestrator") {
+	if strings.Contains(files["system/node/orchestrator.yaml"], "@INSTALL_DIR@") || strings.Contains(files["system/node/orchestrator.yaml"], "@NODE_ID@") || !strings.Contains(files["system/node/orchestrator.yaml"], "/srv/livepeer/volumes/orchestrator") {
 		t.Fatal("incorrect machine rendering")
 	}
 	if !strings.Contains(files["upgrade-plan/plan.yaml"], m.K3sVersion) {

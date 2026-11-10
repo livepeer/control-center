@@ -85,9 +85,9 @@ func loadPinnedRevision(ctx context.Context, q rowQuerier, ref schema.RevisionRe
 	return r, err
 }
 
-// revisionForBinding is #111's integration seam. The caller is an AdminApply:
-// tx already holds policyTx's lock, and current must come from the persisted
-// assignment read using tx, never from a request. No assignment storage is added.
+// revisionForBinding validates a revision within AdminApply. The transaction
+// already holds policyTx's lock, and current must come from the persisted
+// assignment read using tx, never from a request.
 // Unchanged references may scale/recover after retirement or a policy change.
 func revisionForBinding(ctx context.Context, tx *sql.Tx, current *schema.RevisionRef, desired schema.RevisionRef, mode schema.PaymentMode) (CatalogRevision, error) {
 	r, err := loadPinnedRevision(ctx, tx, desired)

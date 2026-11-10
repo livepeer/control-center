@@ -19,7 +19,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -122,6 +121,8 @@ type Identity struct {
 	CredentialVersion int64
 }
 
+var epochPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+
 func ReadIdentity(name string) (Identity, error) {
 	var i Identity
 	b, err := os.ReadFile(name)
@@ -129,23 +130,18 @@ func ReadIdentity(name string) (Identity, error) {
 		return i, errors.New("identity_file")
 	}
 	var raw struct {
-		Epoch   string          `json:"epoch"`
-		Version json.RawMessage `json:"credential_version"`
+		Epoch   string `json:"epoch"`
+		Version int64  `json:"credential_version"`
 	}
-	if err = Decode(b, &raw); err != nil {
+	if Decode(b, &raw) != nil || raw.Version < 1 || !epochPattern.MatchString(raw.Epoch) {
 		return i, errors.New("identity_json")
 	}
-	version := strings.Trim(string(raw.Version), `"`)
-	n, err := strconv.ParseInt(version, 10, 64)
-	if err != nil || n < 0 || strconv.FormatInt(n, 10) != version {
-		return i, errors.New("identity_version")
-	}
-	return Identity{raw.Epoch, n}, nil
+	return Identity{raw.Epoch, raw.Version}, nil
 }
 
 func ReadMetadata(b []byte) (contract.Metadata, error) {
 	var m contract.Metadata
-	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 0 {
+	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 1 || !epochPattern.MatchString(m.Epoch) || m.BundleFormat != contract.BundleFormat {
 		return m, errors.New("metadata_invalid")
 	}
 	return m, nil

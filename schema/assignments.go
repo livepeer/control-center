@@ -14,8 +14,7 @@ import (
 )
 
 const MaxAppAssignments = 100
-const MaxAppConfigMapBytes = 900 << 10
-const AppAssignmentsFile = "app-assignments.json"
+const MaxAppIntentBytes = 900 << 10
 
 type AppCleanupPolicy struct {
 	DrainTimeout    string  `json:"drain_timeout"`
@@ -125,12 +124,16 @@ func CanonicalAssignmentSet(s AppAssignmentSetV1) ([]byte, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(s)
+	b, err := json.Marshal(s)
+	if len(b) > MaxAppIntentBytes {
+		return nil, fmt.Errorf("assignment set too large")
+	}
+	return b, err
 }
 
 func DecodeAssignmentSet(b []byte) (AppAssignmentSetV1, error) {
 	var s AppAssignmentSetV1
-	if len(b) > MaxAppConfigMapBytes {
+	if len(b) > MaxAppIntentBytes {
 		return s, fmt.Errorf("assignment set too large")
 	}
 	if err := jsonv2.Unmarshal(b, &s, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)); err != nil {
@@ -157,32 +160,6 @@ func DecodeAssignmentSet(b []byte) (AppAssignmentSetV1, error) {
 	return s, s.Validate()
 }
 
-func AssignmentConfigMap(s AppAssignmentSetV1) ([]byte, string, error) {
-	b, err := CanonicalAssignmentSet(s)
-	if err != nil {
-		return nil, "", err
-	}
-	digest := Digest(b)
-	manifest := struct {
-		APIVersion string `json:"apiVersion"`
-		Kind       string `json:"kind"`
-		Metadata   struct {
-			Name        string            `json:"name"`
-			Namespace   string            `json:"namespace"`
-			Annotations map[string]string `json:"annotations"`
-		} `json:"metadata"`
-		Data map[string]string `json:"data"`
-	}{APIVersion: "v1", Kind: "ConfigMap", Data: map[string]string{"desired.json": string(b)}}
-	manifest.Metadata.Name = "livepeer-app-assignments"
-	manifest.Metadata.Namespace = "livepeer"
-	manifest.Metadata.Annotations = map[string]string{"livepeer.io/apps-sha256": digest}
-	out, err := json.Marshal(manifest)
-	if len(out) > MaxAppConfigMapBytes {
-		return nil, "", fmt.Errorf("app ConfigMap exceeds 900 KiB")
-	}
-	return out, digest, err
-}
-
 // Reserve the larger present/removal form and maximum counter widths, so a
 // previously admitted assignment can always be removed without growing the set.
 func CheckAssignmentBudget(s AppAssignmentSetV1) error {
@@ -204,6 +181,6 @@ func CheckAssignmentBudget(s AppAssignmentSetV1) error {
 		}
 		s.Entries[i] = a
 	}
-	_, _, err := AssignmentConfigMap(s)
+	_, err := CanonicalAssignmentSet(s)
 	return err
 }

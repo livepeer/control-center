@@ -96,17 +96,20 @@ func TestPublicationSkipsUnchangedStatusAndRepairsReadiness(t *testing.T) {
 		t.Fatal("failure rewrote status or discarded last valid artifact")
 	}
 }
-func TestDecodeAndIdentityCompatibility(t *testing.T) {
+func TestDecodeAndIdentityValidation(t *testing.T) {
 	var value map[string]any
 	if Decode([]byte(`{"id":1,"id":2}`), &value) == nil {
 		t.Fatal("accepted duplicate JSON key")
 	}
 	file := filepath.Join(t.TempDir(), "identity")
-	for _, b := range []string{`{"epoch":"epoch","credential_version":"2"}`, `{"epoch":"epoch","credential_version":2}`} {
-		os.WriteFile(file, []byte(b), 0600)
-		i, err := ReadIdentity(file)
-		if err != nil || i.CredentialVersion != 2 {
-			t.Fatal(i, err)
+	for _, version := range []string{`"2"`, `0`, `-1`, `null`} {
+		os.WriteFile(file, []byte(`{"epoch":"11111111-1111-4111-8111-111111111111","credential_version":`+version+`}`), 0600)
+		if _, err := ReadIdentity(file); err == nil {
+			t.Fatal("accepted invalid credential version", version)
 		}
+	}
+	os.WriteFile(file, []byte(`{"epoch":"11111111-1111-4111-8111-111111111111","credential_version":2}`), 0600)
+	if i, err := ReadIdentity(file); err != nil || i.CredentialVersion != 2 {
+		t.Fatal(i, err)
 	}
 }

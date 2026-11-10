@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"io/fs"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +18,7 @@ import (
 	"uuid"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
-	"github.com/livepeer/control-center/api/internal/migrations"
+	"github.com/livepeer/control-center/runtime/contract"
 )
 
 type simulatedCloudflare struct {
@@ -162,9 +161,10 @@ func tunnelTestServer(t *testing.T) (*Server, *simulatedCloudflare) {
 	s := newTestServer(t)
 	t.Cleanup(func() { testTunnelDependencies.Delete(s) })
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareTeamName: "test-team", CloudflareAPIToken: "backend-provisioning-only", CloudflareKeyring: `{"current":"one","keys":{"one":"` + key + `"}}`, CloudflareConnectorImage: "registry.example.invalid/connector@sha256:" + strings.Repeat("c", 64), CloudflareAccessLifetime: 24 * time.Hour, CloudflareRotateBefore: 6 * time.Hour, TunnelStatusTTL: 5 * time.Minute, TunnelDrainTimeout: time.Minute}
+	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareTeamName: "test-team", CloudflareAPIToken: "backend-provisioning-only", CloudflareKeyring: `{"current":"one","keys":{"one":"` + key + `"}}`, CloudflareAccessLifetime: 24 * time.Hour, CloudflareRotateBefore: 6 * time.Hour, TunnelStatusTTL: 5 * time.Minute, TunnelDrainTimeout: time.Minute}
 	s.params.TunnelNodeAddresses = []string{"198.51.100.10/32"}
 	s.params.RuntimeImage = "registry.example.invalid/runtime@sha256:" + strings.Repeat("d", 64)
+	s.params.RuntimeConnectorImage = "registry.example.invalid/connector@sha256:" + strings.Repeat("c", 64)
 	if e := s.ConfigureTunnels(); e != nil {
 		t.Fatal(e)
 	}
@@ -232,8 +232,25 @@ func reportRuntime(t *testing.T, s *Server, c map[string]string, component strin
 	if e == nil {
 		gen = state.Generation
 	}
-	r := tunnel.MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
-	r.Drained = component == "runner" && ready
+	r := tunnel.MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, K3sVersion: m.K3sVersion, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
+	if component == "connector" {
+		r.ConnectorObservedAt = time.Now().UTC()
+		r.ConnectorExpiresAt = r.ConnectorObservedAt.Add(time.Minute)
+	}
+	if component == "runner" {
+		r.BundleFormat = contract.BundleFormat
+		r.Apps = &contract.AppStatus{Instances: []contract.InstanceStatus{}}
+		rollout, err := (machineconfig.Store{DB: s.db}).Load(t.Context(), m.NodeID, m.Epoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready && rollout.DrainRequested {
+			now := time.Now().UTC()
+			r.Drained = true
+			r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, m.Epoch, rollout.State), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}
+		}
+	}
+	r = currentReport(t, s, m.NodeID, r)
 	if w := request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], r); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -249,7 +266,9 @@ func readyTunnel(t *testing.T, s *Server, c map[string]string) tunnel.Snapshot {
 	driveTunnels(t, s)
 	state, _, e := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
 	if e != nil || !state.Ready {
-		t.Fatalf("not ready: %+v %v", state, e)
+		m, _ := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
+		report, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(m), "runtime")
+		t.Fatalf("not ready: reason=%s generation=%d runtime=%+v observed=%v err=%v desired=%s", state.Reason, state.Generation, report, at, err, machineconfig.Digest(desiredConfiguration(s, m, &state)))
 	}
 	return state
 }
@@ -311,10 +330,10 @@ func TestTunnelDurabilityPartialFailureAndIsolation(t *testing.T) {
 			t.Fatal("secret in bundle")
 		}
 	}
-	if !strings.Contains(files["orchestrator.yaml"], stateA.ServiceURL) || !strings.Contains(files["orchestrator.yaml"], "RunnerServiceURL = \""+tunnel.PrivateOrchestrator+"\"") {
+	if !strings.Contains(files["system/node/orchestrator.yaml"], stateA.ServiceURL) || !strings.Contains(files["system/node/orchestrator.yaml"], "RunnerServiceURL = \""+tunnel.PrivateOrchestrator+"\"") {
 		t.Fatal("incorrect Node routing")
 	}
-	if strings.Count(files["tunnel.yaml"], "mountPath: /credentials") != 1 || !strings.Contains(files["tunnel.yaml"], "medium: Memory") {
+	if strings.Contains(files["system/connector/tunnel.yaml"], "mountPath: /credentials") || !strings.Contains(files["system/connector/tunnel.yaml"], "medium: Memory") {
 		t.Fatal("connector credential isolation")
 	}
 }
@@ -372,8 +391,8 @@ func TestEpochRetirementAndRefresh(t *testing.T) {
 		t.Fatal(terminal.Code, terminal.Body.String())
 	}
 	terminalFiles := archiveFiles(t, terminal.Body.Bytes())
-	if strings.Contains(terminalFiles["orchestrator.yaml"], "kind: Deployment") || !strings.Contains(terminalFiles["orchestrator.yaml"], "kind: PersistentVolumeClaim") || !strings.Contains(terminalFiles["upgrade-plan/kustomization.yaml"], "resources: []") {
-		t.Fatal("terminal storage/upgrade inventory")
+	if strings.Contains(terminalFiles["terminal-cleanup/system/node/orchestrator.yaml"], "kind: Deployment") || !strings.Contains(terminalFiles["terminal-cleanup/system/node/orchestrator.yaml"], "kind: PersistentVolumeClaim") || !strings.Contains(terminalFiles["terminal-cleanup/upgrade-plan/kustomization.yaml"], "resources: []") {
+		t.Fatal("terminal cleanup storage/upgrade inventory")
 	}
 	newer := enroll(t, s, ownerA, strings.Repeat("d", 64))
 	if newer["epoch"] == fresh["epoch"] || newer["token"] == fresh["token"] {
@@ -450,7 +469,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
 	path := "/v1/nodes/" + c["node_id"] + "/config"
-	old := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["orchestrator.yaml"]
+	old := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["system/node/orchestrator.yaml"]
 	m, e := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
 	if e != nil {
 		t.Fatal(e)
@@ -463,7 +482,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if e = s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	if current := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["orchestrator.yaml"]; current != old {
+	if current := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["system/node/orchestrator.yaml"]; current != old {
 		t.Fatal("publisher replaced workload ahead of drain worker")
 	}
 	reportRuntime(t, s, c, "runtime", false)
@@ -473,12 +492,12 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 		t.Fatal("Node replacement not drain gated")
 	}
 	held := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())
-	if held["orchestrator.yaml"] != old {
+	if held["system/node/orchestrator.yaml"] != old {
 		t.Fatal("workload changed before drain")
 	}
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
-	updated := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["orchestrator.yaml"]
+	updated := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["system/node/orchestrator.yaml"]
 	if updated == old || !strings.Contains(updated, state.ServiceURL) {
 		t.Fatal("drained configuration not released")
 	}
@@ -579,59 +598,6 @@ func TestEndpointReplacementRequiresCurrentSourceAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestLegacyEnrollmentMigrationRequiresHTTPSRefresh(t *testing.T) {
-	s := newTestServer(t)
-	files, e := fs.Sub(MigrationFiles, "migrations")
-	if e != nil {
-		t.Fatal(e)
-	}
-	for {
-		var version int
-		if e = s.db.QueryRow(`SELECT max(version) FROM lpcc.migrations`).Scan(&version); e != nil {
-			t.Fatal(e)
-		}
-		if version < 4 {
-			break
-		}
-		if e = migrations.Down(t.Context(), s.db, files); e != nil {
-			t.Fatal(e)
-		}
-	}
-	node := "lp-" + strings.Repeat("6", 16)
-	execSQL(t, s.db, `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version) VALUES($1,$2,$3,'legacy','/opt/livepeer','v1.37.10+k3s1')`, node, strings.Repeat("6", 64), ownerA)
-	if e = Migrate(t.Context(), s.db); e != nil {
-		t.Fatal(e)
-	}
-	if e = s.reconcile(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	oldToken := machineToken(s.params.MachineTokenSecret, ownerA, node)
-	legacy, e := s.authenticateMachine(t.Context(), node, oldToken, false)
-	if e != nil || legacy.CredentialVersion != 0 {
-		t.Fatal("legacy verifier lost", legacy, e)
-	}
-	requireStatus(t, request(t, s, "GET", "/v1/nodes/"+node+"/config", oldToken, nil), 200)
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", oldToken, tunnel.MachineReport{}), 403)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
-	in := map[string]any{"fingerprint": strings.Repeat("6", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 0}
-	s.params.PublicAPIURL = "http://legacy.example.invalid"
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/credentials/refresh", jwt, in), 409)
-	s.params.PublicAPIURL = "https://api.example.invalid"
-	w := request(t, s, "POST", "/v1/nodes/"+node+"/credentials/refresh", jwt, in)
-	requireStatus(t, w, 200)
-	var fresh map[string]string
-	if e = json.Unmarshal(w.Body.Bytes(), &fresh); e != nil {
-		t.Fatal(e)
-	}
-	m, e := s.authenticateMachine(t.Context(), node, fresh["token"], false)
-	if e != nil || m.Epoch != legacy.Epoch || m.CredentialVersion != 1 || m.K3sVersion != "v1.37.10+k3s1" {
-		t.Fatal("legacy refresh changed enrollment", m, e)
-	}
-	requireStatus(t, request(t, s, "GET", "/v1/nodes/"+node+"/config", oldToken, nil), 401)
-	in["operation_id"] = uuid.New().String()
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/credentials/refresh", jwt, in), 409)
-}
-
 func TestPrivateWorkloadUpdatePolicy(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprint("managed-enable-", enabled), func(t *testing.T) {
@@ -648,7 +614,7 @@ func TestPrivateWorkloadUpdatePolicy(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			previous := strings.Replace(archiveFiles(t, data)["orchestrator.yaml"], "RunnerServiceURL = \""+tunnel.PrivateOrchestrator+"\"", "# previous Node release used its ServiceURL fallback", 1)
+			previous := strings.Replace(archiveFiles(t, data)["system/node/orchestrator.yaml"], `Network = "offchain"`, `Network = "previous"`, 1)
 			desired.State.HeldOrchestrator = previous
 			data, digest, e := machineconfig.Build(desired)
 			if e != nil {
@@ -660,9 +626,9 @@ func TestPrivateWorkloadUpdatePolicy(t *testing.T) {
 			}
 			w := request(t, s, "GET", "/v1/nodes/"+m.NodeID+"/config", c["token"], nil)
 			requireStatus(t, w, 200)
-			same := archiveFiles(t, w.Body.Bytes())["orchestrator.yaml"] == previous
-			if same != enabled {
-				t.Fatal("private updates frozen outside managed activation, or managed hold bypassed")
+			same := archiveFiles(t, w.Body.Bytes())["system/node/orchestrator.yaml"] == previous
+			if !same {
+				t.Fatal("workload replacement bypassed the drain")
 			}
 		})
 	}

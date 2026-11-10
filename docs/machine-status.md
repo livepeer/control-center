@@ -51,14 +51,15 @@ observation time:
   prerequisite. Another assignment can still be healthy.
 - **Image, startup, isolation or probe failure:** inspect the failure, Pod UID,
   configured check and startup deadline in the instance details.
-- **`dependency_pending`:** install a compatible Node with the required
-  registration capabilities; see the [Runtime guide](../runtime/README.md).
-- **Node work is unknown:** missing or expired observations do not mean zero
-  sessions. Registration loss or recreation does not prove earlier work survived;
-  a Reconciler restart against a surviving Node is a separate case.
-- **Cleanup is pending:** check withdrawal and deadline, cancellation attempt,
-  removal publication, actual termination and registration cleanup separately.
-  A cancellation attempt or published removal does not prove termination.
+- **Node registration or protocol failure:** inspect the request failure and
+  verify the deployed Node and SDK revisions meet the
+  [Runtime protocol](../runtime/README.md#system-workload-delivery).
+- **Node work is unknown:** check Node connectivity and status. Missing or expired
+  observations do not establish whether sessions are still running.
+- **Cleanup is pending:** check the drain deadline, published workload configuration,
+  Pod and Service deletion, and registration cleanup. A maintenance deadline can
+  initiate workload removal when Node is unavailable; Flux or Kubernetes outages
+  can delay deletion.
 - **Access or collection failed:** check connector status, tunnel verification and
   the source transport outcome separately. See [machine tunnels](machine-tunnels.md)
   and [fleet discovery](fleet-discovery.md).
@@ -79,10 +80,6 @@ values or sensitive app output into issue evidence.
 
 ## Recovery and rollout
 
-Deploy backend contract support before updated Runtime producers, then the UI.
-Legacy reports provide limited evidence until upgraded. Preserve contract
-support during rollback.
-
 A status report HTTP 412 indicates lost or regressed ordering state. Restore
 trustworthy state; do not delete counters or repeatedly increment them until the
 server accepts a report. For active enrollments, the existing authorized
@@ -95,7 +92,5 @@ lost. A process restart alone does not reset report ordering.
 Run the Go race suite with `TEST_DATABASE_URL` pointing to disposable PostgreSQL,
 the UI build and Playwright; skipped database tests do not establish acceptance.
 For Runtime checks, follow [Runtime verification](../runtime/README.md#verification).
-Record exact revisions and redacted evidence. Real Node/SDK/Flux/gVisor integration,
-two-machine acceptance and production activation remain gated by
-[#118](https://github.com/livepeer/naap-ops/issues/118); local tests do not establish
-that acceptance or external reachability.
+Record exact revisions and redacted evidence. Verify real Node/SDK/Flux/gVisor
+integration and external reachability on two machines before production activation.

@@ -78,34 +78,6 @@ func TestReenrollmentReplacesSuffixWithoutCrossEnrollmentCertificateDeletion(t *
 	}
 }
 
-func TestLegacyEndpointsDoNotBlockFreshEnrollmentOrCertificateCleanup(t *testing.T) {
-	s, f := tunnelTestServer(t)
-	legacy := enroll(t, s, ownerA, strings.Repeat("c", 64))
-	readyTunnel(t, s, legacy)
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=state-'endpoint_suffix' WHERE node_id=$1`, legacy["node_id"])
-	wildcard := "*.orphan.fleet.example.invalid"
-	pack, err := f.OrderCertificate(t.Context(), []string{"example.invalid", wildcard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	execSQL(t, s.db, `INSERT INTO lpcc.machine_certificates(zone_id,wildcard_host,account_id) VALUES($1,$2,$3)`, s.params.CloudflareZoneID, wildcard, s.params.CloudflareAccountID)
-	fresh := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	readyTunnel(t, s, fresh)
-	state, _, err := s.loadTunnel(t.Context(), legacy["node_id"], legacy["epoch"])
-	if err != nil || state.Ready || state.Reason != "legacy_endpoints_require_retirement" || state.EndpointSuffix != "" {
-		t.Fatal("legacy enrollment was not excluded with a durable reason", state, err)
-	}
-	if _, exists := f.certificatePacks[pack.ID]; exists {
-		t.Fatal("legacy enrollment blocked unused certificate cleanup")
-	}
-	adminA(t, s)
-	for _, kind := range []string{"access", "connector"} {
-		for _, compromised := range []bool{false, true} {
-			requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+legacy["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": legacy["epoch"], "kind": kind, "compromised": compromised}), 409)
-		}
-	}
-}
-
 func TestDomainCertificatePrecedesDrainAndReleasesAbandonedCandidates(t *testing.T) {
 	s, f := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("e", 64))
@@ -119,7 +91,7 @@ func TestDomainCertificatePrecedesDrainAndReleasesAbandonedCandidates(t *testing
 		t.Fatal("certificate issuance changed endpoints or started a drain", pending, err)
 	}
 	files := archiveFiles(t, request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil).Body.Bytes())
-	if !strings.Contains(files["tunnel.yaml"], initial.ProxyURLTemplate) {
+	if !strings.Contains(files["system/connector/tunnel.yaml"], initial.ProxyURLTemplate) {
 		t.Fatal("pending certificate changed the proxy template")
 	}
 	pack := f.certificatePacks[pending.CertificatePackID]

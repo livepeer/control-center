@@ -2,9 +2,6 @@ package controlplane
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -48,12 +45,6 @@ func verifyEnrollment(secret, raw string) (string, error) {
 		return "", errors.New("invalid enrollment subject")
 	}
 	return id.String(), nil
-}
-
-func machineToken(secret, owner, nodeID string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte("config:v1:" + owner + ":" + nodeID))
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func bearer(r *http.Request) string {

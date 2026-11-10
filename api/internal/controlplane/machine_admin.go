@@ -63,10 +63,6 @@ func configurationProblem(err error) error {
 		return problem(404, "machine_not_found", "Machine not found.")
 	case errors.Is(err, machineconfig.ErrEnrollmentChanged):
 		return problem(409, "epoch_changed", "Machine enrollment changed.")
-	case errors.Is(err, machineconfig.ErrLegacyDrain):
-		return problem(409, "legacy_drain_unsupported", "Refresh credentials before ordinary removal, or explicitly force removal.")
-	case errors.Is(err, machineconfig.ErrDeadlineRequired):
-		return problem(409, "drain_deadline_required", "Configure a drain deadline before removal or retrying.")
 	case errors.Is(err, machineconfig.ErrDrainChanged):
 		return problem(409, "drain_changed", "Drain intent changed.")
 	case errors.Is(err, machineconfig.ErrDrainNotExpired):
@@ -111,7 +107,7 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 			return AdminChange{}, problem(409, "tunnel_inactive", "Tunnel is not active.")
 		}
 		if state.EndpointSuffix == "" {
-			return AdminChange{}, problem(409, "legacy_endpoints_require_retirement", "Retire this legacy enrollment before rotating its tunnel credentials.")
+			return AdminChange{}, problem(409, "invalid_tunnel_state", "Tunnel routing state is incomplete.")
 		}
 		previous := string(b)
 		if in.Kind == "connector" {

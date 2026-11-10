@@ -4,17 +4,17 @@
 Debian/Ubuntu amd64, systemd** host. It installs K3s, gVisor, Flux, an API-backed
 HTTP configuration adapter, system-upgrade-controller, and the standalone
 [`livepeer/node`](https://github.com/livepeer/node) orchestrator in offchain mode.
-Control Center assigns CPU reusable apps to isolated Pods; Node owns admission,
-sessions, capacity and private proxying. GPU setup and single-session lifetimes
+Control Center assigns CPU reusable apps to isolated Pods; Node handles new
+requests, sessions, capacity and private proxying. GPU setup and single-session lifetimes
 remain separate work. Managed Cloudflare ingress is optional.
 
 Runtime lives under `runtime/` in the Control Center repository. Run the
 commands below from that directory.
 
 Copy or clone the whole project onto the target machine. Host installation uses
-Bash and standard Linux utilities. Runtime management, App Reconciler, connector
-startup and probes use one Go distribution. Kubernetes supervises cloudflared. See
-[storage and host integration](#storage-and-host-integration) for installed paths.
+Bash and standard Linux utilities. Runtime management, app reconciliation and
+probes use one Go distribution. See [storage and host integration](#storage-and-host-integration)
+for installed paths.
 
 ```bash
 # On the machine that will receive the cluster:
@@ -28,11 +28,17 @@ sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE bash bootstrap-livep
 sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE bash bootstrap-livepeer.sh --token <TOKEN> --install-dir /srv/livepeer
 ```
 
-The default root is `/opt/livepeer`. Use the same `--install-dir` for subsequent
-runs. Paths must be canonical, contain no symlinks or spaces, and use only the
-characters described by `--help`. The installer refuses existing Kubernetes
-installations and unmarked directories containing data. An interrupted older
-installer's known empty directory layout can be claimed safely on a rerun.
+The default installation directory is `/opt/livepeer`. On a first run, choose a
+new or empty directory. To rerun an existing Livepeer installation, use the same
+`--install-dir`.
+
+For directory names, use an absolute path such as `/srv/livepeer`, without
+symlinks, spaces, repeated or trailing slashes, or `.` and `..` as directory
+names. Allowed characters are letters, digits, `_`, `.`, `-` and `/`; `/` itself
+is not allowed.
+
+The installer stops if it detects a conflicting Kubernetes installation anywhere
+on the host, including outside `--install-dir`.
 
 ## Prerequisites
 
@@ -77,55 +83,25 @@ the installer trusts the upstream HTTPS release endpoints.
 Build the Go Runtime image from the repository root with
 `docker build -f runtime/Dockerfile -t <registry>/livepeer-runtime:<tag> .`, push
 it, and use its published digest for `LIVEPEER_RUNTIME_IMAGE` and backend
-`RUNTIME_IMAGE`. The backend image used by App Reconciler must support scoped
-sockets before the management agent is upgraded. The installer saves its selected
-image for reruns.
+`RUNTIME_IMAGE`. The installer saves its selected image for reruns.
 
-For managed ingress, build the Go connector image using that Runtime digest as
-shown in the [tunnel runbook](../docs/machine-tunnels.md#infrastructure-and-enablement). Set
-backend `RUNTIME_CONNECTOR_IMAGE` to its published digest. Keep the separate
-legacy `CloudflareConnectorImage` pin while format 1/2 machines remain. Format 3
-promotion waits for the new connector pin when managed ingress is enabled or
-retained routing needs a connector. An unrouted machine can use format 3 without
-it; configure the pin before enabling routing. Selected pins survive backend
-configuration loss and terminal delivery within an enrollment; a new enrollment
-does not necessarily inherit them.
-
-Before starting the new management agent, prepare a rollback image that supports
-format 3 and sockets. Backend selection of format 3 is the rollback boundary and
-can happen before any local migration marker exists. There is no automatic
-format downgrade; a format 2 publisher alone is not a safe rollback. Restore a
-compatible release through bootstrap and keep the installation root, migration
-markers, caches and watermarks.
+For managed external access, Runtime's connector obtains a Cloudflare Tunnel
+token and starts cloudflared; Kubernetes restarts it when needed. Build and publish
+the separate connector image, which combines cloudflared with the Runtime helper,
+using the [tunnel build command](../docs/machine-tunnels.md#infrastructure-and-enablement).
+Set backend `RUNTIME_CONNECTOR_IMAGE` to the published connector image digest
+before enabling managed ingress.
 
 ## System workload delivery
 
-Node, connector, App Reconciler and upgrade controller have separate inventories;
-their parent does not wait for health. Node reports its own applied revision and
-workload evidence. App Reconciler reads `app-desired/` from the management bundle
-and publishes app workloads through a separate source and restricted identity.
+Runtime delivers management and app workloads separately, so management can
+continue to update when app reconciliation fails. Node reports its applied
+revision and workload status. See the [tunnel runbook](../docs/machine-tunnels.md#credential-boundaries)
+for connector credentials, startup and recovery.
 
-Only the agent mounts the enrollment token; consumers mount scoped sockets.
-See the [tunnel runbook](../docs/machine-tunnels.md#credential-boundaries) for connector
-startup, readiness and restart behavior.
-
-First format-3 advertisement waits for a verified root inventory from the same
-Node and epoch, with format-2 repair reporting available meanwhile. Migration
-does not wait for workload health. Its durable `volumes/http-source/system-layout.json`
-records adoption before pruning; app intent and upgrade plans keep updating.
-Keep one publisher and preserve the installation root, caches and migration state.
-Resolve unknown legacy resources before retrying a stopped transfer. A completed
-layout keeps the format-3 floor across re-enrollment; use bootstrap for agent repair.
-Remove old code ConfigMaps only after no Pod references them.
-
-The bundled Node image is not sufficient for production app admission. Set
-backend `RUNTIME_NODE_IMAGE` to a compatible digest-pinned image once available.
-Until required Node capabilities are advertised, affected apps remain
-`dependency_pending`. Production activation requires the capabilities tracked in
-[Node #61](https://github.com/livepeer/node/issues/61),
-[#62](https://github.com/livepeer/node/issues/62),
-[#63](https://github.com/livepeer/node/issues/63), and
-[golang-runner #7](https://github.com/livepeer/golang-runner/issues/7).
+Running production apps requires compatible Node and SDK releases. Set backend
+`RUNTIME_NODE_IMAGE` to a compatible digest-pinned image and verify it with the
+[Runtime release checks](#verification).
 
 Explicit container stop signals require Kubernetes `ContainerStopSignals` on
 both the API server and kubelet, plus backend `APP_STOP_SIGNALS=true`. Keep that
@@ -141,32 +117,19 @@ environment variable as shown in Quick start. Backend `PUBLIC_API_URL` must use
 the same reachable base URL. The installer rejects literal loopback configuration
 URLs because pods cannot use host loopback.
 
-The one-hour bootstrap JWT can enroll multiple machines. The installer sends a
-hash of `/etc/machine-id`, hostname, installation directory, and K3s version to
-`POST /v1/nodes/register`. The API returns HTTP 200 with `node_id`, a 64-hex
-long-lived service `token`, and `config_url` only after registration and initial
-configuration are stored; modern responses also carry enrollment `epoch` and
-`credential_version`. The installer rejects redirects and invalid responses.
-It saves credentials in owner-only files and reuses them on reruns; the service
-credential remains valid after the bootstrap JWT expires. Fresh registration
-retries require the original owner, install path, and initial K3s version; a
-conflict returns HTTP 409 even with a new JWT. Normal recovery keeps the install
-root and preserves an already upgraded K3s version. The separately generated
-runner-bootstrap credential stays local.
+The one-hour bootstrap JWT can enroll multiple machines. The installer saves
+long-lived service credentials in owner-only files and reuses them on reruns,
+even after the JWT expires. A fresh registration retry requires the original
+owner, installation path and initial K3s version; otherwise it returns HTTP 409,
+even with a new JWT. Normal recovery keeps the installation root and an already
+upgraded K3s version. The runner-bootstrap credential stays local.
 
-Livepeer Control Center stores a bundle per machine and reconciles it every
-minute by default. It updates changed digests only and retains the last valid
-bundle if generation fails. Machine owners do not upload or edit configuration.
-The service credential authorizes the existing HTTP adapter to fetch the bundle,
-validate and cache artifacts, and publish them to Flux. There is no in-cluster
-mock API or local editable desired directory.
-
-The adapter polls every minute and preserves the last artifact on fetch failure.
-It accepts relative, unique regular files with a root Kustomize configuration;
-it rejects links, traversal, oversized archives, and redirects. Limits are
-16 MiB compressed, 64 MiB expanded, and 2,048 files. Bootstrap resources and
-runner credentials remain installer-managed. K3s upgrades require explicit
-opt-in using the node label, and persistent volumes retain their data.
+Control Center generates a configuration bundle for each machine. Runtime
+polls for updates every minute and delivers valid configuration to Flux. If
+generation or download fails, it retains the last valid configuration. Machine
+owners do not upload or edit the bundle. Bootstrap resources and runner
+credentials remain installer-managed. K3s upgrades require explicit opt-in using
+the node label, and persistent volumes retain their data.
 
 ## Protected machine ingress
 
@@ -175,8 +138,8 @@ operator decisions and release gates. Live provisioning requires verified HTTPS
 for enrollment, configuration, status and token delivery. Development HTTP is
 available only with `LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1` and cannot enable tunnels.
 
-Upgrade an existing HTTP/legacy installation using the complete new Runtime
-source and a fresh owner enrollment JWT:
+To refresh credentials, run the installer with a fresh owner enrollment JWT and
+the same HTTPS origin and installation directory:
 
 ```bash
 export LIVEPEER_API_URL=https://<CONTROL_CENTER_ORIGIN>
@@ -184,36 +147,22 @@ sudo --preserve-env=LIVEPEER_API_URL bash bootstrap-livepeer.sh \
   --refresh-credentials --token <FRESH_OWNER_JWT> --install-dir /opt/livepeer
 ```
 
-This stops the Flux apply controller before terminating the old management, App
-Reconciler and connector Pods and releasing refreshed credentials. It stages HTTPS-enforcing source and URL
-settings, replaces owner-only credential files and the bootstrap-owned Secret,
-then starts and verifies the trusted adapter. The transition's UUID and expected
-version and original controller replica count persist under
-`state/credential-transition.json`; after interruption,
-rerun the same command with a fresh JWT and the same HTTPS origin. Never delete
-that marker to return to ordinary bootstrap. Refresh retains the enrollment,
-tunnel UUID, local runner credential and installed K3s version.
+If refresh is interrupted, rerun the command with a fresh JWT and the same HTTPS
+origin. Refresh retains the enrollment, tunnel UUID, local runner credential and
+installed K3s version.
 
-After the backend has removed an enrollment, use `--reenroll` with a fresh owner
-JWT to create a new epoch while retaining local data. The old adapter is stopped
-and cached epoch metadata/artifact status is fenced before the new one starts.
-The installer requires confirmed app cleanup for the retired epoch and archives
-its owner journal before starting a new lifetime. It rechecks migration after
-stopping the publisher: finish an old enrollment’s incomplete transfer before
-retrying. A new enrollment’s interrupted transfer resumes only when its issued
-epoch matches the installed identity. Use the same installation root. Re-enrollment does not accelerate the backend's
-external cleanup of the old epoch.
+After the backend removes an enrollment, use `--reenroll` with a fresh owner JWT
+and the same installation root to create a new enrollment while retaining local
+data. The installer requires confirmed app cleanup for the old enrollment.
+Re-enrollment does not accelerate its external cleanup.
 
 The connector fetches a fresh token before every start; running connectors can
 reconnect during a Control Center outage. Runtime reports applied state, while
 Control Center verifies external readiness. See the [tunnel runbook](../docs/machine-tunnels.md).
 
-Terminal configuration retains Node, routes, the App Reconciler and connector
-token access while app cleanup receipts are pending. Accepted receipts select
-final cleanup; credential compromise overrides the hold. Token access ends when
-the backend no longer authorizes cleanup. The terminal upgrade plan can be
-removed even if the upgrade controller is unhealthy. Fetch or authentication
-failures preserve the last valid artifact. Public Trickle is unsupported.
+During enrollment removal, Node, routes and connector access remain available
+while app cleanup is pending, unless credentials are compromised. Public Trickle
+is unsupported.
 
 ## Storage and host integration
 
@@ -304,8 +253,7 @@ recorded release, and K3s/firewall service states without enrollment or writes.
   initialization marker; it can be inspected and removed. Existing operator
   files are never adopted as an installation.
 - Credentials are published atomically and valid committed files are not rewritten.
-  Empty or missing committed credentials require an operator backup. Legacy JSON
-  installation markers remain supported.
+  Empty or missing committed credentials require an operator backup.
 - Release checksum manifests are refreshed on each run. Payloads and installed
   binaries are verified and repaired atomically; invalid upstream metadata or a
   checksum mismatch stops installation before binary or version changes. Partial
@@ -313,9 +261,9 @@ recorded release, and K3s/firewall service states without enrollment or writes.
   old generations remain available to running processes.
 - K3s's selected release is recorded before binary replacement and before every
   service launch, including launches after upgrade-controller jobs. Repair uses
-  that release or a newer healthy installed release; older installations require
-  an explicit upgrade. A damaged legacy install with cluster data but no version
-  record needs a known `state/k3s-version` or full backup restored before repair.
+  that release or a newer healthy installed release. If cluster data exists but
+  the version record is missing, restore a known `state/k3s-version` or full
+  backup before repair.
   K3s restarts when generated host configuration changes or a binary repair needs activation.
 
 These mechanisms handle interrupted installation steps. They do not reconstruct
@@ -368,15 +316,14 @@ curl -fsS http://127.0.0.1:8935/discovery
 See the [app delivery and lifecycle contract](../docs/app-registry.md#runtime-delivery-and-completion-contract)
 for readiness and drain behavior. Public session URLs remain Node URLs.
 
-Back up `volumes/app-reconciler/` with cluster state and credentials. It contains
-the owner journal, including credentials, deadlines and cleanup decisions.
-Recovery needs the latest committed history; restoring an older checkpoint alone
-is unsafe. Missing or corrupt committed history reports `state_recovery_failed`
-and freezes app actions. Restore a consistent backup; management can still
-repair the Runtime image independently.
+Back up `volumes/app-reconciler/` together with cluster state and credentials.
+Recovery requires the latest committed state; an older checkpoint alone is unsafe.
+If state is missing or corrupt, `state_recovery_failed` stops app actions. Restore
+a consistent backup; management can still repair the Runtime image.
 
 Node restart or heartbeat expiry can lose sessions.
-Maintenance keeps admission frozen until the Node or K3s operation completes.
+During maintenance, Node stops accepting new work until the Node or K3s operation
+completes.
 
 No node has `livepeer.io/allow-upgrade=true` initially. To enable a planned
 upgrade, set `spec.version` to the target K3s version in the backend-owned
@@ -426,6 +373,6 @@ installation, rerun, reboot, persistent data and an alternate install directory.
 Test management repair while app reconciliation is broken, including recovery
 from missing committed state. With compatible Node and SDK revisions, run a
 two-machine, two-capability fixture covering both protocol modes, multiple
-replicas, routing, readiness loss, updates, removal, cancellation failure and
-recovery. Confirm that deadlines and pending physical cleanup are reported
+replicas, routing, readiness loss, updates, removal, drain expiry and Node
+unavailability. Confirm that deadlines and pending physical cleanup are reported
 accurately. Unit tests and a mock Node do not replace this acceptance test.

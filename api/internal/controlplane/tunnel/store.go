@@ -13,7 +13,6 @@ import (
 )
 
 var errTunnelFenced = machineconfig.ErrFenced
-var errLegacyEndpoints = errors.New("legacy tunnel hostnames require retirement")
 
 func (s *Manager) Load(ctx context.Context, node, epoch string) (Snapshot, int64, error) {
 	r, err := (machineconfig.Store{DB: s.db}).Load(ctx, node, epoch)
@@ -64,17 +63,9 @@ func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, err
 		return nil, err
 	}
 	if !l.Machine.Terminal && l.state.EndpointSuffix == "" {
-		if l.state.ServiceURL != "" {
-			if l.state.Ready || l.state.Reason != "legacy_endpoints_require_retirement" {
-				l.state.Ready = false
-				l.state.Reason = "legacy_endpoints_require_retirement"
-				if err := l.save(ctx); err != nil {
-					lease.Release(ctx)
-					return nil, err
-				}
-			}
+		if l.state.ServiceURL != "" || l.state.TunnelID != "" || len(l.state.Resources) != 0 {
 			lease.Release(ctx)
-			return nil, errLegacyEndpoints
+			return nil, errors.New("incomplete tunnel routing state")
 		}
 		suffix, err := s.newEndpointSuffix(ctx, m)
 		if err != nil {
@@ -183,9 +174,6 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	}
 	if e := l.sweepAbsentResources(ctx, false); e != nil {
 		return r, e
-	}
-	if kind == "token" && r.CredentialVersion == 0 {
-		r.CredentialVersion = l.state.AccessVersion
 	}
 	if r.Attempts == 0 {
 		r.CreationTarget = target
@@ -416,7 +404,7 @@ func (s *Manager) ReencryptAccessCredentials(ctx context.Context) error {
 
 func (s *Manager) SecureRuntime(ctx context.Context, m Machine) (bool, error) {
 	var yes bool
-	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id AND m.enrollment_epoch=r.epoch WHERE r.node_id=$1 AND r.epoch=$2 AND component='runtime' AND r.credential_version=$3 AND m.credential_version=$3 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$4) AND (COALESCE((report->>'report_version')::int,0)=0 OR (COALESCE((report->>'clock_uncertain')::boolean,false)=false AND (report->>'observed_at')::timestamptz>now()-make_interval(secs=>$4) AND (report->>'observed_at')::timestamptz<=now()+interval '5 seconds')))`, m.NodeID, m.Epoch, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
+	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id AND m.enrollment_epoch=r.epoch WHERE r.node_id=$1 AND r.epoch=$2 AND component='runtime' AND r.credential_version=$3 AND m.credential_version=$3 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$4) AND (report->>'report_version')::int=1 AND COALESCE((report->>'clock_uncertain')::boolean,false)=false AND (report->>'observed_at')::timestamptz>now()-make_interval(secs=>$4) AND (report->>'observed_at')::timestamptz<=now()+interval '5 seconds')`, m.NodeID, m.Epoch, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
 	return yes, e
 }
 func (s *Manager) report(ctx context.Context, m Machine, component string) (MachineReport, time.Time, error) {

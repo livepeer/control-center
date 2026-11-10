@@ -86,7 +86,6 @@ func appReconciler(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("app-reconciler", flag.ContinueOnError)
 	configURL := flags.String("url", "", "Machine configuration URL")
 	configURLFile := flags.String("config-url-file", "", "Installed machine configuration URL file")
-	token := flags.String("token-file", "", "Machine credential file")
 	managementSocket := flags.String("management-socket", "", "Scoped management reporting socket")
 	identity := flags.String("identity-file", "", "Installed enrollment identity")
 	directory := flags.String("directory", "", "Durable owner-only state directory")
@@ -96,7 +95,7 @@ func appReconciler(ctx context.Context, args []string) error {
 	bootstrapFile := flags.String("bootstrap-secret-file", "", "Runner bootstrap credential")
 	listen := flags.String("listen", ":8080", "Private artifact listener")
 	mode := flags.String("transport", "https", "https or development-http")
-	if flags.Parse(args) != nil || *directory == "" || *identity == "" || *bootstrapFile == "" || ((*token == "") == (*managementSocket == "")) || (*mode != "https" && *mode != "development-http") {
+	if flags.Parse(args) != nil || *directory == "" || *identity == "" || *bootstrapFile == "" || *managementSocket == "" || (*mode != "https" && *mode != "development-http") {
 		return errors.New("invalid app-reconciler configuration")
 	}
 	for _, value := range []string{*sourceURL, *artifactURL, *nodeURL} {
@@ -112,14 +111,11 @@ func appReconciler(ctx context.Context, args []string) error {
 		}
 		*configURL = strings.TrimSpace(string(b))
 	}
-	control, err := transport.NewControl(*configURL, *token, *mode == "development-http")
+	control, err := transport.NewControl(*configURL, "", *mode == "development-http")
 	if err != nil {
 		return err
 	}
-	var reports transport.Requester = control
-	if *managementSocket != "" {
-		reports = transport.NewLocal(*managementSocket)
-	}
+	var reports transport.Requester = transport.NewLocal(*managementSocket)
 	reports = &transport.Reports{Client: reports, Directory: filepath.Join(*directory, "reports")}
 	kube, err := transport.InCluster()
 	if err != nil {
@@ -232,7 +228,7 @@ func httpSource(ctx context.Context, args []string) error {
 		return errors.New("invalid http-source flags")
 	}
 	u, err := url.Parse(*artifactURL)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || (u.Scheme != "http" && u.Scheme != "https") || *directory == "" || *token == "" || *interval < time.Second || (*mode != "https" && *mode != "development-http") {
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || (u.Scheme != "http" && u.Scheme != "https") || *directory == "" || *token == "" || *identity == "" || *socketRoot == "" || *interval < time.Second || (*mode != "https" && *mode != "development-http") {
 		return errors.New("invalid http-source configuration")
 	}
 	control, err := transport.NewControl(*configURL, *token, *mode == "development-http")
@@ -245,26 +241,24 @@ func httpSource(ctx context.Context, args []string) error {
 	}
 	store := artifact.Store{Directory: *directory}
 	ordered := &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}
-	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, SystemWorkloads: *socketRoot != ""}
+	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	socketErrors := make(chan error, 1)
-	if *socketRoot != "" {
-		integration := &connector.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
-		integration.Restore()
-		sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired})
-		if err != nil {
-			return err
-		}
-		defer sockets.Close()
-		go func() {
-			if err := sockets.Run(ctx); err != nil {
-				socketErrors <- err
-				cancel()
-			}
-		}()
-		go reportsLoop(ctx, "connector", 5*time.Second, integration.Report)
+	integration := &connector.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
+	integration.Restore()
+	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired})
+	if err != nil {
+		return err
 	}
+	defer sockets.Close()
+	go func() {
+		if err := sockets.Run(ctx); err != nil {
+			socketErrors <- err
+			cancel()
+		}
+	}()
+	go reportsLoop(ctx, "connector", 5*time.Second, integration.Report)
 	go reportsLoop(ctx, "runtime", 20*time.Second, source.Report)
 	err = serve(ctx, *listen, store, func(ctx context.Context) {
 		ticker := time.NewTicker(*interval)

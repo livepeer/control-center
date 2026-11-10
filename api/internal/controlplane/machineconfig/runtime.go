@@ -21,13 +21,17 @@ func templateValues(m Desired) *strings.Replacer {
 		service = m.Exposure.ServiceURL
 		proxy = m.Exposure.ProxyURLTemplate
 	}
-	return strings.NewReplacer("@NODE_ID@", m.NodeID, "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
+	mode := "https"
+	if strings.HasPrefix(m.ControlAPIURL, "http://") {
+		mode = "development-http"
+	}
+	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
 }
 func orchestratorConfiguration(m Desired) string {
 	if m.State.HeldOrchestrator != "" {
 		return configurationFromManifest(m.State.HeldOrchestrator)
 	}
-	b, _ := templates.ReadFile("templates/orchestrator.yaml")
+	b, _ := templates.ReadFile("templates/system/node/orchestrator.yaml")
 	s := specializeNode(templateValues(m).Replace(string(b)), m)
 	return configurationFromManifest(s)
 }
@@ -41,22 +45,18 @@ func configurationFromManifest(s string) string {
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
 }
 func Digest(m Desired) string {
-	if m.BundleFormat >= 2 || m.NodeImage != "" {
-		b, _ := templates.ReadFile("templates/orchestrator.yaml")
-		manifest := specializeNode(templateValues(m).Replace(string(b)), m)
-		if m.State.HeldOrchestrator != "" {
-			manifest = m.State.HeldOrchestrator
-		}
-		manifest = regexp.MustCompile(`livepeer.io/config-sha256: '[^']*'`).ReplaceAllString(manifest, "livepeer.io/config-sha256: '@ORCHESTRATOR_DIGEST@'")
-		plan, _ := templates.ReadFile("templates/upgrade-plan/plan.yaml")
-		upgrade := renderMachineTemplateWithoutDigest(string(plan), m)
-		if m.State.HeldUpgradePlan != "" {
-			upgrade = m.State.HeldUpgradePlan
-		}
-		h := sha256.Sum256([]byte(manifest + "\n" + upgrade))
-		return hex.EncodeToString(h[:])
+	b, _ := templates.ReadFile("templates/system/node/orchestrator.yaml")
+	manifest := specializeNode(templateValues(m).Replace(string(b)), m)
+	if m.State.HeldOrchestrator != "" {
+		manifest = m.State.HeldOrchestrator
 	}
-	h := sha256.Sum256([]byte(orchestratorConfiguration(m)))
+	manifest = regexp.MustCompile(`livepeer.io/config-sha256: '[^']*'`).ReplaceAllString(manifest, "livepeer.io/config-sha256: '@ORCHESTRATOR_DIGEST@'")
+	plan, _ := templates.ReadFile("templates/upgrade-plan/plan.yaml")
+	upgrade := renderMachineTemplateWithoutDigest(string(plan), m)
+	if m.State.HeldUpgradePlan != "" {
+		upgrade = m.State.HeldUpgradePlan
+	}
+	h := sha256.Sum256([]byte(manifest + "\n" + upgrade))
 	return hex.EncodeToString(h[:])
 }
 func upgradeVersion(m Desired) string {
@@ -72,9 +72,6 @@ func upgradeVersion(m Desired) string {
 	return match[1]
 }
 func specializeNode(raw string, m Desired) string {
-	if m.BundleFormat >= 2 {
-		raw = strings.Replace(raw, "RunnerGrants = []", `RunnerGrants = ["10.43.0.0/16"]`, 1)
-	}
 	if m.NodeImage != "" {
 		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
 	}
@@ -94,10 +91,8 @@ func DesiredRuntime(m Desired) Runtime {
 	d.RunnerServiceURL = PrivateOrchestrator
 	d.Generation = max(m.State.Generation, 1)
 	d.DrainRequested = m.State.DrainRequested
-	d.BundleFormat = m.BundleFormat
-	if m.BundleFormat >= 2 {
-		d.UpgradeVersion = upgradeVersion(m)
-	}
+	d.BundleFormat = contract.BundleFormat
+	d.UpgradeVersion = upgradeVersion(m)
 	d.AppsError = m.AppsError
 	d.RequestedAppsGeneration = m.RequestedAppsGeneration
 	d.DrainStartedAt = m.State.DrainStartedAt
@@ -122,7 +117,7 @@ func DesiredRuntime(m Desired) Runtime {
 }
 func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !m.Terminal && m.State.HeldOrchestrator != "" {
-		files["orchestrator.yaml"] = []byte(m.State.HeldOrchestrator)
+		files["system/node/orchestrator.yaml"] = []byte(m.State.HeldOrchestrator)
 	}
 	if !m.Terminal && m.State.HeldUpgradePlan != "" {
 		files["upgrade-plan/plan.yaml"] = []byte(m.State.HeldUpgradePlan)
@@ -134,11 +129,11 @@ func addRoutingBundle(files map[string][]byte, m Desired) error {
 	}
 	files["runtime.json"] = b
 	if m.Terminal {
-		docs := strings.Split(string(files["orchestrator.yaml"]), "\n---\n")
+		docs := strings.Split(string(files["system/node/orchestrator.yaml"]), "\n---\n")
 		if len(docs) < 3 {
 			return fmt.Errorf("missing retained orchestrator storage")
 		}
-		files["orchestrator.yaml"] = []byte(strings.Join(docs[:3], "\n---\n") + "\n")
+		files["system/node/orchestrator.yaml"] = []byte(strings.Join(docs[:3], "\n---\n") + "\n")
 		files["upgrade-plan/kustomization.yaml"] = []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
 		delete(files, "upgrade-plan/plan.yaml")
 		return nil
@@ -152,16 +147,11 @@ func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !ValidConnectorImage(m.RuntimeImage) {
 		return fmt.Errorf("Node proxy Runtime image is not pinned")
 	}
-	routingJSON, e := json.MarshalIndent(d, "", "  ")
-	if e != nil {
-		return e
-	}
 	var node struct{ ServiceURL, ProxyURLTemplate string }
 	if _, err := toml.Decode(orchestratorConfiguration(m), &node); err != nil || node.ServiceURL == "" {
 		return fmt.Errorf("invalid effective Node routing configuration")
 	}
-	files["tunnel.yaml"] = []byte(tunnelManifest(m, string(routingJSON), nodeProxyContainer(m, node.ServiceURL, node.ProxyURLTemplate)))
-	files["tunnel-network.yaml"] = []byte(tunnelNetwork(m))
-	files["kustomization.yaml"] = []byte(strings.Replace(string(files["kustomization.yaml"]), "- orchestrator.yaml", "- orchestrator.yaml\n- tunnel.yaml\n- tunnel-network.yaml", 1))
+	files["system/connector/tunnel.yaml"] = []byte(managedTunnelManifest(m, nodeProxyContainer(m, node.ServiceURL, node.ProxyURLTemplate)))
+	files["system/connector/network.yaml"] = []byte(tunnelNetwork(m))
 	return nil
 }

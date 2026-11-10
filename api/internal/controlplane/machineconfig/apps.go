@@ -2,10 +2,8 @@ package machineconfig
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -13,39 +11,15 @@ import (
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
-//go:embed app-management.yaml
-var appManagement string
-
 func DrainTarget(node, epoch string, state State) string {
 	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%s/%s", node, epoch, state.Generation, state.PendingConfigDigest, state.Target)))
 }
-func (s *Manager) runtimeSettings(ctx context.Context, m Machine, record *Record) {
-	state := &record.State
-	// Retirement uses the delivered format captured by the deletion transaction.
-	// A capability report alone must not promote its write-once terminal bundle.
+func (s *Manager) connectorSettings(m Machine, record *Record) {
 	if m.Terminal {
 		return
 	}
-	if s.config.RuntimeImage != "" {
-		state.RuntimeImage = s.config.RuntimeImage
-	}
-	if s.config.Connector.ManagedImage != "" {
-		state.SystemConnectorImage = s.config.Connector.ManagedImage
-	}
-	report, _, err := s.store.Report(ctx, m, "runtime")
-	if err == nil && report.BundleFormat >= contract.BundleFormat && ValidConnectorImage(state.RuntimeImage) {
-		format := min(report.BundleFormat, contract.SystemBundleFormat)
-		if format >= contract.SystemBundleFormat && !ValidConnectorImage(state.SystemConnectorImage) {
-			connectorRequired := s.config.RequireDrain
-			if !connectorRequired && s.deps.Exposure != nil {
-				exposure, err := s.deps.Exposure(record.Routing)
-				connectorRequired = err != nil || (exposure != nil && exposure.IngressDigest != "")
-			}
-			if connectorRequired {
-				format = contract.BundleFormat
-			}
-		}
-		state.BundleFormat = max(state.BundleFormat, format)
+	if s.config.Connector.Image != "" {
+		record.ConnectorImage = s.config.Connector.Image
 	}
 }
 
@@ -101,25 +75,6 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		}
 		p = &value
 	}
-	// Keep the existing independent upgrade-plan path valid during migration.
-	moved := map[string][]byte{}
-	for name, data := range files {
-		if name != "runtime.json" && !strings.HasPrefix(name, "upgrade-plan/") {
-			delete(files, name)
-			moved["management/"+name] = data
-		}
-	}
-	for name, data := range moved {
-		files[name] = data
-	}
-	files["kustomization.yaml"] = []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- management\n")
-	mode := "https"
-	if strings.HasPrefix(m.ControlAPIURL, "http://") {
-		mode = "development-http"
-	}
-	manifest := strings.NewReplacer("@NODE_ID@", m.NodeID, "@INSTALL_DIR@", m.InstallDir, "@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode).Replace(appManagement)
-	files["management/app-reconciler.yaml"] = []byte(manifest)
-	files["management/kustomization.yaml"] = []byte(strings.Replace(string(files["management/kustomization.yaml"]), "patches:", "- app-reconciler.yaml\npatches:", 1))
 	for name, data := range p.Files {
 		files[name] = data
 	}
@@ -127,7 +82,7 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 	if err := json.Unmarshal(files["runtime.json"], &metadata); err != nil {
 		return err
 	}
-	metadata.BundleFormat = m.BundleFormat
+	metadata.BundleFormat = contract.BundleFormat
 	metadata.AppsGeneration = 0
 	metadata.AppsDigest = ""
 	if p.Intent != nil {
@@ -150,24 +105,9 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		for name, data := range cleanup {
 			files["terminal-cleanup/"+name] = data
 		}
-		for _, name := range []string{"orchestrator.yaml", "tunnel.yaml", "tunnel-network.yaml"} {
-			data := m.RetainedFiles["management/"+name]
-			if data == nil {
-				path := map[string]string{"orchestrator.yaml": "system/node/orchestrator.yaml", "tunnel.yaml": "system/connector/tunnel.yaml", "tunnel-network.yaml": "system/connector/network.yaml"}[name]
-				data = m.RetainedFiles[path]
-			}
-			if data == nil {
-				data = m.RetainedFiles[name]
-			}
-			if data == nil {
-				continue
-			}
-			files["management/"+name] = data
-			if name == "tunnel-network.yaml" {
-				files["management/"+name] = []byte(tunnelNetwork(m))
-			}
-			if name != "orchestrator.yaml" {
-				files["management/kustomization.yaml"] = []byte(strings.Replace(string(files["management/kustomization.yaml"]), "patches:", "- "+name+"\npatches:", 1))
+		for _, name := range []string{"system/node/orchestrator.yaml", "system/connector/tunnel.yaml", "system/connector/network.yaml"} {
+			if data := m.RetainedFiles[name]; data != nil {
+				files[name] = data
 			}
 		}
 		if prior, e := transport.ReadMetadata(m.RetainedFiles["runtime.json"]); e == nil {

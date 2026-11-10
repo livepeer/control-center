@@ -28,7 +28,6 @@ type componentObservation struct {
 	ExpiresAt           *time.Time              `json:"expires_at,omitempty"`
 	Fresh               bool                    `json:"fresh"`
 	Current             bool                    `json:"current"`
-	Limited             bool                    `json:"limited"`
 	Ready               bool                    `json:"ready"`
 	Reason              string                  `json:"reason"`
 	ClockUncertain      bool                    `json:"clock_uncertain"`
@@ -228,17 +227,15 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 		if !effective.IsZero() {
 			expires = timePointer(effective.Add(ttl))
 		}
-		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Limited: report.ReportVersion == 0, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
-		if report.ReportVersion == 1 {
-			c.AppsError = safeObservationReason(report.AppsError)
-			c.Apps, c.Downloaded, c.DownloadedAt = report.Apps, report.Downloaded, timePointer(report.DownloadedAt)
-			c.ObserverID, c.ObserverStartedAt = report.ObserverID, timePointer(report.ObserverStartedAt)
-			c.ConnectorObservedAt, c.ConnectorExpiresAt = timePointer(report.ConnectorObservedAt), timePointer(report.ConnectorExpiresAt)
-			if name == "connector" && (report.ConnectorObservedAt.IsZero() || !now.Before(report.ConnectorExpiresAt)) {
-				c.Ready = false
-				if report.Ready {
-					c.Reason = "connector_observation_stale"
-				}
+		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
+		c.AppsError = safeObservationReason(report.AppsError)
+		c.Apps, c.Downloaded, c.DownloadedAt = report.Apps, report.Downloaded, timePointer(report.DownloadedAt)
+		c.ObserverID, c.ObserverStartedAt = report.ObserverID, timePointer(report.ObserverStartedAt)
+		c.ConnectorObservedAt, c.ConnectorExpiresAt = timePointer(report.ConnectorObservedAt), timePointer(report.ConnectorExpiresAt)
+		if name == "connector" && (report.ConnectorObservedAt.IsZero() || !now.Before(report.ConnectorExpiresAt)) {
+			c.Ready = false
+			if report.Ready {
+				c.Reason = "connector_observation_stale"
 			}
 		}
 		if c.ClockUncertain {
@@ -359,8 +356,7 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
  SELECT e.node_id,e.epoch,e.hostname,e.owner_id,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,'cleanup_pending'
  FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL AND e.removal_ack_at IS NULL
  ) SELECT i.node_id,i.epoch::text,i.hostname,i.owner_id::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,i.lifecycle,
- CASE WHEN COALESCE((r.report->>'report_version')::int,0)=0 THEN r.received_at
- WHEN COALESCE((r.report->>'clock_uncertain')::boolean,false) THEN NULL
+ CASE WHEN COALESCE((r.report->>'clock_uncertain')::boolean,false) THEN NULL
  ELSE LEAST(r.received_at,(r.report->>'observed_at')::timestamptz) END, COALESCE((r.report->>'clock_uncertain')::boolean,false)
  FROM inventory i LEFT JOIN lpcc.machine_reports r ON r.node_id=i.node_id AND r.epoch=i.epoch AND r.credential_version=i.credential_version AND r.component='runtime'
  WHERE ($1='' OR i.owner_id::text=$1) ORDER BY i.created_at DESC,i.node_id,i.epoch`, owner)

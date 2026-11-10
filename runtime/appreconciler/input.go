@@ -64,7 +64,7 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 		return input, err
 	}
 	m, err := transport.ReadMetadata(files["runtime.json"])
-	if err != nil || m.NodeID != s.NodeID || m.BundleFormat < contract.BundleFormat || m.BundleFormat > contract.SystemBundleFormat {
+	if err != nil || m.NodeID != s.NodeID {
 		return input, errors.New("management_enrollment")
 	}
 	identity, err := transport.ReadIdentity(s.IdentityFile)

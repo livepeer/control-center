@@ -222,10 +222,10 @@ func TestEndpointFailurePreservesConnectorAndRollbackReusesOwnership(t *testing.
 	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
 	bundle := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
 	files := archiveFiles(t, bundle.Body.Bytes())
-	if !strings.Contains(files["tunnel.yaml"], initial.ProxyURLTemplate) || !strings.Contains(files["tunnel.yaml"], initial.ServiceURL) {
+	if !strings.Contains(files["system/connector/tunnel.yaml"], initial.ProxyURLTemplate) || !strings.Contains(files["system/connector/tunnel.yaml"], initial.ServiceURL) {
 		t.Fatal("failed replacement advanced guard beyond held Node routing")
 	}
-	if state.IngressDigest != initial.IngressDigest || files["tunnel.yaml"] == "" || files["tunnel-network.yaml"] == "" {
+	if state.IngressDigest != initial.IngressDigest || files["system/connector/tunnel.yaml"] == "" || files["system/connector/network.yaml"] == "" {
 		t.Fatal("failed replacement pruned last connector", state, files["kustomization.yaml"])
 	}
 	testTunnelDeps(s).Provider = f
@@ -284,10 +284,7 @@ func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
 	fp := strings.Repeat("1", 64)
 	w := request(t, s, "POST", "/v1/nodes/register", jwt, map[string]any{"fingerprint": fp, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1", "development_http": true})
 	requireStatus(t, w, 200)
-	var c map[string]string
-	if e := json.Unmarshal(w.Body.Bytes(), &c); e != nil {
-		t.Fatal(e)
-	}
+	c := credentials(t, w.Body.Bytes())
 	reportRuntime(t, s, c, "runtime", false)
 	driveTunnels(t, s)
 	// An ordinary enrollment retry over the production URL must not upgrade a

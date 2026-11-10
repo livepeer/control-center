@@ -47,7 +47,7 @@ install_k3s() {
     die 'cannot establish the installed K3s version; restore state/k3s-version from a known backup before repair (no downgrade attempted)'
   fi
   if [[ -n "$reported" ]] && ! version_at_least "$reported" "$K3S_VERSION"; then
-    die 'existing K3s is older than the supported baseline or unrecognized; upgrade explicitly'
+    die 'existing K3s is older than the minimum supported release or unrecognized; upgrade explicitly'
   fi
   cache="$INSTALL_DIR/download/k3s/$version"
   install -d -m 0700 "$cache"

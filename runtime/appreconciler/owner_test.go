@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,7 +30,7 @@ func TestSDKOwnerPersistsBeforeConfirmationAndKeepsExactOptions(t *testing.T) {
 			return
 		}
 		var body struct {
-			Sequence uint64                       `json:"mutation_sequence"`
+			Sequence uint64                       `json:"seq"`
 			Apps     []map[string]json.RawMessage `json:"apps"`
 		}
 		if json.NewDecoder(r.Body).Decode(&body) != nil {
@@ -46,6 +47,9 @@ func TestSDKOwnerPersistsBeforeConfirmationAndKeepsExactOptions(t *testing.T) {
 			var id, status string
 			json.Unmarshal(a["id"], &id)
 			json.Unmarshal(a["status"], &status)
+			if status != "not-ready" || body.Sequence == 0 {
+				t.Error("initial or confirming snapshot was ready or unsequenced")
+			}
 			if id == "" {
 				id = "assigned"
 			}
@@ -55,7 +59,11 @@ func TestSDKOwnerPersistsBeforeConfirmationAndKeepsExactOptions(t *testing.T) {
 		if auth == "bootstrap" {
 			credential = "issued"
 		}
-		json.NewEncoder(w).Encode(map[string]any{"runner_id": "owner", "heartbeat_secret": credential, "heartbeat_interval": "10ms", "heartbeat_ttl": "30s", "mutation_sequence": body.Sequence, "capabilities": Capabilities{true, true, true}, "apps": apps})
+		result := map[string]any{"runner_id": "owner", "heartbeat_secret": credential, "heartbeat_interval": "10ms", "heartbeat_ttl": "30s", "apps": apps}
+		if auth != "bootstrap" {
+			result["seq"] = body.Sequence
+		}
+		json.NewEncoder(w).Encode(result)
 	}))
 	defer server.Close()
 	o, err := NewSDKOwner(server.URL, "bootstrap", transport.HTTPClient())
@@ -77,6 +85,9 @@ func TestSDKOwnerPersistsBeforeConfirmationAndKeepsExactOptions(t *testing.T) {
 	h := OwnerHooks{
 		Reserve: func(string) (uint64, error) { mu.Lock(); defer mu.Unlock(); sequence++; return sequence, nil },
 		Observe: func(value Observation) error {
+			if len(value.Apps) != 1 || value.Apps[0].ID != "assigned" || (value.Bootstrap && value.Credential != "issued") {
+				t.Error("issued identity missing before persistence", value)
+			}
 			mu.Lock()
 			persisted = true
 			mu.Unlock()
@@ -117,64 +128,66 @@ func TestSDKOwnerPersistsBeforeConfirmationAndKeepsExactOptions(t *testing.T) {
 	}
 }
 
-func TestCancellationCapturesDurableTargetAndCommitsBeforeNextMutation(t *testing.T) {
-	c, _, _, _, _, now := fixtureController(t)
-	c.Journal.Update(func(s *State) error {
-		s.Identity = Identity{RunnerID: "owner", Credential: "issued", Confirmed: true}
-		s.OwnerHash, s.OwnerEpoch = "current", "epoch"
-		s.MutationSequence, s.AcceptedSequence = 7, 7
-		s.Instances["target"] = &Instance{ID: "target", AppID: "app", PodUID: "uid", WithdrawalID: "withdrawal", Phase: "removed", Forced: true}
-		return nil
-	})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/runners/owner/apps/app/cancel" || r.Header.Get("Authorization") != "issued" {
-			t.Error("used stale owner identity/target")
-		}
+func TestSDKOwnerRestoresNonReadyBeforeReadmission(t *testing.T) {
+	c, _, cluster, _, _, _ := fixtureController(t)
+	registerApps(t, c, cluster)
+	before := c.Journal.View()
+	ready := map[string]bool{}
+	c.Probes = NewProbes()
+	known := map[string]bool{}
+	for id, i := range before.Instances {
+		ready[id], known[i.AppID] = true, true
+		c.Probes.values[id] = &health{uid: i.PodUID, ready: true}
+	}
+	calls := 0
+	sequence := before.AcceptedSequence
+	client := transport.HTTPClient()
+	client.Transport = reviewRoundTripper(func(r *http.Request) (*http.Response, error) {
 		var body struct {
-			Sequence uint64 `json:"mutation_sequence"`
+			RunnerID string                        `json:"runner_id"`
+			Sequence uint64                        `json:"seq"`
+			Apps     []struct{ ID, Status string } `json:"apps"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
-		json.NewEncoder(w).Encode(map[string]any{"runner_id": "owner", "mutation_sequence": body.Sequence, "app": map[string]any{"id": "app", "status": "draining", "session_ids": []string{}}})
-	}))
-	defer server.Close()
-	o, err := NewSDKOwner(server.URL, "bootstrap", transport.HTTPClient())
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		calls++
+		want := "not-ready"
+		if calls > 1 {
+			want = "ready"
+		}
+		if r.Header.Get("Authorization") != before.Identity.Credential || body.RunnerID != before.Identity.RunnerID || body.Sequence <= sequence || len(body.Apps) != len(known) {
+			t.Error("restored snapshot lost durable identity, sequence or membership", body)
+		}
+		sequence = body.Sequence
+		apps := []map[string]any{}
+		for _, app := range body.Apps {
+			if !known[app.ID] || app.Status != want {
+				t.Error("incorrect restored app identity or admission state", app, want)
+			}
+			apps = append(apps, map[string]any{"id": app.ID, "status": app.Status, "session_ids": []string{}})
+		}
+		w := httptest.NewRecorder()
+		// Scoped responses retain the issued credential and do not return it again.
+		json.NewEncoder(w).Encode(map[string]any{"runner_id": body.RunnerID, "seq": body.Sequence, "heartbeat_interval": "1h", "heartbeat_ttl": "30s", "apps": apps})
+		return w.Result(), nil
+	})
+	owner, err := NewSDKOwner("http://node.invalid", "bootstrap", client)
 	if err != nil {
 		t.Fatal(err)
 	}
-	o.caps = Capabilities{true, true, true}
-	// Cancellation must work even when the target is absent from accepted entries.
-	o.accepted = OwnerRequest{Hash: "old", Identity: Identity{RunnerID: "stale", Credential: "stale"}}
-	observed, release := make(chan struct{}), make(chan struct{})
-	var captured Observation
-	h := c.hooks()
-	h.Observe = func(value Observation) error {
-		captured = value
-		err := c.observe(value)
-		close(observed)
-		<-release
-		return err
+	defer owner.Close(context.Background())
+	c.Owner, c.proofs = owner, nil
+	for range 2 {
+		if err := c.syncOwner(t.Context(), c.Journal.View(), ready, cluster.view); err != nil {
+			t.Fatal(err)
+		}
+		if owner.Accepted().Identity != before.Identity || c.Journal.View().Identity != before.Identity {
+			t.Fatal("accepted scoped identity did not retain the durable issued credential")
+		}
 	}
-	done := make(chan error, 1)
-	go func() { done <- o.Cancel(t.Context(), "target", h) }()
-	<-observed
-	next := make(chan struct{})
-	go func() { o.mutations.Lock(); close(next); o.mutations.Unlock() }()
-	select {
-	case <-next:
-		t.Fatal("mutation escaped before cancellation observation committed")
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	<-next
-	if !c.empty(c.Journal.View().Instances["target"], *now) || c.Journal.View().AcceptedSequence != 8 {
-		t.Fatal("lost cancellation proof for an omitted target")
-	}
-	c.Journal.Update(func(s *State) error { s.AcceptedSequence = 9; return nil })
-	if err := c.observe(captured); !errors.Is(err, ErrSuperseded) {
-		t.Fatal("older cancellation regressed accepted observation", err)
+	if calls != 2 {
+		t.Fatal("restart did not submit non-ready then ready snapshots", calls)
 	}
 }
 
@@ -188,7 +201,7 @@ func TestSDKLiveSafetyWithdrawalAndBackgroundPersistenceFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		var body struct {
-			Sequence uint64                       `json:"mutation_sequence"`
+			Sequence uint64                       `json:"seq"`
 			Apps     []map[string]json.RawMessage `json:"apps"`
 		}
 		if json.NewDecoder(r.Body).Decode(&body) != nil {
@@ -207,12 +220,11 @@ func TestSDKLiveSafetyWithdrawalAndBackgroundPersistenceFailure(t *testing.T) {
 		if status == "not-ready" && (len(sessions) != 1 || sessions[0] != "cache-session") {
 			t.Error("readiness overlay dropped SDK work fields")
 		}
-		json.NewEncoder(w).Encode(map[string]any{"runner_id": "owner", "heartbeat_interval": "10ms", "heartbeat_ttl": "30s", "mutation_sequence": body.Sequence, "capabilities": Capabilities{true, true, true}, "apps": []map[string]any{{"id": "app", "status": status, "session_ids": []string{"node-owned-work"}}}})
+		json.NewEncoder(w).Encode(map[string]any{"runner_id": "owner", "heartbeat_interval": "10ms", "heartbeat_ttl": "30s", "seq": body.Sequence, "apps": []map[string]any{{"id": "app", "status": status, "session_ids": []string{"node-owned-work"}}}})
 	}))
 	defer server.Close()
 	o, _ := NewSDKOwner(server.URL, "bootstrap", transport.HTTPClient())
 	defer o.Close(context.Background())
-	o.caps = Capabilities{true, true, true}
 	set := testutil.Assignment(t)
 	options, _ := AppOptions(&Instance{Name: "one", AppID: "app", Definition: set.Entries[0].Revision.Definition}, true)
 	r := OwnerRequest{Epoch: "epoch", Hash: "hash", Identity: Identity{RunnerID: "owner", Credential: "issued", Confirmed: true}, Entries: []Registration{{InstanceID: "i", Options: options}}}
@@ -263,8 +275,8 @@ func TestSDKLiveSafetyWithdrawalAndBackgroundPersistenceFailure(t *testing.T) {
 	}
 }
 func TestSDKOwnerRejectsAutomaticBootstrapAndTerminatesOnPersistenceFailure(t *testing.T) {
-	for _, failPersistence := range []bool{false, true} {
-		t.Run(map[bool]string{false: "unauthorized", true: "persistence"}[failPersistence], func(t *testing.T) {
+	for _, testCase := range []struct{ name, credential string }{{"unauthorized", "issued"}, {"persistence", "issued"}, {"bootstrap_persistence", ""}} {
+		t.Run(testCase.name, func(t *testing.T) {
 			var mu sync.Mutex
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -272,21 +284,25 @@ func TestSDKOwnerRejectsAutomaticBootstrapAndTerminatesOnPersistenceFailure(t *t
 				calls++
 				n := calls
 				mu.Unlock()
-				if r.Header.Get("Authorization") == "bootstrap" {
-					t.Error("automatic bootstrap fallback")
+				wantAuth := testCase.credential
+				if wantAuth == "" {
+					wantAuth = "bootstrap"
 				}
-				if !failPersistence {
+				if r.Header.Get("Authorization") != wantAuth {
+					t.Error("automatic bootstrap fallback or premature confirmation")
+				}
+				if testCase.name == "unauthorized" {
 					w.WriteHeader(401)
 					return
 				}
-				json.NewEncoder(w).Encode(map[string]any{"runner_id": "owner", "heartbeat_interval": "5ms", "heartbeat_ttl": "30s", "capabilities": Capabilities{true, true, true}, "mutation_sequence": n, "apps": []map[string]any{{"id": "app", "status": "not-ready", "session_ids": []string{}}}})
+				json.NewEncoder(w).Encode(map[string]any{"runner_id": "owner", "heartbeat_secret": "issued", "heartbeat_interval": "5ms", "heartbeat_ttl": "30s", "seq": n, "apps": []map[string]any{{"id": "app", "status": "not-ready", "session_ids": []string{}}}})
 			}))
 			defer server.Close()
 			o, _ := NewSDKOwner(server.URL, "bootstrap", transport.HTTPClient())
 			defer o.Close(context.Background())
 			set := testutil.Assignment(t)
 			options, _ := AppOptions(&Instance{Name: "one", AppID: "app", Definition: set.Entries[0].Revision.Definition}, false)
-			r := OwnerRequest{Epoch: "epoch", Hash: "hash", Identity: Identity{RunnerID: "owner", Credential: "issued"}, Entries: []Registration{{InstanceID: "i", Options: options}}}
+			r := OwnerRequest{Epoch: "epoch", Hash: "hash", Identity: Identity{RunnerID: "owner", Credential: testCase.credential}, Entries: []Registration{{InstanceID: "i", Options: options}}}
 			h := OwnerHooks{Reserve: func(string) (uint64, error) { return 1, nil }, Observe: func(Observation) error { return errors.New("disk_failed_with_private_details") }}
 			if err := o.Sync(context.Background(), r, h); err == nil {
 				t.Fatal("accepted failure")
@@ -296,6 +312,9 @@ func TestSDKOwnerRejectsAutomaticBootstrapAndTerminatesOnPersistenceFailure(t *t
 			defer mu.Unlock()
 			if calls != 1 {
 				t.Fatal("SDK continued after terminal failure", calls)
+			}
+			if o.Accepted().Identity.Credential != "" {
+				t.Fatal("accepted an unpersisted identity")
 			}
 		})
 	}
@@ -312,7 +331,7 @@ func TestRegressionRestartedOrderedOwnerSendsSequencedHeartbeat(t *testing.T) {
 			t.Error("reconstruction ignored durable credential after stop/join")
 		}
 		var body struct {
-			Sequence uint64 `json:"mutation_sequence"`
+			Sequence uint64 `json:"seq"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		submitted = body.Sequence
@@ -351,5 +370,83 @@ func TestSDKOwnerClassifiesAuthenticationFailure(t *testing.T) {
 	hooks := OwnerHooks{Identity: func() Identity { return identity }, Reserve: func(string) (uint64, error) { return 1, nil }, Observe: func(Observation) error { return nil }, Failure: func(f OwnerFailure) { failure = f }}
 	if err := o.Sync(t.Context(), request, hooks); err == nil || !transport.IsStatus(err, 401) || failure.Reason != "registration_auth_failed" || !failure.Reset {
 		t.Fatal("authentication failure lost its classification", err, failure)
+	}
+}
+
+func TestSDKOwnerValidatesAcceptedSequence(t *testing.T) {
+	set := testutil.Assignment(t)
+	options, err := AppOptions(&Instance{Name: "one", AppID: "app", Definition: set.Entries[0].Revision.Definition}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []string{"matching", "missing", "zero", "mismatched"} {
+		t.Run(testCase, func(t *testing.T) {
+			client := transport.HTTPClient()
+			client.Transport = reviewRoundTripper(func(r *http.Request) (*http.Response, error) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					return nil, err
+				}
+				if r.URL.Path != "/runners/heartbeat" || string(body["seq"]) != "8" || r.Header.Get("Authorization") != "issued" {
+					t.Error("wrong heartbeat endpoint, reserved sequence or credential", r.URL.Path, body)
+				}
+				result := map[string]any{"runner_id": "owner", "seq": 8, "heartbeat_ttl": "30s", "apps": []map[string]any{{"id": "app", "status": "not-ready", "session_ids": []string{}}}}
+				switch testCase {
+				case "missing":
+					delete(result, "seq")
+				case "zero":
+					result["seq"] = 0
+				case "mismatched":
+					result["seq"] = 7
+				}
+				w := httptest.NewRecorder()
+				json.NewEncoder(w).Encode(result)
+				return w.Result(), nil
+			})
+			owner, err := NewSDKOwner("http://node.invalid", "bootstrap", client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var observed *Observation
+			identity := Identity{RunnerID: "owner", Credential: "issued"}
+			hooks := OwnerHooks{Reserve: func(string) (uint64, error) { return 8, nil }, Observe: func(value Observation) error { observed = &value; return nil }}
+			h := &heartbeatClient{owner: owner, request: OwnerRequest{Identity: identity, Entries: []Registration{{Options: options}}}, hooks: hooks}
+			body, _ := json.Marshal(map[string]any{"runner_id": "owner", "apps": []any{options}})
+			req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://node.invalid/runners/heartbeat", strings.NewReader(string(body)))
+			req.Header.Set("Authorization", identity.Credential)
+			resp, err := h.Do(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if testCase == "matching" {
+				if err != nil || observed == nil || observed.Sequence != 8 {
+					t.Fatal("valid acknowledgment rejected", err, observed)
+				}
+			} else if err == nil || err.Error() != "heartbeat_response" || observed != nil {
+				t.Fatal("invalid acknowledgment became an observation or lost its protocol error", err, observed)
+			}
+		})
+	}
+}
+
+func TestSDKOwnerRejectsReadyBootstrapBeforeSubmission(t *testing.T) {
+	client := transport.HTTPClient()
+	client.Transport = reviewRoundTripper(func(*http.Request) (*http.Response, error) {
+		t.Error("submitted a ready bootstrap snapshot")
+		return nil, errors.New("unexpected_request")
+	})
+	o, _ := NewSDKOwner("http://node.invalid", "bootstrap", client)
+	set := testutil.Assignment(t)
+	options, err := AppOptions(&Instance{Name: "one", Definition: set.Entries[0].Revision.Definition}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := OwnerRequest{Epoch: "epoch", Hash: "hash", Entries: []Registration{{Options: options}}}
+	h := OwnerHooks{Reserve: func(string) (uint64, error) { return 1, nil }, Observe: func(Observation) error {
+		t.Error("observed a rejected bootstrap snapshot")
+		return nil
+	}}
+	if err := o.Sync(t.Context(), r, h); err == nil || err.Error() != "sdk_request" {
+		t.Fatal("ready bootstrap did not fail as a request error", err)
 	}
 }

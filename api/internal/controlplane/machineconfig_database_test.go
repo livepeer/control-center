@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +11,7 @@ import (
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
-	"github.com/livepeer/control-center/api/internal/migrations"
+	"github.com/livepeer/control-center/runtime/contract"
 )
 
 func TestUnchangedRenderingAllowsProviderProgress(t *testing.T) {
@@ -131,7 +130,7 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	if s.tunnels.Enabled() || state.TunnelID != "" {
 		t.Fatal("private rollout acquired provider resources")
 	}
-	stale := machineconfig.Report{Epoch: m.Epoch, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, Drained: true, HTTPS: true}
+	stale := currentReport(t, s, m.NodeID, machineconfig.Report{Epoch: m.Epoch, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
 	for len(s.reconcileWake) > 0 {
 		<-s.reconcileWake
 	}
@@ -190,11 +189,11 @@ func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources, err := s.tunnels.DiscoverySources(t.Context())
-	if err != nil || len(sources) != 1 || sources[0].Ready || sources[0].Reason != "runtime_pending" {
+	if err != nil || len(sources) != 1 || sources[0].Ready || sources[0].Reason != "rollout_pending" {
 		t.Fatal("prior generation advertised during workload replacement", sources, err)
 	}
 	state, _, err := s.loadTunnel(t.Context(), m.NodeID, m.Epoch)
-	if err != nil || state.Ready || state.Reason != "runtime_pending" {
+	if err != nil || state.Ready || state.Reason != "rollout_pending" {
 		t.Fatal("prior generation reported ready", state, err)
 	}
 	reportRuntime(t, s, c, "runtime", true)
@@ -208,64 +207,6 @@ func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {
 	sources, err = s.tunnels.DiscoverySources(t.Context())
 	if err != nil || len(sources) != 1 || !sources[0].Blocked || sources[0].Reason != "drain_pending" {
 		t.Fatal("drain diagnostic erased provider blocker", sources, err)
-	}
-}
-
-func TestMachineConfigurationMigrationPreservesInflightRollout(t *testing.T) {
-	s := newTestServer(t)
-	files, err := fs.Sub(MigrationFiles, "migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
-		if err = migrations.Down(t.Context(), s.db, files); err != nil {
-			t.Fatal(err)
-		}
-	}
-	c := enroll(t, s, ownerA, strings.Repeat("8", 64))
-	lease := uuid.New().String()
-	started := time.Now().UTC().Add(-time.Second).Truncate(time.Microsecond)
-	legacy := map[string]any{"lifecycle": "active", "generation": int64(9), "drain_requested": true, "drain_started_at": started, "endpoint_drain_url": "https://replacement.example.invalid", "held_orchestrator": "held manifest", "pending_config_digest": "pending", "approved_config_digest": "approved", "tunnel_id": "provider-id", "credential_generation": int64(4), "source_generation": int64(3), "reason": "drain_pending", "resources": map[string]any{"tunnel": map[string]any{"kind": "tunnel", "id": "provider-id", "pending": true, "attempts": 2}}}
-	raw, _ := json.Marshal(legacy)
-	execSQL(t, s.db, `INSERT INTO lpcc.machine_tunnels(node_id,epoch,state,revision,lease_id,lease_until) VALUES($1,$2,$3,7,$4,now()+interval '1 minute')`, c["node_id"], c["epoch"], string(raw), lease)
-	if err = Migrate(t.Context(), s.db); err != nil {
-		t.Fatal(err)
-	}
-	record, err := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"], c["epoch"])
-	if err != nil || record.Generation != 9 || record.Target != legacy["endpoint_drain_url"] || record.HeldOrchestrator != "held manifest" || record.PendingConfigDigest != "pending" || record.ApprovedConfigDigest != "approved" || !record.DrainStartedAt.Equal(started) || record.Revision != 7 {
-		t.Fatal("migration lost in-flight rollout", record, err)
-	}
-	var provider map[string]any
-	if err = json.Unmarshal(record.Routing, &provider); err != nil {
-		t.Fatal(err)
-	}
-	if provider["generation"] != nil || provider["held_orchestrator"] != nil || provider["tunnel_id"] != "provider-id" || provider["credential_generation"] != float64(4) {
-		t.Fatal("provider and rollout ownership not separated", provider)
-	}
-	var savedLease string
-	if err = s.db.QueryRow(`SELECT lease_id::text FROM lpcc.machine_states`).Scan(&savedLease); err != nil || savedLease != lease {
-		t.Fatal("migration changed active lease", savedLease, err)
-	}
-	execSQL(t, s.db, `DELETE FROM auth.users WHERE id=$1`, ownerA)
-	record, err = (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"], c["epoch"])
-	if err != nil || record.Lifecycle != "removed" || record.Generation != 9 || record.Revision != 8 {
-		t.Fatal("retirement did not fence both states", record, err)
-	}
-	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
-		if err = migrations.Down(t.Context(), s.db, files); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var restored []byte
-	if err = s.db.QueryRow(`SELECT state FROM lpcc.machine_tunnels`).Scan(&restored); err != nil {
-		t.Fatal(err)
-	}
-	var old map[string]any
-	if err = json.Unmarshal(restored, &old); err != nil {
-		t.Fatal(err)
-	}
-	if old["generation"] != float64(9) || old["endpoint_drain_url"] != legacy["endpoint_drain_url"] || old["held_orchestrator"] != "held manifest" || old["lifecycle"] != "removed" {
-		t.Fatal("rollback lost lifecycle state", old)
 	}
 }
 
@@ -290,7 +231,7 @@ func priorMachineConfiguration(t *testing.T, s *Server, c map[string]string, rou
 	if err != nil {
 		t.Fatal(err)
 	}
-	prior := strings.Replace(archiveFiles(t, data)["orchestrator.yaml"], `Network = "offchain"`, `Network = "previous"`, 1)
+	prior := strings.Replace(archiveFiles(t, data)["system/node/orchestrator.yaml"], `Network = "offchain"`, `Network = "previous"`, 1)
 	desired.State.HeldOrchestrator = prior
 	data, digest, err := machineconfig.Build(desired)
 	if err != nil {
@@ -343,7 +284,7 @@ func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	}
 	reportRuntime(t, s, c, "runner", true)
 	refreshed := false
-	s.configs = machineconfig.New(machineconfig.Config{DrainTimeout: time.Minute, StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute, StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !refreshed {
 			refreshed = true
 			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
@@ -366,40 +307,6 @@ func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	}
 }
 
-func TestPendingTargetWithoutStoredHoldKeepsAppliedWorkload(t *testing.T) {
-	s, _ := tunnelTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	initial := readyTunnel(t, s, c)
-	m, prior := priorMachineConfiguration(t, s, c, &initial)
-	// Reconstruct a pre-certificate history for the older rollout migration.
-	execSQL(t, s.db, `DELETE FROM lpcc.machine_certificate_refs; DELETE FROM lpcc.machine_certificates`)
-	files, err := fs.Sub(MigrationFiles, "migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
-		if err = migrations.Down(t.Context(), s.db, files); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Baseline stageEndpoints stored only the target and generation, and relied
-	// on holdUnapprovedConfiguration in the publisher to retain the old workload.
-	execSQL(t, s.db, `UPDATE lpcc.machine_tunnels SET state=(state-'held_orchestrator'-'pending_config_digest') || jsonb_build_object('generation',$2::bigint,'drain_requested',true,'drain_started_at',$3::text,'endpoint_drain_url','https://new.example.invalid') WHERE node_id=$1`, m.NodeID, initial.Generation+1, time.Now().UTC().Format(time.RFC3339Nano))
-	if err = Migrate(t.Context(), s.db); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	runtime, manifest := publishedMachineConfiguration(t, s, m.NodeID)
-	if !runtime.DrainRequested {
-		t.Fatal("no drain requested")
-	}
-	if manifest != prior {
-		t.Fatal("published replacement before pending external target completed when migrated target has no held manifest")
-	}
-}
-
 func TestTerminalBundleUsesRetirementCredential(t *testing.T) {
 	s := newTestServer(t)
 	one := enroll(t, s, ownerA, strings.Repeat("e", 64))
@@ -415,7 +322,7 @@ func TestTerminalBundleUsesRetirementCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := false
-	s.configs = machineconfig.New(machineconfig.Config{APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Build: func(d machineconfig.Desired) ([]byte, string, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Build: func(d machineconfig.Desired) ([]byte, string, error) {
 		if d.NodeID == one["node_id"] && !changed {
 			changed = true
 			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
@@ -495,6 +402,9 @@ func TestSharedLeaseRetainsProviderBackoff(t *testing.T) {
 func TestOrdinaryReportDoesNotWakeWholeFleet(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("1", 64))
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	for len(s.reconcileWake) > 0 {
 		<-s.reconcileWake
 	}
@@ -520,7 +430,7 @@ func TestConcurrentRemovalDoesNotAbortFleetPass(t *testing.T) {
 	}
 	removed := false
 	builtSecond := false
-	s.configs = machineconfig.New(machineconfig.Config{DrainTimeout: time.Minute}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !removed {
 			removed = true
 			if err := s.RetireMachine(t.Context(), one["node_id"]); err != nil {
@@ -539,34 +449,6 @@ func TestConcurrentRemovalDoesNotAbortFleetPass(t *testing.T) {
 	}
 	if !builtSecond {
 		t.Fatal("remaining enrollment was not processed")
-	}
-}
-
-func TestRollbackInitializesConfigOnlyProviderDefaults(t *testing.T) {
-	s := newTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("4", 64))
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	files, err := fs.Sub(MigrationFiles, "migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
-		if err = migrations.Down(t.Context(), s.db, files); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var raw []byte
-	if err = s.db.QueryRow(`SELECT state FROM lpcc.machine_tunnels WHERE node_id=$1`, c["node_id"]).Scan(&raw); err != nil {
-		t.Fatal(err)
-	}
-	var routing tunnel.RoutingState
-	if err = json.Unmarshal(raw, &routing); err != nil {
-		t.Fatal(err)
-	}
-	if routing.AccessVersion != 1 || routing.CredentialGeneration != 1 || routing.SourceGeneration != 1 || routing.EndpointGeneration != 1 || routing.Resources == nil {
-		t.Fatal("rollback did not supply provider defaults", routing)
 	}
 }
 
@@ -615,24 +497,6 @@ func TestRetirementReasonSurvivesOldDrainReason(t *testing.T) {
 	}
 	if len(sources) != 1 || sources[0].Reason != "removed" {
 		t.Errorf("discovery cleanup reason is stale: %#v", sources)
-	}
-	files, err := fs.Sub(MigrationFiles, "migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// This fixture reconstructs the historical rollout schema, without owned certificates.
-	execSQL(t, s.db, `DELETE FROM lpcc.machine_certificate_refs; DELETE FROM lpcc.machine_certificates`)
-	for count(t, s, `SELECT count(*) FROM lpcc.migrations WHERE version>=5`) > 0 {
-		if err = migrations.Down(t.Context(), s.db, files); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var reason string
-	if err = s.db.QueryRow(`SELECT state->>'reason' FROM lpcc.machine_tunnels WHERE node_id=$1`, c["node_id"]).Scan(&reason); err != nil {
-		t.Fatal(err)
-	}
-	if reason != "removed" {
-		t.Errorf("DOWN restored stale drain reason %q over completed cleanup", reason)
 	}
 }
 

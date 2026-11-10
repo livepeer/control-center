@@ -1,7 +1,9 @@
-# Machine tunnels and protected discovery (#112)
+# Machine tunnels and protected discovery
 
-Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime
-runs the connector; Node routes application traffic to private workloads.
+Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
+connector obtains a tunnel token and starts cloudflared; Kubernetes restarts it as
+needed. The tunnel enables external access, and Node routes application traffic
+to private workloads.
 API and discovery use separate hostnames protected by one Cloudflare Access
 application.
 
@@ -14,11 +16,10 @@ Supply account and zone IDs, a dedicated base domain, Zero Trust team, scoped
 backend API credential, token lifetime/rotation window, observation TTL, drain
 deadline, quotas with overlapping-token/hostname headroom, and all fleet node
 and management address exclusions. Use the [required API token permissions](../api/internal/controlplane/tunnel/README.md#cloudflare-api-token-permissions)
-when creating the backend credential. Private Control Center exceptions are
-individual private /32 or /128 addresses on HTTPS port 443. The generated
-network policy assumes Runtime's fixed Pod/Service ranges. Verify actual
+when creating the backend credential. The generated network policy assumes
+Runtime's fixed Pod/Service ranges. Verify actual
 CNI/DNAT behavior; update exclusions before introducing any new network ranges
-or node addresses. Management connectivity remains #95's responsibility.
+or node addresses.
 
 Control Center orders an Advanced certificate for the zone apex and each machine's
 wildcard; Cloudflare handles validation and renewal. Enable Advanced Certificate
@@ -33,8 +34,7 @@ switch: provisioned client routes can be reachable before source advertisement.
 Disabling the worker does not revoke resources. Use removal/compromise actions
 when external access must stop.
 
-Build the supported amd64 connector image, publish it, and configure its actual
-immutable digest:
+From the repository root, build the supported amd64 connector image:
 
 ```sh
 docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
@@ -42,13 +42,12 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
   -t <REGISTRY>/livepeer-tunnel:<RELEASE> runtime/services
 ```
 
-The image verifies the SHA256 of cloudflared 2026.10.7 and copies the helper from
-the pinned Go Runtime image. Both connector formats use that Runtime image for
-the credential-free loopback proxy sidecar. Set
-`RuntimeConnectorImage` to its published digest before enabling managed ingress
-on format 3. `CloudflareConnectorImage` remains the legacy format 1/2 image. Startup disables
-automatic updates and enables path normalization. Changing the selected image
-replaces the connector Deployment.
+The separate image contains checksum-verified cloudflared 2026.10.7 and the
+connector helper copied from the digest-pinned Runtime image. Push the image and
+set backend `RUNTIME_CONNECTOR_IMAGE` (or `RuntimeConnectorImage` in configuration)
+to its published digest before enabling managed ingress. Startup disables automatic
+updates and enables path normalization. Changing the image replaces the connector
+Deployment.
 
 ## Credential boundaries
 
@@ -59,12 +58,10 @@ replaces the connector Deployment.
 | API/discovery Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Authorized backend API callers and discovery Collector |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
-the `flux-system/livepeer-service-auth` Secret. In format 3, only the management
-agent mounts its token. The connector mounts its own socket directory and has no
-Kubernetes API credential. App Reconciler mounts only nonsecret enrollment fields
-and reports through a separate scoped socket. The agent has limited observation,
-artifact-status and ownership-migration RBAC. Protect
-Kubernetes Secrets and backups at deployment.
+the `flux-system/livepeer-service-auth` Secret. Only the management agent mounts
+its token. The connector uses its own socket and has no Kubernetes API credential.
+App Reconciler reports through a separate socket. Protect Kubernetes Secrets and
+backups at deployment.
 
 Use independently generated random 32-byte keys, base64 encoded:
 
@@ -79,11 +76,8 @@ Keep credentials out of bundles, ConfigMaps, command arguments, URLs, logs,
 audit bodies and metric labels. Protect process memory and core dumps. Replace
 backend credentials by controlled restart.
 
-The Go helper deletes prior launch files, fetches a fresh token before every
-start and execs cloudflared. Kubernetes owns exit and restart handling. An agent
-restart leaves a healthy connector running; uncertain associations report no
-positive readiness until a fresh probe revalidates the same Pod and private PID 1
-grant. Rotation replaces the connector. New starts require Control Center and
+The connector fetches a fresh token before each start. Kubernetes restarts it
+when needed; token rotation replaces it. Starting it requires Control Center and
 Cloudflare. See
 [Tunnel token behavior](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
 
@@ -94,11 +88,8 @@ Idempotent active registration retains both; refresh increments only credential
 version. Deletion and re-enrollment create a new epoch and tunnel UUID.
 Cloudflare Tunnel must be the HTTPS front door, with the API origin reachable
 only through the trusted connector. The API does not infer transport security
-from arbitrary forwarded headers. Migration 004 makes existing credentials
-legacy config-only. An HTTPS refresh with a fresh owner enrollment JWT is
-required before enabling their tunnels.
-Fresh HTTPS enrollment remains eligible when provisioning is disabled; later
-enablement does not require another refresh. Development credentials stay ineligible.
+from arbitrary forwarded headers. HTTPS enrollment is eligible even when
+provisioning is disabled; development credentials cannot enable live tunnels.
 Use the Runtime commands in [its README](../runtime/README.md#protected-machine-ingress).
 
 Refresh uses a durable operation ID so retries do not increment the credential
@@ -111,32 +102,21 @@ and return `Cache-Control: no-store`. Retired credentials can fetch their termin
 artifact, acknowledge its epoch and digest, and send scoped cleanup diagnostics.
 See [machine and app status](machine-status.md) for evidence and recovery rules.
 
-Reports merge independently. Upgraded reports retain their original observation
-time and expiry; delivery retries do not renew evidence. Legacy reports provide
-limited evidence based on receipt time. The agent checks Node's
-applied revision, completed rollout/config digest, metrics `/readyz`, private
-discovery address and installed K3s version. Format 3 connector reports use a fresh
-local probe of cloudflared and the proxy, the observed configuration version and
-an incarnation-bound token grant.
-Probe reporting is best effort within its five-second deadline; missing evidence
-expires without restarting cloudflared. Source readiness expires with
-`TunnelStatusTTL`; an offline source remains available
-to #116's eviction policy. Bundle download or Pod readiness alone is insufficient.
+Reports retain their observation time and expiry across delivery retries. The
+agent checks Node's applied revision, readiness, private discovery address and
+installed K3s version, and probes cloudflared and the proxy. Source readiness
+expires with `TunnelStatusTTL`.
 
 ## Reconciliation and recovery
 
 Retirement is recorded even when machine deletion cascades from Supabase Auth.
-Enrollment commits a private-only bundle without contacting Cloudflare. Existing
-private Node workloads remain in place during additive upgrades until the
-controlled routing rollout. The worker creates or recovers a tunnel, source
-token, an Access application covering both hostnames and a Service Auth-only
-policy. It installs audience-validating ingress before publishing routing. Managed Node configuration changes publish a drain
-intent while retaining the previous workload. A fresh matching Runtime #113/#94 drain report
-releases the replacement; an expired deadline blocks and requires intervention.
+Enrollment commits a private-only bundle without contacting Cloudflare. The
+worker creates or recovers a tunnel, source token, an Access application covering
+both hostnames and a Service Auth-only policy. It installs audience-validating
+ingress before publishing routing. Managed Node configuration changes drain the
+existing workload before replacement; an expired deadline requires intervention.
 Token-generation changes replace the connector; remote-only ingress changes do
-not unnecessarily restart it.
-Private machines outside managed rollout retain their existing update behavior
-while provisioning is disabled. Cancelling an endpoint change releases its drain;
+not unnecessarily restart it. Cancelling an endpoint change releases its drain;
 retrying the same unfinished target preserves the original deadline.
 
 After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
@@ -171,10 +151,6 @@ Confirmed unsafe Access protection disables routes until verified protection is 
 A rollback uses a new
 generation and the prior restrictive settings; it never restores a revoked
 credential. Account/zone/team changes require retiring the previous scope first.
-Retain migrations 004 and 008 and their enrollment/resource/certificate ledgers during software rollback;
-never run their down migrations while owned resources or terminal delivery remain.
-An older API that understands only legacy HMAC credentials cannot serve modern
-enrollments; rollback to a compatible release rather than changing their verifier.
 Domain replacements drain and retain predecessor discovery protection until
 the new source is acknowledged.
 
@@ -202,11 +178,9 @@ security rotations proceed even when Runtime is offline; `RotationReason`
 reports rotation separately from observation expiry. See
 [Access service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
 
-Ordinary removal stages drain and withdraws readiness. Runtime #113/#94 must
-coordinate admission withdrawal and report drained for that generation. An expired drain deadline remains
-blocked even if a late completion arrives. An administrator can start a fresh,
-audited drain generation with `drain/retry`, or deliberately remove with
-`force:true`. Legacy credentials require refresh or explicit force removal.
+Ordinary removal withdraws readiness and waits for draining. An expired drain
+deadline remains blocked even if a late completion arrives. An administrator can
+start a fresh drain with `drain/retry`, or deliberately remove with `force:true`.
 Deletion denies token delivery, installs deny-only ingress, revokes connector
 authentication before disconnecting, deletes DNS/tunnel resources before Access protection,
 and revokes source tokens.
@@ -214,7 +188,7 @@ Cleanup proceeds even with the machine offline. A new epoch cannot reuse stable
 hostnames until the predecessor's external cleanup is complete.
 
 The terminal artifact prunes the connector and orchestrator and delivers app-removal
-intents; the Runtime lifecycle consumer (#113) cleans up assigned apps.
+intents; Runtime cleans up assigned apps.
 Bootstrap namespaces/Secrets, retained PV/PVC and shared upgrade controller/CRDs
 remain, with no active upgrade Plan. Terminal delivery persists through local
 acknowledgement; authentication/fetch errors never mean removal. Verify provider
@@ -222,48 +196,16 @@ absence separately from local cleanup.
 
 ## Integration agreements and release evidence
 
-App assignments use the [delivery and cleanup contract](app-registry.md#runtime-delivery-and-completion-contract).
-Normal removal and terminal removal acknowledgement require app cleanup by the
-Runtime lifecycle consumer (#113). Runtime #113/#94 owns admission, destination
-grants, drain policy, deadlines and workload pruning. #114 supplies collision-safe DNS-label
-registration IDs (at most 63 lowercase characters), private `proxy=true`
-RunnerURLs, literal IP/IP:port/CIDR RunnerGrants, registration observations and
-compatible SDK/Node images.
-Do not claim end-to-end private application readiness before that integration.
+App assignments follow the [delivery and cleanup contract](app-registry.md#runtime-delivery-and-completion-contract).
+Before production, test with compatible Node and SDK images and two machines:
 
-#115/#116 consume `DiscoverySources`, `ResolveAccessCredential` and
-`AcknowledgeDiscovery` internally. A source includes stable ID, node/epoch,
-complete URL, lifecycle/readiness, source generation and versioned credential
-reference. `verified_generation` records the last approved source generation;
-admit a new generation only when ready. Previously admitted offline generations
-remain subject to #116's policy. Resolve an immutable snapshot only in authorized backend code. Send
-both Access headers on every collection request. Install replacements with a
-concurrency-safe wrapper or stop/join/recreate Collector, then acknowledge only
-after successful collection with that snapshot. #116 owns deployment/offline
-eviction. Add an authenticated resolution API only if deployment separation
-requires one. No Node CLI authentication extension is required.
-
-Simulated provider, database and local TLS/socket tests verify lifecycle,
-encryption, fencing, lost-response recovery, references, rollout ordering and
-protected delivery. They do not establish Cloudflare edge security. Before
-advertising a production source, record in #112/#118:
-
-1. Additive migrations/API with provisioning disabled; built connector digest;
-   disposable Runtime upgrade and actual Flux pruning/retained-object evidence.
-2. Pinned cloudflared + real Node/private app fixtures proving actual Host,
-   reservation/payment/control/callback URLs and every client route/method.
-3. Real edge **and direct-origin** bypass matrix: encoded/double-encoded
-   separators, dot segments, repeated slashes, backslashes, mixed-case escapes,
-   trailing slashes, prefixes, aliases, malformed wildcard hosts and redirects.
-   Any bypass blocks rollout and requires an architecture decision.
-4. Two machines with distinct stable tunnel UUIDs, isolated Access credentials,
-   API/discovery/generated-host TLS before apps exist, and private gVisor targets.
-   Missing/invalid/expired/revoked/wrong-source Access credentials must fail.
-5. Restart/reboot, provider/API outages, partial creates, rotations/expiry,
-   updates and offline removal; sanitized timelines, generations, inventories,
-   external absence and no orphaned owned resources. Test actual CNI/DNAT,
-   NodePort/host-port, direct Pod/Service and IPv6 attempts.
-6. #96 HTTP/SSE/WebSocket performance criteria. Public Trickle remains denied.
+1. Verify Cloudflare Access, DNS and TLS, including rejection of invalid or revoked
+   credentials and attempts to bypass the tunnel directly.
+2. Exercise Node routing to private gVisor apps, including session, payment and
+   application paths. Test HTTP, SSE and WebSocket performance.
+3. Test restart, reboot, provider and API outages, rotation, updates and offline
+   removal. Check local and provider cleanup, and test actual CNI/DNAT, NodePort,
+   host-port, direct Pod/Service and IPv6 access.
 
 Cloudflared normalization affects matching and can differ from the forwarded
 path; configuration inspection is not isolation evidence. Review Cloudflare

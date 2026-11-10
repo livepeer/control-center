@@ -1,4 +1,4 @@
-// Package migrations ports livepeer/node's embedded, checksum-verified SQL migrations to PostgreSQL.
+// Package migrations applies embedded, checksum-verified SQL migrations to PostgreSQL.
 package migrations
 
 import (

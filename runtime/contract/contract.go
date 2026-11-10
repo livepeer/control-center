@@ -3,10 +3,7 @@ package contract
 
 import "time"
 
-const BundleFormat = 2
-
-// SystemBundleFormat adds sibling system reconciliation and scoped management sockets.
-const SystemBundleFormat = 3
+const BundleFormat = 3
 
 type Metadata struct {
 	NodeID                  string    `json:"node_id"`
@@ -67,7 +64,6 @@ type InstanceStatus struct {
 	Reason               string       `json:"reason,omitempty"`
 	Deadline             time.Time    `json:"deadline,omitempty"`
 	Forced               bool         `json:"forced,omitempty"`
-	CancelAttemptAt      time.Time    `json:"cancel_attempt_at,omitempty"`
 	RemovalPublishedAt   time.Time    `json:"removal_published_at,omitempty"`
 	TerminatedAt         time.Time    `json:"terminated_at,omitempty"`
 	RunnerID             string       `json:"runner_id,omitempty"`
@@ -85,7 +81,7 @@ type InstanceStatus struct {
 const MaxStatusBytes = 128 << 10
 
 // StageIdentity keeps an artifact's original intent independent of newer input.
-// Generation zero means the historical generation is unknown.
+// Generation zero means the source generation is unknown.
 type StageIdentity struct {
 	Generation     int64  `json:"generation"`
 	AppsDigest     string `json:"apps_digest,omitempty"`

@@ -85,15 +85,14 @@ func TestReportRetriesUnchangedAndRefreshesAtCadence(t *testing.T) {
 	}
 }
 
-func TestIdleUnknownCapabilitiesAndClockFaultDoNotInventWorkProof(t *testing.T) {
-	c, input, _, o, r, now := fixtureController(t)
+func TestIdleOwnerAndClockFaultDoNotInventWorkProof(t *testing.T) {
+	c, input, _, _, r, now := fixtureController(t)
 	empty := testutil.Assignment(t)
 	empty.Entries = empty.Entries[:0]
 	input.set(t, empty)
-	o.caps = &Capabilities{}
 	tick(t, c)
 	if !r.reports[len(r.reports)-1].Ready {
-		t.Fatal("idle owner required capability negotiation")
+		t.Fatal("idle owner reported a fault")
 	}
 	input.value.Metadata.DrainRequested = true
 	input.value.Metadata.DrainTarget = artifact.Digest([]byte("target"))
@@ -119,7 +118,7 @@ func TestRetainedHeartbeatCountsDoNotBecomeWithdrawalProof(t *testing.T) {
 		s.Instances["retained"] = &Instance{ID: "retained", AppID: "app", PodUID: "uid", WithdrawalID: "withdrawal", Phase: "removed"}
 		return nil
 	})
-	obs := Observation{RunnerID: "owner", PreviousCredential: "issued", ReservedSequence: 1, Sequence: 1, Hash: "hash", Epoch: "epoch", At: *now, TTL: time.Minute, Capabilities: Capabilities{true, true, true}, Apps: []AppObservation{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}}}
+	obs := Observation{RunnerID: "owner", PreviousCredential: "issued", ReservedSequence: 1, Sequence: 1, Hash: "hash", Epoch: "epoch", At: *now, TTL: time.Minute, Apps: []AppObservation{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}}}
 	if err := c.observe(obs); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +142,7 @@ func TestReportBudgetPreservesProofAndOmissionCounts(t *testing.T) {
 	r := Report{Sequence: ^uint64(0), ObservedAt: time.Now(), Apps: contract.AppStatus{Instances: []contract.InstanceStatus{}, InstancesTotal: 128}, Evidence: &contract.Evidence{Target: "sha256:" + strings.Repeat("a", 64), OwnerID: strings.Repeat("x", 128), WithdrawalID: "withdrawal", ObservedAt: time.Now(), ExpiresAt: time.Now().Add(time.Second)}}
 	proof := *r.Evidence
 	for n := 0; n < 128; n++ {
-		r.Apps.Instances = append(r.Apps.Instances, contract.InstanceStatus{InstanceID: fmt.Sprint(n), AppID: strings.Repeat("a", 128), RunnerID: strings.Repeat("r", 128), PodUID: strings.Repeat("p", 128), Reason: strings.Repeat("e", 128), WorkloadReason: strings.Repeat("w", 128), RevisionID: strings.Repeat("b", 36), NodeObservedAt: time.Now(), NodeExpiresAt: time.Now().Add(time.Minute), StartupDeadline: time.Now(), Deadline: time.Now(), CancelAttemptAt: time.Now(), TerminatedAt: time.Now(), RemovalPublishedAt: time.Now(), DrainExpiredAt: time.Now()})
+		r.Apps.Instances = append(r.Apps.Instances, contract.InstanceStatus{InstanceID: fmt.Sprint(n), AppID: strings.Repeat("a", 128), RunnerID: strings.Repeat("r", 128), PodUID: strings.Repeat("p", 128), Reason: strings.Repeat("e", 128), WorkloadReason: strings.Repeat("w", 128), RevisionID: strings.Repeat("b", 36), NodeObservedAt: time.Now(), NodeExpiresAt: time.Now().Add(time.Minute), StartupDeadline: time.Now(), Deadline: time.Now(), TerminatedAt: time.Now(), RemovalPublishedAt: time.Now(), DrainExpiredAt: time.Now()})
 	}
 	if err := boundReport(&r); err != nil {
 		t.Fatal(err)

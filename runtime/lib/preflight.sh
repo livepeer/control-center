@@ -4,16 +4,7 @@
 owned_pid() { [[ -r "/proc/$1/cgroup" ]] && grep -q '/livepeer-k3s.service' "/proc/$1/cgroup"; }
 
 managed_installation() {
-  local marker="$INSTALL_DIR/state"
-  if [[ -f "$marker/install-dir" ]]; then
-    [[ "$(cat "$marker/install-dir")" == "$INSTALL_DIR" ]]
-  elif [[ -f "$marker/installation.json" ]]; then
-    # Compatibility with the first installer; this fixed shape needs no JSON tool.
-    [[ "$(tr -d '[:space:]' < "$marker/installation.json")" == \
-      "{\"schema\":1,\"install_dir\":\"$INSTALL_DIR\"}" ]]
-  else
-    return 1
-  fi
+  [[ -f "$INSTALL_DIR/state/install-dir" && "$(cat "$INSTALL_DIR/state/install-dir")" == "$INSTALL_DIR" ]]
 }
 
 check_resources() {
@@ -78,11 +69,10 @@ check_existing_installation() {
   MANAGED=0
   if managed_installation; then
     MANAGED=1
-  elif [[ -e "$INSTALL_DIR/state/install-dir" || -e "$INSTALL_DIR/state/installation.json" ]]; then
+  elif [[ -e "$INSTALL_DIR/state/install-dir" ]]; then
     die 'incompatible installation marker'
   elif [[ -d "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR")" ]]; then
-    empty_bootstrap_layout || die 'installation directory is nonempty and has no installation marker'
-    log 'Recovering an interrupted initialization containing only known empty bootstrap directories.'
+    die 'installation directory is nonempty and has no installation marker'
   fi
   for service in "$UNIT" livepeer-firewall.service; do
     path="/etc/systemd/system/$service"

@@ -125,7 +125,7 @@ func (s Store) Report(ctx context.Context, m Machine, component string) (Report,
 	if err == nil {
 		err = json.Unmarshal(raw, &r)
 		at = ObservationTime(r, at)
-		if r.ReportVersion > 0 && component == "connector" && (r.ConnectorObservedAt.IsZero() || !time.Now().Before(r.ConnectorExpiresAt)) {
+		if component == "connector" && (r.ConnectorObservedAt.IsZero() || !time.Now().Before(r.ConnectorExpiresAt)) {
 			at = time.Time{}
 		}
 	}

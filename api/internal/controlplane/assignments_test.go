@@ -39,17 +39,15 @@ func appBundle(t *testing.T, s *Server, c map[string]string) (schema.AppAssignme
 	w := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
 	requireStatus(t, w, 200)
 	files := archiveFiles(t, w.Body.Bytes())
-	var manifest struct {
-		Data map[string]string `json:"data"`
+	intent := []byte(files["app-desired/intent.json"])
+	if len(intent) == 0 {
+		t.Fatalf("missing app intent: runtime metadata %s", files["runtime.json"])
 	}
-	if err := json.Unmarshal([]byte(files[schema.AppAssignmentsFile]), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	set, err := schema.DecodeAssignmentSet([]byte(manifest.Data["desired.json"]))
+	set, err := schema.DecodeAssignmentSet(intent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return set, schema.Digest([]byte(manifest.Data["desired.json"])), files
+	return set, schema.Digest(intent), files
 }
 func appReport(t *testing.T, s *Server, c map[string]string, a schema.AppAssignment, digest, phase string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -74,6 +72,9 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	adminA(t, s)
 	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	other := enroll(t, s, ownerB, strings.Repeat("b", 64))
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	before := request(t, s, "GET", "/v1/nodes/"+other["node_id"]+"/config", other["token"], nil).Header().Get("ETag")
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	requireStatus(t, putApp(t, s, c, r, 0, 2), 202)
@@ -125,7 +126,7 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	if !target.StartAllowed || target.Generation != 1 || target.ActivationGeneration != 1 {
 		t.Fatal("cleanup did not release target")
 	}
-	if files["orchestrator.yaml"] != afterFiles["orchestrator.yaml"] {
+	if files["system/node/orchestrator.yaml"] != afterFiles["system/node/orchestrator.yaml"] {
 		t.Fatal("assignment edit replaced Node")
 	}
 	requireStatus(t, appReport(t, s, c, source, blockedDigest, "removed"), 200)
@@ -365,7 +366,7 @@ func TestAssignmentsPreserveTunnelReadiness(t *testing.T) {
 	if err != nil || !after.Ready || after.Generation != ready.Generation || after.SourceGeneration != ready.SourceGeneration {
 		t.Fatal("app assignment invalidated tunnel", after, err)
 	}
-	if strings.Contains(files["tunnel.yaml"], "apps_generation") {
+	if strings.Contains(files["system/connector/tunnel.yaml"], "apps_generation") {
 		t.Fatal("app metadata leaked into connector config")
 	}
 	sources, err := s.tunnels.DiscoverySources(t.Context())

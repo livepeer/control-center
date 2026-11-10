@@ -3,6 +3,8 @@
 ## Installation
 
 Copy `api/config.example.toml` to `api/config.toml` and create its secret files.
+Build and publish the Runtime image, then set `RuntimeImage` to its digest as
+described in the [Runtime prerequisites](../runtime/README.md#prerequisites).
 In the [Supabase authentication dashboard](https://supabase.com/dashboard),
 enable the sign-in methods you plan to use and allow
 `http://localhost:5173/auth/callback` as a redirect URL. Authentication and the
@@ -65,8 +67,7 @@ for definition settings and pricing policy. Catalog changes alone do not assign
 or deploy applications. In the fleet, use **Manage apps** for revision-pinned
 assignments, replica edits and sequential replacement/removal. Runtime completion
 is separate from current health; see the registry guide for the delivery and
-cleanup contract. Without the Runtime lifecycle consumer (#113), reassignment after
-removal and normal machine removal remain pending.
+cleanup contract.
 
 ## Machine ingress
 

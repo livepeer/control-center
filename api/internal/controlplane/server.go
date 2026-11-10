@@ -241,8 +241,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, s.machineCredentials(m))
 }
 
-func (s *Server) machineCredentials(m Machine) map[string]string {
-	return map[string]string{"node_id": m.NodeID, "epoch": m.Epoch, "credential_version": strconv.FormatInt(m.CredentialVersion, 10), "token": s.enrollmentToken(m), "config_url": strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/config"}
+func (s *Server) machineCredentials(m Machine) map[string]any {
+	return map[string]any{"node_id": m.NodeID, "epoch": m.Epoch, "credential_version": m.CredentialVersion, "token": s.enrollmentToken(m), "config_url": strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/config"}
 }
 
 func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {

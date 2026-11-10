@@ -76,7 +76,7 @@ func (s *Server) requestReconcile() {
 	}
 }
 
-// Adapt #112's ledger and protected resolver. The discovery subsystem never
+// Adapt the tunnel ledger and protected resolver. The discovery subsystem never
 // imports controlplane or obtains the server's other credentials/provider client.
 type discoveryStore struct{ server *Server }
 

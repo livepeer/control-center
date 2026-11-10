@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	"errors"
-	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -22,12 +21,10 @@ type Config struct {
 	CloudflareAPITokenFile    string        `env:"CLOUDFLARE_API_TOKEN_FILE" secretfor:"CloudflareAPIToken" basepath:"source" descr:"Private provisioning credential file"`
 	CloudflareKeyring         string        `env:"CLOUDFLARE_KEYRING" secret:"true" optional:"true" descr:"Access-secret encryption keyring JSON"`
 	CloudflareKeyringFile     string        `env:"CLOUDFLARE_KEYRING_FILE" secretfor:"CloudflareKeyring" basepath:"source" descr:"Private encryption keyring file"`
-	CloudflareConnectorImage  string        `env:"CLOUDFLARE_CONNECTOR_IMAGE" optional:"true" descr:"Built Runtime connector image pinned by sha256 digest"`
 	CloudflareAccessLifetime  time.Duration `env:"CLOUDFLARE_ACCESS_LIFETIME" optional:"true" descr:"Required Access service-token lifetime"`
 	CloudflareRotateBefore    time.Duration `env:"CLOUDFLARE_ROTATE_BEFORE" optional:"true" descr:"Required renewal window"`
 	TunnelStatusTTL           time.Duration `env:"TUNNEL_STATUS_TTL" optional:"true" descr:"Maximum age of Runtime readiness observations"`
 	TunnelDrainTimeout        time.Duration `env:"TUNNEL_DRAIN_TIMEOUT" optional:"true" descr:"Drain deadline; expiry blocks ordinary activation"`
-	TunnelPrivateControlCIDRs []string      `env:"TUNNEL_PRIVATE_CONTROL_CIDRS" optional:"true" descr:"Explicit private HTTPS Control Center network exceptions"`
 	TunnelNodeAddresses       []string      `env:"TUNNEL_NODE_ADDRESSES" optional:"true" descr:"Node/management addresses excluded from connector public egress"`
 }
 
@@ -48,22 +45,13 @@ func (p Config) Validate(api string) error {
 	if p.CloudflareAccessLifetime <= 0 || p.CloudflareRotateBefore <= 0 || p.CloudflareRotateBefore >= p.CloudflareAccessLifetime || p.TunnelStatusTTL < 2*time.Minute || p.TunnelDrainTimeout <= 0 {
 		return errors.New("configure tunnel status TTL of at least two minutes, positive drain limit and Access lifetime/rotation window")
 	}
-	if !machineconfig.ValidConnectorImage(p.CloudflareConnectorImage) {
-		return errors.New("CloudflareConnectorImage requires an immutable sha256 digest")
-	}
-	for _, raw := range append(append([]string{}, p.TunnelPrivateControlCIDRs...), p.TunnelNodeAddresses...) {
+	for _, raw := range p.TunnelNodeAddresses {
 		if _, e := netip.ParsePrefix(raw); e != nil {
 			return errors.New("tunnel network exceptions/exclusions require literal CIDRs")
 		}
 	}
 	if len(p.TunnelNodeAddresses) == 0 {
 		return errors.New("configure the fleet node/management address exclusions before enabling tunnels")
-	}
-	for _, raw := range p.TunnelPrivateControlCIDRs {
-		prefix, _ := netip.ParsePrefix(raw)
-		if !prefix.Addr().IsPrivate() || prefix.Bits() != prefix.Addr().BitLen() {
-			return errors.New("private Control Center exceptions must be individual private /32 or /128 addresses")
-		}
 	}
 	return nil
 }

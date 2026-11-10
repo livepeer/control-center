@@ -66,7 +66,7 @@ data:
     BootstrapSecretFile = "/credentials/secret"
     HeartbeatInterval = "5s"
     HeartbeatTTL = "30s"
-    RunnerGrants = []
+    RunnerGrants = ["10.43.0.0/16"]
     HealthGrants = []
     SessionProxyGrants = []
 ---

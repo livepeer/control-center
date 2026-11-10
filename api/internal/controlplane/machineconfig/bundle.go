@@ -3,10 +3,8 @@ package machineconfig
 import (
 	"bytes"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/runtime/artifact"
-	"github.com/livepeer/control-center/schema"
 	"io/fs"
 	"strings"
 )
@@ -43,27 +41,8 @@ func Build(m Desired) ([]byte, string, error) {
 	if err = addRoutingBundle(files, m); err != nil {
 		return nil, "", err
 	}
-	if m.BundleFormat >= 2 {
-		if err := addManagedApps(files, m); err != nil {
-			return nil, "", err
-		}
-	} else if m.Apps != nil {
-		manifest, appsDigest, err := schema.AssignmentConfigMap(*m.Apps)
-		if err != nil {
-			return nil, "", err
-		}
-		files[schema.AppAssignmentsFile] = manifest
-		// Add to resources before the existing patches section.
-		files["kustomization.yaml"] = []byte(strings.Replace(string(files["kustomization.yaml"]), "patches:", "- "+schema.AppAssignmentsFile+"\npatches:", 1))
-		var runtime Runtime
-		if err := json.Unmarshal(files["runtime.json"], &runtime); err != nil {
-			return nil, "", err
-		}
-		runtime.AppsGeneration, runtime.AppsDigest = m.Apps.Generation, appsDigest
-		files["runtime.json"], err = json.Marshal(runtime)
-		if err != nil {
-			return nil, "", err
-		}
+	if err := addManagedApps(files, m); err != nil {
+		return nil, "", err
 	}
 	if err = addSystemWorkloads(files, m); err != nil {
 		return nil, "", err

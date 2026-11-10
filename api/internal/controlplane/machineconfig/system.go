@@ -73,49 +73,19 @@ func kustomize(resources ...string) []byte {
 	return []byte(text)
 }
 
-// addSystemWorkloads partitions centrally rendered resources into sibling inventories.
+// addSystemWorkloads defines independent inventories for management workloads.
 func addSystemWorkloads(files map[string][]byte, m Desired) error {
-	if m.BundleFormat < 3 {
-		return nil
-	}
 	for _, prefix := range []string{"", "terminal-cleanup/"} {
 		if files[prefix+"runtime.json"] == nil {
 			continue
 		}
-		root := string(files[prefix+"management/kustomization.yaml"])
-		_, patches, _ := strings.Cut(root, "patches:\n")
-		move := func(old, target string) {
-			if b, ok := files[prefix+old]; ok {
-				files[prefix+target] = b
-				delete(files, prefix+old)
-			}
-		}
-		move("management/orchestrator.yaml", "system/node/orchestrator.yaml")
 		files[prefix+"system/node/network.yaml"] = []byte(nodeNetwork())
 		files[prefix+"system/node/kustomization.yaml"] = kustomize("orchestrator.yaml", "network.yaml")
-		move("management/suc-crd.yaml", "system/upgrade-controller/suc-crd.yaml")
-		move("management/suc.yaml", "system/upgrade-controller/suc.yaml")
-		files[prefix+"system/upgrade-controller/kustomization.yaml"] = append(kustomize("suc-crd.yaml", "suc.yaml"), []byte("patches:\n"+patches)...)
 		connectorResources := []string{}
-		if files[prefix+"management/tunnel.yaml"] != nil {
-			move("management/tunnel.yaml", "system/connector/tunnel.yaml")
-			network, _, _ := strings.Cut(string(files[prefix+"management/tunnel-network.yaml"]), "---\n")
-			files[prefix+"system/connector/network.yaml"] = []byte(network)
+		if files[prefix+"system/connector/tunnel.yaml"] != nil {
 			connectorResources = []string{"tunnel.yaml", "network.yaml"}
 		}
-		delete(files, prefix+"management/tunnel-network.yaml")
 		files[prefix+"system/connector/kustomization.yaml"] = kustomize(connectorResources...)
-		support, workload, found := strings.Cut(string(files[prefix+"management/app-reconciler.yaml"]), "---\napiVersion: apps/v1\nkind: Deployment\n")
-		if !found {
-			return fmt.Errorf("missing App Reconciler deployment")
-		}
-		workload = "apiVersion: apps/v1\nkind: Deployment\n" + workload
-		workload = strings.Replace(workload, "        - --token-file\n        - /credentials/token", "        - --management-socket\n        - /management/control.sock", 1)
-		workload = strings.Replace(workload, "        - {name: state, mountPath: /state}", "        - {name: state, mountPath: /state}\n        - {name: management, mountPath: /management, readOnly: true}", 1)
-		workload = strings.Replace(workload, "      - name: credentials\n        secret: {secretName: livepeer-service-auth, defaultMode: 288}", "      - name: credentials\n        secret:\n          secretName: livepeer-service-auth\n          defaultMode: 288\n          items:\n          - {key: identity.json, path: identity.json}\n          - {key: config-url, path: config-url}\n      - name: management\n        hostPath: {path: '"+m.InstallDir+"/volumes/management-sockets/apps', type: Directory}", 1)
-		files[prefix+"system/app-reconciler/workload.yaml"] = []byte(workload)
-		files[prefix+"system/app-reconciler/kustomization.yaml"] = kustomize("workload.yaml")
-		files[prefix+"management/app-reconciler.yaml"] = []byte(support)
 		upgradeDependency := "livepeer-upgrade-controller"
 		if m.Terminal {
 			upgradeDependency = "livepeer"

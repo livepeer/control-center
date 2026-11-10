@@ -22,7 +22,6 @@ import urllib.request
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'bootstrap-livepeer.sh'
 PROJECT = SCRIPT.parent
-sys.path.insert(0, str(PROJECT / 'services'))
 try:
     import yaml
 except ImportError:
@@ -145,7 +144,7 @@ LIVEPEER_RUNTIME_IMAGE=$RUNTIME_IMAGE
 curl() {
   local digest
   digest=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
-  printf '{"node_id":"lp-%s","token":"%s","config_url":"%s"}' "${digest:0:16}" "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/lp-${digest:0:16}/config}"
+  printf '{"node_id":"lp-%s","token":"%s","config_url":"%s","epoch":"11111111-1111-4111-8111-111111111111","credential_version":1}' "${digest:0:16}" "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/lp-${digest:0:16}/config}"
   printf '\\n200'
 }
 '''
@@ -334,7 +333,8 @@ class EnrollmentHTTPTests(TempTest):
                 received['body'] = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 fingerprint = received['body']['fingerprint']
                 response = {'node_id': 'lp-' + fingerprint[:16], 'token': 'c' * 64,
-                            'config_url': 'https://api.example/v1/nodes/lp-' + fingerprint[:16] + '/config'}
+                            'config_url': 'https://api.example/v1/nodes/lp-' + fingerprint[:16] + '/config',
+                            'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(json.dumps(response).encode())
@@ -470,21 +470,23 @@ check_ports
 class RecoveryTests(TempTest):
     shell = ShellTests.shell
 
-    def test_failure_before_marker_publication_can_resume(self):
-        target = self.root / 'install'
-        failed = self.shell('''INSTALL_DIR="$1"
-atomic_write() { cat >/dev/null; exit 71; }
+    def test_interrupted_publication_resumes_for_absent_and_empty_root(self):
+        for existing in (False, True):
+            target = self.root / ('empty' if existing else 'absent')
+            if existing:
+                target.mkdir()
+            failed = self.shell('''INSTALL_DIR="$1"
+mv() { if [[ "${*: -1}" == "$INSTALL_DIR" ]]; then exit 71; fi; command mv "$@"; }
 initialize_installation
 ''', str(target))
-        self.assertEqual(failed.returncode, 71)
-        self.assertFalse(target.exists())
-        result = self.shell('INSTALL_DIR="$1"; initialize_installation; managed_installation', str(target))
-        self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(failed.returncode, 71, failed.stderr)
+            self.assertFalse(target.exists())
+            result = self.shell('INSTALL_DIR="$1"; initialize_installation; managed_installation', str(target))
+            self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_empty_legacy_layout_recovers_but_never_adopts_data(self):
+    def test_empty_directory_initializes_and_nonempty_directory_is_preserved(self):
         target = self.root / 'install'
-        (target / 'k3s/agent/etc/containerd').mkdir(parents=True)
-        (target / 'credentials').mkdir()
+        target.mkdir()
         result = self.shell('INSTALL_DIR="$1"; initialize_installation; managed_installation', str(target))
         self.assertEqual(result.returncode, 0, result.stderr)
         other = self.root / 'unowned'
@@ -701,10 +703,6 @@ stage_manifests
         for path in (self.root / 'manifests').rglob('*.yaml'):
             self.assertNotRegex(path.read_text(), r'@[A-Z_]+@')
         self.assertFalse((self.root / 'desired').exists())
-        self.assertFalse((self.root / 'services/mock_service.py').exists())
-        self.assertFalse((self.root / 'services/http_source.py').exists())
-        self.assertFalse((self.root / 'services/tunnel_broker.py').exists())
-        self.assertFalse((self.root / 'bin/bootstrap-helper.py').exists())
         self.assertNotIn((self.root / 'credentials/service-token').read_text(),
                          (self.root / 'manifests/bootstrap/deployments.yaml').read_text())
 
@@ -723,33 +721,28 @@ stage_manifests
         self.assertIn('http://api.example/v1/nodes/', deployment)
         self.assertNotIn('name: livepeer-config', deployment)
 
-    def test_bootstrap_preserves_managed_upgrade_prerequisite_and_waits_for_creation(self):
+    def test_bootstrap_waits_for_workload_creation_before_rollout(self):
         flux = self.root / 'bin/flux'
         flux.write_text('#!/bin/sh\nprintf "kind: List\\nitems: []\\n"\n')
         flux.chmod(0o755)
-        for managed in ('true', ''):
-            steps = self.root / 'cluster-steps'
-            steps.unlink(missing_ok=True)
-            result = self.shell('''INSTALL_DIR="$1"
-UPGRADE_MANAGED="$2"
+        steps = self.root / 'cluster-steps'
+        steps.unlink(missing_ok=True)
+        result = self.shell('''INSTALL_DIR="$1"
 install_machine_secret() { :; }
 kube() {
   printf '%s\\n' "$*" >> "$INSTALL_DIR/cluster-steps"
   if [[ "$*" == 'get nodes -o name' ]]; then printf 'node/test-node'; fi
-  if [[ "$*" == *'get kustomization/livepeer-upgrade-plan'* ]]; then printf '%s' "$UPGRADE_MANAGED"; fi
   if [[ "$*" == *'create secret generic'* ]]; then printf '{}'; fi
   if [[ "$*" == 'apply -f -' ]]; then cat >/dev/null; fi
 }
 bootstrap_cluster
-''', str(self.root), managed)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            calls = steps.read_text().splitlines()
-            seed = 'apply -f ' + str(self.root / 'manifests/upgrade-reconciliation.yaml')
-            self.assertEqual(seed in calls, managed != 'true')
-            for namespace, name in (('system-upgrade', 'system-upgrade-controller'), ('livepeer', 'orchestrator')):
-                creation = f'-n {namespace} wait --for=create deployment/{name} --timeout=300s'
-                rollout = f'-n {namespace} rollout status deployment/{name} --timeout=300s'
-                self.assertLess(calls.index(creation), calls.index(rollout))
+''', str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = steps.read_text().splitlines()
+        for namespace, name in (('system-upgrade', 'system-upgrade-controller'), ('livepeer', 'orchestrator')):
+            creation = f'-n {namespace} wait --for=create deployment/{name} --timeout=300s'
+            rollout = f'-n {namespace} rollout status deployment/{name} --timeout=300s'
+            self.assertLess(calls.index(creation), calls.index(rollout))
 
     def test_failed_firewall_activation_stops_k3s(self):
         result = self.shell('''INSTALL_DIR="$1"
