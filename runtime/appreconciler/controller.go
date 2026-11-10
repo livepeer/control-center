@@ -96,13 +96,23 @@ func (c *Controller) observe(o Observation) error {
 				}
 			}
 		}
-		// Identity updates remain valuable when SetApps supersedes the work snapshot.
+		// Persist identities even when SetApps superseded the submitted snapshot.
 		for _, e := range o.Entries {
 			i := s.Instances[e.InstanceID]
-			if i == nil || i.PodUID != e.PodUID || contract.ReservedProxyID(e.Options.ID) || (i.AppID != "" && i.AppID != e.Options.ID) {
+			if i == nil || i.PodUID != e.PodUID || contract.ReservedProxyID(e.Options.ID) {
 				return errors.New("app_identity")
 			}
-			i.AppID = e.Options.ID
+			if len(i.Definition.Apps) > 0 {
+				if e.AppIndex < 0 || e.AppIndex >= len(i.Definition.Apps) || e.Options.ID != appID(i, e.AppIndex) {
+					return errors.New("app_identity")
+				}
+				i.AppID = appID(i, 0)
+			} else {
+				if i.AppID != "" && i.AppID != e.Options.ID {
+					return errors.New("app_identity")
+				}
+				i.AppID = e.Options.ID
+			}
 			i.RegistrationPending = false
 		}
 		if s.Identity.Retiring || !o.Accepted || o.Bootstrap || changed || s.ClockUncertain {
@@ -121,14 +131,18 @@ func (c *Controller) observe(o Observation) error {
 		}
 		for _, i := range s.Instances {
 			if i.AppID != "" {
-				known[i.AppID] = true
+				for n := range appCount(i.Definition) {
+					known[appID(i, n)] = true
+				}
 			}
 		}
-		for _, a := range o.Apps {
-			for id, i := range s.Instances {
-				if i.AppID == a.ID {
-					proofs[id] = proof{Observation: o, App: a}
-				}
+		byID := map[string]AppObservation{}
+		for _, app := range o.Apps {
+			byID[app.ID] = app
+		}
+		for id, i := range s.Instances {
+			if app, observed := aggregateObservation(i, byID); observed {
+				proofs[id] = proof{Observation: o, App: app}
 			}
 		}
 		for _, e := range o.Entries {
@@ -144,12 +158,23 @@ func (c *Controller) observe(o Observation) error {
 			}
 		}
 		if !o.At.After(c.now().Add(time.Second)) && c.now().Before(o.At.Add(o.TTL)) {
+			omitted := map[string]map[string]bool{}
 			for _, e := range o.Withdrawals {
 				i := s.Instances[e.InstanceID]
 				if i == nil || i.WithdrawalID != e.WithdrawalID || i.PodUID != e.PodUID || i.WithdrawalID == "" {
 					continue
 				}
-				if (i.AppID != "" && !seen[i.AppID]) || (i.AppID == "" && !unknown) {
+				if len(i.Definition.Apps) > 0 && !ownsAppID(i, e.Options.ID) {
+					continue
+				}
+				if omitted[i.ID] == nil {
+					omitted[i.ID] = map[string]bool{}
+				}
+				omitted[i.ID][e.Options.ID] = true
+			}
+			for id, aliases := range omitted {
+				i := s.Instances[id]
+				if len(aliases) == appCount(i.Definition) && registrationsAbsent(i, seen) && (i.AppID != "" || !unknown) {
 					i.RegistrationGone = true
 					i.RegistrationPending = false
 				}
@@ -312,7 +337,11 @@ func (c *Controller) Tick(ctx context.Context) error {
 			}
 		}
 		if !maintenance && !s.Identity.Retiring {
-			for _, g := range s.Payload.Index.Groups {
+			groups := append([]appbundle.Group(nil), s.Payload.Index.Groups...)
+			sort.SliceStable(groups, func(i, j int) bool {
+				return assignments[groups[i].RevisionID].Replacement != nil && assignments[groups[j].RevisionID].Replacement == nil
+			})
+			for _, g := range groups {
 				a := assignments[g.RevisionID]
 				if !a.StartAllowed {
 					s.AssignmentReasons[a.RevisionID] = "cleanup_prerequisite"
@@ -348,7 +377,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 						}
 					}
 				}
-				if !archiveRoom || bytes > appbundle.MaxRenderedBytes || count >= appbundle.MaxInstances || !fits(s.Instances, a.Revision.Definition, view.Budget) {
+				if !archiveRoom || bytes > appbundle.MaxRenderedBytes || count >= appbundle.MaxInstances || retainedRegistrations(s.Instances)+appCount(a.Revision.Definition) > schema.MaxRegistrations || !fits(s.Instances, a.Revision.Definition, view.Budget) {
 					s.SchedulingReason = "resource_refused"
 					s.AssignmentReasons[a.RevisionID] = "resource_refused"
 					continue
@@ -556,12 +585,11 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 	for _, id := range instanceIDs(&s) {
 		i := s.Instances[id]
 		live = live || i.Phase != "removed" || !i.RegistrationGone
-		options, err := AppOptions(i)
+		registrations, err := AppRegistrations(i, false)
 		if err != nil {
 			return err
 		}
-		entry := Registration{InstanceID: id, WithdrawalID: i.WithdrawalID, WithdrawnAt: i.WithdrawnAt, PodUID: i.PodUID, Options: options}
-		tracked = append(tracked, entry)
+		tracked = append(tracked, registrations...)
 		if i.Phase == "removed" || i.WithdrawalID != "" {
 			continue
 		}
@@ -571,9 +599,11 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 		}
 		signalOK := i.Definition.Lifecycle.StopSignal == nil || (exists && pod.StopSignal == *i.Definition.Lifecycle.StopSignal)
 		if i.AppID != "" && ready[id] && signalOK && confirmed && !s.ClockUncertain && !recovery {
-			entry.Options.Status = "ready"
+			for n := range registrations {
+				registrations[n].Options.Status = "ready"
+			}
 		}
-		entries = append(entries, entry)
+		entries = append(entries, registrations...)
 	}
 	if len(entries) == 0 && (s.Identity.RunnerID == "" || !live) {
 		if s.Identity.RunnerID == "" {

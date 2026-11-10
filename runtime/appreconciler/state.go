@@ -231,8 +231,8 @@ func (j *Journal) Eligibility(r Registration) (member, ready bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	i := j.state.Instances[r.InstanceID]
-	member = i != nil && i.PodUID == r.PodUID && i.WithdrawalID == "" && i.Phase != "removed" && !j.state.Identity.Retiring
-	return member, member && i.AppID != "" && i.AppID == r.Options.ID && i.StopVerified &&
+	member = i != nil && (len(i.Definition.Apps) == 0 || ownsAppID(i, r.Options.ID)) && i.PodUID == r.PodUID && i.WithdrawalID == "" && i.Phase != "removed" && !j.state.Identity.Retiring
+	return member, member && i.AppID != "" && ownsAppID(i, r.Options.ID) && i.StopVerified &&
 		i.Phase != "retired" && !j.state.ClockUncertain &&
 		!j.state.Metadata.DrainRequested && !j.state.Metadata.Terminal &&
 		j.state.Identity.Confirmed

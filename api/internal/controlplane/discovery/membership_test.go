@@ -12,6 +12,44 @@ import (
 	"time"
 )
 
+func TestSharedBackendMembershipRequiresEveryApp(t *testing.T) {
+	source := testSource("one", "https://source.example")
+	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	f, _ := testFleet(t, b)
+	var body atomic.Value
+	body.Store("[]")
+	f.transport.base = discoveryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body.Load().(string)))}, nil
+	})
+	reconcileFleet(t, f)
+	now := time.Now().UTC()
+	queries := []MembershipQuery{{"shared", "https://orch.example/apps/first/session", "first", "v1"}, {"shared", "https://orch.example/apps/second/session", "second", "v1"}}
+	for _, present := range [][]int{{0, 1}, {0}, {1}, {}} {
+		runners := []map[string]string{}
+		for _, n := range present {
+			q := queries[n]
+			runners = append(runners, map[string]string{"url": q.Endpoint, "app": q.App, "version": q.Version, "observed_at": now.Add(time.Duration(n-1) * time.Second).Format(time.RFC3339Nano)})
+		}
+		raw, err := json.Marshal([]any{map[string]any{"address": source.ServiceURL, "runners": runners}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body.Store(string(raw))
+		f.collector.Refresh(t.Context(), false)
+		got := f.Memberships(source.NodeID, source.Epoch, queries)["shared"]
+		want := "absent"
+		if len(present) == 2 {
+			want = "present"
+			if got.ObservedAt == nil || !got.ObservedAt.Equal(now.Add(-time.Second)) {
+				t.Fatal("membership did not retain oldest app evidence", got)
+			}
+		}
+		if got.State != want {
+			t.Fatalf("published %v: got %s, want %s", present, got.State, want)
+		}
+	}
+}
+
 func TestMembershipBindsSuccessfulSnapshotToSourceVersion(t *testing.T) {
 	source := testSource("one", "https://source.example")
 	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"old-client", "secret-sentinel"}}}

@@ -29,6 +29,27 @@ import (
 	"github.com/livepeer/control-center/schema"
 )
 
+func TestSharedAppMembershipQueries(t *testing.T) {
+	a := observedAssignment{Name: "backend", Version: "v1", DiscoveryApps: []string{"first", "second"}}
+	i := contract.InstanceStatus{InstanceID: "instance", AppID: "r-instance-0"}
+	for _, mode := range []string{"persistent", "single-shot"} {
+		a.Mode = mode
+		queries := a.membershipQueries(i, "https://orch.example", "https://{proxy}.apps.example")
+		if len(queries) != 2 {
+			t.Fatal("missing public app query", queries)
+		}
+		for n, q := range queries {
+			endpoint := fmt.Sprintf("https://orch.example/apps/r-instance-%d/session", n)
+			if mode == "single-shot" {
+				endpoint = fmt.Sprintf("https://r-instance-%d.apps.example", n)
+			}
+			if q.InstanceID != i.InstanceID || q.App != a.DiscoveryApps[n] || q.Version != a.Version || q.Endpoint != endpoint {
+				t.Fatalf("wrong app membership query: %+v", q)
+			}
+		}
+	}
+}
+
 func observationFixture(t *testing.T) (*Server, map[string]string, contract.Metadata, schema.AppAssignment) {
 	t.Helper()
 	s := newTestServer(t)

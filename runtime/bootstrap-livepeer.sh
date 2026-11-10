@@ -88,7 +88,9 @@ authenticate_node() {
     NODE_ID=$(cat "$credentials/node-id")
     SERVICE_TOKEN=$(cat "$credentials/service-token")
     CONFIG_URL=$(cat "$credentials/config-url")
-    [[ -s "$credentials/identity.json" ]] && read_identity "$(cat "$credentials/identity.json")" || die 'invalid saved enrollment identity; restore it from backup'
+    if [[ ! -s "$credentials/identity.json" ]] || ! read_identity "$(cat "$credentials/identity.json")"; then
+      die 'invalid saved enrollment identity; restore it from backup'
+    fi
   else
     [[ -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires --token TOKEN'
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
@@ -199,8 +201,14 @@ version_at_least() {
 
 write_host_configuration() {
   local changed=1
+  local containerd_config="$INSTALL_DIR/k3s/agent/etc/containerd/config-v3.toml.tmpl"
+  if [[ -f "$containerd_config" ]] && ! grep -Fq "cni_conf_dir = \"$INSTALL_DIR/config/gvisor-cni\"" "$containerd_config"; then
+    die 'The previous gVisor network layout cannot be resumed; recreate this installation first'
+  fi
+  install -d -m 0755 "$INSTALL_DIR/config/gvisor-cni"
+  render_template "$SCRIPT_DIR/config/gvisor.conflist" "$INSTALL_DIR/config/gvisor-cni/10-gvisor.conflist"
   render_template "$SCRIPT_DIR/config/runsc.toml" "$INSTALL_DIR/config/runsc.toml"
-  render_template "$SCRIPT_DIR/config/containerd.tmpl" "$INSTALL_DIR/k3s/agent/etc/containerd/config-v3.toml.tmpl"
+  render_template "$SCRIPT_DIR/config/containerd.tmpl" "$containerd_config"
   render_template "$SCRIPT_DIR/config/k3s.yaml" "$INSTALL_DIR/config/k3s.yaml"
   render_template "$SCRIPT_DIR/config/kubelet.conf" "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d/10-livepeer.conf"
   render_template "$SCRIPT_DIR/config/livepeer-k3s.service" "$INSTALL_DIR/systemd/$UNIT"
@@ -210,6 +218,7 @@ write_host_configuration() {
   atomic_binary "$SCRIPT_DIR/lib/record-version.sh" "$INSTALL_DIR/bin/livepeer-record-version"
   atomic_write "$INSTALL_DIR/lib/recovery.sh" 0644 < "$SCRIPT_DIR/lib/recovery.sh"
   sha256sum "$INSTALL_DIR/config/k3s.yaml" "$INSTALL_DIR/config/runsc.toml" \
+    "$INSTALL_DIR/config/gvisor-cni/10-gvisor.conflist" \
     "$INSTALL_DIR/k3s/agent/etc/containerd/config-v3.toml.tmpl" \
     "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d/10-livepeer.conf" \
     "$INSTALL_DIR/systemd/$UNIT" > "$INSTALL_DIR/state/host-config.new"

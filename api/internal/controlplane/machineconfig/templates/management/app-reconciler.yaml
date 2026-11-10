@@ -190,7 +190,7 @@ spec:
     message: Host access and credential references are forbidden.
   - expression: "size(object.spec.containers) == 1 && (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0) && (!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir)))"
     message: App Pods support one container and private temporary storage.
-  - expression: "object.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && (!has(c.securityContext.privileged) || !c.securityContext.privileged) && has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0) && (!has(c.envFrom) || size(c.envFrom) == 0) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))) && (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))"
+  - expression: "object.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && (!has(c.securityContext.privileged) || !c.securityContext.privileged) && has(c.securityContext.capabilities) && c.securityContext.capabilities.drop == ['ALL'] && (!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0) && (!has(c.envFrom) || size(c.envFrom) == 0) && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || (has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name.matches('^lp-app-[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && !has(e.valueFrom.fieldRef) && !has(e.valueFrom.resourceFieldRef) && !has(e.valueFrom.configMapKeyRef)))) && (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))"
     message: App containers must keep their filesystem, capabilities and credentials restricted.
   - expression: "request.operation != 'CREATE' || (has(object.metadata.finalizers) && 'livepeer.io/app-incarnation' in object.metadata.finalizers)"
     message: App Pods require their lifecycle finalizer.
@@ -237,3 +237,25 @@ metadata: {name: livepeer-app-services}
 spec:
   policyName: livepeer-app-services
   validationActions: [Deny]
+
+---
+# Public HTTPS and external DNS only. Host enforcement also isolates runsc Pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-app-public-https, namespace: livepeer-apps}
+spec:
+  podSelector: {matchLabels: {livepeer.io/egress: public-https}}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - ipBlock: {cidr: 1.1.1.1/32}
+    - ipBlock: {cidr: 1.0.0.1/32}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4]
+    - ipBlock:
+        cidr: '::/0'
+        except: ['::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8']
+    ports: [{protocol: TCP, port: 443}]

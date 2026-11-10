@@ -1,6 +1,7 @@
 {{ template "base" . }}
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
+  cni_conf_dir = "@INSTALL_DIR@/config/gvisor-cni"
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc.options]
   TypeUrl = "io.containerd.runsc.v1.options"
   ConfigPath = "@INSTALL_DIR@/config/runsc.toml"

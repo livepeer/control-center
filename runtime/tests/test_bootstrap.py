@@ -433,7 +433,9 @@ df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted-on\\n/dev/
                                      ('10.0.0.0/8 dev eth0', 0, False),
                                      ('10.42.1.0/24 dev eth0', 0, False),
                                      ('local 10.43.0.1 dev lo table local', 0, False),
-                                     ('10.44.0.0/16 dev eth0', 0, True),
+                                     ('10.44.0.0/16 dev eth0', 0, False),
+                                     ('172.20.0.0/16 dev eth0', 0, True),
+                                     ('10.44.0.0/16 dev lp-gvisor0', 1, True),
                                      ('10.42.0.0/24 dev cni0', 1, True),
                                      ('10.42.0.0/24 dev cni0', 0, False)]:
             result = self.shell('MANAGED="$2"; ip() { echo "$ROUTE"; }; ROUTE="$1"; check_routes', route, str(managed))
@@ -672,6 +674,8 @@ class FirewallTests(TempTest):
         self.assertIn('iifname "lo" accept', rules)
         self.assertIn('ip saddr 10.42.0.0/16 tcp dport 6443 accept', rules)
         self.assertIn('ct direction reply', rules)
+        self.assertLess(rules.index('iifname "lp-gvisor0" drop'),
+                        rules.index('ip saddr 10.42.0.0/16 tcp dport 6443 accept'))
 
     def test_missing_policy_does_not_change_firewall(self):
         nft = self.root / 'nft'
@@ -759,6 +763,22 @@ write_host_configuration
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.root / 'stopped').read_text(), 'stopped')
         self.assertIn('firewall enforcement failed', result.stderr)
+        profile = self.root / 'config/gvisor-cni/10-gvisor.conflist'
+        bridge = json.loads(profile.read_text())['plugins'][0]
+        self.assertEqual(bridge['bridge'], 'lp-gvisor0')
+        self.assertTrue(bridge['portIsolation'])
+        self.assertIn(str(profile), (self.root / 'state/host-config.new').read_text())
+
+    def test_previous_gvisor_network_requires_recreation(self):
+        config = self.root / 'k3s/agent/etc/containerd/config-v3.toml.tmpl'
+        config.write_text('[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]\nruntime_type="io.containerd.runsc.v1"\n')
+        result = self.shell('''INSTALL_DIR="$1"
+atomic_symlink() { exit 91; }
+systemctl() { exit 91; }
+write_host_configuration
+''', str(self.root))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('previous gVisor network layout cannot be resumed', result.stderr)
 
     @unittest.skipUnless(shutil.which('kubectl') and yaml, 'kubectl and PyYAML needed for manifest validation')
     def test_kustomize_uses_pinned_go_adapter_and_independent_management(self):

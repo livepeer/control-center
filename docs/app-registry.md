@@ -77,6 +77,7 @@ onchain mode, add a positive price to the example. See the
 | `container.platform` | Image default; `"linux/amd64"` if specified. |
 | `container.entrypoint`, `container.command`, `container.working_dir`, `container.user` | Image defaults. Entrypoint and command are nonempty arrays of literal strings; working directory is an absolute path. |
 | `container.environment` | No additions. A table of nonsecret string values. |
+| `container.secrets` | Up to 16 `{name, secret, key}` references to `lp-app-*` Secrets. |
 | `resources.limits.cpu` | 1 CPU. Use integer cores or quoted values such as `"0.5"` or `"500m"`. |
 | `resources.limits.ephemeral_storage` | `"100MB"`. |
 | `resources.requests` | Each omitted CPU, memory, or ephemeral storage request defaults to its corresponding limit. Requests cannot exceed limits. |
@@ -84,7 +85,7 @@ onchain mode, add a positive price to the example. See the
 | `filesystem.read_only_root` | `true`; writable roots are unsupported. |
 | `filesystem.shm_size` | `"64MiB"` of memory-backed shared memory. |
 | `filesystem.scratch` | No mounts. Each `[[filesystem.scratch]]` table requires `path`; `size` defaults to `"64MiB"`. Mounts are memory-backed. |
-| `network.egress` | `"deny"`; other values are unsupported. |
+| `network.egress` | `"deny"` or `"public-https"` for DNS and public TCP 443. |
 | `lifecycle.startup_timeout`, `lifecycle.stop_grace_period` | `"120s"` and `"30s"`. |
 | `lifecycle.stop_signal` | Image default; otherwise a supported catchable Linux signal name such as `"SIGTERM"`. |
 | `instances.mode` | `"reusable"` or `"single-session"`. Default: `"reusable"`. |
@@ -105,6 +106,9 @@ directory may be `/`; scratch mounts cannot. Scratch mounts cannot overlap each
 other or system and secret paths. HTTP readiness paths must be local absolute paths
 without a query, fragment, or traversal. The validator reports the affected
 field when a setting is invalid.
+
+A shared deployment supports up to 256 public `[[apps]]`, each with a `name`,
+private `path`, `capacity`, and `price`; paths must be unique and nonnested.
 
 ## Pricing policy
 

@@ -23,6 +23,8 @@ var routeID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 type Registration struct {
 	InstanceID, WithdrawalID, PodUID string
+	AppIndex                         int
+	Registered                       bool
 	WithdrawnAt                      time.Time
 	Options                          runner.AppOptions
 }
@@ -62,17 +64,6 @@ type Owner interface {
 	Close(context.Context) error
 }
 
-func AppOptions(i *Instance) (runner.AppOptions, error) {
-	if contract.ReservedProxyID(i.AppID) {
-		return runner.AppOptions{}, errors.New("reserved_app_identity")
-	}
-	d := i.Definition
-	price, err := runner.NewPriceInfo(d.Price.Amount, d.Price.Currency, d.Price.Unit)
-	if err != nil {
-		return runner.AppOptions{}, err
-	}
-	return runner.AppOptions{ID: i.AppID, App: d.Name, Version: d.AppVersion, RunnerURL: privateURL(i.Name, d.HTTP.Port), Mode: d.Runner.Mode, PriceInfo: price, Capacity: d.Instances.CapacityPerInstance, Status: "not-ready", Proxy: true}, nil
-}
 func privateURL(name string, port int) string {
 	return "http://" + name + ".livepeer-apps.svc.cluster.local:" + formatPort(port)
 }
@@ -141,8 +132,11 @@ func (o *SDKOwner) Sync(ctx context.Context, r OwnerRequest, h OwnerHooks) error
 			if !ok {
 				known = o.registrations[e.Options.RunnerURL]
 			}
-			if known.InstanceID == e.InstanceID && known.PodUID == e.PodUID && e.Options.ID == "" {
-				e.Options.ID = known.Options.ID
+			if known.InstanceID == e.InstanceID && known.PodUID == e.PodUID {
+				e.Registered = e.Registered || known.Registered
+				if e.Options.ID == "" {
+					e.Options.ID = known.Options.ID
+				}
 			}
 			registrations[e.Options.RunnerURL] = e
 		}
@@ -186,7 +180,7 @@ func (o *SDKOwner) appsLocked() []runner.AppOptions {
 	for _, entry := range o.request.Entries {
 		e := entry
 		known := o.registrations[e.Options.RunnerURL]
-		if backoff && known.Options.ID == "" {
+		if backoff && !known.Registered {
 			continue
 		}
 		if known.Options.ID != "" {
@@ -279,6 +273,7 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		}
 		e.Options = app.AppOptions
 		e.Options.ID = resp.Apps[n].ID
+		e.Registered = true
 		submitted[e.Options.ID] = true
 		obs.Entries = append(obs.Entries, e)
 	}
@@ -299,6 +294,7 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		current := o.registrations[e.Options.RunnerURL]
 		if current.InstanceID == e.InstanceID {
 			current.Options.ID = e.Options.ID
+			current.Registered = true
 			o.registrations[e.Options.RunnerURL] = current
 		}
 	}

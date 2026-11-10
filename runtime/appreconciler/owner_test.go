@@ -368,9 +368,10 @@ func TestRejectedAdditionCannotBlockTerminalOmission(t *testing.T) {
 	old.WithdrawnAt = time.Now()
 	next := old
 	next.InstanceID = "next"
+	next.Registered = false
 	next.WithdrawalID = ""
 	next.WithdrawnAt = time.Time{}
-	next.Options.ID = ""
+	next.Options.ID = "r-next-0"
 	next.Options.RunnerURL = "http://rejected.invalid:8080"
 	n.mu.Lock()
 	n.rejectEndpoint = next.Options.RunnerURL
@@ -470,7 +471,8 @@ func TestNativeRestoredMembershipRejectionPreservesSibling(t *testing.T) {
 			known := first.Entries[0]
 			added := known
 			added.InstanceID, added.PodUID = "new-instance", "new-pod"
-			added.Options.ID = ""
+			added.Registered = false
+			added.Options.ID = "r-new-instance-0"
 			added.Options.RunnerURL = "http://rejected.invalid:8080"
 			node.mu.Lock()
 			node.rejectEndpoint = added.Options.RunnerURL

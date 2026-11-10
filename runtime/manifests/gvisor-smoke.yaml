@@ -8,6 +8,8 @@ metadata:
     app: livepeer-gvisor-smoke
 spec:
   runtimeClassName: gvisor
+  dnsPolicy: None
+  dnsConfig: {nameservers: [1.1.1.1, 1.0.0.1]}
   automountServiceAccountToken: false
   restartPolicy: Never
   containers:
@@ -19,9 +21,8 @@ spec:
     - |
       dmesg | grep -q 'Starting gVisor'
       for attempt in $(seq 1 20); do
-        if nslookup kubernetes.default.svc.cluster.local &&
-          wget -T 2 -qO- http://orchestrator.livepeer.svc:8936/readyz &&
-          wget -T 2 -qO- http://orchestrator.livepeer.svc:8935/discovery; then
+        if nslookup example.com &&
+          wget -T 3 --no-check-certificate -qO- https://example.com >/dev/null; then
           echo gvisor-ok
           exit 0
         fi

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	runner "github.com/livepeer/golang-runner"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +16,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/livepeer/control-center/runtime/internal/testutil"
+	"github.com/livepeer/control-center/schema"
+	runner "github.com/livepeer/golang-runner"
 )
 
 func freeAddress(t *testing.T) string {
@@ -331,5 +334,101 @@ func TestMergedNodeSDKRestoredMembership(t *testing.T) {
 				t.Fatalf("restoration withdrew active work: apps=%+v, session HTTP=%d", obs.Request.Apps, resp.StatusCode)
 			}
 		})
+	}
+}
+
+func TestNativeNodeSharedAppsAndOwnedDrain(t *testing.T) {
+	base := realNode(t, "750ms")
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "running") }))
+	defer app.Close()
+	definition := testutil.Assignment(t).Entries[0].Revision.Definition
+	definition.Runner.Mode = "persistent"
+	definition.Apps = make([]schema.App, 199)
+	for n := range definition.Apps {
+		definition.Apps[n] = schema.App{Name: fmt.Sprintf("app-%d", n), Path: fmt.Sprintf("/app/%d", n), Capacity: 2, Price: definition.Price}
+	}
+	i := &Instance{ID: "shared", Definition: definition, PodUID: "pod"}
+	entries, err := AppRegistrations(i, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := range entries {
+		entries[n].Options.RunnerURL = app.URL + definition.Apps[n].Path
+	}
+	owner, err := NewSDKOwner(base, "bootstrap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close(t.Context())
+	request := OwnerRequest{Epoch: "epoch", Identity: Identity{RunnerID: "owner"}, Entries: entries, Tracked: append([]Registration{}, entries...)}
+	observations := make(chan Observation, 1024)
+	hooks := OwnerHooks{Observe: func(o Observation) error { observations <- o; return nil }}
+	if err = owner.Sync(t.Context(), request, hooks); err != nil {
+		t.Fatal(err)
+	}
+	awaitObservation(t, observations, func(o Observation) bool { return o.Accepted })
+	for n := range request.Entries {
+		request.Entries[n].Options.Status = "ready"
+	}
+	if err = owner.Sync(t.Context(), request, hooks); err != nil {
+		t.Fatal(err)
+	}
+	awaitObservation(t, observations, func(o Observation) bool { return o.Accepted && len(o.Apps) == 199 && o.Apps[198].Status == "ready" })
+	response, err := http.Get(base + "/discovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listing []struct {
+		Runners []json.RawMessage `json:"runners"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&listing)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range listing {
+		count += len(entry.Runners)
+	}
+	if count != 199 {
+		t.Fatalf("discovered %d apps", count)
+	}
+	var session struct {
+		AppURL string `json:"app_url"`
+	}
+	route := base + "/apps/" + appID(i, 198) + "/session"
+	if status := nodePost(t, route, &session); status != 200 {
+		t.Fatal("last app reservation failed", status)
+	}
+	for n := range request.Tracked {
+		request.Tracked[n].WithdrawalID = "withdrawal"
+		request.Tracked[n].WithdrawnAt = time.Now()
+	}
+	request.Entries = []Registration{}
+	if err = owner.Sync(t.Context(), request, hooks); err != nil {
+		t.Fatal(err)
+	}
+	awaitObservation(t, observations, func(o Observation) bool { return o.Accepted && len(o.Apps) == 1 && o.Apps[0].Status == "draining" })
+	if status := nodePost(t, route, nil); status != 404 {
+		t.Fatal("withdrawn app admitted a new session", status)
+	}
+	response, err = http.Get(session.AppURL + "/result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatal("existing session lost during drain", response.StatusCode)
+	}
+	// No per-session callback, stop request, app cleanup RPC or Runtime timer.
+	// Node's configured deadline alone removes the final retained registration.
+	awaitObservation(t, observations, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
+	response, err = http.Get(session.AppURL + "/result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 404 {
+		t.Fatal("Node drain deadline did not terminate session", response.StatusCode)
 	}
 }

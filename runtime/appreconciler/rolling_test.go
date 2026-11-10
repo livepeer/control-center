@@ -1,6 +1,7 @@
 package appreconciler
 
 import (
+	"fmt"
 	"github.com/livepeer/control-center/runtime/internal/testutil"
 	"github.com/livepeer/control-center/schema"
 	"testing"
@@ -171,5 +172,77 @@ func TestRollingUsesCurrentSuccessorStateBeforeWithdrawal(t *testing.T) {
 				t.Fatalf("rolling withdrawal=%v for successor state %s", withdrew, failure)
 			}
 		})
+	}
+}
+
+func TestRollingRetainsFreedRegistrationBudget(t *testing.T) {
+	c, input, k, _, _, _ := fixtureController(t)
+	set := *input.value.Payload.Intent
+	d := &set.Entries[0].Revision.Definition
+	d.Apps = make([]schema.App, 256)
+	for n := range d.Apps {
+		d.Apps[n] = schema.App{Name: fmt.Sprintf("app-%d", n), Path: fmt.Sprintf("/app/%d", n), Capacity: 1, Price: d.Price}
+	}
+	testutil.Refresh(&set.Entries[0])
+	input.set(t, set)
+	registerApps(t, c, k)
+	if got := retainedRegistrations(c.Journal.View().Instances); got != 512 {
+		t.Fatalf("initial registrations=%d", got)
+	}
+	source, target := stageReplacement(t, input, 2, true)
+	target.Revision.Definition.Apps = target.Revision.Definition.Apps[:1]
+	testutil.Refresh(&target)
+	unrelated := target
+	revision := *target.Revision
+	unrelated.Revision = &revision
+	unrelated.RevisionID = "22222222-2222-4222-8222-222222222222"
+	unrelated.Replicas = 1
+	unrelated.Replacement = nil
+	unrelated.Revision.Definition.Apps = source.Revision.Definition.Apps
+	testutil.Refresh(&unrelated)
+	set = *input.value.Payload.Intent
+	set.Entries = []schema.AppAssignment{set.Entries[0], unrelated, target}
+	if err := schema.CheckAssignmentBudget(set); err != nil {
+		t.Fatal(err)
+	}
+	input.set(t, set)
+	for n := 0; n < 16; n++ {
+		tick(t, c)
+		k.apply(c)
+		if got := retainedRegistrations(c.Journal.View().Instances); got > schema.MaxRegistrations {
+			t.Fatalf("registration budget exceeded: %d", got)
+		}
+	}
+	s := c.Journal.View()
+	servingSource, successors, other := 0, 0, 0
+	for _, i := range s.Instances {
+		if !occupied(i) {
+			continue
+		}
+		switch i.Group.RevisionID {
+		case source.RevisionID:
+			if i.WithdrawalID == "" {
+				servingSource++
+			}
+		case target.RevisionID:
+			successors++
+		case unrelated.RevisionID:
+			other++
+		}
+	}
+	if successors != 1 || other != 0 || servingSource != 1 {
+		t.Fatal("unrelated backend stole the rolling successor's freed registration budget")
+	}
+}
+
+func TestAppReadyProofRequiresEveryAlias(t *testing.T) {
+	i := &Instance{ID: "physical", AppID: "r-physical-0", Definition: schema.DefinitionV1{Apps: make([]schema.App, 2)}}
+	apps := map[string]AppObservation{appID(i, 0): {ID: appID(i, 0), Status: "ready", SessionIDs: []string{}}}
+	if app, ok := aggregateObservation(i, apps); !ok || app.Status == "ready" {
+		t.Fatal("missing app produced a ready proof or erased the observed app")
+	}
+	apps[appID(i, 1)] = AppObservation{ID: appID(i, 1), Status: "not-ready", SessionIDs: []string{}}
+	if app, ok := aggregateObservation(i, apps); !ok || app.Status == "ready" {
+		t.Fatal("one ready alias advanced shared-backend rollout")
 	}
 }

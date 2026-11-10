@@ -56,12 +56,18 @@ Eligibility checks run before authentication, downloads, directory creation, or
 service changes. `--check-only` is read-only. Checks include available kernel
 modules, reserved TCP ports 2379/2380/6443/6444/8935/8936/10010/10249/10250/10256/10257/10259/20241,
 UDP 8472, and routes overlapping
-the fixed `10.42.0.0/16` Pod and `10.43.0.0/16` Service networks. Once K3s has been
-downloaded, its own `check-config` performs additional kernel validation.
+the fixed `10.42.0.0/16` Pod, `10.43.0.0/16` Service and `10.44.0.0/16` gVisor
+networks. Once K3s has been downloaded, its own `check-config` performs additional
+kernel validation.
 The installer requires nftables kernel support and `CAP_NET_ADMIN`, and reserves
 its own `inet livepeer_bootstrap` table. It refuses to take over an existing
 unowned table with that name. Existing host firewalls still apply; its allow
 rules do not override a more restrictive policy in another firewall table.
+
+gVisor uses a separate bridge. It can reply to incoming requests and initiate
+public HTTPS and external DNS, but cannot initiate connections to the host,
+other Pods, private networks or metadata services. System Pods retain local access.
+Reload `livepeer-firewall.service` after changing host networks to refresh local routes.
 
 The host and cluster need HTTPS access to GitHub releases and the configured
 container registries. Downloads use fixed releases with checksum verification:

@@ -3,3 +3,24 @@ kind: RuntimeClass
 metadata:
   name: gvisor
 handler: runsc
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: livepeer-gvisor-network}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules: [{apiGroups: [''], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods]}]
+  matchConditions:
+  - name: gvisor
+    expression: "has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'gvisor'"
+  validations:
+  - expression: "!has(object.spec.hostNetwork) || !object.spec.hostNetwork"
+    message: gVisor Pods must use their isolated network.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: livepeer-gvisor-network}
+spec:
+  policyName: livepeer-gvisor-network
+  validationActions: [Deny]

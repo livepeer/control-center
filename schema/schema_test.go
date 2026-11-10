@@ -274,3 +274,49 @@ func TestCollectionBoundsAndErrorLimit(t *testing.T) {
 		t.Fatal("field error bound", err)
 	}
 }
+
+func TestAppTOMLDefaults(t *testing.T) {
+	for _, price := range []string{"", `price = { amount = "0.01" }`} {
+		d := parse(t, fixture(t)+"\n[[apps]]\nname = \"test\"\npath = \"/test\"\n"+price)
+		app := d.Apps[0]
+		if app.Capacity != 1 || app.Price.Currency != "usd" || app.Price.Unit != "hour" || (price == "" && app.Price.Amount != "0") {
+			t.Fatalf("missing app defaults: %+v", app)
+		}
+	}
+	for _, explicit := range []string{`capacity = 0`, `price = { amount = "" }`, `price = { currency = "" }`} {
+		if _, err := schema.ParseTOML([]byte(fixture(t) + "\n[[apps]]\nname = \"test\"\npath = \"/test\"\n" + explicit)); err == nil {
+			t.Fatalf("defaults replaced explicit invalid value: %s", explicit)
+		}
+	}
+}
+
+func TestPooledAppBoundaries(t *testing.T) {
+	d := parse(t, fixture(t))
+	d.Apps = []schema.App{{Name: "storyboard/fal-cheap", Path: "/apps/cheap", Capacity: 2, Price: d.Price}, {Name: "ffmpeg-trim", Path: "/apps/trim", Capacity: 1, Price: d.Price}}
+	d.Network.Egress = "public-https"
+	d.Container.Secrets = []schema.SecretEnvironment{{Name: "FAL_KEY", Secret: "lp-app-fal", Key: "key"}}
+	if err := schema.Validate(d); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		change func(*schema.DefinitionV1)
+	}{
+		{"nested prefix", func(d *schema.DefinitionV1) { d.Apps[1].Path = "/apps/cheap/nested" }},
+		{"duplicate name", func(d *schema.DefinitionV1) { d.Apps[1].Name = d.Apps[0].Name }},
+		{"escaped path", func(d *schema.DefinitionV1) { d.Apps[0].Path = "/apps/%2e%2e" }},
+		{"secret authority", func(d *schema.DefinitionV1) { d.Container.Secrets[0].Secret = "runner-bootstrap" }},
+		{"reserved environment", func(d *schema.DefinitionV1) { d.Container.Secrets[0].Name = "LIVEPEER_RUNTIME_INSTANCE_ID" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := d
+			v.Apps = append([]schema.App(nil), d.Apps...)
+			v.Container.Secrets = append([]schema.SecretEnvironment(nil), d.Container.Secrets...)
+			c.change(&v)
+			if schema.Validate(v) == nil {
+				t.Fatal("unsafe definition accepted")
+			}
+		})
+	}
+}

@@ -123,6 +123,12 @@ func normalize(d *DefinitionV1, e *ValidationError) {
 	}{{"health.readiness.interval", &d.Health.Readiness.Interval}, {"health.readiness.timeout", &d.Health.Readiness.Timeout}, {"lifecycle.startup_timeout", &d.Lifecycle.StartupTimeout}, {"lifecycle.stop_grace_period", &d.Lifecycle.StopGracePeriod}} {
 		convert(v.p, v.s, duration)
 	}
+	for n := range d.Apps {
+		o := &d.Apps[n]
+		convert(fmt.Sprintf("apps[%d].price.amount", n), &o.Price.Amount, decimal)
+		o.Price.Currency = strings.ToLower(strings.TrimSpace(o.Price.Currency))
+		o.Price.Unit = strings.ToLower(strings.TrimSpace(o.Price.Unit))
+	}
 	convert("price.amount", &d.Price.Amount, decimal)
 	d.Price.Currency = strings.ToLower(strings.TrimSpace(d.Price.Currency))
 	d.Price.Unit = strings.ToLower(strings.TrimSpace(d.Price.Unit))

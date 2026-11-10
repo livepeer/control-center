@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -63,7 +64,8 @@ type observedAssignment struct {
 		Timeout          string `json:"timeout"`
 		FailureThreshold int    `json:"failure_threshold"`
 	} `json:"health"`
-	Mode string `json:"-"`
+	Mode          string   `json:"-"`
+	DiscoveryApps []string `json:"-"`
 }
 
 type tunnelObservation struct {
@@ -280,16 +282,32 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 				if !ok || i.AppID == "" {
 					continue
 				}
-				endpoint := strings.TrimRight(route.ServiceURL, "/") + "/apps/" + url.PathEscape(i.AppID) + "/session"
-				if a.Mode == "single-shot" {
-					endpoint = strings.Replace(route.ProxyURLTemplate, "{proxy}", i.AppID, 1)
-				}
-				queries = append(queries, fleet.MembershipQuery{InstanceID: i.InstanceID, Endpoint: endpoint, App: a.Name, Version: a.Version})
+				queries = append(queries, a.membershipQueries(i, route.ServiceURL, route.ProxyURLTemplate)...)
 			}
 			v.Membership = s.discovery.Memberships(m.NodeID, m.Epoch, queries)
 		}
 	}
 	return v, nil
+}
+
+func (a observedAssignment) membershipQueries(i contract.InstanceStatus, serviceURL, proxyTemplate string) []fleet.MembershipQuery {
+	names := a.DiscoveryApps
+	if len(names) == 0 {
+		names = []string{a.Name}
+	}
+	queries := make([]fleet.MembershipQuery, len(names))
+	for n, name := range names {
+		id := i.AppID
+		if len(a.DiscoveryApps) > 0 {
+			id = fmt.Sprintf("r-%s-%d", i.InstanceID, n)
+		}
+		endpoint := strings.TrimRight(serviceURL, "/") + "/apps/" + url.PathEscape(id) + "/session"
+		if a.Mode == "single-shot" {
+			endpoint = strings.Replace(proxyTemplate, "{proxy}", id, 1)
+		}
+		queries[n] = fleet.MembershipQuery{InstanceID: i.InstanceID, Endpoint: endpoint, App: name, Version: a.Version}
+	}
+	return queries
 }
 
 func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observedAssignment, bool, error) {
@@ -321,6 +339,9 @@ func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observed
 		a.Failure = safeObservationReason(a.Failure)
 		a.Health.Type, a.Health.Interval, a.Health.Timeout, a.Health.FailureThreshold = definition.Health.Readiness.Type, definition.Health.Readiness.Interval, definition.Health.Readiness.Timeout, definition.Health.Readiness.FailureThreshold
 		a.Mode = definition.Runner.Mode
+		for _, app := range definition.Apps {
+			a.DiscoveryApps = append(a.DiscoveryApps, app.Name)
+		}
 		result = append(result, a)
 	}
 	if err = rows.Err(); err != nil {

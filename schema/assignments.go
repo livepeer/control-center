@@ -170,6 +170,23 @@ func DecodeAssignmentSet(b []byte) (AppAssignmentSetV1, error) {
 // Reserve the larger present/removal form and maximum counter widths, so a
 // previously admitted assignment can always be removed without growing the set.
 func CheckAssignmentBudget(s AppAssignmentSetV1) error {
+	registrations := 0
+	for _, a := range s.Entries {
+		if a.Desired != "present" {
+			continue
+		}
+		if a.Revision == nil {
+			return fmt.Errorf("missing present revision")
+		}
+		count := max(1, len(a.Revision.Definition.Apps))
+		if a.Replicas < 1 || count > MaxRegistrations/a.Replicas {
+			return fmt.Errorf("registration budget exceeded")
+		}
+		registrations += count * a.Replicas
+		if registrations > MaxRegistrations {
+			return fmt.Errorf("registration budget exceeded")
+		}
+	}
 	s.Generation = math.MaxInt64
 	s.Entries = append([]AppAssignment{}, s.Entries...)
 	for i, a := range s.Entries {

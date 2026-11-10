@@ -65,11 +65,16 @@ func Render(set schema.AppAssignmentSetV1, options Options) (Payload, error) {
 		return Payload{}, err
 	}
 	p := Payload{Index: Index{Version: 1, Available: true, IntentDigest: schema.Digest(intent), Groups: []Group{}, Hashes: map[string]string{IntentFile: schema.Digest(intent)}}, Intent: &set, Files: map[string][]byte{IntentFile: intent}}
+	registrations := 0
 	for _, a := range set.Entries {
 		if a.Desired != "present" {
 			continue
 		}
 		d := a.Revision.Definition
+		registrations += max(1, len(d.Apps)) * a.Replicas
+		if registrations > schema.MaxRegistrations {
+			return Payload{}, errors.New("resource_refused")
+		}
 		if d.Instances.Mode != "reusable" {
 			return Payload{}, errors.New("unsupported_instance_mode")
 		}
@@ -110,7 +115,7 @@ func payloadBytes(files map[string][]byte) int {
 type object = map[string]any
 
 func renderGroup(g Group, set schema.AppAssignmentSetV1, d schema.DefinitionV1) []object {
-	labels := map[string]string{"app": "livepeer-app", "livepeer.io/instance": g.Name, "livepeer.io/epoch": set.Epoch}
+	labels := map[string]string{"app": "livepeer-app", "livepeer.io/instance": g.Name, "livepeer.io/epoch": set.Epoch, "livepeer.io/egress": d.Network.Egress}
 	metadata := func() object {
 		return object{"name": g.Name, "namespace": Namespace, "labels": labels, "annotations": map[string]string{"livepeer.io/revision-id": g.RevisionID}}
 	}
@@ -143,6 +148,13 @@ func renderGroup(g Group, set schema.AppAssignmentSetV1, d schema.DefinitionV1) 
 	for _, key := range keys {
 		env = append(env, object{"name": key, "value": d.Container.Environment[key]})
 	}
+	for _, s := range d.Container.Secrets {
+		env = append(env, object{"name": s.Name, "valueFrom": object{"secretKeyRef": object{"name": s.Secret, "key": s.Key}}})
+	}
+	if len(d.Apps) > 0 {
+		apps, _ := json.Marshal(d.Apps)
+		env = append(env, object{"name": "LIVEPEER_RUNTIME_APPS", "value": string(apps)}, object{"name": "LIVEPEER_RUNTIME_CAPACITY", "value": strconv.Itoa(d.Instances.CapacityPerInstance)})
+	}
 	container["env"] = env
 	volumes := []object{{"name": "shm", "emptyDir": object{"medium": "Memory", "sizeLimit": strings.TrimSuffix(d.Filesystem.ShmSize, "B")}}}
 	mounts := []object{{"name": "shm", "mountPath": "/dev/shm"}}
@@ -160,6 +172,7 @@ func renderGroup(g Group, set schema.AppAssignmentSetV1, d schema.DefinitionV1) 
 	podMeta["finalizers"] = []string{Finalizer}
 	pod := object{"apiVersion": "v1", "kind": "Pod", "metadata": podMeta, "spec": object{
 		"os": object{"name": "linux"}, "runtimeClassName": "gvisor", "serviceAccountName": "livepeer-app",
+		"dnsPolicy": "None", "dnsConfig": object{"nameservers": []string{"1.1.1.1", "1.0.0.1"}},
 		"automountServiceAccountToken": false, "restartPolicy": "Never", "terminationGracePeriodSeconds": grace,
 		"nodeSelector":    map[string]string{"kubernetes.io/arch": "amd64", "kubernetes.io/os": "linux", "livepeer.io/node-id": set.NodeID},
 		"securityContext": object{"runAsNonRoot": true, "seccompProfile": object{"type": "RuntimeDefault"}},
@@ -272,6 +285,24 @@ func (p Payload) Instantiate(g Group, incarnation string) (map[string][]byte, st
 			return nil, "", errors.New("instance_labels")
 		}
 		labels["livepeer.io/instance"] = name
+		if resource["kind"] == "Pod" {
+			spec, _ := resource["spec"].(map[string]any)
+			containers, _ := spec["containers"].([]any)
+			if len(containers) != 1 {
+				return nil, "", errors.New("instance_pod")
+			}
+			container, _ := containers[0].(map[string]any)
+			env, ok := container["env"].([]any)
+			if container == nil || (container["env"] != nil && !ok) {
+				return nil, "", errors.New("instance_pod")
+			}
+			for _, v := range env {
+				if _, ok := v.(map[string]any); !ok {
+					return nil, "", errors.New("instance_pod")
+				}
+			}
+			container["env"] = append(env, object{"name": "LIVEPEER_RUNTIME_INSTANCE_ID", "value": incarnation})
+		}
 		if resource["kind"] == "Service" {
 			spec, ok := resource["spec"].(map[string]any)
 			if !ok {

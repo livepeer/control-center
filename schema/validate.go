@@ -81,9 +81,18 @@ func validateSemantics(d DefinitionV1) error {
 		}
 		check(valid, "container.user", "Use nonzero numeric UID:GID, each at most 2147483647.")
 	}
+	reservedEnv := func(s string) bool { return strings.HasPrefix(s, "LIVEPEER_RUNTIME_") }
+	names := map[string]bool{}
+	for n, secret := range d.Container.Secrets {
+		p := fmt.Sprintf("container.secrets[%d]", n)
+		check(envPattern.MatchString(secret.Name) && !reservedEnv(secret.Name) && !names[secret.Name], p+".name", "Use a unique, nonreserved environment name.")
+		names[secret.Name] = true
+		check(regexp.MustCompile(`^lp-app-[a-z0-9]([-a-z0-9]*[a-z0-9])?$`).MatchString(secret.Secret) && len(secret.Secret) <= 63, p+".secret", "Use an operator-provisioned lp-app-* Secret in livepeer-apps.")
+		check(regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}$`).MatchString(secret.Key), p+".key", "Invalid Secret key.")
+	}
 	envBytes := 0
 	for k, v := range d.Container.Environment {
-		check(envPattern.MatchString(k), "container.environment", "Invalid environment name.")
+		check(envPattern.MatchString(k) && !reservedEnv(k) && !names[k], "container.environment", "Invalid, duplicate or reserved environment name.")
 		check(utf8.ValidString(v) && !strings.ContainsRune(v, 0), "container.environment."+k, "Environment values must be UTF-8 without NUL.")
 		envBytes += len(k) + len(v)
 	}
@@ -133,6 +142,18 @@ func validateSemantics(d DefinitionV1) error {
 	number(d.Lifecycle.StartupTimeout, "s", "lifecycle.startup_timeout", 1, 3600)
 	number(d.Lifecycle.StopGracePeriod, "s", "lifecycle.stop_grace_period", 0, 300)
 	check(d.Instances.Mode != "single-session" || d.Instances.CapacityPerInstance == 1, "instances.capacity_per_instance", "Single-session instances require capacity one.")
+	names = map[string]bool{}
+	paths := map[string]bool{}
+	for n, app := range d.Apps {
+		p := fmt.Sprintf("apps[%d]", n)
+		validName := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`).MatchString(app.Name) && !dotSegment.MatchString(app.Name) && !strings.Contains(app.Name, "//") && !strings.HasSuffix(app.Name, "/")
+		check(validName && !names[app.Name], p+".name", "Use a unique public app name without traversal or controls.")
+		check(absolute(app.Path) && app.Path != "/" && !strings.ContainsAny(app.Path, "%?#\\") && !paths[app.Path], p+".path", "Use a unique canonical backend prefix.")
+		for previous := range paths {
+			check(!strings.HasPrefix(app.Path, previous+"/") && !strings.HasPrefix(previous, app.Path+"/"), p+".path", "App prefixes cannot overlap.")
+		}
+		names[app.Name], paths[app.Path] = true, true
+	}
 	return e.err()
 }
 func refDigest(r reference.Reference) string {
@@ -145,8 +166,15 @@ func ValidatePolicy(d DefinitionV1, mode PaymentMode) error {
 	e := new(ValidationError)
 	if mode != Offchain && mode != Onchain {
 		e.add("price", "Unknown registry payment mode.")
-	} else if mode == Onchain && d.Price.Amount == "0" {
+	} else if mode == Onchain && len(d.Apps) == 0 && d.Price.Amount == "0" {
 		e.add("price.amount", "Onchain publications and new bindings require an explicit positive price.")
+	}
+	if mode == Onchain {
+		for n, o := range d.Apps {
+			if o.Price.Amount == "0" {
+				e.add(fmt.Sprintf("apps[%d].price.amount", n), "Onchain apps require a positive price.")
+			}
+		}
 	}
 	return e.err()
 }

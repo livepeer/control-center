@@ -7,6 +7,9 @@ const MaxSourceBytes = 64 << 10
 const MaxCanonicalBytes = 512 << 10
 const MaxReplicas = 100
 
+// Includes all replicas and retained/draining revisions, independently of Pod count.
+const MaxRegistrations = 512
+
 // Declaration order is part of CanonicalFormat. Do not reorder fields or change
 // v1 defaults/semantics; evolve the versioned contract instead.
 type DefinitionV1 struct {
@@ -23,16 +26,36 @@ type DefinitionV1 struct {
 	Instances     Instances  `json:"instances"`
 	Runner        Runner     `json:"runner"`
 	Price         Price      `json:"price"`
+	Apps          []App      `json:"apps" required:"true" default:"[]" max:"256"`
 }
 type Container struct {
-	Image       string            `json:"image" max:"2048"`
-	Platform    *string           `json:"platform" optional:"true" alts:"linux/amd64"`
-	Entrypoint  *[]string         `json:"entrypoint" optional:"true" min:"1" max:"64"`
-	Command     *[]string         `json:"command" optional:"true" min:"1" max:"64"`
-	WorkingDir  *string           `json:"working_dir"`
-	User        *string           `json:"user"`
-	Environment map[string]string `json:"environment" required:"true" default:"" max:"64"`
+	Image       string              `json:"image" max:"2048"`
+	Platform    *string             `json:"platform" optional:"true" alts:"linux/amd64"`
+	Entrypoint  *[]string           `json:"entrypoint" optional:"true" min:"1" max:"64"`
+	Command     *[]string           `json:"command" optional:"true" min:"1" max:"64"`
+	WorkingDir  *string             `json:"working_dir"`
+	User        *string             `json:"user"`
+	Environment map[string]string   `json:"environment" required:"true" default:"" max:"64"`
+	Secrets     []SecretEnvironment `json:"secrets" required:"true" default:"[]" max:"16"`
 }
+
+// SecretEnvironment references an operator-provisioned Secret in livepeer-apps.
+// Values never enter definitions or desired artifacts.
+type SecretEnvironment struct {
+	Name   string `json:"name"`
+	Secret string `json:"secret"`
+	Key    string `json:"key"`
+}
+
+// App is a discovery/pricing identity served by a shared backend replica.
+// All apps share the backend protocol, health and deployment lifecycle.
+type App struct {
+	Name     string `json:"name" min:"1" max:"128"`
+	Path     string `json:"path"`
+	Capacity int    `json:"capacity" default:"1" min:"1" max:"10000"`
+	Price    Price  `json:"price"`
+}
+
 type Quantities struct {
 	CPU              string `json:"cpu" pattern:"^(0|[1-9][0-9]*)m$"`
 	Memory           string `json:"memory" pattern:"^(0|[1-9][0-9]*)B$"`
@@ -65,7 +88,7 @@ type Scratch struct {
 	Size string `json:"size" pattern:"^(0|[1-9][0-9]*)B$"`
 }
 type Network struct {
-	Egress string `json:"egress" default:"deny" alts:"deny"`
+	Egress string `json:"egress" default:"deny" alts:"deny,public-https"`
 }
 type Lifecycle struct {
 	StartupTimeout  string  `json:"startup_timeout" default:"120s" pattern:"^(0|[1-9][0-9]*)s$"`

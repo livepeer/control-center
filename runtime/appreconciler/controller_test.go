@@ -936,3 +936,59 @@ func TestLostBootstrapRetainsOldOwnerUntilNodeAbsence(t *testing.T) {
 		})
 	}
 }
+
+func TestAppRemovalRequiresCompleteNodeAbsence(t *testing.T) {
+	c, input, _, _, reporter, now := fixtureController(t)
+	definition := input.value.Payload.Intent.Entries[0].Revision.Definition
+	definition.Apps = []schema.App{{Name: "first", Path: "/first", Capacity: 2, Price: definition.Price}, {Name: "second", Path: "/second", Capacity: 2, Price: definition.Price}}
+	i := &Instance{ID: "shared", PodUID: "pod", Definition: definition, WithdrawalID: "withdrawal", WithdrawnAt: *now, Phase: "withdrawing"}
+	i.AppID = appID(i, 0)
+	if err := c.Journal.Update(func(s *State) error {
+		s.OwnerEpoch = "epoch"
+		s.Identity = Identity{RunnerID: "owner", Credential: "issued"}
+		s.Instances[i.ID] = i
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := AppRegistrations(i, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Observation{Epoch: "epoch", RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, At: *now, TTL: time.Minute, Withdrawals: tracked, Apps: []AppObservation{{ID: appID(i, 1), Status: "draining", SessionIDs: []string{"work"}}}}
+	if err = c.observe(o); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.report(t.Context(), nil, View{}, *now); err != nil {
+		t.Fatal(err)
+	}
+	got := reporter.reports[len(reporter.reports)-1].Apps.Instances[0]
+	if got.Sessions != 1 || !got.Registered || got.NodeObservedAt.IsZero() || c.Journal.View().Instances[i.ID].RegistrationGone {
+		t.Fatalf("lost retained registration: %+v", got)
+	}
+	o.Sequence++
+	o.Apps[0].SessionIDs = []string{}
+	if err = c.observe(o); err != nil {
+		t.Fatal(err)
+	}
+	if c.Journal.View().Instances[i.ID].RegistrationGone {
+		t.Fatal("empty session list is not registration removal")
+	}
+	o.Sequence++
+	o.Apps = []AppObservation{}
+	o.Withdrawals = tracked[:1]
+	if err = c.observe(o); err != nil {
+		t.Fatal(err)
+	}
+	if c.Journal.View().Instances[i.ID].RegistrationGone {
+		t.Fatal("partial alias withdrawal established backend removal")
+	}
+	o.Sequence++
+	o.Withdrawals = tracked
+	if err = c.observe(o); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Journal.View().Instances[i.ID].RegistrationGone {
+		t.Fatal("complete Node-confirmed alias absence did not establish removal")
+	}
+}

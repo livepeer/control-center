@@ -121,6 +121,14 @@ func assignTOML(dst reflect.Value, raw any, path string, e *ValidationError) {
 		}
 		dst.Set(reflect.MakeSlice(dst.Type(), v.Len(), v.Len()))
 		for i := 0; i < v.Len(); i++ {
+			if dst.Type().Elem() == reflect.TypeFor[App]() {
+				defaults, err := boa.Defaults[App]()
+				if err != nil {
+					e.add(path, err.Error())
+					return
+				}
+				dst.Index(i).Set(reflect.ValueOf(defaults))
+			}
 			if dst.Type().Elem() == reflect.TypeFor[Scratch]() {
 				dst.Index(i).FieldByName("Size").SetString("67108864B")
 			}

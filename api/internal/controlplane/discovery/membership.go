@@ -55,7 +55,20 @@ func (f *Manager) Memberships(node, epoch string, queries []MembershipQuery) map
 	published := f.publicInventory(snapshots)
 	result := make(map[string]Membership, len(queries))
 	for _, q := range queries {
-		result[q.InstanceID] = f.membership(node, epoch, q.Endpoint, q.App, q.Version, snapshots, published, attempts)
+		current := f.membership(node, epoch, q.Endpoint, q.App, q.Version, snapshots, published, attempts)
+		if prior, ok := result[q.InstanceID]; ok {
+			if prior.State != "present" {
+				current = prior
+			} else if current.State == "present" {
+				if prior.ObservedAt.Before(*current.ObservedAt) {
+					current.ObservedAt = prior.ObservedAt
+				}
+				if prior.ExpiresAt.Before(*current.ExpiresAt) {
+					current.ExpiresAt = prior.ExpiresAt
+				}
+			}
+		}
+		result[q.InstanceID] = current
 	}
 	return result
 }

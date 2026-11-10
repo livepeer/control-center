@@ -129,11 +129,11 @@ check_routes() {
     { dest=$1; if (dest ~ /^(local|broadcast|unreachable|blackhole|prohibit|throw)$/) dest=$2;
       if (dest == "default") next;
       dev=""; for(i=1;i<NF;i++) if($i=="dev") dev=$(i+1);
-      if(managed && dev ~ /^(cni|flannel|veth)/) next;
+      if(managed && (dev ~ /^(cni|flannel|veth)/ || dev == "lp-gvisor0")) next;
       split(dest,parts,"/"); prefix=(parts[2]=="" ? 32 : parts[2]);
       if(parts[1] !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next;
       size=2^(32-prefix); first=int(number(parts[1])/size)*size; last=first+size-1;
-      if(first <= number("10.43.255.255") && last >= number("10.42.0.0")) {
+      if(first <= number("10.44.255.255") && last >= number("10.42.0.0")) {
         print "error: host route " dest " overlaps Pod or Service networks" > "/dev/stderr"; bad=1
       }
     } END {exit bad}' || die 'resolve network overlap before installing'

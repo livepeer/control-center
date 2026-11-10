@@ -3,6 +3,8 @@ package appreconciler
 import (
 	"testing"
 	"time"
+
+	"github.com/livepeer/control-center/schema"
 )
 
 func TestReservedHostnamesCannotBecomeAcceptedAppIdentities(t *testing.T) {
@@ -32,7 +34,7 @@ func TestReservedHostnamesCannotBecomeAcceptedAppIdentities(t *testing.T) {
 			observation.Entries[0].Options.ID = id
 			err := c.observe(observation)
 			instance := &Instance{AppID: id, Definition: before.Instances[request.Entries[0].InstanceID].Definition}
-			_, optionsErr := AppOptions(instance)
+			_, optionsErr := AppRegistrations(instance, true)
 			if id == "app-valid" {
 				if err != nil || optionsErr != nil {
 					t.Fatal("valid identity rejected", err, optionsErr)
@@ -51,5 +53,23 @@ func TestReservedHostnamesCannotBecomeAcceptedAppIdentities(t *testing.T) {
 				t.Fatal("reserved identity advertised ready")
 			}
 		})
+	}
+}
+
+func TestAppIDOwnership(t *testing.T) {
+	i := &Instance{ID: "shared", AppID: "assigned", Definition: schema.DefinitionV1{Apps: make([]schema.App, 256)}}
+	for _, id := range []string{"r-shared-0", "r-shared-255"} {
+		if !ownsAppID(i, id) {
+			t.Fatal("rejected owned app", id)
+		}
+	}
+	for _, id := range []string{"", "assigned", "r-other-0", "r-shared--1", "r-shared-+1", "r-shared-01", "r-shared-256", "r-shared-999999999999999999999999"} {
+		if ownsAppID(i, id) {
+			t.Fatal("accepted foreign or noncanonical app", id)
+		}
+	}
+	i.Definition.Apps = nil
+	if !ownsAppID(i, "assigned") || ownsAppID(i, "r-shared-0") {
+		t.Fatal("changed single-app identity binding")
 	}
 }

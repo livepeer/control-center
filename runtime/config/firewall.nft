@@ -1,20 +1,33 @@
 # Dedicated to this single-node installation; never flush the host ruleset.
 table inet livepeer_bootstrap {
+  set local_ipv4 { type ipv4_addr; flags interval; auto-merge; }
   chain input {
     type filter hook input priority -20; policy accept;
     iifname "lo" accept
+    # Workload replies to incoming probes/requests are allowed; new host access is not.
+    iifname "lp-gvisor0" ct direction reply ct state established,related accept
+    iifname "lp-gvisor0" drop
     # Service traffic is DNATed to the node API before the input hook.
     iifname { "cni0", "flannel.1" } ip saddr 10.42.0.0/16 tcp dport 6443 accept
     tcp dport { 2379, 2380, 6443, 6444, 8935, 8936, 10010, 10249, 10250, 10256, 10257, 10259, 20241 } drop
     udp dport 8472 drop
   }
+  chain gvisor_egress {
+    ct direction reply ct state established,related accept
+    ip daddr @local_ipv4 drop
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4 } drop
+    ip daddr { 1.1.1.1, 1.0.0.1 } meta l4proto { tcp, udp } th dport 53 accept
+    meta nfproto ipv4 tcp dport 443 accept
+    drop
+  }
   chain forward {
     type filter hook forward priority -20; policy accept;
+    iifname "lp-gvisor0" jump gvisor_egress
     iifname { "cni0", "flannel.1" } accept
     # Preserve replies to Pod-initiated outbound connections.
     ct direction reply ct state established,related accept
     # Also covers direct IPv6 Pod traffic and NodePort/host-port DNAT to Pods.
-    oifname { "cni0", "flannel.1" } drop
-    ip daddr { 10.42.0.0/16, 10.43.0.0/16 } drop
+    oifname { "cni0", "flannel.1", "lp-gvisor0" } drop
+    ip daddr { 10.42.0.0/16, 10.43.0.0/16, 10.44.0.0/16 } drop
   }
 }

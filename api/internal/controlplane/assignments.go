@@ -302,7 +302,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				return AdminChange{}, e
 			}
 			if e = schema.CheckAssignmentBudget(*set); e != nil {
-				return AdminChange{}, problem(400, "assignment_limit", "Assignments exceed the machine count or delivery size limit.")
+				return AdminChange{}, problem(400, "assignment_limit", "Assignments exceed the machine count, runner count, or delivery size limit.")
 			}
 		}
 		sort.Strings(affected)
