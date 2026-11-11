@@ -1,0 +1,37 @@
+# Copy to config.toml. Paths are inside the API container, not the host.
+PGConnstrFile = "/run/secrets/pg-connstr"
+PGPasswordFile = "/run/secrets/pg-password"
+JWTSigningSecretFile = "/run/secrets/jwt-signing-secret"
+MachineTokenSecretFile = "/run/secrets/machine-token-secret"
+SupabaseURL = "https://PROJECT.supabase.co"
+SupabasePublishableKey = "replace-with-publishable-key"
+DefaultAdminEmail = "admin@example.com"
+
+Listen = "0.0.0.0:43812"
+PublicAPIURL = "https://controlcenter-api.livepeer.live"
+ConfigReconcileInterval = "1m"
+RegistryPaymentMode = "offchain"
+
+# Publish both images to the bundled registry and use the returned digests.
+RuntimeImage = "controlcenter-registry.livepeer.live/controlcenter/runtime@sha256:<RUNTIME_DIGEST>"
+RuntimeConnectorImage = "controlcenter-registry.livepeer.live/controlcenter/connector@sha256:<CONNECTOR_DIGEST>"
+RuntimeNodeImage = "controlcenter-registry.livepeer.live/controlcenter/node@sha256:<NODE_DIGEST>"
+RuntimeNodeDrainTimeout = "12h"
+
+# Enable after supplying account settings, the private keyring, and fleet IPs.
+CloudflareEnabled = false
+CloudflareIngressApproved = false
+DiscoveryEnabled = false
+CloudflareAccountID = "<ACCOUNT_ID>"
+CloudflareZoneID = "<ZONE_ID>"
+CloudflareBaseDomain = "livepeer.vip"
+CloudflareTeamName = "livepeer"
+CloudflareAPITokenFile = "/run/secrets/cloudflare-token"
+CloudflareKeyringFile = "/run/secrets/collector-access-keyring.json"
+CloudflareAccessLifetime = "720h"
+CloudflareRotateBefore = "168h"
+TunnelStatusTTL = "10m"
+TunnelDrainTimeout = "10m"
+TunnelNodeAddresses = ["<FLEET_NODE_IP/CIDR>"]
+DiscoveryRefreshInterval = "5m"
+DiscoveryMaxFailedRefreshes = 6

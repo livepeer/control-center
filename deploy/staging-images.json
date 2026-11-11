@@ -1,0 +1,11 @@
+{
+  "images": {
+    "RuntimeImage": "controlcenter-registry.livepeer.live/controlcenter/runtime@sha256:d3fb56a9dc77a7153712d9e929759e81b92a41b5e7d0c0b9575c68f9256bcf75",
+    "RuntimeConnectorImage": "controlcenter-registry.livepeer.live/controlcenter/connector@sha256:3e48424bcb889f6dc7ab7a4745ea1b86e145bdc1d0bb9f7b10e77ed22109f1e1",
+    "RuntimeNodeImage": "controlcenter-registry.livepeer.live/controlcenter/node@sha256:6546d6f493840feb503b5c10a2fa301a95b632213ae0e230aeff179e4624851a"
+  },
+  "controlcenter_commit": "dd802aad142f139aa9c6fcd8bd20cb46ca304789",
+  "source_note": "Built with existing working tree changes. Matching Node snapshot includes the local APIOriginURL implementation.",
+  "node_commit": "96b907678a735cbf4161b3af5eb3c3993ca68b3e",
+  "node_source_archive_sha256": "57fd4de20a8194d73c74347454f50295cdea766a94cb1cf8bdcd3a524b2b5269"
+}

@@ -1,0 +1,110 @@
+name: controlcenter
+
+x-service: &service
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  api:
+    <<: *service
+    image: controlcenter-api:staging
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: api
+    volumes:
+      - ./config.toml:/etc/controlcenter/config.toml:ro
+    secrets:
+      - pg-connstr
+      - pg-password
+      - jwt-signing-secret
+      - machine-token-secret
+      - cloudflare-token
+      - collector-access-keyring.json
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:43812/readyz]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 30s
+
+  web:
+    <<: *service
+    image: controlcenter-web:staging
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: web
+    ports:
+      - 127.0.0.1:33812:8080
+      - 127.0.0.1:43812:8081
+      - 127.0.0.1:53812:8082
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=0700
+    depends_on:
+      api:
+        condition: service_healthy
+      registry:
+        condition: service_started
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  registry:
+    <<: *service
+    image: registry:3
+    environment:
+      REGISTRY_HTTP_ADDR: 0.0.0.0:5000
+      REGISTRY_LOG_LEVEL: warn
+    ports:
+      - 127.0.0.1:63812:5000
+    volumes:
+      - registry-data:/var/lib/registry
+
+  cloudflared:
+    <<: *service
+    image: cloudflare/cloudflared:2026.10.7
+    user: "65532:65532"
+    network_mode: host
+    command: [tunnel, --no-autoupdate, --metrics, "127.0.0.1:23812", run]
+    environment:
+      TUNNEL_TOKEN_FILE: /run/secrets/cloudflare-tunnel-token
+    secrets:
+      - cloudflare-tunnel-token
+    depends_on:
+      web:
+        condition: service_healthy
+    stop_grace_period: 30s
+
+secrets:
+  pg-connstr:
+    file: ./secrets/pg-connstr
+  pg-password:
+    file: ./secrets/pg-password
+  jwt-signing-secret:
+    file: ./secrets/jwt-signing-secret
+  machine-token-secret:
+    file: ./secrets/machine-token-secret
+  cloudflare-token:
+    file: ./secrets/cloudflare-token
+  collector-access-keyring.json:
+    file: ./secrets/collector-access-keyring.json
+  cloudflare-tunnel-token:
+    file: ./secrets/cloudflare-tunnel-token
+
+volumes:
+  registry-data:
+
+networks:
+  default:
+    enable_ipv6: true

@@ -11,3 +11,5 @@ ui/playwright-report/
 /.remote-test-results/
 /tools/__pycache__/
 /tools/tests/__pycache__/
+/deploy/config.toml
+/deploy/secrets/

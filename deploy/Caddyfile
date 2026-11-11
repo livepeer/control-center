@@ -1,0 +1,41 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	header X-Content-Type-Options nosniff
+	header Referrer-Policy strict-origin-when-cross-origin
+
+	handle /api/* {
+		reverse_proxy api:43812
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		header Cache-Control no-cache
+		file_server
+	}
+}
+
+:8081 {
+	header X-Content-Type-Options nosniff
+	reverse_proxy api:43812
+}
+
+:8082 {
+	header X-Content-Type-Options nosniff
+
+	@registry_read {
+		path /v2 /v2/*
+		method GET HEAD
+	}
+	handle @registry_read {
+		reverse_proxy registry:5000
+	}
+
+	handle {
+		respond "Image uploads require SSH access." 405
+	}
+}
