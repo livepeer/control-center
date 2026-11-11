@@ -54,10 +54,8 @@ github.com/klauspost/compress v1.20.2 h1:v5tiZvm1KGLyg5d5oXdXe3lsSPrbEUiKoXGia//
 github.com/klauspost/compress v1.20.2/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
-github.com/livepeer/golang-runner v0.0.0-20261106090658-0b10de392842 h1:M8Bu1WI63Zi8GFL/bLowRk9Y2vRLguwqKJdYpc+nDvo=
-github.com/livepeer/golang-runner v0.0.0-20261106090658-0b10de392842/go.mod h1:7Eao2+wi/GhTZbCFspOShfFe69DLWv1CabfUCqQaTgc=
-github.com/livepeer/golang-runner v0.0.0-20261108033245-0d435fa56849 h1:j9geJmDmLqVBGnfMQR1j0vV/66+jaoOWQL0Mue3UUBw=
-github.com/livepeer/golang-runner v0.0.0-20261108033245-0d435fa56849/go.mod h1:7Eao2+wi/GhTZbCFspOShfFe69DLWv1CabfUCqQaTgc=
+github.com/livepeer/golang-runner v0.0.0-20261110073804-8664fdb1f080 h1:d51np/CrXtGIvFxLzFR72/Cay2jUb2aSIBBbvOYhnI4=
+github.com/livepeer/golang-runner v0.0.0-20261110073804-8664fdb1f080/go.mod h1:7Eao2+wi/GhTZbCFspOShfFe69DLWv1CabfUCqQaTgc=
 github.com/livepeer/node v1.0.7-0.20261106162658-d5af6f14f102 h1:EmE2/5FxSJXyvafDGUIqx2Ii+f1evg5U3EGvVEM5q5E=
 github.com/livepeer/node v1.0.7-0.20261106162658-d5af6f14f102/go.mod h1:hHOVJIzh7VM9xySRUQOuF1UAHvrT7eXaScdHvOkyeik=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=

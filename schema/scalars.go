@@ -120,7 +120,7 @@ func normalize(d *DefinitionV1, e *ValidationError) {
 	for _, v := range []struct {
 		p string
 		s *string
-	}{{"health.readiness.interval", &d.Health.Readiness.Interval}, {"health.readiness.timeout", &d.Health.Readiness.Timeout}, {"lifecycle.startup_timeout", &d.Lifecycle.StartupTimeout}, {"lifecycle.stop_grace_period", &d.Lifecycle.StopGracePeriod}, {"instances.drain_timeout", &d.Instances.DrainTimeout}} {
+	}{{"health.readiness.interval", &d.Health.Readiness.Interval}, {"health.readiness.timeout", &d.Health.Readiness.Timeout}, {"lifecycle.startup_timeout", &d.Lifecycle.StartupTimeout}, {"lifecycle.stop_grace_period", &d.Lifecycle.StopGracePeriod}} {
 		convert(v.p, v.s, duration)
 	}
 	convert("price.amount", &d.Price.Amount, decimal)

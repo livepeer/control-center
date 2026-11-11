@@ -52,7 +52,6 @@ stop_grace_period = "30s"
 mode = "reusable"
 replicas = 2
 capacity_per_instance = 1
-drain_timeout = "12h"
 
 [runner]
 mode = "single-shot"

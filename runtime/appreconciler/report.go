@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sort"
 	"time"
 
@@ -157,7 +158,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		if i.PodUID != "" && i.Definition.Lifecycle.StopSignal != nil && !i.StopVerified {
 			workload = "stop_signal_unverified"
 		}
-		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: accepted, StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
+		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
 	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
 	report := Report{ReportVersion: 1, ClockUncertain: s.ClockUncertain, Epoch: s.Metadata.Epoch, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}
@@ -175,12 +176,12 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 			// and durable owner retirement, rather than renewing an old heartbeat proof.
 			report.Drained = true
 			report.Evidence = &contract.Evidence{Target: s.Metadata.DrainTarget, WithdrawalID: s.MaintenanceWithdrawal, ObservedAt: now, ExpiresAt: now.Add(30 * time.Second), Kind: "no_owner"}
-			if s.Retirement != nil && s.Retirement.MutationSequence > 0 {
+			if s.Retirement != nil && s.Retirement.MutationSequence != nil {
 				report.Evidence.OwnerID = s.Retirement.OwnerID
 				report.Evidence.CredentialFingerprint = s.Retirement.CredentialFingerprint
 				report.Evidence.MutationSequence = s.Retirement.MutationSequence
 			}
-			if old := s.Report; old != nil && old.Drained && old.Evidence != nil && old.Evidence.Target == report.Evidence.Target && old.Evidence.WithdrawalID == report.Evidence.WithdrawalID && old.Evidence.OwnerID == report.Evidence.OwnerID && old.Evidence.CredentialFingerprint == report.Evidence.CredentialFingerprint && old.Evidence.MutationSequence == report.Evidence.MutationSequence && now.Before(old.Evidence.ExpiresAt) && (s.ReportDeliveredSequence < old.Sequence || now.Before(old.Evidence.ObservedAt.Add(10*time.Second))) {
+			if old := s.Report; old != nil && old.Drained && old.Evidence != nil && old.Evidence.Target == report.Evidence.Target && old.Evidence.WithdrawalID == report.Evidence.WithdrawalID && old.Evidence.OwnerID == report.Evidence.OwnerID && old.Evidence.CredentialFingerprint == report.Evidence.CredentialFingerprint && reflect.DeepEqual(old.Evidence.MutationSequence, report.Evidence.MutationSequence) && now.Before(old.Evidence.ExpiresAt) && (s.ReportDeliveredSequence < old.Sequence || now.Before(old.Evidence.ObservedAt.Add(10*time.Second))) {
 				report.Evidence = old.Evidence
 			}
 		}
@@ -355,4 +356,11 @@ func boundReport(r *Report) error {
 		r.Apps.Instances = r.Apps.Instances[:len(r.Apps.Instances)-1]
 		r.Apps.InstancesOmitted++
 	}
+}
+
+func sequencePointer(n uint64, present bool) *uint64 {
+	if !present {
+		return nil
+	}
+	return new(n)
 }

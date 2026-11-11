@@ -163,6 +163,7 @@ func appReconciler(ctx context.Context, args []string) error {
 	}()
 	store := artifact.Store{Directory: filepath.Join(*directory, "artifacts")}
 	probes := appreconciler.NewProbes()
+	probes.OnChange = owner.Refresh
 	controller := appreconciler.Controller{Journal: journal, Input: appreconciler.Source{Kube: kube, Client: transport.HTTPClient(), ArtifactURL: *sourceURL, IdentityFile: *identity, NodeID: control.NodeID}, Cluster: appreconciler.Kubernetes{Client: kube, NodeID: control.NodeID}, Owner: owner, Store: store, ArtifactURL: *artifactURL, Reporter: appreconciler.ControlReporter{Client: reports}, Probes: probes}
 	var stateLost atomic.Bool
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

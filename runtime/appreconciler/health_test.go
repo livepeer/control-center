@@ -67,6 +67,7 @@ func TestBudgetIncludesRetainedInstancesAndRejectsMalformedCapacity(t *testing.T
 		t.Fatal("retained resources treated as free")
 	}
 	instances["old"].Phase = "removed"
+	instances["old"].RegistrationGone = true
 	if !fits(instances, d, budget) {
 		t.Fatal("absent resources not reusable")
 	}

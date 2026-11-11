@@ -133,7 +133,6 @@ func validateSemantics(d DefinitionV1) error {
 	number(d.Lifecycle.StartupTimeout, "s", "lifecycle.startup_timeout", 1, 3600)
 	number(d.Lifecycle.StopGracePeriod, "s", "lifecycle.stop_grace_period", 0, 300)
 	check(d.Instances.Mode != "single-session" || d.Instances.CapacityPerInstance == 1, "instances.capacity_per_instance", "Single-session instances require capacity one.")
-	number(d.Instances.DrainTimeout, "s", "instances.drain_timeout", 0, 43200)
 	return e.err()
 }
 func refDigest(r reference.Reference) string {

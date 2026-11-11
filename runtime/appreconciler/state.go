@@ -26,7 +26,6 @@ import (
 var ErrStateLost = errors.New("state_recovery_failed")
 var ErrSuperseded = errors.New("superseded_owner_snapshot")
 var ErrClock = errors.New("clock_uncertain")
-var ErrResourceRefused = errors.New("resource_refused")
 
 func randomID() string {
 	var b [16]byte
@@ -37,32 +36,40 @@ func randomID() string {
 }
 
 type Identity struct {
-	RunnerID   string `json:"runner_id"`
-	Credential string `json:"credential"`
-	Confirmed  bool   `json:"confirmed"`
-	Retiring   bool   `json:"retiring"`
+	RunnerID   string  `json:"runner_id"`
+	Credential string  `json:"credential"`
+	Confirmed  bool    `json:"confirmed"`
+	Sequence   *uint64 `json:"sequence,omitempty"`
+	Retiring   bool    `json:"retiring"`
 }
+
+func (i Identity) sameOwner(other Identity) bool {
+	return i.RunnerID == other.RunnerID && i.Credential == other.Credential
+}
+
 type Instance struct {
-	ID                 string              `json:"id"`
-	Group              appbundle.Group     `json:"group"`
-	Generation         int64               `json:"generation"`
-	Definition         schema.DefinitionV1 `json:"definition"`
-	Files              map[string][]byte   `json:"files"`
-	Name               string              `json:"name"`
-	PodUID             string              `json:"pod_uid,omitempty"`
-	StopVerified       bool                `json:"stop_verified"`
-	AppID              string              `json:"app_id,omitempty"`
-	Phase              string              `json:"phase"`
-	Reason             string              `json:"reason,omitempty"`
-	CreatedAt          time.Time           `json:"created_at"`
-	WithdrawalID       string              `json:"withdrawal_id,omitempty"`
-	Deadline           time.Time           `json:"deadline,omitempty"`
-	Forced             bool                `json:"forced"`
-	RegistrationGone   bool                `json:"registration_gone"`
-	RetiredAt          time.Time           `json:"retired_at,omitempty"`
-	DrainExpiredAt     time.Time           `json:"drain_expired_at,omitempty"`
-	RemovalPublishedAt time.Time           `json:"removal_published_at,omitempty"`
-	TerminatedAt       time.Time           `json:"terminated_at,omitempty"`
+	ID                  string              `json:"id"`
+	Group               appbundle.Group     `json:"group"`
+	Generation          int64               `json:"generation"`
+	Definition          schema.DefinitionV1 `json:"definition"`
+	Files               map[string][]byte   `json:"files"`
+	Name                string              `json:"name"`
+	PodUID              string              `json:"pod_uid,omitempty"`
+	StopVerified        bool                `json:"stop_verified"`
+	AppID               string              `json:"app_id,omitempty"`
+	Phase               string              `json:"phase"`
+	Reason              string              `json:"reason,omitempty"`
+	CreatedAt           time.Time           `json:"created_at"`
+	WithdrawalID        string              `json:"withdrawal_id,omitempty"`
+	WithdrawnAt         time.Time           `json:"withdrawn_at,omitempty"`
+	RegistrationPending bool                `json:"registration_pending"`
+	Deadline            time.Time           `json:"deadline,omitempty"`
+	Forced              bool                `json:"forced"`
+	RegistrationGone    bool                `json:"registration_gone"`
+	RetiredAt           time.Time           `json:"retired_at,omitempty"`
+	DrainExpiredAt      time.Time           `json:"drain_expired_at,omitempty"`
+	RemovalPublishedAt  time.Time           `json:"removal_published_at,omitempty"`
+	TerminatedAt        time.Time           `json:"terminated_at,omitempty"`
 }
 type Snapshot struct {
 	Included       map[string]bool `json:"included"`
@@ -89,10 +96,6 @@ type State struct {
 	Heads                   map[string]string    `json:"heads"`
 	Identity                Identity             `json:"identity"`
 	OwnerEpoch              string               `json:"owner_epoch"`
-	OwnerHash               string               `json:"owner_hash"`
-	MutationSequence        uint64               `json:"mutation_sequence"`
-	AcceptedSequence        uint64               `json:"accepted_sequence"`
-	IdentitySequence        uint64               `json:"identity_sequence"`
 	ReportSequence          uint64               `json:"report_sequence"`
 	MaintenanceID           string               `json:"maintenance_id,omitempty"`
 	MaintenanceWithdrawal   string               `json:"maintenance_withdrawal,omitempty"`
@@ -109,8 +112,6 @@ type State struct {
 	AssignmentReasons       map[string]string    `json:"assignment_reasons,omitempty"`
 	SchedulingReason        string               `json:"scheduling_reason,omitempty"`
 	InputReason             string               `json:"input_reason,omitempty"`
-	RejectedOwnerHash       string               `json:"rejected_owner_hash,omitempty"`
-	OwnerRetryAt            time.Time            `json:"owner_retry_at,omitempty"`
 	OwnerReason             string               `json:"owner_reason,omitempty"`
 	ReportObservedAt        time.Time            `json:"report_observed_at,omitempty"`
 	ReportDeliveredAt       time.Time            `json:"report_delivered_at,omitempty"`
@@ -226,17 +227,15 @@ func (j *Journal) Close() error {
 	return nil
 }
 func (j *Journal) View() State { j.mu.Lock(); defer j.mu.Unlock(); return clone(j.state) }
-func (j *Journal) Eligible(id, appID string) (string, bool) {
+func (j *Journal) Eligibility(r Registration) (member, ready bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	i := j.state.Instances[id]
-	if i == nil {
-		return "", false
-	}
-	return i.PodUID, i.AppID != "" && i.AppID == appID && i.StopVerified && i.WithdrawalID == "" &&
-		i.Phase != "removed" && i.Phase != "retired" && !j.state.ClockUncertain &&
+	i := j.state.Instances[r.InstanceID]
+	member = i != nil && i.PodUID == r.PodUID && i.WithdrawalID == "" && i.Phase != "removed" && !j.state.Identity.Retiring
+	return member, member && i.AppID != "" && i.AppID == r.Options.ID && i.StopVerified &&
+		i.Phase != "retired" && !j.state.ClockUncertain &&
 		!j.state.Metadata.DrainRequested && !j.state.Metadata.Terminal &&
-		j.state.Identity.Confirmed && !j.state.Identity.Retiring
+		j.state.Identity.Confirmed
 }
 func (j *Journal) Update(change func(*State) error) error {
 	j.mu.Lock()
@@ -284,22 +283,6 @@ func (j *Journal) Update(change func(*State) error) error {
 	}
 	return nil
 }
-func (j *Journal) Reserve(expectedHash string) (uint64, error) {
-	var sequence uint64
-	err := j.Update(func(s *State) error {
-		if s.OwnerHash != expectedHash || s.Identity.Retiring {
-			return ErrSuperseded
-		}
-		if s.MutationSequence == ^uint64(0) {
-			return errors.New("mutation_sequence_exhausted")
-		}
-		s.MutationSequence++
-		sequence = s.MutationSequence
-		return nil
-	})
-	return sequence, err
-}
-
 func receiptKey(r Receipt) string {
 	return fmt.Sprintf("%s/%d/%s", r.RevisionID, r.Generation, r.Phase)
 }

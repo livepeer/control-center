@@ -8,12 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/transport"
 	runner "github.com/livepeer/golang-runner"
@@ -22,63 +22,47 @@ import (
 var routeID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 type Registration struct {
-	InstanceID   string
-	WithdrawalID string
-	PodUID       string
-	Options      runner.AppOptions
+	InstanceID, WithdrawalID, PodUID string
+	WithdrawnAt                      time.Time
+	Options                          runner.AppOptions
 }
 type OwnerRequest struct {
-	Epoch, Hash string
-	Identity    Identity
-	Entries     []Registration
-	Recover     bool
+	Epoch    string
+	Identity Identity
+	Entries  []Registration
+	Tracked  []Registration
 }
 
-func RequestHash(r OwnerRequest) string {
-	b, _ := json.Marshal(struct {
-		RunnerID string
-		Entries  []Registration
-		Recover  bool
-	}{r.Identity.RunnerID, r.Entries, r.Recover})
-	return artifact.Digest(b)
-}
-
-type AppObservation struct {
-	ID, Status string
-	SessionIDs []string
-}
+type AppObservation = runner.HeartbeatAppStatus
 type Observation struct {
-	Epoch, Hash, RunnerID, Credential string
-	PreviousCredential                string
-	ReservedSequence                  uint64
-	Sequence                          uint64
-	Bootstrap                         bool
-	At                                time.Time
-	TTL                               time.Duration
-	Entries                           []Registration
-	Apps                              []AppObservation
+	Request                                         runner.HeartbeatRequest
+	Epoch, RunnerID, Credential, PreviousCredential string
+	Sequence                                        uint64
+	Accepted                                        bool
+	Bootstrap                                       bool
+	At                                              time.Time
+	TTL                                             time.Duration
+	Entries, Withdrawals                            []Registration
+	Apps                                            []AppObservation
 }
 type OwnerFailure struct {
-	Epoch, Hash string
-	Reset       bool
-	Reason      string
+	Epoch, Reason  string
+	Reset, Partial bool
 }
 type OwnerHooks struct {
-	Identity    func() Identity
-	Reserve     func(string) (uint64, error)
 	Observe     func(Observation) error
 	Failure     func(OwnerFailure)
 	Now         func() time.Time
-	PermitReady func(Registration) bool
+	Eligibility func(Registration) (member, ready bool)
 }
 type Owner interface {
 	Sync(context.Context, OwnerRequest, OwnerHooks) error
 	Unregister(context.Context, Identity) error
-	Accepted() OwnerRequest
+	Accepted() Identity
 	Close(context.Context) error
 }
 
-func AppOptions(i *Instance, ready bool) (runner.AppOptions, error) {
+func AppOptions(i *Instance) (runner.AppOptions, error) {
 	if contract.ReservedProxyID(i.AppID) {
 		return runner.AppOptions{}, errors.New("reserved_app_identity")
 	}
@@ -87,29 +71,30 @@ func AppOptions(i *Instance, ready bool) (runner.AppOptions, error) {
 	if err != nil {
 		return runner.AppOptions{}, err
 	}
-	status := "not-ready"
-	if ready && i.WithdrawalID == "" {
-		status = "ready"
-	}
-	return runner.AppOptions{ID: i.AppID, App: d.Name, Version: d.AppVersion, RunnerURL: privateURL(i.Name, d.HTTP.Port), Mode: d.Runner.Mode, PriceInfo: price, Capacity: d.Instances.CapacityPerInstance, Status: status, Proxy: true}, nil
+	return runner.AppOptions{ID: i.AppID, App: d.Name, Version: d.AppVersion, RunnerURL: privateURL(i.Name, d.HTTP.Port), Mode: d.Runner.Mode, PriceInfo: price, Capacity: d.Instances.CapacityPerInstance, Status: "not-ready", Proxy: true}, nil
 }
 func privateURL(name string, port int) string {
 	return "http://" + name + ".livepeer-apps.svc.cluster.local:" + formatPort(port)
 }
 func formatPort(n int) string { b, _ := json.Marshal(n); return string(b) }
 
-// SDKOwner uses the SDK's HTTPClient extension; the SDK still owns heartbeat and O2R loops.
-// The middleware observes registration responses and serializes mutations.
+// SDKOwner keeps protocol execution in the SDK. The mutex protects application
+// membership, never an HTTP call or a join of SDK callbacks.
 type SDKOwner struct {
 	lifecycle       sync.Mutex
-	mutations       sync.Mutex
 	mu              sync.Mutex
 	base, bootstrap string
 	client          *http.Client
 	current         *runner.Runner
-	currentHash     string
-	currentEpoch    string
-	accepted        OwnerRequest
+	request         OwnerRequest
+	accepted        Identity
+	hooks           OwnerHooks
+	registrations   map[string]Registration
+	lineage         string
+	rejectedUntil   time.Time
+	rejectedReason  string
+	// Fatal must terminate the process. Production exits without joining the SDK.
+	Fatal func(error)
 }
 
 func NewSDKOwner(base, bootstrap string, client *http.Client) (*SDKOwner, error) {
@@ -120,280 +105,266 @@ func NewSDKOwner(base, bootstrap string, client *http.Client) (*SDKOwner, error)
 	if client == nil {
 		client = transport.HTTPClient()
 	}
-	return &SDKOwner{base: strings.TrimRight(base, "/"), bootstrap: bootstrap, client: client}, nil
-}
-func (o *SDKOwner) Accepted() OwnerRequest {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return copyRequest(o.accepted)
+	return &SDKOwner{base: strings.TrimRight(base, "/"), bootstrap: bootstrap, client: client, registrations: map[string]Registration{}, Fatal: func(error) { os.Exit(1) }}, nil
 }
 func copyRequest(r OwnerRequest) OwnerRequest {
-	r.Entries = append([]Registration(nil), r.Entries...)
+	r.Entries = append([]Registration{}, r.Entries...)
+	r.Tracked = append([]Registration{}, r.Tracked...)
 	return r
+}
+func (o *SDKOwner) Accepted() Identity {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.accepted
 }
 func (o *SDKOwner) Close(ctx context.Context) error {
 	o.lifecycle.Lock()
 	defer o.lifecycle.Unlock()
-	return o.close(ctx)
-}
-func (o *SDKOwner) close(ctx context.Context) error {
-	if o.current != nil {
-		err := o.current.Close(ctx)
-		o.current = nil
-		o.currentHash = ""
-		o.currentEpoch = ""
-		return err
+	o.mu.Lock()
+	value := o.current
+	o.current = nil
+	o.mu.Unlock()
+	if value != nil {
+		return value.Close(ctx)
 	}
 	return nil
 }
 func (o *SDKOwner) Sync(ctx context.Context, r OwnerRequest, h OwnerHooks) error {
 	o.lifecycle.Lock()
 	defer o.lifecycle.Unlock()
-	if o.current != nil && o.currentHash == r.Hash && o.currentEpoch == r.Epoch {
-		return nil
+	o.mu.Lock()
+	o.request, o.hooks = copyRequest(r), h
+	registrations := map[string]Registration{}
+	for _, entries := range [][]Registration{r.Tracked, r.Entries} {
+		for _, e := range entries {
+			known, ok := registrations[e.Options.RunnerURL]
+			if !ok {
+				known = o.registrations[e.Options.RunnerURL]
+			}
+			if known.InstanceID == e.InstanceID && known.PodUID == e.PodUID && e.Options.ID == "" {
+				e.Options.ID = known.Options.ID
+			}
+			registrations[e.Options.RunnerURL] = e
+		}
 	}
-	if len(r.Entries) == 0 {
-		return errors.New("empty_owner_requires_retirement")
-	}
-	if err := o.close(ctx); err != nil {
+	o.registrations = registrations
+	if o.current != nil {
+		err := o.setAppsLocked()
+		o.mu.Unlock()
 		return err
 	}
-	if h.Identity != nil {
-		latest := h.Identity()
-		if latest.RunnerID != r.Identity.RunnerID || latest.Retiring {
-			return ErrSuperseded
-		}
-		r.Identity = latest
+	o.lineage = r.Identity.Credential
+	initial := uint64(0)
+	if r.Identity.Sequence != nil {
+		initial = *r.Identity.Sequence + 1
 	}
-	apps := make([]runner.AppOptions, len(r.Entries))
-	for i, e := range r.Entries {
-		apps[i] = e.Options
-	}
-	credential := r.Identity.Credential
-	if r.Recover {
-		credential = ""
-	}
-	mid := &heartbeatClient{owner: o, request: r, hooks: h, bootstrapAllowed: credential == "", credential: credential, lineage: r.Identity.Credential}
-	value, err := runner.New(runner.Options{OrchestratorURL: o.base, BootstrapSecret: o.bootstrap, RunnerID: r.Identity.RunnerID, HeartbeatSecret: credential, Apps: apps, DisableUnregisterOnClose: true, HTTPClient: mid, Timeout: 20 * time.Second})
+	apps := o.appsLocked()
+	value, err := runner.New(runner.Options{OrchestratorURL: o.base, BootstrapSecret: o.bootstrap, HeartbeatSecret: r.Identity.Credential, RunnerID: r.Identity.RunnerID, Apps: apps, InitialSeq: initial, DisableUnregisterOnClose: true, HTTPClient: originGuard{o.base, o.client}, Timeout: 20 * time.Second, OnHeartbeat: o.heartbeat})
 	if err != nil {
+		o.mu.Unlock()
 		return errors.New("sdk_configuration")
 	}
+	o.current = value
+	o.mu.Unlock()
+	// Start invokes OnHeartbeat synchronously; no callback-needed mutex is held.
 	if err = value.Start(ctx); err != nil {
 		_ = value.Close(context.WithoutCancel(ctx))
+		o.mu.Lock()
+		o.current = nil
+		o.mu.Unlock()
 		return err
 	}
-	o.current = value
-	o.currentHash = r.Hash
-	o.currentEpoch = r.Epoch
+	return nil
+}
+func (o *SDKOwner) appsLocked() []runner.AppOptions {
+	apps := []runner.AppOptions{}
+	backoff := time.Now().Before(o.rejectedUntil)
+	credential := o.request.Identity.Credential
+	if o.current != nil {
+		credential = o.current.HeartbeatSecret()
+	}
+	for _, entry := range o.request.Entries {
+		e := entry
+		known := o.registrations[e.Options.RunnerURL]
+		if backoff && known.Options.ID == "" {
+			continue
+		}
+		if known.Options.ID != "" {
+			e.Options.ID = known.Options.ID
+		}
+		if e.WithdrawalID != "" {
+			continue
+		}
+		member, ready := true, true
+		if o.hooks.Eligibility != nil {
+			member, ready = o.hooks.Eligibility(e)
+		}
+		if !member {
+			continue
+		}
+		if credential == "" || !ready {
+			e.Options.Status = "not-ready"
+		}
+		apps = append(apps, e.Options)
+	}
+	return apps
+}
+func (o *SDKOwner) setAppsLocked() error {
+	if o.current == nil {
+		return nil
+	}
+	return o.current.SetApps(o.appsLocked())
+}
+
+// Refresh applies independent probe/lifecycle downgrades without reconciling workloads.
+func (o *SDKOwner) Refresh() { o.mu.Lock(); defer o.mu.Unlock(); _ = o.setAppsLocked() }
+func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
+	o.mu.Lock()
+	h, r, lineage := o.hooks, copyRequest(o.request), o.lineage
+	fail := func(reason string, reset bool) {
+		if h.Failure != nil {
+			h.Failure(OwnerFailure{Epoch: r.Epoch, Reason: reason, Reset: reset})
+		}
+	}
+	if event.Err != nil {
+		reason, reset := "node_unavailable", false
+		var e *runner.HTTPError
+		if errors.As(event.Err, &e) {
+			reason = "node_request_failed"
+			if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
+				reason = "registration_auth_failed"
+			}
+			if e.StatusCode == http.StatusUnauthorized {
+				reset = true
+			}
+			if e.StatusCode == http.StatusServiceUnavailable && (strings.Contains(e.Body, "app capacity reached") || strings.Contains(e.Body, "runner capacity reached")) {
+				reason = "resource_refused"
+			}
+		}
+		membershipRejected := e != nil && (e.StatusCode == http.StatusBadRequest || (e.StatusCode == http.StatusConflict && event.AcceptedSeq == nil) || reason == "resource_refused")
+		if membershipRejected {
+			o.rejectedUntil = time.Now().Add(30 * time.Second)
+			o.rejectedReason = reason
+		}
+		fail(reason, reset)
+		_ = o.setAppsLocked()
+		o.mu.Unlock()
+		return
+	}
+	resp := event.Response
+	// The SDK validates response presence, app identities and request cardinality.
+	if event.TTL <= 0 {
+		fail("heartbeat_response", false)
+		o.mu.Unlock()
+		return
+	}
+	obs := Observation{Request: event.Request, Epoch: r.Epoch, RunnerID: resp.RunnerID, Credential: resp.HeartbeatSecret, PreviousCredential: lineage, Sequence: event.Request.Seq, Accepted: event.AcceptedSeq != nil, Bootstrap: event.Credential == o.bootstrap, At: event.At.UTC(), TTL: event.TTL, Apps: resp.Apps}
+	if obs.Credential == "" {
+		obs.Credential = event.Credential
+	}
+	for _, app := range resp.Apps {
+		if !routeID.MatchString(app.ID) || contract.ReservedProxyID(app.ID) || app.SessionIDs == nil || (app.Status != "ready" && app.Status != "not-ready" && app.Status != "draining") {
+			fail("heartbeat_apps", false)
+			o.mu.Unlock()
+			return
+		}
+	}
+	submitted := map[string]bool{}
+	for n, app := range event.Request.Apps {
+		e, ok := o.registrations[app.RunnerURL]
+		if !ok {
+			fail("app_identity", false)
+			o.mu.Unlock()
+			return
+		}
+		e.Options = app.AppOptions
+		e.Options.ID = resp.Apps[n].ID
+		submitted[e.Options.ID] = true
+		obs.Entries = append(obs.Entries, e)
+	}
+	for _, e := range r.Tracked {
+		if e.WithdrawalID != "" && !event.At.Before(e.WithdrawnAt) && !submitted[e.Options.ID] {
+			obs.Withdrawals = append(obs.Withdrawals, e)
+		}
+	}
+	o.mu.Unlock()
+	if err := h.Observe(obs); err != nil && !errors.Is(err, ErrSuperseded) {
+		o.Fatal(errors.New("identity_persistence_failed"))
+		panic("fatal handler returned")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.lineage = obs.Credential
+	for _, e := range obs.Entries {
+		current := o.registrations[e.Options.RunnerURL]
+		if current.InstanceID == e.InstanceID {
+			current.Options.ID = e.Options.ID
+			o.registrations[e.Options.RunnerURL] = current
+		}
+	}
+	o.accepted = Identity{RunnerID: resp.RunnerID, Credential: obs.Credential, Confirmed: obs.Accepted && !obs.Bootstrap, Sequence: event.AcceptedSeq}
+	if time.Now().Before(o.rejectedUntil) && len(obs.Entries) < len(o.request.Entries) && h.Failure != nil {
+		h.Failure(OwnerFailure{Epoch: r.Epoch, Reason: o.rejectedReason, Partial: true})
+	}
+	_ = o.setAppsLocked()
+}
+func (o *SDKOwner) Unregister(ctx context.Context, id Identity) error {
+	o.lifecycle.Lock()
+	defer o.lifecycle.Unlock()
+	credential := id.Credential
+	if credential == "" {
+		// A lost bootstrap response leaves an unknown issued credential. Retain
+		// identity on 401 until Node expires it, then accept 404. Never Start.
+		credential = o.bootstrap
+	}
+	retirement, err := runner.New(runner.Options{OrchestratorURL: o.base, BootstrapSecret: o.bootstrap, HeartbeatSecret: credential, RunnerID: id.RunnerID, Apps: []runner.AppOptions{}, HTTPClient: originGuard{o.base, o.client}})
+	if err != nil {
+		return err
+	}
+	if err := retirement.Close(ctx); err != nil {
+		return err
+	}
+	o.mu.Lock()
+	o.accepted = Identity{}
+	o.registrations = map[string]Registration{}
+	o.mu.Unlock()
 	return nil
 }
 
-type wireApp struct {
-	ID         string    `json:"id"`
-	Status     string    `json:"status"`
-	SessionIDs *[]string `json:"session_ids"`
-}
-type wireResponse struct {
-	RunnerID     string    `json:"runner_id"`
-	Credential   string    `json:"heartbeat_secret"`
-	Orchestrator string    `json:"orchestrator"`
-	TTL          string    `json:"heartbeat_ttl"`
-	Sequence     uint64    `json:"seq"`
-	Apps         []wireApp `json:"apps"`
-	O2R          *struct {
-		URL string `json:"url"`
-	} `json:"o2r"`
-}
-type heartbeatClient struct {
-	owner            *SDKOwner
-	request          OwnerRequest
-	hooks            OwnerHooks
-	bootstrapAllowed bool
-	credential       string
-	lineage          string
-	terminal         bool
+// originGuard only validates origins before the SDK applies a response and starts
+// O2R. It returns unchanged bytes; all protocol mutation belongs to the SDK.
+type originGuard struct {
+	base   string
+	client *http.Client
 }
 
-func (h *heartbeatClient) stop() {
-	h.terminal = true // Do holds the mutation lock; no later request may have side effects.
-	// Close waits for the SDK heartbeat loop, so it must run outside its callback.
-	go func() {
-		h.owner.lifecycle.Lock()
-		defer h.owner.lifecycle.Unlock()
-		if h.owner.currentEpoch == h.request.Epoch {
-			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-			defer cancel()
-			_ = h.owner.close(ctx)
-		}
-	}()
-}
-
-func (h *heartbeatClient) failure(reason string, reset bool) {
-	if h.hooks.Failure != nil {
-		h.hooks.Failure(OwnerFailure{Epoch: h.request.Epoch, Hash: h.request.Hash, Reset: reset, Reason: reason})
-	}
-}
-func (h *heartbeatClient) Do(req *http.Request) (*http.Response, error) {
-	o := h.owner
-	o.mutations.Lock()
-	defer o.mutations.Unlock()
-	if h.terminal {
-		return nil, errors.New("owner_stopped")
-	}
-	if req.URL.String() != o.base+"/runners/heartbeat" {
+func (g originGuard) Do(req *http.Request) (*http.Response, error) {
+	base, _ := url.Parse(g.base)
+	if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host {
 		return nil, errors.New("sdk_control_origin")
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, (2<<20)+1))
-	req.Body.Close()
-	if err != nil || len(raw) > 2<<20 {
-		return nil, errors.New("sdk_request_size")
+	resp, err := g.client.Do(req)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || req.URL.Path != strings.TrimRight(base.Path, "/")+"/runners/heartbeat" {
+		return resp, err
 	}
-	var body map[string]json.RawMessage
-	var apps []runner.AppOptions
-	if transport.Decode(raw, &body) != nil || transport.Decode(body["apps"], &apps) != nil || len(apps) != len(h.request.Entries) {
-		return nil, errors.New("sdk_request")
-	}
-	bootstrap := req.Header.Get("Authorization") == o.bootstrap
-	var rawApps []map[string]json.RawMessage
-	if transport.Decode(body["apps"], &rawApps) != nil {
-		return nil, errors.New("sdk_request")
-	}
-	if bootstrap && !h.bootstrapAllowed {
-		h.failure("registration_reset", true)
-		return nil, errors.New("registration_reset")
-	}
-	reserved, err := h.hooks.Reserve(h.request.Hash)
-	if err != nil {
-		h.failure("mutation_reservation_failed", false)
-		h.stop()
-		return nil, errors.New("mutation_reservation_failed")
-	}
-	// Final safety eligibility is captured after reservation, so a withdrawal
-	// cannot be followed by a stale ready payload with a newer sequence.
-	for n, app := range apps {
-		entry := h.request.Entries[n]
-		entry.Options = app
-		if app.Status == "ready" && h.hooks.PermitReady != nil && !h.hooks.PermitReady(entry) {
-			apps[n].Status = "not-ready"
-			rawApps[n]["status"], _ = json.Marshal("not-ready")
-			app.Status = "not-ready"
-		}
-		if app.Status == "ready" && bootstrap {
-			h.failure("sdk_request", false)
-			return nil, errors.New("sdk_request")
-		}
-	}
-	sequence := reserved
-	body["seq"], _ = json.Marshal(sequence)
-	body["apps"], _ = json.Marshal(rawApps)
-	raw, err = json.Marshal(body)
-	if err != nil {
-		return nil, errors.New("sdk_request")
-	}
-	request := req.Clone(req.Context())
-	request.Body = io.NopCloser(bytes.NewReader(raw))
-	request.ContentLength = int64(len(raw))
-	request.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(raw)), nil }
-	observedAt := time.Now().UTC()
-	if h.hooks.Now != nil {
-		observedAt = h.hooks.Now()
-	}
-	response, err := o.client.Do(request)
-	if err != nil {
-		h.failure("node_unavailable", false)
-		return nil, errors.New("node_unavailable")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var failure struct {
-			Error string `json:"error"`
-		}
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 16385))
-		response.Body.Close()
-		if response.StatusCode == http.StatusServiceUnavailable && len(body) <= 16384 && transport.Decode(body, &failure) == nil && (failure.Error == "app capacity reached" || failure.Error == "runner capacity reached") {
-			h.failure("resource_refused", false)
-			return nil, ErrResourceRefused
-		}
-		reset := response.StatusCode == 401
-		reason := "node_request_failed"
-		if response.StatusCode == 401 || response.StatusCode == 403 {
-			reason = "registration_auth_failed"
-		}
-		h.failure(reason, reset)
-		// Returning a sanitized transport error also prevents the SDK's automatic 401 bootstrap retry.
-		return nil, &transport.HTTPError{Status: response.StatusCode}
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
-	response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
+	resp.Body.Close()
 	if err != nil || len(data) > 2<<20 {
-		h.failure("heartbeat_response", false)
 		return nil, errors.New("heartbeat_response")
 	}
-	var wire wireResponse
-	if transport.Decode(data, &wire) != nil || !routeID.MatchString(wire.RunnerID) || len(wire.Apps) < len(apps) || (h.request.Identity.RunnerID != "" && wire.RunnerID != h.request.Identity.RunnerID) || (wire.Orchestrator != "" && strings.TrimRight(wire.Orchestrator, "/") != o.base) || (bootstrap && wire.Credential == "") || (!bootstrap && wire.Sequence != sequence) {
-		h.failure("heartbeat_response", false)
+	var value runner.HeartbeatResponse
+	if json.Unmarshal(data, &value) != nil {
 		return nil, errors.New("heartbeat_response")
 	}
-	ttl, err := time.ParseDuration(wire.TTL)
-	if err != nil || ttl <= 0 {
-		h.failure("heartbeat_ttl", false)
-		return nil, errors.New("heartbeat_ttl")
+	if value.Orchestrator != "" && strings.TrimRight(value.Orchestrator, "/") != g.base {
+		return nil, errors.New("sdk_control_origin")
 	}
-	if wire.O2R != nil {
-		control, _ := url.Parse(o.base)
-		channel, e := url.Parse(wire.O2R.URL)
-		if e != nil || channel.Scheme != control.Scheme || channel.Host != control.Host || channel.User != nil || channel.Fragment != "" {
-			h.failure("o2r_origin", false)
+	if value.O2R != nil {
+		u, err := url.Parse(value.O2R.URL)
+		if err != nil || u.Scheme != base.Scheme || u.Host != base.Host || u.User != nil || u.Fragment != "" {
 			return nil, errors.New("o2r_origin")
 		}
 	}
-	observation := Observation{Epoch: h.request.Epoch, Hash: h.request.Hash, RunnerID: wire.RunnerID, Credential: wire.Credential, PreviousCredential: h.lineage, ReservedSequence: reserved, Sequence: sequence, Bootstrap: bootstrap, At: observedAt, TTL: ttl, Entries: append([]Registration(nil), h.request.Entries...)}
-	seen := map[string]bool{}
-	for index, app := range wire.Apps {
-		if !routeID.MatchString(app.ID) || (app.Status != "ready" && app.Status != "not-ready" && app.Status != "draining") || app.SessionIDs == nil || seen[app.ID] || (index < len(apps) && apps[index].ID != "" && app.ID != apps[index].ID) {
-			h.failure("heartbeat_apps", false)
-			return nil, errors.New("heartbeat_apps")
-		}
-		seen[app.ID] = true
-		observation.Apps = append(observation.Apps, AppObservation{app.ID, app.Status, append([]string{}, (*app.SessionIDs)...)})
-		if index < len(apps) {
-			observation.Entries[index].Options = apps[index]
-		}
-	}
-	if err = h.hooks.Observe(observation); err != nil {
-		h.failure("identity_persistence_failed", false)
-		h.stop()
-		return nil, errors.New("identity_persistence_failed")
-	}
-	h.bootstrapAllowed = false
-	if wire.Credential != "" {
-		h.credential = wire.Credential
-		h.lineage = wire.Credential
-	}
-	accepted := copyRequest(h.request)
-	accepted.Identity = Identity{RunnerID: wire.RunnerID, Credential: h.credential, Confirmed: !bootstrap}
-	for i := range accepted.Entries {
-		accepted.Entries[i].Options.ID = wire.Apps[i].ID
-	}
-	o.mu.Lock()
-	o.accepted = accepted
-	o.mu.Unlock()
-	response.Body = io.NopCloser(bytes.NewReader(data))
-	return response, nil
-}
-
-func (o *SDKOwner) Unregister(ctx context.Context, identity Identity) error {
-	if identity.RunnerID == "" {
-		return errors.New("owner_identity_missing")
-	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, o.base+"/runners/"+url.PathEscape(identity.RunnerID)+"/unregister", nil)
-	req.Header.Set("Authorization", identity.Credential)
-	resp, err := o.client.Do(req)
-	if err != nil {
-		return errors.New("node_unavailable")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 && resp.StatusCode != 404 {
-		return &transport.HTTPError{Status: resp.StatusCode}
-	}
-	return nil
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	return resp, nil
 }

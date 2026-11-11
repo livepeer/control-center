@@ -30,10 +30,11 @@ type probeResult struct {
 	at      time.Time
 }
 type Probes struct {
-	mu      sync.Mutex
-	values  map[string]*health
-	results chan probeResult
-	Client  *http.Client
+	mu       sync.Mutex
+	values   map[string]*health
+	results  chan probeResult
+	OnChange func()
+	Client   *http.Client
 	// Address is used by local contract tests; production always probes the immutable Service.
 	Address func(*Instance) string
 	targets map[string]*Instance
@@ -65,6 +66,9 @@ func (p *Probes) Run(ctx context.Context) {
 			p.mu.Unlock()
 			if instances != nil {
 				p.Poll(ctx, instances, view, now)
+				if p.OnChange != nil {
+					p.OnChange()
+				}
 			}
 		}
 	}

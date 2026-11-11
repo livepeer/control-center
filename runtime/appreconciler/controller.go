@@ -20,9 +20,9 @@ import (
 )
 
 type proof struct {
-	Observation          Observation
-	App                  AppObservation
-	WithdrawalID, PodUID string
+	Observation Observation
+	App         AppObservation
+	PodUID      string
 }
 type Controller struct {
 	Journal      *Journal
@@ -47,17 +47,20 @@ func (c *Controller) now() time.Time {
 	return time.Now().UTC()
 }
 func (c *Controller) hooks() OwnerHooks {
-	return OwnerHooks{Identity: func() Identity { return c.Journal.View().Identity }, Reserve: c.Journal.Reserve, Observe: c.observe, Failure: c.failed, Now: c.now, PermitReady: func(r Registration) bool {
-		uid, eligible := c.Journal.Eligible(r.InstanceID, r.Options.ID)
-		return eligible && c.Probes != nil && c.Probes.Ready(r.InstanceID, uid)
-	}}
+	return OwnerHooks{Observe: c.observe, Failure: c.failed, Now: c.now,
+		Eligibility: func(r Registration) (bool, bool) {
+			member, ready := c.Journal.Eligibility(r)
+			return member, ready && c.Probes != nil && c.Probes.Ready(r.InstanceID, r.PodUID)
+		}}
 }
 func (c *Controller) failed(f OwnerFailure) {
 	if c.Journal.View().OwnerEpoch != f.Epoch {
 		return
 	}
 	c.mu.Lock()
-	c.proofs = map[string]proof{}
+	if !f.Partial {
+		c.proofs = nil
+	}
 	c.fault = f.Reason
 	if f.Reset {
 		c.recoverOwner = true
@@ -65,86 +68,91 @@ func (c *Controller) failed(f OwnerFailure) {
 	c.mu.Unlock()
 }
 func (c *Controller) observe(o Observation) error {
-	// Durable identity is committed before the SDK accepts the response or confirms registration.
-	var workErr error
-	credentialChanged := false
+	var proofs map[string]proof
 	err := c.Journal.Update(func(s *State) error {
-		if o.RunnerID == "" || (s.Identity.RunnerID != "" && s.Identity.RunnerID != o.RunnerID) {
-			return errors.New("owner_identity")
-		}
-		if s.Identity.RunnerID == "" || (s.Identity.Credential != o.PreviousCredential && (o.Credential == "" || s.Identity.Credential != o.Credential)) || o.ReservedSequence < s.IdentitySequence {
-			return ErrSuperseded
-		}
-		workCurrent := s.OwnerHash == o.Hash && s.OwnerEpoch == o.Epoch && !s.Identity.Retiring
-		previous := s.Identity.Credential
-		credentialChanged = o.Credential != "" && o.Credential != previous
-		if o.Credential != "" {
-			s.Identity.Credential = o.Credential
-		}
-		if s.Identity.Credential == "" {
+		if o.Credential == "" {
 			return errors.New("owner_credential")
 		}
-		s.IdentitySequence = o.ReservedSequence
-		if credentialChanged {
-			s.AcceptedSequence = 0
-			s.Identity.Confirmed = false
-		}
-		if o.Bootstrap && credentialChanged && previous != "" {
-			s.OwnerRecreatedAt = o.At
-			for _, i := range s.Instances {
-				if i.Phase == "removed" || i.WithdrawalID != "" {
-					continue
-				}
-				// The old Node work state cannot be reconstructed. Drain the old
-				// incarnation before admitting work to a fresh process/registration.
-				withdraw(i, o.At, s.Metadata)
-				s.OwnerHash = ""
-				i.Forced = true
-				i.Reason = "node_registration_recreated"
-			}
-		}
-		// Keep a lineage-fenced credential even when its work snapshot was superseded.
-		// Reconstruction and retirement must use the latest issued secret.
-		if !workCurrent {
-			workErr = ErrSuperseded
-			return nil
-		}
-		if !o.Bootstrap && !credentialChanged && o.Sequence > 0 && o.Sequence <= s.AcceptedSequence {
+		if o.Epoch != s.OwnerEpoch || s.Identity.RunnerID != o.RunnerID {
 			return ErrSuperseded
 		}
-		if o.Bootstrap || credentialChanged {
-			s.AcceptedSequence = 0
-		} else if o.Sequence > 0 {
-			s.AcceptedSequence = o.Sequence
+		if s.Identity.Credential != o.PreviousCredential && s.Identity.Credential != o.Credential {
+			return ErrSuperseded
 		}
-		s.Identity.RunnerID = o.RunnerID
-		s.Identity.Confirmed = !o.Bootstrap && !credentialChanged && o.Sequence > 0
+		changed := s.Identity.Credential != o.Credential
+		previous := s.Identity.Credential
+		s.Identity.Credential = o.Credential
+		if changed {
+			s.Identity.Sequence = nil
+			s.Identity.Confirmed = false
+		}
+		if changed && previous != "" && o.Bootstrap {
+			s.OwnerRecreatedAt = o.At
+			for _, i := range s.Instances {
+				if i.Phase != "removed" && i.WithdrawalID == "" {
+					withdraw(i, o.At, s.Metadata)
+					i.Forced = true
+					i.Reason = "node_registration_recreated"
+				}
+			}
+		}
+		// Identity updates remain valuable when SetApps supersedes the work snapshot.
+		for _, e := range o.Entries {
+			i := s.Instances[e.InstanceID]
+			if i == nil || i.PodUID != e.PodUID || contract.ReservedProxyID(e.Options.ID) || (i.AppID != "" && i.AppID != e.Options.ID) {
+				return errors.New("app_identity")
+			}
+			i.AppID = e.Options.ID
+			i.RegistrationPending = false
+		}
+		if s.Identity.Retiring || !o.Accepted || o.Bootstrap || changed || s.ClockUncertain {
+			return nil
+		}
+		if s.Identity.Sequence != nil && o.Sequence <= *s.Identity.Sequence {
+			return nil
+		}
+		s.Identity.Sequence = new(o.Sequence)
+		s.Identity.Confirmed = true
+		proofs = map[string]proof{}
+		seen := map[string]bool{}
 		known := map[string]bool{}
+		for _, a := range o.Apps {
+			seen[a.ID] = true
+		}
 		for _, i := range s.Instances {
 			if i.AppID != "" {
 				known[i.AppID] = true
 			}
 		}
-		for n, entry := range o.Entries {
-			i := s.Instances[entry.InstanceID]
-			if i == nil || n >= len(o.Apps) || contract.ReservedProxyID(o.Apps[n].ID) || (i.AppID != "" && i.AppID != o.Apps[n].ID) {
-				return errors.New("app_identity")
-			}
-			i.AppID = o.Apps[n].ID
-			known[i.AppID] = true
-		}
-		for _, app := range o.Apps {
-			if !known[app.ID] {
-				return errors.New("unknown_owner_registration")
+		for _, a := range o.Apps {
+			for id, i := range s.Instances {
+				if i.AppID == a.ID {
+					proofs[id] = proof{Observation: o, App: a}
+				}
 			}
 		}
-		seen := map[string]bool{}
-		for _, app := range o.Apps {
-			seen[app.ID] = true
+		for _, e := range o.Entries {
+			if p, ok := proofs[e.InstanceID]; ok {
+				p.PodUID = e.PodUID
+				proofs[e.InstanceID] = p
+			}
 		}
-		for _, i := range s.Instances {
-			if i.Phase == "removed" && i.AppID != "" && !seen[i.AppID] {
-				i.RegistrationGone = true
+		unknown := false
+		for id := range seen {
+			if !known[id] {
+				unknown = true
+			}
+		}
+		if !o.At.After(c.now().Add(time.Second)) && c.now().Before(o.At.Add(o.TTL)) {
+			for _, e := range o.Withdrawals {
+				i := s.Instances[e.InstanceID]
+				if i == nil || i.WithdrawalID != e.WithdrawalID || i.PodUID != e.PodUID || i.WithdrawalID == "" {
+					continue
+				}
+				if (i.AppID != "" && !seen[i.AppID]) || (i.AppID == "" && !unknown) {
+					i.RegistrationGone = true
+					i.RegistrationPending = false
+				}
 			}
 		}
 		return nil
@@ -152,45 +160,14 @@ func (c *Controller) observe(o Observation) error {
 	if err != nil {
 		return err
 	}
-	if workErr != nil {
-		return workErr
-	}
-	s := c.Journal.View()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.proofs = map[string]proof{}
-	c.fault = ""
-	c.recoverOwner = false
-	if o.Bootstrap || credentialChanged || o.Sequence == 0 {
-		return nil
-	}
-	byID := map[string]AppObservation{}
-	for _, app := range o.Apps {
-		byID[app.ID] = app
-	}
-	for id, i := range s.Instances {
-		if app, exists := byID[i.AppID]; exists {
-			// Authoritative retained-app counts are useful diagnostics. Without
-			// a captured withdrawal/UID they are deliberately not cleanup proof.
-			c.proofs[id] = proof{Observation: o, App: app}
-		}
-	}
-	for _, e := range o.Entries {
-		i := s.Instances[e.InstanceID]
-		app, exists := byID[i.AppID]
-		if exists {
-			c.proofs[i.ID] = proof{o, app, e.WithdrawalID, e.PodUID}
-		}
+	c.proofs = proofs
+	if proofs != nil {
+		c.fault = ""
+		c.recoverOwner = false
 	}
 	return nil
-}
-func (c *Controller) empty(i *Instance, now time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	p, ok := c.proofs[i.ID]
-	return ok && i.WithdrawalID != "" && p.WithdrawalID == i.WithdrawalID && p.PodUID == i.PodUID &&
-		p.Observation.At.Before(now.Add(time.Second)) && now.Before(p.Observation.At.Add(p.Observation.TTL)) &&
-		(p.App.Status == "not-ready" || p.App.Status == "draining") && len(p.App.SessionIDs) == 0
 }
 
 // Tick never interprets an unavailable input, failed observation or missing object as an empty desired set.
@@ -239,6 +216,9 @@ func (c *Controller) Tick(ctx context.Context) error {
 	}
 	usage, usageErr := c.Store.Usage()
 	archiveRoom := usageErr == nil && usage <= archiveBudget-2*artifact.MaxArchive
+	if c.Probes == nil {
+		c.Probes = NewProbes()
+	}
 	err = c.Journal.Update(func(s *State) error {
 		s.LastClock = now
 		s.ClockUncertain = false
@@ -250,7 +230,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 			s.Metadata = m
 			if input.Payload.Index.Available {
 				if s.Payload.Index.IntentDigest != input.Payload.Index.IntentDigest {
-					s.OwnerReason, s.RejectedOwnerHash, s.OwnerRetryAt = "", "", time.Time{}
+					s.OwnerReason = ""
 				}
 				s.Payload = input.Payload
 				s.InputDigest = input.Digest
@@ -272,8 +252,8 @@ func (c *Controller) Tick(ctx context.Context) error {
 		for _, g := range s.Payload.Index.Groups {
 			wanted[g.Key] = g
 		}
-		// Highest slots withdraw first; the complete withdrawal decision is one durable commit.
 		ids := instanceIDs(s)
+		// Highest slots withdraw first; the complete withdrawal decision is one durable commit.
 		sort.Slice(ids, func(a, b int) bool { return s.Instances[ids[a]].Group.Slot > s.Instances[ids[b]].Group.Slot })
 		for _, id := range ids {
 			i := s.Instances[id]
@@ -298,20 +278,19 @@ func (c *Controller) Tick(ctx context.Context) error {
 			_, desired := wanted[i.Group.Key]
 			if (!desired || maintenance || i.Reason == "process_lost" || i.Reason == "unexpected_pod_replacement") && i.WithdrawalID == "" {
 				withdraw(i, now, s.Metadata)
-				s.OwnerHash = ""
 			}
 			if i.WithdrawalID != "" {
-				if !s.Metadata.DrainDeadline.IsZero() && s.Metadata.DrainDeadline.Before(i.Deadline) {
+				if !s.Metadata.DrainDeadline.IsZero() && (i.Deadline.IsZero() || s.Metadata.DrainDeadline.Before(i.Deadline)) {
 					i.Deadline = s.Metadata.DrainDeadline
 				}
-				if i.Phase != "retired" && (i.AppID == "" || c.empty(i, now) || !now.Before(i.Deadline)) {
-					unconfirmed := i.AppID != "" && !c.empty(i, now)
+				if i.Phase != "retired" && ((i.AppID == "" && !i.RegistrationPending) || i.RegistrationGone || (!i.Deadline.IsZero() && !now.Before(i.Deadline))) {
+					unconfirmed := (i.AppID != "" || i.RegistrationPending) && !i.RegistrationGone
 					i.Forced = i.Forced || unconfirmed
 					i.Phase = "retired"
 					i.RetiredAt = now
 					if unconfirmed {
 						i.Reason = "cleanup_unconfirmed"
-						if !now.Before(i.Deadline) {
+						if !i.Deadline.IsZero() && !now.Before(i.Deadline) {
 							i.DrainExpiredAt = i.Deadline
 						}
 					}
@@ -378,10 +357,6 @@ func (c *Controller) Tick(ctx context.Context) error {
 	if s.Payload.Intent == nil {
 		return errors.Join(inputErr, c.report(ctx, map[string]bool{}, view, now))
 	}
-	s = c.Journal.View()
-	if c.Probes == nil {
-		c.Probes = NewProbes()
-	}
 	c.Probes.Configure(s.Instances, view)
 	ready := c.Probes.Poll(ctx, s.Instances, view, now)
 	if err := c.Journal.Update(func(s *State) error {
@@ -426,7 +401,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 						value.Phase = "removed"
 						value.TerminatedAt = now
 						value.Files = nil
-						if value.AppID == "" {
+						if value.AppID == "" && !value.RegistrationPending {
 							value.RegistrationGone = true
 						}
 						return nil
@@ -444,11 +419,10 @@ func (c *Controller) Tick(ctx context.Context) error {
 func withdraw(i *Instance, now time.Time, m contract.Metadata) {
 	if i.WithdrawalID == "" {
 		i.WithdrawalID = randomID()
-		timeout, _ := time.ParseDuration(i.Definition.Instances.DrainTimeout)
-		i.Deadline = now.Add(timeout)
+		i.WithdrawnAt = now
 		i.Phase = "withdrawing"
 	}
-	if !m.DrainDeadline.IsZero() && m.DrainDeadline.Before(i.Deadline) {
+	if !m.DrainDeadline.IsZero() && (i.Deadline.IsZero() || m.DrainDeadline.Before(i.Deadline)) {
 		i.Deadline = m.DrainDeadline
 	}
 }
@@ -522,18 +496,59 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 	if s.Identity.Retiring {
 		return c.retireOwner(ctx, s)
 	}
+	// A lost bootstrap response may leave registrations under an unknown issued
+	// credential. Retain that owner until native retirement confirms its absence.
+	if s.Identity.RunnerID != "" && s.Identity.Credential == "" {
+		pending := false
+		for _, i := range s.Instances {
+			pending = pending || i.RegistrationPending
+		}
+		if pending {
+			if err := c.Owner.Close(ctx); err != nil {
+				return err
+			}
+			s = c.Journal.View()
+			if s.Identity.Credential == "" {
+				if err := c.Owner.Unregister(ctx, s.Identity); err != nil {
+					return err
+				}
+				if err := c.Journal.Update(func(s *State) error {
+					s.Identity = Identity{}
+					s.OwnerEpoch, s.OwnerReason, s.Retirement = "", "", nil
+					for _, i := range s.Instances {
+						i.RegistrationPending = false
+						if i.AppID == "" && i.WithdrawalID != "" {
+							i.RegistrationGone = true
+						}
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				c.mu.Lock()
+				c.fault, c.recoverOwner, c.proofs = "", false, nil
+				c.mu.Unlock()
+				s = c.Journal.View()
+			}
+		}
+	}
 	c.mu.Lock()
 	recovery := c.recoverOwner
 	c.mu.Unlock()
 	// A restored identity first needs a non-ready scoped heartbeat in this process.
-	confirmed := s.Identity.Confirmed && c.Owner.Accepted().Identity == s.Identity
-	entries := []Registration{}
+	confirmed := s.Identity.Confirmed && c.Owner.Accepted().sameOwner(s.Identity)
+	entries, tracked := []Registration{}, []Registration{}
+	live := false
 	for _, id := range instanceIDs(&s) {
 		i := s.Instances[id]
-		if i.Phase == "removed" {
-			continue
+		live = live || i.Phase != "removed" || !i.RegistrationGone
+		options, err := AppOptions(i)
+		if err != nil {
+			return err
 		}
-		if i.AppID == "" && i.WithdrawalID != "" {
+		entry := Registration{InstanceID: id, WithdrawalID: i.WithdrawalID, WithdrawnAt: i.WithdrawnAt, PodUID: i.PodUID, Options: options}
+		tracked = append(tracked, entry)
+		if i.Phase == "removed" || i.WithdrawalID != "" {
 			continue
 		}
 		pod, exists := view.Pods[i.Name]
@@ -541,20 +556,14 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 			continue
 		}
 		signalOK := i.Definition.Lifecycle.StopSignal == nil || (exists && pod.StopSignal == *i.Definition.Lifecycle.StopSignal)
-		options, err := AppOptions(i, i.AppID != "" && ready[id] && signalOK && i.WithdrawalID == "" && confirmed && !s.ClockUncertain && !recovery)
-		if err != nil {
-			return err
+		if i.AppID != "" && ready[id] && signalOK && confirmed && !s.ClockUncertain && !recovery {
+			entry.Options.Status = "ready"
 		}
-		entries = append(entries, Registration{InstanceID: id, WithdrawalID: i.WithdrawalID, PodUID: i.PodUID, Options: options})
+		entries = append(entries, entry)
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && (s.Identity.RunnerID == "" || !live) {
 		if s.Identity.RunnerID == "" {
 			return nil
-		}
-		for _, i := range s.Instances {
-			if i.Phase != "removed" {
-				return nil
-			}
 		}
 		if err := c.Journal.Update(func(s *State) error { s.Identity.Retiring = true; return nil }); err != nil {
 			return err
@@ -567,84 +576,32 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 		}
 		s = c.Journal.View()
 	}
-	r := OwnerRequest{Identity: s.Identity, Entries: entries, Recover: recovery}
-	r.Hash = RequestHash(r)
-	if r.Hash == s.RejectedOwnerHash && c.now().Before(s.OwnerRetryAt) {
-		return c.resumeAccepted(ctx, s, ready, recovery)
-	}
-	if r.Hash != s.OwnerHash {
-		if err := c.Journal.Update(func(s *State) error {
-			s.OwnerHash = r.Hash
-			s.OwnerEpoch = randomID()
-			return nil
-		}); err != nil {
-			return err
-		}
-		c.mu.Lock()
-		c.fault = ""
-		c.mu.Unlock()
-		s = c.Journal.View()
-	}
-	r.Epoch = s.OwnerEpoch
-	err := c.Owner.Sync(ctx, r, c.hooks())
-	if err != nil {
-		c.mu.Lock()
-		reason := c.fault
-		recovery = c.recoverOwner
-		c.mu.Unlock()
-		if errors.Is(err, ErrResourceRefused) {
-			reason = "resource_refused"
-		} else if transport.IsStatus(err, 401) || transport.IsStatus(err, 403) {
-			reason = "registration_auth_failed"
-		} else if reason == "" {
-			reason = "registration_pending"
-		}
-		c.failed(OwnerFailure{Epoch: r.Epoch, Hash: r.Hash, Reason: reason})
-		accepted := c.Owner.Accepted()
-		if e := c.Journal.Update(func(s *State) error {
-			s.OwnerReason = reason
-			if len(accepted.Entries) > 0 && len(r.Entries) > len(accepted.Entries) && !recovery {
-				s.RejectedOwnerHash, s.OwnerRetryAt = r.Hash, c.now().Add(30*time.Second)
-			}
-			return nil
-		}); e != nil {
-			return errors.Join(err, e)
-		}
-		return errors.Join(err, c.resumeAccepted(ctx, c.Journal.View(), ready, recovery))
-	}
-	return c.Journal.Update(func(s *State) error {
-		s.OwnerReason = ""
-		s.RejectedOwnerHash = ""
-		s.OwnerRetryAt = time.Time{}
-		return nil
-	})
-}
-
-func (c *Controller) resumeAccepted(ctx context.Context, s State, ready map[string]bool, recovery bool) error {
-	accepted := c.Owner.Accepted()
-	if len(accepted.Entries) == 0 || accepted.Identity.RunnerID != s.Identity.RunnerID || recovery {
-		return nil
-	}
-	confirmed := s.Identity.Confirmed && accepted.Identity == s.Identity
-	accepted.Identity = s.Identity
-	for n, e := range accepted.Entries {
-		if i := s.Instances[e.InstanceID]; i != nil {
-			e.WithdrawalID, e.PodUID = i.WithdrawalID, i.PodUID
-			e.Options, _ = AppOptions(i, i.AppID != "" && ready[i.ID] && i.WithdrawalID == "" && confirmed && !s.ClockUncertain)
-			accepted.Entries[n] = e
-		}
-	}
-	accepted.Hash = RequestHash(accepted)
 	if err := c.Journal.Update(func(s *State) error {
-		if s.OwnerHash != accepted.Hash {
-			s.OwnerHash, s.OwnerEpoch = accepted.Hash, randomID()
+		if s.OwnerEpoch == "" {
+			s.OwnerEpoch = randomID()
+		}
+		for _, e := range entries {
+			if i := s.Instances[e.InstanceID]; i != nil && i.AppID == "" {
+				i.RegistrationPending = true
+			}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	accepted.Epoch = c.Journal.View().OwnerEpoch
-	return c.Owner.Sync(ctx, accepted, c.hooks())
+	s = c.Journal.View()
+	r := OwnerRequest{Epoch: s.OwnerEpoch, Identity: s.Identity, Entries: entries, Tracked: tracked}
+	if err := c.Owner.Sync(ctx, r, c.hooks()); err != nil {
+		c.mu.Lock()
+		reason := c.fault
+		c.mu.Unlock()
+		if reason == "" {
+			reason = "registration_pending"
+		}
+		c.failed(OwnerFailure{Epoch: r.Epoch, Reason: reason})
+		return errors.Join(err, c.Journal.Update(func(s *State) error { s.OwnerReason = reason; return nil }))
+	}
+	return c.Journal.Update(func(s *State) error { s.OwnerReason = ""; return nil })
 }
 
 func (c *Controller) retireOwner(ctx context.Context, s State) error {
@@ -660,18 +617,15 @@ func (c *Controller) retireOwner(ctx context.Context, s State) error {
 		if s.Identity.Credential != "" {
 			fingerprint = artifact.Digest([]byte(s.Identity.Credential))
 		}
-		s.Retirement = &contract.Evidence{OwnerID: s.Identity.RunnerID, CredentialFingerprint: fingerprint, MutationSequence: s.AcceptedSequence, ObservedAt: c.now(), ExpiresAt: c.now().Add(30 * time.Second), Kind: "owner_retired"}
+		s.Retirement = &contract.Evidence{OwnerID: s.Identity.RunnerID, CredentialFingerprint: fingerprint, MutationSequence: s.Identity.Sequence, ObservedAt: c.now(), ExpiresAt: c.now().Add(30 * time.Second), Kind: "owner_retired"}
 		for _, i := range s.Instances {
 			if i.AppID != "" {
 				i.RegistrationGone = true
 			}
 		}
 		s.Identity = Identity{}
-		s.AcceptedSequence = 0
-		s.IdentitySequence = 0
-		s.OwnerHash = ""
 		s.OwnerEpoch = ""
-		s.OwnerReason, s.RejectedOwnerHash, s.OwnerRetryAt = "", "", time.Time{}
+		s.OwnerReason = ""
 		return nil
 	})
 }

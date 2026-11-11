@@ -106,5 +106,5 @@ func validDrainEvidence(m Machine, state State, report Report, now time.Time) bo
 	if e.ObservedAt.Before(state.DrainStartedAt) || e.ObservedAt.After(now.Add(5*time.Second)) || !now.Before(e.ExpiresAt) || !e.ExpiresAt.After(e.ObservedAt) || e.ExpiresAt.Sub(e.ObservedAt) > time.Minute {
 		return false
 	}
-	return e.OwnerID == "" || (artifact.HashPattern.MatchString(e.CredentialFingerprint) && e.MutationSequence > 0)
+	return e.OwnerID == "" || (artifact.HashPattern.MatchString(e.CredentialFingerprint) && e.MutationSequence != nil)
 }

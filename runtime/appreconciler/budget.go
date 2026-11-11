@@ -52,7 +52,7 @@ func resources(q schema.Quantities) Resources {
 func fits(instances map[string]*Instance, definition schema.DefinitionV1, budget Resources) bool {
 	wanted := resources(definition.Resources.Limits)
 	for _, i := range instances {
-		if i.Phase == "removed" {
+		if i.Phase == "removed" && i.RegistrationGone {
 			continue
 		}
 		cost := resources(i.Definition.Resources.Limits)

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestJournalRecoversLatestCommitAndRejectsStaleSequence(t *testing.T) {
+func TestJournalRecoversLatestCommittedIdentity(t *testing.T) {
 	dir := t.TempDir()
 	j, err := OpenJournal(dir)
 	if err != nil {
@@ -20,18 +20,12 @@ func TestJournalRecoversLatestCommitAndRejectsStaleSequence(t *testing.T) {
 	}
 	deadline := time.Now().UTC().Truncate(time.Second)
 	if err = j.Update(func(s *State) error {
-		s.OwnerHash = "withdrawn"
+		s.OwnerEpoch = "epoch"
 		s.Identity = Identity{RunnerID: "runner", Credential: "private"}
-		s.Instances["one"] = &Instance{ID: "one", Phase: "draining", Deadline: deadline, WithdrawalID: "withdrawal"}
+		s.Instances["one"] = &Instance{ID: "one", Phase: "draining", Deadline: deadline, WithdrawalID: "withdrawal", RegistrationGone: true}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
-	}
-	if n, err := j.Reserve("withdrawn"); err != nil || n != 1 {
-		t.Fatal(n, err)
-	}
-	if _, err := j.Reserve("stale"); !errors.Is(err, ErrSuperseded) {
-		t.Fatal("accepted stale allocator", err)
 	}
 	if _, err := OpenJournal(dir); err == nil {
 		t.Fatal("allowed concurrent owner")
@@ -44,11 +38,8 @@ func TestJournalRecoversLatestCommitAndRejectsStaleSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := j.View()
-	if state.MutationSequence != 1 || state.Identity.Credential != "private" || !state.Instances["one"].Deadline.Equal(deadline) {
-		t.Fatal("lost committed identity/deadline", state)
-	}
-	if n, err := j.Reserve("withdrawn"); err != nil || n != 2 {
-		t.Fatal("reused sequence", n, err)
+	if state.Identity.Credential != "private" || !state.Instances["one"].Deadline.Equal(deadline) || !state.Instances["one"].RegistrationGone {
+		t.Fatal("lost committed identity/deadline/removal", state)
 	}
 	j.Close()
 }
@@ -107,12 +98,12 @@ func TestHistoryCollectionPinsPendingReceiptsAndPublications(t *testing.T) {
 func TestJournalRecoveryRequiresTheLatestFence(t *testing.T) {
 	dir := t.TempDir()
 	j, _ := OpenJournal(dir)
-	j.Update(func(s *State) error { s.OwnerHash = "ready"; return nil })
+	j.Update(func(s *State) error { s.OwnerEpoch = "ready"; return nil })
 	old, err := os.ReadFile(filepath.Join(dir, "checkpoint"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	j.Update(func(s *State) error { s.Identity.Retiring = true; s.OwnerHash = "retiring"; return nil })
+	j.Update(func(s *State) error { s.Identity.Retiring = true; return nil })
 	latest := j.recordPath(j.head.Sequence)
 	j.Close()
 	// An exact latest checkpoint can recover one damaged record.

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -71,7 +72,7 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 
 func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfig.Report {
 	now := time.Now().UTC()
-	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: 1}}}}
+	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
 }
 
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
@@ -532,7 +533,7 @@ func TestLargeObservedReportCrossesRelayAndIngestion(t *testing.T) {
 	relay := management.AppReports{Control: control, Desired: func() (contract.Metadata, bool) { return m, true }}
 	r := observationReport(m, a)
 	r.Drained, r.Ready, r.Reason = true, false, "drain_pending"
-	r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, m.Epoch, state.State), OwnerID: "retained-owner", CredentialFingerprint: "sha256:" + strings.Repeat("f", 64), WithdrawalID: "withdrawal", MutationSequence: 42, ObservedAt: now, ExpiresAt: now.Add(time.Minute)}
+	r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, m.Epoch, state.State), OwnerID: "retained-owner", CredentialFingerprint: "sha256:" + strings.Repeat("f", 64), WithdrawalID: "withdrawal", MutationSequence: new(uint64(0)), ObservedAt: now, ExpiresAt: now.Add(time.Minute)}
 	proof := *r.Evidence
 	r.Apps.Instances = nil
 	r.Apps.Assignments[0].Instances, r.Apps.Assignments[0].Ready, r.Apps.Assignments[0].Registered = 128, 0, 0
@@ -570,7 +571,7 @@ func TestLargeObservedReportCrossesRelayAndIngestion(t *testing.T) {
 		relay.ServeHTTP(w, httptest.NewRequest("POST", "http://management/status", bytes.NewReader(body)))
 		requireStatus(t, w, 200)
 		stored, _, err := store.Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1}), "runner")
-		if err != nil || stored.Evidence == nil || *stored.Evidence != proof || len(stored.Apps.Instances) != len(r.Apps.Instances) || stored.Apps.InstancesOmitted != r.Apps.InstancesOmitted || stored.Apps.InstancesTotal != 128 {
+		if err != nil || stored.Evidence == nil || !reflect.DeepEqual(*stored.Evidence, proof) || len(stored.Apps.Instances) != len(r.Apps.Instances) || stored.Apps.InstancesOmitted != r.Apps.InstancesOmitted || stored.Apps.InstancesTotal != 128 {
 			t.Fatal("relay/ingestion changed bounded state or proof", len(body), stored, err)
 		}
 	}

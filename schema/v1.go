@@ -76,7 +76,6 @@ type Instances struct {
 	Mode                string `json:"mode" default:"reusable" alts:"reusable,single-session"`
 	Replicas            int    `json:"replicas" default:"1" min:"1" max:"100"`
 	CapacityPerInstance int    `json:"capacity_per_instance" default:"1" min:"1" max:"10000"`
-	DrainTimeout        string `json:"drain_timeout" default:"43200s" pattern:"^(0|[1-9][0-9]*)s$"`
 }
 type Runner struct {
 	Mode string `json:"mode" default:"persistent" alts:"persistent,single-shot"`

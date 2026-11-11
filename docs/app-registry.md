@@ -90,7 +90,6 @@ onchain mode, add a positive price to the example. See the
 | `instances.mode` | `"reusable"` or `"single-session"`. Default: `"reusable"`. |
 | `instances.replicas` | `1`; range 1–100. |
 | `instances.capacity_per_instance` | `1`; range 1–10,000. Single-session instances require 1. |
-| `instances.drain_timeout` | `"12h"`; range 0–12 hours. |
 | `runner.mode` | `"persistent"` or `"single-shot"`. Default: `"persistent"`. |
 | `price.amount`, `price.currency`, `price.unit` | `"0"`, `"usd"`, `"hour"`. Amount is a nonnegative decimal string; currency is USD; unit is `"hour"` or `"fixed"`. |
 
@@ -205,7 +204,7 @@ Each assignment identifies a pinned revision, desired `present`/`absent` state,
 include the definition, effective replicas and `start_allowed`; queued targets
 also carry `start_after: {source_revision_id, source_removal_generation}`.
 Activation survives scaling and removal; reassignment after cleanup creates a
-new activation. Absent entries retain identity and bounded drain/stop policy.
+new activation. Absent entries retain identity and stop policy.
 The desired configuration digest is independent of the rendered payload and
 bundle digests. App-only edits preserve the Node and tunnel rollout generation.
 
@@ -216,14 +215,21 @@ lists ready instances in its discovery response and checks readiness and capacit
 before accepting new sessions or single-shot requests. Control Center collects
 these responses into its cached fleet listing.
 
-For removal, Runtime reports the instance as not ready to Node. Node removes it
-from discovery and stops taking new work while existing sessions drain. The Pod
-and Service remain available to existing work. Once Node confirms the sessions
-are empty, Runtime removes their definitions from the published workload
-configuration; Flux and Kubernetes then delete the resources. A local maintenance
-deadline can initiate removal even when Node is unavailable. Control-plane
-outages can delay deletion. Runtime reports completion after the resources and
-registration are cleaned up.
+Unhealthy instances stop receiving new work but retain their registration.
+Removal withdraws an instance from discovery while existing work drains.
+`RuntimeNodeDrainTimeout` sets Node's drain deadline: it defaults to 12 hours,
+accepts 0–12 hours, and zero ends work immediately.
+
+Normally, the Pod and Service remain available until a fresh, accepted complete
+Node snapshot confirms registration removal. Runtime then removes their workload
+definitions so Flux and Kubernetes can delete them. Runtime reports completion
+after registration and resource cleanup.
+
+`TunnelDrainTimeout` is a separate machine-maintenance fallback. Expiry may force
+physical removal without Node confirmation; ordinary replacement stays blocked
+until an audited retry, even if Node completes later. Draining continues across
+Runtime restart, but SDK sequencing cannot fence higher-sequence requests still
+in flight at a crash. Node restart or owner expiry can lose sessions.
 
 Runtime reports with the machine service credential to
 `POST /v1/nodes/{node_id}/apps/{revision_id}/status`. The strict JSON body is limited

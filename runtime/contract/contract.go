@@ -43,7 +43,7 @@ type Evidence struct {
 	OwnerID               string    `json:"owner_id"`
 	CredentialFingerprint string    `json:"credential_fingerprint"`
 	WithdrawalID          string    `json:"withdrawal_id"`
-	MutationSequence      uint64    `json:"mutation_sequence"`
+	MutationSequence      *uint64   `json:"mutation_sequence"`
 	ObservedAt            time.Time `json:"observed_at"`
 	ExpiresAt             time.Time `json:"expires_at"`
 	Kind                  string    `json:"kind"`
@@ -72,7 +72,7 @@ type InstanceStatus struct {
 	RegistrationGone     bool         `json:"registration_gone,omitempty"`
 	NodeObservedAt       time.Time    `json:"node_observed_at,omitempty"`
 	NodeExpiresAt        time.Time    `json:"node_expires_at,omitempty"`
-	AcceptedSequence     uint64       `json:"accepted_sequence,omitempty"`
+	AcceptedSequence     *uint64      `json:"accepted_sequence,omitempty"`
 	StartupDeadline      time.Time    `json:"startup_deadline,omitempty"`
 	Probe                *ProbeStatus `json:"probe,omitempty"`
 	WorkloadReason       string       `json:"workload_reason,omitempty"`

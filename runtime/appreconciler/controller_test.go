@@ -3,9 +3,16 @@ package appreconciler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +22,7 @@ import (
 	"github.com/livepeer/control-center/runtime/internal/testutil"
 	"github.com/livepeer/control-center/runtime/transport"
 	"github.com/livepeer/control-center/schema"
+	runner "github.com/livepeer/golang-runner"
 )
 
 type testInputs struct {
@@ -90,38 +98,33 @@ func (k *testCluster) apply(c *Controller) {
 }
 
 type testOwner struct {
-	accepted             OwnerRequest
-	sessions             map[string][]string
-	down                 bool
-	unregisterFail       bool
-	unregisters          int
-	rejectAbove, rejects int
-	credential           string
-	syncFailure          func(OwnerRequest, OwnerHooks) error
+	accepted       OwnerRequest
+	sessions       map[string][]string
+	down           bool
+	unregisterFail bool
+	unregisters    int
+	credential     string
+	syncFailure    func(OwnerRequest, OwnerHooks) error
 }
 
-func (o *testOwner) Accepted() OwnerRequest      { return o.accepted }
+func (o *testOwner) Accepted() Identity          { return o.accepted.Identity }
 func (o *testOwner) Close(context.Context) error { return nil }
 func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error {
 	if o.syncFailure != nil {
 		return o.syncFailure(r, h)
 	}
-	if o.rejectAbove > 0 && len(r.Entries) > o.rejectAbove {
-		o.rejects++
-		return ErrResourceRefused
-	}
 	if o.down {
 		return errors.New("node_down")
 	}
-	n, err := h.Reserve(r.Hash)
-	if err != nil {
-		return err
+	n := uint64(0)
+	if r.Identity.Sequence != nil {
+		n = *r.Identity.Sequence + 1
 	}
 	credential := o.credential
 	if credential == "" {
 		credential = "issued-secret"
 	}
-	obs := Observation{Epoch: r.Epoch, Hash: r.Hash, RunnerID: r.Identity.RunnerID, Credential: credential, PreviousCredential: r.Identity.Credential, ReservedSequence: n, Sequence: n, Bootstrap: r.Identity.Credential == "" || r.Recover, At: h.Now(), TTL: 30 * time.Second, Entries: r.Entries}
+	obs := Observation{Epoch: r.Epoch, RunnerID: r.Identity.RunnerID, Credential: credential, PreviousCredential: r.Identity.Credential, Accepted: true, Sequence: n, Bootstrap: r.Identity.Credential == "" || (o.credential != "" && o.credential != r.Identity.Credential), At: h.Now(), TTL: 30 * time.Second, Entries: r.Entries, Withdrawals: r.Tracked}
 	submitted := map[string]bool{}
 	for _, e := range r.Entries {
 		id := e.Options.ID
@@ -129,18 +132,19 @@ func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error 
 			id = "app-" + e.InstanceID
 		}
 		submitted[id] = true
-		obs.Apps = append(obs.Apps, AppObservation{ID: id, Status: e.Options.Status, SessionIDs: o.sessions[id]})
+		obs.Apps = append(obs.Apps, AppObservation{ID: id, Status: e.Options.Status, SessionIDs: append([]string{}, o.sessions[id]...)})
+		obs.Entries[len(obs.Apps)-1].Options.ID = id
 	}
 	for id, sessions := range o.sessions {
 		if !submitted[id] && len(sessions) > 0 {
 			obs.Apps = append(obs.Apps, AppObservation{ID: id, Status: "draining", SessionIDs: sessions})
 		}
 	}
-	if err = h.Observe(obs); err != nil {
+	if err := h.Observe(obs); err != nil {
 		return err
 	}
 	o.accepted = r
-	o.accepted.Identity = Identity{RunnerID: r.Identity.RunnerID, Credential: credential, Confirmed: !obs.Bootstrap}
+	o.accepted.Identity = Identity{RunnerID: r.Identity.RunnerID, Credential: credential, Confirmed: !obs.Bootstrap, Sequence: new(n)}
 	for n := range o.accepted.Entries {
 		o.accepted.Entries[n].Options.ID = obs.Apps[n].ID
 	}
@@ -181,40 +185,6 @@ func (r *testReporter) Status(_ context.Context, value Report) error {
 	return nil
 }
 
-func TestRejectedAdditionIsDeferredWithoutMaskingFailureOrDelayingWithdrawal(t *testing.T) {
-	c, input, k, o, r, _ := fixtureController(t)
-	set := testutil.Assignment(t)
-	set.Entries[0].Replicas = 1
-	input.set(t, set)
-	registerApps(t, c, k)
-	o.rejectAbove = 1
-	set.Generation++
-	set.Entries[0].Generation++
-	set.Entries[0].Replicas = 2
-	input.set(t, set)
-	tick(t, c)
-	k.apply(c)
-	if c.Tick(t.Context()) == nil {
-		t.Fatal("addition was not rejected")
-	}
-	epoch := c.Journal.View().OwnerEpoch
-	tick(t, c)
-	if o.rejects != 1 || c.Journal.View().OwnerEpoch != epoch || r.reports[len(r.reports)-1].Apps.Reason != "resource_refused" {
-		t.Fatal("retry churned healthy subset or hid requested-membership failure")
-	}
-	set.Generation++
-	set.Entries[0].Generation++
-	set.Entries[0].Desired = "absent"
-	set.Entries[0].Replicas = 0
-	set.Entries[0].StartAllowed = false
-	set.Entries[0].Revision = nil
-	input.set(t, set)
-	tick(t, c)
-	if len(o.accepted.Entries) != 1 || o.accepted.Entries[0].Options.Status != "not-ready" {
-		t.Fatal("addition retry delay also delayed safety withdrawal")
-	}
-}
-
 func TestOwnerFailureKeepsClassificationAndUsesCurrentRecoveryDecision(t *testing.T) {
 	for _, reset := range []bool{false, true} {
 		t.Run(map[bool]string{false: "node_unavailable", true: "registration_auth_failed"}[reset], func(t *testing.T) {
@@ -236,7 +206,7 @@ func TestOwnerFailureKeepsClassificationAndUsesCurrentRecoveryDecision(t *testin
 			}
 			o.syncFailure = func(r OwnerRequest, h OwnerHooks) error {
 				calls++
-				h.Failure(OwnerFailure{Epoch: r.Epoch, Hash: r.Hash, Reason: reason, Reset: reset})
+				h.Failure(OwnerFailure{Epoch: r.Epoch, Reason: reason, Reset: reset})
 				if reset {
 					return &transport.HTTPError{Status: 401}
 				}
@@ -246,8 +216,8 @@ func TestOwnerFailureKeepsClassificationAndUsesCurrentRecoveryDecision(t *testin
 				t.Fatal("fixture failure ignored")
 			}
 			s := c.Journal.View()
-			if s.OwnerReason != reason || reports.reports[len(reports.reports)-1].Apps.Reason != reason || (reset && s.RejectedOwnerHash != "") {
-				t.Fatal("classified failure became generic or resource backoff", s.OwnerReason, s.RejectedOwnerHash)
+			if s.OwnerReason != reason || reports.reports[len(reports.reports)-1].Apps.Reason != reason {
+				t.Fatal("classified failure became generic", s.OwnerReason)
 			}
 			if reset && calls != 1 {
 				t.Fatal("resumed invalid accepted credential after auth failure", calls)
@@ -302,10 +272,10 @@ func TestRecreatedOwnerDoesNotConfirmOldWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := c.Journal.View()
-	if s.Identity.Credential != owner.credential || s.Identity.Confirmed || s.AcceptedSequence != 0 || len(c.proofs) != 0 {
+	if s.Identity.Credential != owner.credential || s.Identity.Confirmed || s.Identity.Sequence != nil || len(c.proofs) != 0 {
 		t.Fatal("recreated owner supplied confirmed work evidence", s.Identity)
 	}
-	for _, entry := range owner.Accepted().Entries {
+	for _, entry := range owner.accepted.Entries {
 		if entry.Options.Status != "not-ready" {
 			t.Fatal("recovery admitted new work", entry)
 		}
@@ -340,7 +310,7 @@ func TestWithdrawalRetainsSessionsAndRequiresExactExclusionBeforeFinalizer(t *te
 	if c.Journal.View().Instances[retired.ID].Phase != "withdrawing" {
 		t.Fatal("removed active work")
 	}
-	if len(o.accepted.Entries) != 2 {
+	if len(o.accepted.Entries) != 1 || o.accepted.Entries[0].InstanceID != sibling.ID {
 		t.Fatal("lost retained sibling membership")
 	}
 	o.sessions[retired.AppID] = nil
@@ -362,8 +332,8 @@ func TestWithdrawalRetainsSessionsAndRequiresExactExclusionBeforeFinalizer(t *te
 	if c.Journal.View().Instances[sibling.ID].Phase == "removed" || o.unregisters != 0 {
 		t.Fatal("removed sibling owner")
 	}
-	if c.Journal.View().Instances[retired.ID].RegistrationGone {
-		t.Fatal("claimed registration removal before the next owner observation")
+	if i := c.Journal.View().Instances[retired.ID]; i != nil && !i.RegistrationGone {
+		t.Fatal("lost committed registration removal")
 	}
 	tick(t, c)
 	found := false
@@ -413,7 +383,9 @@ func TestDeadlinePublishesWithoutNodeAndKeepsCleanupUnconfirmed(t *testing.T) {
 		t.Fatal("claimed Node cleanup from pod absence")
 	}
 	o.down = false
+	o.sessions = map[string][]string{}
 	o.unregisterFail = true
+	_ = c.Tick(context.Background())
 	_ = c.Tick(context.Background())
 	if !c.Journal.View().Identity.Retiring {
 		t.Fatal("lost retirement tombstone")
@@ -463,7 +435,7 @@ func TestRegressedIntentDoesNotBlockCommittedDrain(t *testing.T) {
 	timeout := time.Duration(0)
 	for _, i := range s.Instances {
 		o.sessions[i.AppID] = []string{"busy"}
-		timeout, _ = time.ParseDuration(i.Definition.Instances.DrainTimeout)
+		timeout = time.Second
 	}
 	set := testutil.Assignment(t)
 	set.Generation++
@@ -473,6 +445,7 @@ func TestRegressedIntentDoesNotBlockCommittedDrain(t *testing.T) {
 	set.Entries[0].StartAllowed = false
 	set.Entries[0].Revision = nil
 	input.set(t, set)
+	input.value.Metadata.DrainDeadline = now.Add(timeout)
 	tick(t, c)
 	digest := c.Journal.View().Payload.Index.IntentDigest
 	input.set(t, testutil.Assignment(t))
@@ -485,6 +458,7 @@ func TestRegressedIntentDoesNotBlockCommittedDrain(t *testing.T) {
 		t.Fatal("regression replaced accepted intent or blocked deadline exclusion")
 	}
 	k.apply(c)
+	o.sessions = map[string][]string{}
 	for n := 0; n < 3; n++ {
 		_ = c.Tick(t.Context())
 	}
@@ -545,55 +519,90 @@ func TestUnavailableInputAndStateLossNeverPublishEmpty(t *testing.T) {
 		t.Fatal("accepted complete state loss", err)
 	}
 }
-func TestLateProofIsBoundToWithdrawalAndPodUID(t *testing.T) {
+func TestRemovalObservationIsBoundAndDurable(t *testing.T) {
 	c, _, _, _, _, now := fixtureController(t)
-	i := &Instance{ID: "i", WithdrawalID: "new", PodUID: "new-pod"}
-	c.proofs = map[string]proof{"i": {Observation: Observation{At: *now, TTL: time.Minute}, App: AppObservation{Status: "draining"}, WithdrawalID: "old", PodUID: "new-pod"}}
-	if c.empty(i, *now) {
-		t.Fatal("old withdrawal accepted")
+	c.Journal.Update(func(s *State) error {
+		s.OwnerEpoch = "epoch"
+		s.Identity = Identity{RunnerID: "owner", Credential: "issued"}
+		s.Instances["i"] = &Instance{ID: "i", AppID: "app", WithdrawalID: "withdrawal", PodUID: "pod"}
+		return nil
+	})
+	e := Registration{InstanceID: "i", WithdrawalID: "wrong", PodUID: "pod"}
+	o := Observation{Epoch: "epoch", RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, At: *now, TTL: time.Minute, Apps: []AppObservation{}, Withdrawals: []Registration{e}}
+	c.observe(o)
+	if c.Journal.View().Instances["i"].RegistrationGone {
+		t.Fatal("wrong withdrawal accepted")
 	}
-	p := c.proofs["i"]
-	p.WithdrawalID = "new"
-	p.PodUID = "old-pod"
-	c.proofs["i"] = p
-	if c.empty(i, *now) {
-		t.Fatal("old UID accepted")
+	o.Sequence++
+	o.Withdrawals[0].WithdrawalID = "withdrawal"
+	o.Withdrawals[0].PodUID = "old-pod"
+	c.observe(o)
+	if c.Journal.View().Instances["i"].RegistrationGone {
+		t.Fatal("wrong incarnation accepted")
 	}
-	p.PodUID = i.PodUID
-	c.proofs["i"] = p
-	if !c.empty(i, *now) || c.empty(i, now.Add(time.Minute)) {
-		t.Fatal("freshness ignored")
+	o.Sequence++
+	o.Withdrawals[0].PodUID = "pod"
+	o.At = now.Add(-2 * time.Minute)
+	c.observe(o)
+	if c.Journal.View().Instances["i"].RegistrationGone {
+		t.Fatal("expired response accepted")
+	}
+	o.Sequence++
+	o.At = *now
+	if err := c.observe(o); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Journal.View().Instances["i"].RegistrationGone {
+		t.Fatal("fresh accepted absence did not commit removal")
 	}
 }
 
-func TestSupersededResponsePreservesOnlyCurrentCredentialLineage(t *testing.T) {
+func TestCredentialLineageAndOwnerEpochFence(t *testing.T) {
 	c, _, _, _, _, _ := fixtureController(t)
 	c.Journal.Update(func(s *State) error {
 		s.Identity = Identity{RunnerID: "owner", Credential: "old", Confirmed: true}
-		s.OwnerHash, s.OwnerEpoch = "current", "new-epoch"
-		s.IdentitySequence, s.AcceptedSequence = 7, 7
+		s.OwnerEpoch = "epoch"
 		return nil
 	})
-	o := Observation{RunnerID: "owner", Hash: "superseded", Epoch: "old-epoch", PreviousCredential: "old", Credential: "rotated", ReservedSequence: 8, Sequence: 8}
+	o := Observation{RunnerID: "owner", Epoch: "epoch", PreviousCredential: "old", Credential: "rotated", Bootstrap: true}
+	if err := c.observe(o); err != nil {
+		t.Fatal(err)
+	}
+	if c.Journal.View().Identity.Credential != "rotated" || c.Journal.View().Identity.Confirmed {
+		t.Fatal("credential scope not reset")
+	}
+	o.PreviousCredential = "old"
+	o.Credential = "stale"
 	if err := c.observe(o); !errors.Is(err, ErrSuperseded) {
-		t.Fatal("accepted superseded work", err)
+		t.Fatal("stale lineage accepted", err)
+	}
+	o.PreviousCredential = "rotated"
+	o.Credential = "other"
+	o.Epoch = "other"
+	if err := c.observe(o); !errors.Is(err, ErrSuperseded) {
+		t.Fatal("stale epoch accepted", err)
+	}
+}
+
+func TestRetirementPersistsCredentialIssuedBeforeHeartbeatJoin(t *testing.T) {
+	c, _, _, _, _, _ := fixtureController(t)
+	c.Journal.Update(func(s *State) error {
+		s.OwnerEpoch = "epoch"
+		s.Identity = Identity{RunnerID: "owner", Credential: "issued", Confirmed: true, Retiring: true}
+		return nil
+	})
+	o := Observation{Epoch: "epoch", RunnerID: "owner", PreviousCredential: "issued", Credential: "rotated", Bootstrap: true, Accepted: true, Sequence: 0}
+	if err := c.observe(o); err != nil {
+		t.Fatal("lost credential while joining SDK loop", err)
 	}
 	s := c.Journal.View()
-	if s.Identity.Credential != "rotated" || s.Identity.Confirmed || s.AcceptedSequence != 0 || s.IdentitySequence != 8 {
-		t.Fatal("lost rotated credential or confirmed old scope", s.Identity)
+	if s.Identity.Credential != "rotated" || !s.Identity.Retiring || s.Identity.Confirmed || len(c.proofs) != 0 {
+		t.Fatal("retirement lost credential or accepted work", s.Identity)
 	}
-	o.Credential, o.ReservedSequence = "stale", 7
-	if err := c.observe(o); !errors.Is(err, ErrSuperseded) || c.Journal.View().Identity.Credential != "rotated" {
-		t.Fatal("older lineage overwrote latest credential", err)
-	}
-	c.Journal.Update(func(s *State) error { s.Identity.Retiring = true; return nil })
-	o.PreviousCredential, o.Credential, o.ReservedSequence = "rotated", "final", 9
+	o.PreviousCredential = "issued"
+	o.Credential = "stale"
 	if err := c.observe(o); !errors.Is(err, ErrSuperseded) {
-		t.Fatal("retirement accepted work", err)
-	}
-	s = c.Journal.View()
-	if s.Identity.Credential != "final" || !s.Identity.Retiring {
-		t.Fatal("in-flight credential was lost or revived retiring owner")
+		t.Fatal("stale credential crossed retirement lineage", err)
 	}
 }
 
@@ -686,5 +695,244 @@ func TestRegressionPublicationFailureStillWithdrawsAdmission(t *testing.T) {
 		if s.Instances[e.InstanceID].Group.Slot == 1 && e.Options.Status == "ready" {
 			t.Fatalf("publication error left removed instance advertised ready in the live owner snapshot")
 		}
+	}
+}
+
+func TestBootstrapOutageRemovalWaitsForNode(t *testing.T) {
+	c, input, k, _, _, _ := fixtureController(t)
+	var available atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !available.Load() {
+			http.Error(w, "outage", 503)
+			return
+		}
+		if req.URL.Path != "/runners/heartbeat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var hb runner.HeartbeatRequest
+		json.NewDecoder(req.Body).Decode(&hb)
+		if len(hb.Apps) != 0 {
+			t.Error("resubmitted withdrawn apps after Node recovery")
+		}
+		json.NewEncoder(w).Encode(runner.HeartbeatResponse{RunnerID: hb.RunnerID, HeartbeatSecret: "issued", Apps: []runner.HeartbeatAppStatus{}, HeartbeatTTL: "30s", HeartbeatInterval: "1h"})
+	}))
+	defer srv.Close()
+	o, err := NewSDKOwner(srv.URL, "bootstrap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close(context.Background())
+	c.Owner = o
+	tick(t, c)
+	k.apply(c)
+	if c.Tick(t.Context()) == nil {
+		t.Fatal("expected initial registration outage")
+	}
+	set := *input.value.Payload.Intent
+	set.Generation++
+	set.Entries[0] = set.Entries[0].Absent()
+	set.Entries[0].Generation++
+	input.set(t, set)
+	for n := 0; n < 8; n++ {
+		_ = c.Tick(t.Context())
+		k.apply(c)
+	}
+	if c.Journal.View().Identity.RunnerID == "" {
+		t.Fatal("forgot owner during Node outage")
+	}
+	available.Store(true)
+	for n := 0; n < 8; n++ {
+		tick(t, c)
+		k.apply(c)
+	}
+	if c.Journal.View().Identity.RunnerID != "" {
+		t.Fatal("owner never retired")
+	}
+}
+
+func TestLostBootstrapRetainsOldOwnerUntilNodeAbsence(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(map[bool]string{false: "natural", true: "maintenance-expired"}[expired], func(t *testing.T) {
+			c, input, k, _, reports, now := fixtureController(t)
+			type nodeOwner struct {
+				credential string
+				apps       map[string]bool
+			}
+			var mu sync.Mutex
+			owners := map[string]*nodeOwner{}
+			rejectHeartbeats, unexpectedHeartbeats := false, 0
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if r.URL.Path != "/runners/heartbeat" {
+					id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/runners/"), "/unregister")
+					existing := owners[id]
+					if existing == nil {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					if r.Header.Get("Authorization") != existing.credential {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					delete(owners, id)
+					return
+				}
+				if rejectHeartbeats {
+					unexpectedHeartbeats++
+					http.Error(w, "heartbeat unavailable", 503)
+					return
+				}
+				var req runner.HeartbeatRequest
+				json.NewDecoder(r.Body).Decode(&req)
+				existing := owners[req.RunnerID]
+				bootstrap := existing == nil
+				if bootstrap {
+					existing = &nodeOwner{credential: "issued-" + req.RunnerID, apps: map[string]bool{}}
+					owners[req.RunnerID] = existing
+				} else if r.Header.Get("Authorization") != existing.credential {
+					w.WriteHeader(401)
+					return
+				}
+				response := runner.HeartbeatResponse{RunnerID: req.RunnerID, Apps: []runner.HeartbeatAppStatus{}, HeartbeatTTL: "1h", HeartbeatInterval: "1h"}
+				if bootstrap {
+					response.HeartbeatSecret = existing.credential
+				} else {
+					response.Seq = new(req.Seq)
+				}
+				for n, app := range req.Apps {
+					id := app.ID
+					if id == "" {
+						id = fmt.Sprintf("app-%s-%d", req.RunnerID, n)
+					}
+					existing.apps[id] = true
+					response.Apps = append(response.Apps, runner.HeartbeatAppStatus{ID: id, Status: app.Status, SessionIDs: []string{}})
+				}
+				json.NewEncoder(w).Encode(response)
+			})
+			var lose atomic.Bool
+			lose.Store(true)
+			client := &http.Client{Transport: reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				resp, err := w.Result(), error(nil)
+				if err == nil && req.URL.Path == "/runners/heartbeat" && lose.Swap(false) {
+					resp.Body.Close()
+					return nil, errors.New("lost bootstrap response")
+				}
+				return resp, err
+			})}
+			o, _ := NewSDKOwner("http://node.invalid", "bootstrap", client)
+			defer o.Close(context.Background())
+			c.Owner = o
+			tick(t, c)
+			k.apply(c)
+			if c.Tick(t.Context()) == nil {
+				t.Fatal("fixture did not lose bootstrap response")
+			}
+			oldID := c.Journal.View().Identity.RunnerID
+			mu.Lock()
+			oldApps := len(owners[oldID].apps)
+			mu.Unlock()
+			if oldApps == 0 {
+				t.Fatal("fixture did not retain Node registrations")
+			}
+			set := *input.value.Payload.Intent
+			set.Generation++
+			set.Entries[0] = set.Entries[0].Absent()
+			set.Entries[0].Generation++
+			input.set(t, set)
+			for n := 0; n < 7; n++ {
+				_ = c.Tick(t.Context())
+				k.apply(c)
+			}
+			if c.Journal.View().Identity.RunnerID != oldID {
+				t.Fatal("abandoned unresolved owner identity")
+			}
+			for _, i := range c.Journal.View().Instances {
+				if !i.RegistrationPending || i.RegistrationGone {
+					t.Fatal("discarded potentially submitted registration", i)
+				}
+			}
+			for _, r := range reports.receipts {
+				if r.Phase == "removed" {
+					mu.Lock()
+					remaining := len(owners[oldID].apps)
+					mu.Unlock()
+					if remaining > 0 {
+						t.Fatalf("reported removed while abandoned owner still has %d registrations", remaining)
+					}
+				}
+			}
+
+			// Recreate the SDK adapter with the same journal while the unknown owner lives.
+			_ = o.Close(context.Background())
+			restored, err := NewSDKOwner("http://node.invalid", "bootstrap", client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restored.Close(context.Background())
+			c.Owner = restored
+			if c.Tick(t.Context()) == nil {
+				t.Fatal("restart ignored old owner's 401")
+			}
+			if c.Journal.View().Identity.RunnerID != oldID {
+				t.Fatal("restart forgot unresolved identity")
+			}
+			deadline := now.Add(time.Minute)
+			if expired {
+				input.value.Metadata.DrainRequested = true
+				input.value.Metadata.DrainTarget = artifact.Digest([]byte("maintenance"))
+				input.value.Metadata.DrainDeadline = deadline
+				input.value.Metadata.Generation++
+				*now = deadline.Add(time.Second)
+				for n := 0; n < 7; n++ {
+					_ = c.Tick(t.Context())
+					k.apply(c)
+				}
+				for _, i := range c.Journal.View().Instances {
+					if i.Phase != "removed" || !i.Forced || i.RegistrationGone || !i.RegistrationPending || !i.DrainExpiredAt.Equal(deadline) {
+						t.Fatal("expired cleanup lost its unresolved registration", i)
+					}
+				}
+			}
+			// Simulate Node expiry; only its subsequent unregister 404 authorizes recovery.
+			mu.Lock()
+			delete(owners, oldID)
+			rejectHeartbeats = true
+			mu.Unlock()
+			for n := 0; n < 8; n++ {
+				tick(t, c)
+				k.apply(c)
+			}
+			if c.Journal.View().Identity.RunnerID != "" {
+				t.Fatal("did not finish retirement after old-owner absence")
+			}
+			found := false
+			for _, r := range reports.receipts {
+				found = found || r.Phase == "removed"
+			}
+			if !found {
+				t.Fatal("cleanup never completed after confirmed absence")
+			}
+			mu.Lock()
+			attempts := unexpectedHeartbeats
+			mu.Unlock()
+			if attempts != 0 {
+				t.Fatal("created another owner to prove an absent owner's cleanup", attempts)
+			}
+			if expired {
+				preserved := false
+				for _, report := range reports.reports {
+					for _, i := range report.Apps.Instances {
+						preserved = preserved || (i.RegistrationGone && i.Forced && i.DrainExpiredAt.Equal(deadline))
+					}
+				}
+				if !preserved {
+					t.Fatal("late Node absence erased maintenance expiry")
+				}
+			}
+		})
 	}
 }

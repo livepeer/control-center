@@ -17,7 +17,6 @@ const MaxAppAssignments = 100
 const MaxAppIntentBytes = 900 << 10
 
 type AppCleanupPolicy struct {
-	DrainTimeout    string  `json:"drain_timeout"`
 	StopSignal      *string `json:"stop_signal"`
 	StopGracePeriod string  `json:"stop_grace_period"`
 }
@@ -57,7 +56,7 @@ func canonicalUUID(s string) bool {
 }
 
 func CleanupPolicy(d DefinitionV1) AppCleanupPolicy {
-	return AppCleanupPolicy{d.Instances.DrainTimeout, d.Lifecycle.StopSignal, d.Lifecycle.StopGracePeriod}
+	return AppCleanupPolicy{d.Lifecycle.StopSignal, d.Lifecycle.StopGracePeriod}
 }
 
 func (a AppAssignment) Absent() AppAssignment {
@@ -79,14 +78,9 @@ func (s AppAssignmentSetV1) Validate() error {
 			return fmt.Errorf("invalid or duplicate assignment identity")
 		}
 		previous = a.RevisionID
-		for _, quantity := range []struct {
-			value   string
-			maximum int64
-		}{{a.Cleanup.DrainTimeout, 43200}, {a.Cleanup.StopGracePeriod, 300}} {
-			n, err := strconv.ParseInt(strings.TrimSuffix(quantity.value, "s"), 10, 64)
-			if err != nil || n < 0 || n > quantity.maximum || quantity.value != strconv.FormatInt(n, 10)+"s" {
-				return fmt.Errorf("invalid cleanup duration")
-			}
+		n, err := strconv.ParseInt(strings.TrimSuffix(a.Cleanup.StopGracePeriod, "s"), 10, 64)
+		if err != nil || n < 0 || n > 300 || a.Cleanup.StopGracePeriod != strconv.FormatInt(n, 10)+"s" {
+			return fmt.Errorf("invalid cleanup duration")
 		}
 		if err := boa.Validate(Lifecycle{StartupTimeout: "120s", StopSignal: a.Cleanup.StopSignal, StopGracePeriod: a.Cleanup.StopGracePeriod}); err != nil {
 			return fmt.Errorf("invalid cleanup lifecycle")

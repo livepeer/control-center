@@ -114,11 +114,11 @@ func TestRetainedHeartbeatCountsDoNotBecomeWithdrawalProof(t *testing.T) {
 	c, _, _, _, r, now := fixtureController(t)
 	c.Journal.Update(func(s *State) error {
 		s.Identity = Identity{RunnerID: "owner", Credential: "issued", Confirmed: true}
-		s.OwnerHash, s.OwnerEpoch = "hash", "epoch"
+		s.OwnerEpoch = "epoch"
 		s.Instances["retained"] = &Instance{ID: "retained", AppID: "app", PodUID: "uid", WithdrawalID: "withdrawal", Phase: "removed"}
 		return nil
 	})
-	obs := Observation{RunnerID: "owner", PreviousCredential: "issued", ReservedSequence: 1, Sequence: 1, Hash: "hash", Epoch: "epoch", At: *now, TTL: time.Minute, Apps: []AppObservation{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}}}
+	obs := Observation{RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, Sequence: 1, Epoch: "epoch", At: *now, TTL: time.Minute, Apps: []AppObservation{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}}}
 	if err := c.observe(obs); err != nil {
 		t.Fatal(err)
 	}
@@ -128,12 +128,12 @@ func TestRetainedHeartbeatCountsDoNotBecomeWithdrawalProof(t *testing.T) {
 	if r.reports[len(r.reports)-1].Apps.Instances[0].Sessions != 1 {
 		t.Fatal("discarded authoritative retained-app diagnostic")
 	}
-	obs.ReservedSequence, obs.Sequence = 2, 2
-	obs.Apps[0].SessionIDs = nil
+	obs.Sequence = 2
+	obs.Apps = []AppObservation{}
 	if err := c.observe(obs); err != nil {
 		t.Fatal(err)
 	}
-	if c.empty(c.Journal.View().Instances["retained"], *now) {
+	if c.Journal.View().Instances["retained"].RegistrationGone {
 		t.Fatal("attached current withdrawal context to an uncaptured retained observation")
 	}
 }
