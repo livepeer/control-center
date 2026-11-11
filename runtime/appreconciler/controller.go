@@ -219,6 +219,10 @@ func (c *Controller) Tick(ctx context.Context) error {
 	if c.Probes == nil {
 		c.Probes = NewProbes()
 	}
+	// Consume fresh endpoint eligibility and pending probe results before rolling
+	// decisions can rely on a successor's earlier ready observation.
+	c.Probes.Configure(before.Instances, view)
+	c.Probes.Poll(ctx, before.Instances, view, now)
 	err = c.Journal.Update(func(s *State) error {
 		s.LastClock = now
 		s.ClockUncertain = false
@@ -253,8 +257,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 			wanted[g.Key] = g
 		}
 		ids := instanceIDs(s)
-		// Highest slots withdraw first; the complete withdrawal decision is one durable commit.
-		sort.Slice(ids, func(a, b int) bool { return s.Instances[ids[a]].Group.Slot > s.Instances[ids[b]].Group.Slot })
+		// Observe every workload before any rolling decision can use cached health.
 		for _, id := range ids {
 			i := s.Instances[id]
 			if i.Phase == "removed" {
@@ -275,7 +278,18 @@ func (c *Controller) Tick(ctx context.Context) error {
 			} else if i.PodUID != "" && i.Phase != "retired" {
 				i.Reason = "process_lost"
 			}
+		}
+		// Highest slots withdraw first; the complete withdrawal decision is one durable commit.
+		sort.Slice(ids, func(a, b int) bool { return s.Instances[ids[a]].Group.Slot > s.Instances[ids[b]].Group.Slot })
+		for _, id := range ids {
+			i := s.Instances[id]
+			if i.Phase == "removed" {
+				continue
+			}
 			_, desired := wanted[i.Group.Key]
+			if !maintenance && retainRolling(s, i, c, now) {
+				desired = true
+			}
 			if (!desired || maintenance || i.Reason == "process_lost" || i.Reason == "unexpected_pod_replacement") && i.WithdrawalID == "" {
 				withdraw(i, now, s.Metadata)
 			}
@@ -307,7 +321,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 				if id := s.Heads[g.Key]; id != "" && s.Instances[id] != nil && s.Instances[id].Phase != "removed" {
 					continue
 				}
-				blocked := false
+				blocked := a.Replacement != nil && rollingCount(s, a) >= a.Replacement.Replicas
 				for _, i := range s.Instances {
 					if (i.Phase != "removed" || !i.RegistrationGone) && (i.Group.Key == g.Key || (a.StartAfter != nil && i.Group.RevisionID == a.StartAfter.RevisionID)) {
 						blocked = true

@@ -26,6 +26,14 @@ type AppStartAfter struct {
 	Generation int64  `json:"source_removal_generation"`
 }
 
+// AppReplacement identifies a rolling replacement; it does not grant a bypass of StartAfter.
+type AppReplacement struct {
+	RevisionID           string `json:"source_revision_id"`
+	ActivationGeneration int64  `json:"source_activation_generation"`
+	Generation           int64  `json:"source_removal_generation"`
+	Replicas             int    `json:"replica_limit"`
+}
+
 // Generation orders intent edits. ActivationGeneration identifies an incarnation
 // across scale edits, and changes only after removal and a fresh assignment.
 type AppAssignment struct {
@@ -36,6 +44,7 @@ type AppAssignment struct {
 	Cleanup              AppCleanupPolicy  `json:"cleanup"`
 	Revision             *ResolvedRevision `json:"revision,omitempty"`
 	Replicas             int               `json:"replicas,omitempty"`
+	Replacement          *AppReplacement   `json:"replacement,omitempty"`
 	StartAfter           *AppStartAfter    `json:"start_after,omitempty"`
 	StartAllowed         bool              `json:"start_allowed"`
 }
@@ -64,6 +73,7 @@ func (a AppAssignment) Absent() AppAssignment {
 	a.Revision = nil
 	a.Replicas = 0
 	a.StartAfter = nil
+	a.Replacement = nil
 	a.StartAllowed = false
 	return a
 }
@@ -88,6 +98,9 @@ func (s AppAssignmentSetV1) Validate() error {
 
 		switch a.Desired {
 		case "present":
+			if r := a.Replacement; r != nil && (!canonicalUUID(r.RevisionID) || r.RevisionID == a.RevisionID || r.Generation < 1 || r.ActivationGeneration < 1 || r.ActivationGeneration > r.Generation || r.Replicas <= 1 || r.Replicas != a.Replicas) {
+				return fmt.Errorf("invalid rolling replacement")
+			}
 			if a.Revision == nil || a.Revision.RevisionRef != a.RevisionRef || a.Revision.Verify() != nil || ValidateReplicaCount(a.Replicas) != nil {
 				return fmt.Errorf("invalid pinned assignment definition")
 			}
@@ -103,7 +116,7 @@ func (s AppAssignmentSetV1) Validate() error {
 				return fmt.Errorf("invalid cleanup prerequisite")
 			}
 		case "absent":
-			if a.Revision != nil || a.Replicas != 0 || a.StartAfter != nil || a.StartAllowed {
+			if a.Revision != nil || a.Replicas != 0 || a.StartAfter != nil || a.Replacement != nil || a.StartAllowed {
 				return fmt.Errorf("removal must be a compact tombstone")
 			}
 		default:

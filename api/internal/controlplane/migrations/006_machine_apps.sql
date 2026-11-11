@@ -46,7 +46,7 @@ DECLARE changed integer;
 BEGIN
  INSERT INTO lpcc.machine_app_versions(node_id,epoch,revision_id,generation,intent,actor_id)
  SELECT node_id,epoch,revision_id,generation+1,
- (intent-ARRAY['revision','replicas','start_after']) || jsonb_build_object('generation',generation+1,'desired','absent','start_allowed',false),actor
+ (intent-ARRAY['revision','replicas','start_after','replacement']) || jsonb_build_object('generation',generation+1,'desired','absent','start_allowed',false),actor
  FROM lpcc.machine_app_heads WHERE node_id=n AND epoch=e AND intent->>'desired'='present';
  GET DIAGNOSTICS changed=ROW_COUNT;
  IF changed>0 THEN

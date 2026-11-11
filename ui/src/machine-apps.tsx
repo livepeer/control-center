@@ -4,7 +4,7 @@ import { api, APIError } from './api'
 
 type Revision = { revision_id: string; digest: string; name: string; revision: number; app_version: string; lifecycle: { retired_at: string | null }; definition: { name: string; instances: { replicas: number } } }
 type Summary = Pick<Revision, 'revision_id' | 'digest' | 'revision' | 'app_version' | 'lifecycle'>
-type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: 'present' | 'absent'; replicas?: number; revision?: Revision; start_after?: unknown; start_allowed: boolean; completed_at: string | null; failure?: string; observed_at: string | null; created_at: string; actor_id: string }
+type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: 'present' | 'absent'; replicas?: number; revision?: Revision; start_after?: unknown; replacement?: unknown; start_allowed: boolean; completed_at: string | null; failure?: string; observed_at: string | null; created_at: string; actor_id: string }
 type Listing = { epoch: string; assignments: Assignment[]; apps_generation: number; published_generation: number; delivery_error: string | null; next_after_revision_id: string | null; last_config_fetch_at: string | null }
 type Detail = { assignment: Assignment; revision: Revision; history: Assignment[]; next_before_generation: number | null }
 
@@ -102,14 +102,16 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
   function label(a: Assignment) {
     if (a.desired === 'absent') return a.completed_at ? 'Removed' : 'Removing — waiting for cleanup'
     if (a.start_after && !a.start_allowed) return 'Waiting for previous revision cleanup'
+    if (a.failure && !a.completed_at) return `Failed: ${a.failure}`
+    if (a.replacement && !a.completed_at) return 'Rolling replacement in progress'
     if (a.completed_at) return 'Applied — health unverified'
-    return a.failure ? `Failed: ${a.failure}` : 'Pending Runtime completion'
+    return 'Pending Runtime completion'
   }
   const selectedAssignment = listing?.assignments.find(a => a.revision_id === selected?.revision_id)
   const validCount = (n: number) => Number.isInteger(n) && n >= 1 && n <= 100
   return <section className="machine-apps" aria-labelledby="machine-apps-title">
     <div className="section-heading"><div><h3 id="machine-apps-title">Apps on {machine.hostname}</h3><code>{machine.node_id}</code></div><button className="button" disabled={busy} onClick={() => { load(); loadApps(); if (appName) chooseApp(appName) }}>Refresh assignments</button></div>
-    <p className="muted">Revisions stay pinned. Applied means replica reconciliation completed; health, registration and discoverability are separate.</p>
+    <p className="muted">Revisions stay pinned. Equal replica limits above one roll within the combined limit; other replacements wait for full cleanup. Applied means replica reconciliation completed; health, registration and discoverability are separate.</p>
     {problem && <div role="alert" className="notice error">{problem}</div>}{message && <div role="status" className="notice success">{message}</div>}
     {listing && <p className="muted">Desired app generation {listing.apps_generation}; published {listing.published_generation}. Last config request: {listing.last_config_fetch_at ? new Date(listing.last_config_fetch_at).toLocaleString() : 'None'}{listing.delivery_error ? ` · Delivery failed: ${listing.delivery_error}` : ''}</p>}
     <div className="catalog-actions">
@@ -125,7 +127,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
       <div className="catalog-actions"><button className="button" disabled={busy} onClick={() => inspect(a.revision_id)}>Inspect assignment {a.revision_id}</button>
         {present(a) && <><label>Replicas <input aria-label={`Replicas for ${a.revision_id}`} type="number" min="1" max="100" value={count(a)} disabled={busy} onChange={e => setCounts(old => ({ ...old, [a.revision_id]: { value: Number(e.target.value), activation: a.activation_generation } }))} /></label><button className="button" disabled={busy || !validCount(count(a))} onClick={() => mutate(`${base}/${a.revision_id}`, 'PUT', { epoch: machine.epoch, digest: a.digest, expected_generation: a.generation, replicas: count(a) })}>Save replicas</button>
         <button className="button" disabled={busy} onClick={() => mutate(`${base}/${a.revision_id}`, 'DELETE', { epoch: machine.epoch, expected_generation: a.generation })}>Remove revision {a.revision?.revision}</button>
-        <button className="button" disabled={busy || !selected || selected.revision_id === a.revision_id || selected.name !== a.revision?.name || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(a.start_after && !a.start_allowed) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${a.revision_id}/replace`, 'POST', { epoch: machine.epoch, expected_generation: a.generation, target: { revision_id: selected.revision_id, digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas } })}>Replace revision {a.revision?.revision} after cleanup</button></>}
+        <button className="button" disabled={busy || !selected || selected.revision_id === a.revision_id || selected.name !== a.revision?.name || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(a.start_after && !a.start_allowed) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${a.revision_id}/replace`, 'POST', { epoch: machine.epoch, expected_generation: a.generation, target: { revision_id: selected.revision_id, digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas } })}>Replace revision {a.revision?.revision}</button></>}
       </div>
     </li>)}</ul>
     {listing?.assignments.length === 0 && <p>No app assignments.</p>}{listing?.next_after_revision_id && <button className="button" disabled={busy} onClick={() => load(listing.next_after_revision_id!)}>More assignments</button>}

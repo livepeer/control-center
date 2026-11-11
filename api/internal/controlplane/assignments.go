@@ -132,6 +132,15 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				removal.Generation++
 			}
 			if replace {
+				if old.Replacement != nil {
+					done, e := machineapps.CleanupComplete(ctx, tx, node, in.Epoch, schema.AppStartAfter{RevisionID: old.Replacement.RevisionID, Generation: old.Replacement.Generation})
+					if e != nil {
+						return AdminChange{}, e
+					}
+					if !done {
+						return AdminChange{}, problem(409, "replacement_blocked", "Wait for rolling source cleanup.")
+					}
+				}
 				if old.StartAfter != nil {
 					done, e := machineapps.CleanupComplete(ctx, tx, node, in.Epoch, *old.StartAfter)
 					if e != nil {
@@ -162,7 +171,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 						desiredReplicas = *in.Target.Replicas
 					}
 					retry := old.Generation == *in.Expected+1 && target.Generation == *in.Target.Expected+1 && target.ActivationGeneration == target.Generation
-					if (!current && !retry) || target.Desired != "present" || target.RevisionRef != ref || target.StartAfter == nil || *target.StartAfter != (schema.AppStartAfter{RevisionID: id, Generation: old.Generation}) || target.Replicas != desiredReplicas {
+					if (!current && !retry) || target.Desired != "present" || target.RevisionRef != ref || !replacementMatches(target.AppAssignment, id, old.Generation) || target.Replicas != desiredReplicas {
 						return AdminChange{}, appConflict()
 					}
 				} else {
@@ -187,6 +196,11 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 						return AdminChange{}, problem(400, "invalid_replicas", "Replicas must be between 1 and 100.")
 					}
 					a := schema.AppAssignment{RevisionRef: ref, Generation: target.Generation + 1, ActivationGeneration: target.Generation + 1, Desired: "present", Revision: &revision.ResolvedRevision, Replicas: n, Cleanup: schema.CleanupPolicy(revision.Definition), StartAfter: &schema.AppStartAfter{RevisionID: id, Generation: removal.Generation}}
+					if old.Replicas == n && n > 1 {
+						a.StartAfter = nil
+						a.StartAllowed = true
+						a.Replacement = &schema.AppReplacement{RevisionID: id, ActivationGeneration: old.ActivationGeneration, Generation: removal.Generation, Replicas: n}
+					}
 					if e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, removal); e == nil {
 						e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, a)
 					}
@@ -244,6 +258,17 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 			a := schema.AppAssignment{RevisionRef: ref, Generation: *in.Expected + 1, ActivationGeneration: *in.Expected + 1, Desired: "present", Cleanup: schema.CleanupPolicy(revision.Definition), Revision: &revision.ResolvedRevision, Replicas: n, StartAllowed: true}
 			if base.Desired == "present" {
 				a.ActivationGeneration = base.ActivationGeneration
+				a.Replacement = base.Replacement
+				if base.Replacement != nil && n != base.Replicas {
+					done, e := machineapps.CleanupComplete(ctx, tx, node, in.Epoch, schema.AppStartAfter{RevisionID: base.Replacement.RevisionID, Generation: base.Replacement.Generation})
+					if e != nil {
+						return AdminChange{}, e
+					}
+					if !done {
+						return AdminChange{}, problem(409, "replacement_blocked", "Wait for rolling source cleanup before scaling.")
+					}
+					a.Replacement = nil
+				}
 				a.StartAfter = base.StartAfter
 				a.StartAllowed = base.StartAllowed
 			}
@@ -585,4 +610,11 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 }
 func digestRefPattern(s string) bool {
 	return len(s) == 71 && s[:7] == "sha256:" && fingerprintPattern.MatchString(s[7:])
+}
+
+func replacementMatches(a schema.AppAssignment, id string, generation int64) bool {
+	if a.StartAfter != nil {
+		return *a.StartAfter == (schema.AppStartAfter{RevisionID: id, Generation: generation})
+	}
+	return a.Replacement != nil && a.Replacement.RevisionID == id && a.Replacement.Generation == generation
 }

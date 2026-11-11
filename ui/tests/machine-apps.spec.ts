@@ -7,7 +7,7 @@ const node = 'lp-aaaaaaaaaaaaaaaa', base = `/api/admin/machines/${node}/apps`
 const expires = Math.floor(Date.now() / 1000) + 3600
 const saved = { access_token: `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ sub: owner, exp: expires })).toString('base64url')}.fixture`, refresh_token: 'fixture', token_type: 'bearer', expires_at: expires, expires_in: 3600, user: { id: owner, email: 'a@example.invalid', aud: 'authenticated', role: 'authenticated', app_metadata: {}, user_metadata: {}, created_at: '2026-11-07T00:00:00Z' } }
 function revision(id: string, n: number) { return { revision_id: id, digest: 'sha256:' + (n === 1 ? 'a' : 'b').repeat(64), name: 'whoami', revision: n, app_version: String(n), lifecycle: { retired_at: null, version: 1 }, definition: { name: 'whoami', instances: { replicas: 2 } } } }
-type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: string; replicas?: number; revision?: ReturnType<typeof revision>; start_allowed: boolean; start_after?: unknown; completed_at: string | null; observed_at: null; actor_id: string; created_at: string }
+type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: string; replicas?: number; revision?: ReturnType<typeof revision>; start_allowed: boolean; start_after?: unknown; replacement?: unknown; failure?: string; completed_at: string | null; observed_at: null; actor_id: string; created_at: string }
 function assignment(id: string, n: number): Assignment { return { revision_id: id, digest: revision(id, n).digest, app_name: 'whoami', revision_number: n, revision: revision(id, n), generation: 1, activation_generation: 1, desired: 'present', replicas: 2, start_allowed: true, completed_at: null, observed_at: null, actor_id: owner, created_at: '2026-11-07T00:00:00Z' } }
 function absent(a: Assignment) { a.desired = 'absent'; a.start_allowed = false; delete a.revision; delete a.replicas; delete a.start_after }
 async function setup(page: Page) {
@@ -67,7 +67,7 @@ test('machine apps assign, scale and replace only after cleanup', async ({ page 
   await page.getByRole('button', { name: 'Save replicas', exact: true }).click()
   await expect.poll(() => state.assignments[0].replicas).toBe(3)
   await page.getByLabel('Catalog revision for machine').selectOption(r2)
-  await page.getByRole('button', { name: 'Replace revision 1 after cleanup', exact: true }).click()
+  await page.getByRole('button', { name: 'Replace revision 1', exact: true }).click()
   await expect(page.getByText('Waiting for previous revision cleanup', { exact: true })).toBeVisible()
   await expect(page.getByText('Removing — waiting for cleanup', { exact: true })).toBeVisible()
   await expect(page.getByText('whoami / revision 1', { exact: true })).toBeVisible()
@@ -144,4 +144,17 @@ test('replica drafts clear after saving or a new activation and retain unrelated
   state.assignments.push({ ...assignment(r2, 2), replicas: 6 })
   await page.getByRole('button', { name: 'Refresh assignments', exact: true }).click()
   await expect(second).toHaveValue('6')
+})
+
+
+test('rolling assignment reports failures before generic progress', async ({ page }) => {
+  const state = await setup(page)
+  const target = { ...assignment(r2, 2), replacement: { source_revision_id: r1, source_activation_generation: 1, source_removal_generation: 2, replica_limit: 2 } }
+  state.assignments = [target]
+  await page.getByRole('button', { name: 'Refresh assignments', exact: true }).click()
+  await expect(page.getByText('Rolling replacement in progress', { exact: true })).toBeVisible()
+  state.assignments[0].failure = 'startup_failed'
+  await page.getByRole('button', { name: 'Refresh assignments', exact: true }).click()
+  await expect(page.getByText('Failed: startup_failed', { exact: true })).toBeVisible()
+  await expect(page.getByText('Rolling replacement in progress', { exact: true })).toHaveCount(0)
 })

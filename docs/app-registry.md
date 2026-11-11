@@ -152,12 +152,14 @@ New assignments reject retired revisions and definitions incompatible with curre
 pricing policy, but existing assignments may scale or recover. Rollback requires an
 explicit assignment or replacement with an eligible prior revision.
 
-**Replace revision after cleanup** requests source removal and queues the target.
-The target may start only after source cleanup and a new published snapshot permits it,
-so replacement can cause an availability gap. Replica edits preserve this condition.
-Removing a queued target leaves source removal in place. Replacement chains through
-blocked assignments are rejected; a revision being removed cannot be reassigned until
-cleanup is acknowledged.
+**Replace revision** drains the source and stages the target. Matching replica
+limits above one allow rolling replacement within that combined limit. Each
+successor must be ready and registered before another source is withdrawn; target
+failure pauses progress. With a limit of one or differing limits, source cleanup
+finishes first. Replica edits and replacement chains are refused during rolling
+source cleanup; blocked sequential targets cannot be replaced again.
+Removing a target leaves source removal in place. A revision being removed
+cannot be reassigned until cleanup is acknowledged.
 
 **Applied — health unverified** means the requested replicas were reconciled and
 scale-down finished safely; it does not establish current health, registration,
@@ -203,6 +205,7 @@ Each assignment identifies a pinned revision, desired `present`/`absent` state,
 `generation`, stable `activation_generation` and cleanup policy. Present entries
 include the definition, effective replicas and `start_allowed`; queued targets
 also carry `start_after: {source_revision_id, source_removal_generation}`.
+`replacement` identifies rolling targets without bypassing `start_after`.
 Activation survives scaling and removal; reassignment after cleanup creates a
 new activation. Absent entries retain identity and stop policy.
 The desired configuration digest is independent of the rendered payload and

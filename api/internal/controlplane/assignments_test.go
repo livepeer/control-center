@@ -531,3 +531,42 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 		t.Fatal("rollback changed history")
 	}
 }
+
+func TestReplacementSelectsCleanupPolicyAndPreservesLineage(t *testing.T) {
+	for _, counts := range [][2]int{{1, 1}, {2, 2}, {2, 3}, {3, 2}} {
+		t.Run(fmt.Sprintf("%dto%d", counts[0], counts[1]), func(t *testing.T) {
+			s := newTestServer(t)
+			adminA(t, s)
+			c := enroll(t, s, ownerA, strings.Repeat("c", 64))
+			old := publishAssignmentRevision(t, s, registryFixture(t), "")
+			requireStatus(t, putApp(t, s, c, old, 0, counts[0]), 202)
+			next := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "2"`, 1), old.RevisionID)
+			body := map[string]any{"epoch": c["epoch"], "expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0, "replicas": counts[1]}}
+			requireStatus(t, request(t, s, "POST", appPath(c, old)+"/replace", "session-a", body), 202)
+			audits := count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events`)
+			requireStatus(t, request(t, s, "POST", appPath(c, old)+"/replace", "session-a", body), 200)
+			if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events`) != audits {
+				t.Fatal("replacement retry duplicated audit")
+			}
+			set, digest, _ := appBundle(t, s, c)
+			target := findApp(t, set, next.RevisionID)
+			source := findApp(t, set, old.RevisionID)
+			if counts[0] != counts[1] || counts[0] == 1 {
+				if target.StartAllowed || target.StartAfter == nil || target.StartAfter.RevisionID != source.RevisionID || target.StartAfter.Generation != source.Generation || target.Replacement != nil {
+					t.Fatal("replacement not sequential", target)
+				}
+				return
+			}
+			if !target.StartAllowed || target.StartAfter != nil || target.Replacement == nil || target.Replacement.Replicas != 2 || target.Replacement.ActivationGeneration != source.ActivationGeneration {
+				t.Fatal("rolling lineage lost", target)
+			}
+			requireStatus(t, putApp(t, s, c, next, 1, 3), 409)
+			requireStatus(t, appReport(t, s, c, source, digest, "removed"), 200)
+			requireStatus(t, putApp(t, s, c, next, 1, 3), 202)
+			scaled, _, _ := appBundle(t, s, c)
+			if findApp(t, scaled, next.RevisionID).Replacement != nil {
+				t.Fatal("completed lineage prevented scale change")
+			}
+		})
+	}
+}
