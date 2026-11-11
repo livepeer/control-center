@@ -62,6 +62,7 @@ type Desired struct {
 	Connector               ConnectorConfig
 	ControlAPIURL           string
 	RuntimeImage            string
+	NodeDrainTimeout        *time.Duration
 	NodeImage               string
 	StopSignals             bool
 	AppPayload              *appbundle.Payload

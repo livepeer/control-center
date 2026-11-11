@@ -8,6 +8,7 @@ import (
 	"github.com/livepeer/control-center/runtime/contract"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -72,6 +73,11 @@ func upgradeVersion(m Desired) string {
 	return match[1]
 }
 func specializeNode(raw string, m Desired) string {
+	timeout := 12 * time.Hour
+	if m.NodeDrainTimeout != nil {
+		timeout = *m.NodeDrainTimeout
+	}
+	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", timeout.String())
 	if m.NodeImage != "" {
 		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
 	}

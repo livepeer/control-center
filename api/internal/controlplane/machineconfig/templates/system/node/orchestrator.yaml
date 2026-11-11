@@ -66,6 +66,7 @@ data:
     BootstrapSecretFile = "/credentials/secret"
     HeartbeatInterval = "5s"
     HeartbeatTTL = "30s"
+    DrainTimeout = "@NODE_DRAIN_TIMEOUT@"
     RunnerGrants = ["10.43.0.0/16"]
     HealthGrants = []
     SessionProxyGrants = []
@@ -99,7 +100,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: orchestrator
-        image: ghcr.io/livepeer/node:v1.0.6@sha256:a265916e8612ec4291230f0867734ce2bae763f6326f5204cbe86a267f8153ef
+        image: ghcr.io/livepeer/node:sha-61ef152c2933ab44a8eeb86335976b5595ef6df9@sha256:105449cff9a17646239f3620cfa1df96e048512ba85e9f685adfed8fe0eec534
         args:
         - orchestrator
         - --config

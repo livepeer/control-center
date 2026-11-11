@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigurationBundle(t *testing.T) {
@@ -46,6 +47,35 @@ func TestConfigurationBundle(t *testing.T) {
 	if hex.EncodeToString(hash[:]) != digest {
 		t.Fatal("wrong digest")
 	}
+	for _, tc := range []struct {
+		name    string
+		value   *time.Duration
+		want    string
+		invalid bool
+	}{
+		{name: "default", want: "12h0m0s"}, {name: "zero", value: new(time.Duration(0)), want: "0s"}, {name: "maximum", value: new(12 * time.Hour), want: "12h0m0s"}, {name: "negative", value: new(-time.Second), invalid: true}, {name: "excessive", value: new(13 * time.Hour), invalid: true},
+	} {
+		t.Run("node-drain/"+tc.name, func(t *testing.T) {
+			desired := m
+			desired.NodeDrainTimeout = tc.value
+			desired.DrainTimeout = time.Minute
+			data, _, err := Build(desired)
+			if tc.invalid {
+				if err == nil {
+					t.Fatal("accepted invalid timeout")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			files := archiveFiles(t, data)
+			if !strings.Contains(files["system/node/orchestrator.yaml"], `DrainTimeout = "`+tc.want+`"`) {
+				t.Fatal("timeout lost during rendering")
+			}
+		})
+	}
+
 }
 
 func archiveFiles(t *testing.T, data []byte) map[string]string {

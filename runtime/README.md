@@ -72,7 +72,6 @@ container registries. Downloads use fixed releases with checksum verification:
 | gVisor | `release-20261102.0` |
 | Flux | `v2.10.0` |
 | system-upgrade-controller | `v0.21.0` |
-| Livepeer Node | `v1.0.6` |
 
 Runtime, tunnel, smoke-test BusyBox and Livepeer images must be pinned by digest.
 The upgrade job's kubectl helper uses `rancher/kubectl:v1.36.2`, within one minor

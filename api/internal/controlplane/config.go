@@ -45,6 +45,7 @@ type Params struct {
 	RuntimeImage            string        `env:"RUNTIME_IMAGE" descr:"Digest-pinned Go Runtime distribution for system services"`
 	RuntimeConnectorImage   string        `env:"RUNTIME_CONNECTOR_IMAGE" optional:"true" descr:"Digest-pinned Runtime connector image"`
 	RuntimeNodeImage        string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
+	RuntimeNodeDrainTimeout time.Duration `env:"RUNTIME_NODE_DRAIN_TIMEOUT" default:"12h" descr:"Node app drain timeout, from zero to 12h"`
 	AppStopSignals          bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
 }
 
@@ -94,6 +95,9 @@ func OpenDB(ctx context.Context, raw, password string) (*sql.DB, error) {
 }
 
 func (p Params) PreValidate() error {
+	if p.RuntimeNodeDrainTimeout < 0 || p.RuntimeNodeDrainTimeout > 12*time.Hour {
+		return errors.New("RuntimeNodeDrainTimeout must be between zero and 12h")
+	}
 	if p.RuntimeImage == "" {
 		return errors.New("configure a digest-pinned RuntimeImage")
 	}

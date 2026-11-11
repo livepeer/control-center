@@ -17,6 +17,7 @@ type Config struct {
 	Connector               ConnectorConfig
 	DrainTimeout, StatusTTL time.Duration
 	RuntimeImage            string
+	NodeDrainTimeout        *time.Duration
 	NodeImage               string
 	StopSignals             bool
 }
@@ -50,7 +51,7 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	if s.config.Connector.Image != "" {
 		connector.Image = s.config.Connector.Image
 	}
-	return Desired{Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
+	return Desired{Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
 }
 func (s *Manager) drainTimeout() time.Duration {
 	if s.config.DrainTimeout <= 0 {

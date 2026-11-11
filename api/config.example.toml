@@ -50,6 +50,7 @@ DiscoveryGrants = []
 # CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
 # CloudflareKeyringFile = "secrets/collector-access-keyring.json"
 RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required; build instructions in runtime/README.md
+RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 # RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # Runtime helper and cloudflared
 # CloudflareAccessLifetime = "<TOKEN_LIFETIME>"
 # CloudflareRotateBefore = "<ROTATION_WINDOW>"
