@@ -6,7 +6,7 @@ commands below from the repository root.
 
 ## Run locally
 
-Requires Go 1.27.3+, Node.js 22.12+, TLS-enabled PostgreSQL 15+, and authentication.
+Requires Go 1.27.4+, Node.js 22.12+, TLS-enabled PostgreSQL 15+, and authentication.
 Configure credentials and sign-in using
 [api/config.example.toml](../api/config.example.toml) and the
 [operations runbook](operations.md). Then run:

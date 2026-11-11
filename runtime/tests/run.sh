@@ -65,7 +65,7 @@ if shellcheck "${scripts[@]}"; then :; else test_code=$?; exit "$test_code"; fi
 if python3 -m unittest discover -s tests -v; then :; else test_code=$?; exit "$test_code"; fi
 
 outcome=setup_failed
-image_tag=golang:1.27.2-bookworm
+image_tag=golang:1.27.4-bookworm
 if ! image=$(docker image inspect --format '{{.Id}}' "$image_tag" 2>/dev/null); then
   image=-
   docker pull "$image_tag"
