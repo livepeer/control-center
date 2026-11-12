@@ -178,6 +178,8 @@ credentials, configuration and recorded version together. If cluster data
 exists but `state/k3s-version` is missing, restore that record or a full backup
 before repair. Missing or corrupt App Reconciler state requires a consistent
 backup; `state_recovery_failed` stops app actions until recovery.
+A stopped managed cluster can retain its Flannel UDP socket. Repair recognizes
+it only when the saved release and generated host configuration still verify.
 
 To uninstall, suspend reconciliation, drain workloads and detach storage; disable
 and stop K3s, terminate this installation's remaining processes and unmount its

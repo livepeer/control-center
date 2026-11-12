@@ -102,8 +102,17 @@ check_existing_installation() {
 }
 
 managed_flannel_socket() {
-  (( MANAGED )) && systemctl is-active --quiet "$UNIT" &&
-    ip -d link show flannel.1 2>/dev/null | grep -Eq 'vxlan id 1 .*dstport 8472([[:space:]]|$)'
+  (( MANAGED )) || return 1
+  if ! systemctl is-active --quiet "$UNIT"; then
+    # The kernel VXLAN socket outlives K3s. Recognize a stopped installation
+    # only with its committed release and unchanged generated host files;
+    # an initialization marker alone must not adopt an unrelated socket.
+    managed_installation && [[ -d "$INSTALL_DIR/k3s/server" &&
+      -s "$INSTALL_DIR/state/k3s-version" && -s "$INSTALL_DIR/state/host-config.sha256" ]] &&
+      version_at_least "$(cat "$INSTALL_DIR/state/k3s-version")" "$K3S_VERSION" &&
+      sha256sum --check --status "$INSTALL_DIR/state/host-config.sha256" || return 1
+  fi
+  ip -d link show flannel.1 2>/dev/null | grep -Eq 'vxlan id 1 .*dstport 8472([[:space:]]|$)'
 }
 
 check_ports() {
