@@ -76,7 +76,7 @@ func TestPayloadValidationAndUnsupportedSettings(t *testing.T) {
 		t.Fatal("accepted changed resource")
 	}
 	p, _ = Render(set, Options{})
-	m.NodeID = "33333333-3333-4333-8333-333333333333"
+	m.NodeID = strings.Repeat("c", 26)
 	if _, err := Read(p.Files, m); err == nil {
 		t.Fatal("accepted foreign enrollment")
 	}
