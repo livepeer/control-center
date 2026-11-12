@@ -39,7 +39,9 @@ Govulncheck; builds and browser-tests the UI; and runs bootstrap, remote runner
 and Runtime tests. CI supplies PostgreSQL, Livepeer Node and cloudflared for
 integration tests. Pushes to `main` also run these checks.
 
-Tests requiring `NODE_BINARY` or an isolated Flux/gVisor cluster remain opt-in.
+For local real-process tests, set `NODE_BINARY` and `LIVEPEER_NODE_TEST_BINARY`
+to the compatible Node binary. CI sets both. Isolated Flux/gVisor cluster tests
+remain opt-in.
 
 [Build](../.github/workflows/build.yml) validates the API, web and Runtime
 Docker images on native Linux amd64 and arm64 runners for pull requests and

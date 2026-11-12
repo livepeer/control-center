@@ -47,11 +47,12 @@ jobs:
         run: |
           {
             echo "LIVEPEER_NODE_TEST_BINARY=$RUNNER_TEMP/bin/livepeer-orchestrator"
+            echo "NODE_BINARY=$RUNNER_TEMP/bin/livepeer-orchestrator"
             echo "CLOUDFLARED_BINARY=$RUNNER_TEMP/bin/cloudflared"
           } >> "$GITHUB_ENV"
       - name: Install pinned Livepeer Node fixture
         run: |
-          GOBIN="$RUNNER_TEMP/bin" go install github.com/livepeer/node/cmd/livepeer-orchestrator@c4e2e5d3b4807c09e5b027cf1f1d75fd1f9db142
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/livepeer/node/cmd/livepeer-orchestrator@9273a78b0842b7d26171ec09174a24a0ac549df2
       - name: Pin cloudflared fixture
         run: |
           curl --fail --location --retry 3 \
