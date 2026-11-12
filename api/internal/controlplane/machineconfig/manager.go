@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/payment"
 	"github.com/livepeer/control-center/schema"
 	"log/slog"
 	"time"
@@ -23,6 +24,7 @@ type Config struct {
 }
 
 type Dependencies struct {
+	Payment  func(context.Context, Machine) (payment.Config, error)
 	DB       *sql.DB
 	Logger   *slog.Logger
 	Exposure func(json.RawMessage) (*Exposure, error)
@@ -51,7 +53,22 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	if s.config.Connector.Image != "" {
 		connector.Image = s.config.Connector.Image
 	}
-	return Desired{Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
+	p := payment.Offchain()
+	var err error
+	if s.deps.Payment != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		p, err = s.deps.Payment(ctx, m)
+		cancel()
+	}
+
+	d := Desired{Payment: p, PaymentError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
+	if p.Paid() && s.store.DB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		r, at, e := s.store.Report(ctx, m, "runtime")
+		cancel()
+		d.PaymentReady = e == nil && !r.ClockUncertain && time.Since(ObservationTime(r, at)) <= s.config.StatusTTL && r.Ready && r.Payment != nil && r.Payment.Ready && r.Payment.Applied && r.Payment.Generation == p.Generation && r.ConfigDigest == Digest(d)
+	}
+	return d
 }
 func (s *Manager) drainTimeout() time.Duration {
 	if s.config.DrainTimeout <= 0 {
@@ -199,6 +216,7 @@ func (s *Manager) planManagement(ctx context.Context, m Machine, record *Record)
 	}
 	record.State = before
 	record.HeldOrchestrator = manifest
+	record.HeldPayment = paymentJSON(old.Payment)
 	s.holdUpgrade(ctx, m, &record.State)
 	record.RolloutReason = "lifecycle_observation_failed"
 	if old.IngressDigest != "" {
@@ -223,11 +241,12 @@ func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposur
 		return exposure, false, nil
 	}
 	if (record.Lifecycle == "draining" || record.Target != "") && record.HeldOrchestrator == "" {
-		_, manifest, e := s.applied(ctx, m)
+		old, manifest, e := s.applied(ctx, m)
 		if e != nil {
 			return nil, false, e
 		}
 		record.HeldOrchestrator = manifest
+		record.HeldPayment = paymentJSON(old.Payment)
 	}
 	if record.Lifecycle == "draining" {
 		done, e := s.removalComplete(ctx, m, &record.State)

@@ -128,9 +128,9 @@ transition_credentials() {
   install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/app-reconciler"
   install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
   chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"

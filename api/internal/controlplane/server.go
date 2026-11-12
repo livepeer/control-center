@@ -118,6 +118,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/{node_id}/apps/{revision_id}/status", s.assignmentStatus)
 	mux.HandleFunc("POST /v1/nodes/register", s.register)
 	mux.HandleFunc("GET /v1/nodes/{node_id}/config", s.configuration)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/payment/credentials", s.paymentCredentials)
+	mux.HandleFunc("POST /internal/redemption/authorize", s.redemptionAuthorize)
 	mux.HandleFunc("POST /v1/nodes/{node_id}/credentials/refresh", s.refreshCredentials)
 	mux.HandleFunc("POST /v1/nodes/{node_id}/tunnel/connector-token", s.connectorToken)
 	mux.HandleFunc("POST /v1/nodes/{node_id}/status", s.machineStatus)

@@ -34,7 +34,7 @@ func command() *cobra.Command {
 		func(ctx context.Context, raw string, _ bool) (*sql.DB, error) {
 			return controlplane.OpenDB(ctx, raw, database.PGPassword)
 		})
-	root := boa.Cmd[boa.NoParams]{Use: "controlcenter", Short: "Livepeer machine control plane", SubCmds: []*cobra.Command{serve, migrate}}.ToCobra()
+	root := boa.Cmd[boa.NoParams]{Use: "controlcenter", Short: "Livepeer machine control plane", SubCmds: []*cobra.Command{serve, migrate, controlplane.PaymentsCommand()}}.ToCobra()
 	root.SilenceUsage, root.SilenceErrors = true, true
 	return root
 }

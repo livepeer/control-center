@@ -112,18 +112,10 @@ private `path`, `capacity`, and `price`; paths must be unique and nonnested.
 
 ## Pricing policy
 
-Set `RegistryPaymentMode` in the API configuration, or the
-`REGISTRY_PAYMENT_MODE` environment variable, to one of:
-
-| Mode | Registry behavior |
-| --- | --- |
-| `offchain` | Default; allows zero or positive prices. |
-| `onchain` | Requires a positive price for validation and new publications. |
-
-This setting controls registry policy; it does not configure payment mode on
-Livepeer Nodes. The publication API returns an identical existing revision even
-if it no longer meets the current pricing policy. The catalog UI requires
-validation first, so it cannot submit such a definition in onchain mode.
+Catalog prices remain generic and immutable. Assignment and registration compatibility
+is evaluated against the target machine's desired and observed Node payment settings.
+See [managed paid operation](paid-operation.md) for deployment configuration and
+activation. Publishing a price does not activate paid operation on a Node.
 
 ## Catalog API
 

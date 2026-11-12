@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"uuid"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
@@ -242,6 +243,12 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 			s.databaseError(w, err)
 		}
 		return
+	}
+	if report.Component == "runtime" && !report.ClockUncertain && !report.ObservedAt.Before(time.Now().Add(-2*time.Minute)) {
+		if e := s.observePaymentGrant(r.Context(), m, report.Payment, report.ConfigDigest); e != nil {
+			s.databaseError(w, e)
+			return
+		}
 	}
 	if wake {
 		s.requestReconcile()

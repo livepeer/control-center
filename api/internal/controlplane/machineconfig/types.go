@@ -4,6 +4,7 @@ package machineconfig
 import (
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/runtime/payment"
 	"github.com/livepeer/control-center/schema"
 	"regexp"
 	"time"
@@ -29,6 +30,9 @@ type State struct {
 	DrainStartedAt         time.Time `json:"drain_started_at,omitempty"`
 	DrainedGeneration      int64     `json:"drained_generation,omitempty"`
 	Target                 string    `json:"target,omitempty"`
+	PaymentSettled         bool      `json:"payment_settled,omitempty"`
+	PaymentDrainAfter      time.Time `json:"payment_drain_after,omitempty"`
+	HeldPayment            string    `json:"held_payment,omitempty"`
 	HeldOrchestrator       string    `json:"held_orchestrator,omitempty"`
 	PendingConfigDigest    string    `json:"pending_config_digest,omitempty"`
 	ApprovedConfigDigest   string    `json:"approved_config_digest,omitempty"`
@@ -55,6 +59,9 @@ type ConnectorConfig struct {
 }
 
 type Desired struct {
+	Payment      payment.Config
+	PaymentError error
+	PaymentReady bool
 	Machine
 	Apps                    *schema.AppAssignmentSetV1
 	State                   State
@@ -77,6 +84,7 @@ var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{
 func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }
 
 type Report struct {
+	Payment             *payment.Observation    `json:"payment,omitempty"`
 	ObserverID          string                  `json:"observer_id,omitempty"`
 	ObserverStartedAt   time.Time               `json:"observer_started_at,omitempty"`
 	ClockUncertain      bool                    `json:"clock_uncertain,omitempty"`

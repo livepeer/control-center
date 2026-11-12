@@ -27,3 +27,6 @@ func hashProcess(boot, namespace, stat string) (string, error) {
 	digest := sha256.Sum256([]byte(strings.TrimSpace(boot) + "\n" + namespace + "\n" + start))
 	return hex.EncodeToString(digest[:]), nil
 }
+
+// ProcessIdentity identifies PID 1 across exec for protected credential consumers.
+func ProcessIdentity() (string, error) { return processIdentity() }

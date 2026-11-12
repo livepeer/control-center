@@ -3,9 +3,11 @@ package machineconfig
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/payment"
 	"time"
 )
 
@@ -24,6 +26,12 @@ func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, erro
 // Gate holds the applied workload until a fresh report completes its drain.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
+	if desired.PaymentError != nil {
+		return false, desired.PaymentError
+	}
+	if desired.Payment.Paid() {
+		state.PaymentSettled = false
+	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
@@ -32,6 +40,19 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
+	// Admission has never opened for this paid target. Its image or rendering
+	// can be repaired without asking the failed process to drain again, while
+	// retaining the exact payment/storage binding and the admission freeze.
+	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested && !state.PaymentDrainAfter.IsZero()
+	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
+	if old.ConfigDigest != digest && old.Payment.Paid() && !old.PaymentActive && state.ApprovedConfigDigest != old.ConfigDigest && paymentJSON(old.Payment) == paymentJSON(desired.Payment) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+		state.ApplyingConfigDigest = digest
+		state.ApplyingUpgradeVersion = upgradeVersion(desired)
+		state.PendingConfigDigest = digest
+		state.RolloutReason = "rollout_pending"
+		return false, nil
+	}
 	if state.ApplyingConfigDigest != "" {
 		if state.ApplyingConfigDigest == digest {
 			report, at, e := s.store.Report(ctx, m, "runtime")
@@ -55,6 +76,14 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.ApplyingUpgradeVersion = ""
 	}
 	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
+		if desired.Payment.Paid() && state.ApprovedConfigDigest != digest {
+			if !desired.PaymentReady {
+				state.RolloutReason = "payment_startup_pending"
+				return false, nil
+			}
+			state.ApprovedConfigDigest = digest
+			state.RolloutReason = ""
+		}
 		return false, nil
 	}
 	if state.PendingConfigDigest != digest {
@@ -65,12 +94,22 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
 		state.HeldOrchestrator = manifest
+		state.HeldPayment = paymentJSON(old.Payment)
 		s.holdUpgrade(ctx, m, state)
 	}
 	if old.ConfigDigest != digest {
 		done, err := s.drainComplete(ctx, m, state)
 		if err != nil || !done {
 			return true, err
+		}
+	}
+	if old.Payment.Paid() && (!desired.Payment.Paid() || desired.Payment.RedeemerURL != old.Payment.RedeemerURL) {
+		if !s.paymentDrained(ctx, m, old, state.PaymentDrainAfter) {
+			state.RolloutReason = "payment_drain_pending"
+			return true, nil
+		}
+		if !desired.Payment.Paid() {
+			state.PaymentSettled = true
 		}
 	}
 	state.HeldOrchestrator = ""
@@ -85,6 +124,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 // StageTarget drains for a change whose external prerequisites are prepared by
 // another subsystem. Gate releases the held workload once those facts are ready.
 func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desired Desired, target string) (bool, error) {
+	if desired.PaymentError != nil {
+		return false, desired.PaymentError
+	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
@@ -105,6 +147,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
 		state.HeldOrchestrator = manifest
+		state.HeldPayment = paymentJSON(old.Payment)
 		s.holdUpgrade(ctx, m, state)
 	}
 	done, err := s.drainComplete(ctx, m, state)
@@ -145,6 +188,7 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 		return false, err
 	}
 	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL && validDrainEvidence(m, *state, report, time.Now()) {
+		state.PaymentDrainAfter = evidenceTime(report)
 		state.RolloutReason = ""
 		return true, nil
 	}
@@ -166,6 +210,14 @@ func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) 
 		state.RolloutReason = "app_cleanup_pending"
 		return false, err
 	}
+	old, _, e := s.applied(ctx, m)
+	if e != nil {
+		return false, e
+	}
+	if !s.paymentDrained(ctx, m, old, state.PaymentDrainAfter) {
+		state.RolloutReason = "payment_drain_pending"
+		return false, nil
+	}
 	state.RolloutReason = ""
 	return true, nil
 }
@@ -175,10 +227,47 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 	if err != nil || !done {
 		return false, err
 	}
-	result, err := s.store.DB.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$5 AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$4 AND lease_until>now())`, l.Machine.NodeID, l.Machine.Epoch, l.ID, l.Revision, l.Machine.CredentialVersion)
+	tx, err := s.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	return n == 1, err
+	defer tx.Rollback()
+	var yes int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`, l.Machine.NodeID, l.Machine.Epoch, l.Machine.CredentialVersion).Scan(&yes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$4 AND lease_until>now() FOR UPDATE`, l.Machine.NodeID, l.Machine.Epoch, l.ID, l.Revision).Scan(&yes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.payment_machines SET drained=true WHERE node_id=$1`, l.Machine.NodeID); err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2`, l.Machine.NodeID, l.Machine.Epoch); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func paymentJSON(c payment.Config) string { b, _ := json.Marshal(c); return string(b) }
+func (s *Manager) paymentDrained(ctx context.Context, m Machine, old Runtime, after time.Time) bool {
+	if !old.Payment.Paid() {
+		return true
+	}
+	r, at, e := s.store.Report(ctx, m, "runtime")
+	return e == nil && !after.IsZero() && !r.ObservedAt.Before(after) && r.Generation == old.Generation && !r.ClockUncertain && time.Since(at) <= s.config.StatusTTL && time.Since(r.ObservedAt) <= s.config.StatusTTL && r.ConfigDigest == old.ConfigDigest && r.Payment != nil && r.Payment.Generation == old.Payment.Generation && r.Payment.Applied && r.Payment.QueueKnown && r.Payment.Unsettled == 0
+}
+
+func evidenceTime(r Report) time.Time {
+	if r.Evidence == nil {
+		return time.Time{}
+	}
+	return r.Evidence.ObservedAt
 }
