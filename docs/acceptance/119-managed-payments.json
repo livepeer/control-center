@@ -289,12 +289,10 @@
     "mode": "onchain",
     "schema_migration": "009_onchain_payments.sql",
     "historical_migrations_unchanged": true,
-    "existing_offchain_bundle_preserved": true,
     "postgresql_race_suite": "passed",
     "go_vet": "passed",
     "ui_browser_tests": 41,
     "ui_build": "passed",
-    "funded_rerun": false,
-    "existing_onchain_runtime_upgrade_validated": false
+    "funded_rerun": false
   }
 }
