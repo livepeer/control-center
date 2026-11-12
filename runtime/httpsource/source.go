@@ -384,7 +384,7 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		ready = ready && k3sVersion == m.UpgradeVersion
 	}
 	reason := "applying"
-	if m.Payment.Paid() && applied && actual == m.ConfigDigest && !ready {
+	if m.Payment.Onchain() && applied && actual == m.ConfigDigest && !ready {
 		reason = "payment_not_ready"
 	}
 	if ready {

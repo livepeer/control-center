@@ -19,7 +19,7 @@ import (
 type paymentTransport func(*http.Request) (*http.Response, error)
 
 func (f paymentTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-func TestPaidAdmissionRequiresLiveMatchingNode(t *testing.T) {
+func TestOnchainAdmissionRequiresLiveMatchingNode(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	pods := 1
 	ready := 200
@@ -55,13 +55,13 @@ func TestPaidAdmissionRequiresLiveMatchingNode(t *testing.T) {
 		t.Fatal("ambiguous Node incarnation admitted")
 	}
 }
-func TestPendingPaidTargetDoesNotAllocateOrAdmit(t *testing.T) {
+func TestPendingOnchainTargetDoesNotAllocateOrAdmit(t *testing.T) {
 	c, input, cluster, owner, _, _ := fixtureController(t)
-	input.value.Metadata.Payment = payment.Config{Mode: "paid", Generation: 1}
+	input.value.Metadata.Payment = payment.Config{Mode: "onchain", Generation: 1}
 	input.value.Metadata.PaymentActive = false
 	tick(t, c)
 	if len(c.Journal.View().Instances) != 0 {
-		t.Fatal("pending paid target allocated work")
+		t.Fatal("pending onchain target allocated work")
 	}
 	input.value.Metadata.PaymentActive = true
 	registerApps(t, c, cluster)

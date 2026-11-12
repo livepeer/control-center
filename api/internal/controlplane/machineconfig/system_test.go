@@ -126,8 +126,8 @@ func TestProxyRoutingFollowsHeldNodeConfiguration(t *testing.T) {
 		private := build()
 		m.Exposure = &Exposure{TunnelID: "tunnel", ServiceURL: "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.a.invalid", ProxyURLTemplate: "https://{proxy}.lp-aaaaaaaaaaaaaaaa.a.invalid", IngressDigest: "ingress"}
 		a := build()
-		if !strings.Contains(string(a[prefix+nodeFile]), `RunnerServiceURL = "`+PrivateOrchestrator+`"`) {
-			t.Fatal("public Node routing omitted the private runner callback URL")
+		if !strings.Contains(string(a[prefix+nodeFile]), `APIOriginURL = "`+PrivateOrchestrator+`"`) {
+			t.Fatal("public Node routing omitted the private API origin")
 		}
 		m.State.HeldOrchestrator = string(a[prefix+nodeFile])
 		m.Exposure.ServiceURL = "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.b.invalid"

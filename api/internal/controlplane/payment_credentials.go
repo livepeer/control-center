@@ -59,7 +59,7 @@ func (s *Server) paymentCredentials(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		metadata, e = transport.ReadMetadata(files["runtime.json"])
 	}
-	if e != nil || metadata.Epoch != m.Epoch || metadata.CredentialVersion != m.CredentialVersion || !metadata.Payment.Paid() || metadata.Payment.Generation != in.PaymentGeneration || metadata.ConfigDigest != in.ConfigDigest {
+	if e != nil || metadata.Epoch != m.Epoch || metadata.CredentialVersion != m.CredentialVersion || !metadata.Payment.Onchain() || metadata.Payment.Generation != in.PaymentGeneration || metadata.ConfigDigest != in.ConfigDigest {
 		fail(w, 409, "payment configuration changed")
 		return
 	}
@@ -150,7 +150,7 @@ func (s *Server) observePaymentGrant(ctx context.Context, m Machine, reportPayme
 	if p == nil || !p.Applied || p.PodUID == "" {
 		return nil
 	}
-	if p.Mode != "offchain" && (p.Mode != "paid" || !appID(p.GrantID)) {
+	if p.Mode != "offchain" && (p.Mode != "onchain" || !appID(p.GrantID)) {
 		return nil
 	}
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -179,7 +179,7 @@ func (s *Server) observePaymentGrant(ctx context.Context, m Machine, reportPayme
 	}
 	if p.Mode == "offchain" {
 		// The replacement has no submission bearer to observe. Retire the held
-		// paid workload's grants only after its offchain successor is applied.
+		// onchain workload's grants only after its offchain successor is applied.
 		_, e = tx.ExecContext(ctx, `UPDATE lpcc.payment_grants SET revoked_at=now() WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL`, m.NodeID, m.Epoch)
 		if e != nil {
 			return e

@@ -62,7 +62,7 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	}
 
 	d := Desired{Payment: p, PaymentError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
-	if p.Paid() && s.store.DB != nil {
+	if p.Onchain() && s.store.DB != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		r, at, e := s.store.Report(ctx, m, "runtime")
 		cancel()

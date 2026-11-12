@@ -100,8 +100,8 @@ func DesiredRuntime(m Desired) Runtime {
 	if d.Payment.Version == 0 {
 		d.Payment = payment.Offchain()
 	}
-	d.PaymentActive = !m.State.DrainRequested && m.State.ApplyingConfigDigest == "" && (!d.Payment.Paid() || (m.PaymentReady && m.State.ApprovedConfigDigest == d.ConfigDigest))
-	if d.Payment.Paid() {
+	d.PaymentActive = !m.State.DrainRequested && m.State.ApplyingConfigDigest == "" && (!d.Payment.Onchain() || (m.PaymentReady && m.State.ApprovedConfigDigest == d.ConfigDigest))
+	if d.Payment.Onchain() {
 		d.PaymentCredentialsRef = "/v1/nodes/" + m.NodeID + "/payment/credentials"
 	}
 	d.RunnerServiceURL = PrivateOrchestrator

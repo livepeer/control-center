@@ -1,10 +1,16 @@
-# Managed paid operation
+# Managed onchain operation
 
 This workflow targets fresh Control Center databases and fresh Runtime installations.
 The app catalog's exact decimal prices are the registration inputs. Deployment
 configuration owns Node payment infrastructure; the machine UI inspects its state.
 Offchain Node advertises free service even if a catalog revision has a positive quote.
-Paid Node requires positive USD prices with `hour` or `fixed` units for every app.
+Onchain Node requires positive USD prices with `hour` or `fixed` units for every app.
+
+Payment persistence is introduced by additive migration `009_onchain_payments.sql`;
+historical migrations remain unchanged. Applying it preserves existing machine
+records and stored bundles, and unconfigured machines stay offchain. The funded
+acceptance below covers fresh installations; it does not establish Runtime or
+payment-storage upgrade compatibility for existing onchain installations.
 
 ## Fresh setup
 
@@ -44,7 +50,7 @@ Create owner-only files readable by container UID 65532:
 
 Set `PaymentSecretsDir` and `PaymentWebhookSecretFile` in the API deployment
 configuration as shown in `deploy/config.example.toml`. Start the fresh deployment
-with `docker compose -f compose.yaml -f compose.paid.yaml --profile paid up -d`.
+with `docker compose -f compose.yaml -f compose.onchain.yaml --profile onchain up -d`.
 Only `POST /redemption/tickets` is exposed through the verified HTTPS API ingress.
 Keep the redeemer's raw listener, metrics and webhook inaccessible externally.
 The same-host deployment accepts host compromise as a trust-boundary limitation.
@@ -60,7 +66,7 @@ controlcenter payments apply --config /etc/controlcenter/config.toml \
 ```
 
 The command prints the current deployment revision. Use that revision on the next
-apply. Imports are complete snapshots: retain all currently paid machine entries,
+apply. Imports are complete snapshots: retain all currently onchain machine entries,
 or explicitly set one to `{"version":1,"mode":"offchain"}`. Do not supply generated
 `generation` values. An identical retry is a no-op, including after a lost response. Stale changes conflict.
 Settings, generations and audit records commit together. API processes consume
@@ -103,7 +109,7 @@ a new process obtains a new grant. Keep immutable RPC secret versions available.
 
 ## Failure, retirement and recovery
 
-Configuration application, local paid readiness and remote redemption handoff are
+Configuration application, local onchain readiness and remote redemption handoff are
 separate observations. A successful `/readyz`, download or empty worker pass does
 not prove authorized handoff. `unverified` means no current successful handoff has
 been observed; `degraded` reflects submission failures. Node's durable queue and
@@ -112,8 +118,8 @@ backpressure continue governing redemption outages.
 Disable, destination change and ordinary removal wait for app drain and fresh
 successful evidence of zero unsettled tickets. Missing, stale or incomplete queue
 evidence blocks completion. Drain expiry requires the existing audited retry.
-Normal removal retains the paid workload and credentials while settling tickets.
-An observed offchain replacement revokes the previous paid workload's submission
+Normal removal retains the onchain workload and credentials while settling tickets.
+An observed offchain replacement revokes the previous onchain workload's submission
 grants after the required drain completes.
 
 Forced removal or account deletion revokes submission grants immediately. Already
@@ -125,7 +131,7 @@ chain settings before resuming submission. Once the restored Node has reported a
 zero-unsettled observation, apply the same desired snapshot with
 `--acknowledge-recovery <machine-id>` and the current expected revision. This
 records an explicit recovery audit event and clears the recovery-required flag.
-After a paid Node has initialized successfully, credential delivery requires its
+After a onchain Node has initialized successfully, credential delivery requires its
 existing payment database; a missing database fails startup instead of silently
 creating a replacement. Do not discard databases to clear an
 error or reinterpret retained state on a different chain or recipient.
@@ -144,7 +150,7 @@ before publishing its new protected routes.
 Use two freshly installed CPU machines with different infrastructure settings and
 unchanged shared catalog revisions. Record component commits/digests, desired and
 observed generations, bounded spending/runtime limits, and redacted outcomes.
-Exercise paid discovery/admission/execution/accounting, winning-ticket handoff,
+Exercise onchain discovery/admission/execution/accounting, winning-ticket handoff,
 lost acknowledgements, Node/redeemer restarts, webhook/redemption outages and
 backpressure, rotation, ordinary/forced retirement and retained-state recovery.
 Verify signing-key isolation, private endpoint reachability and blocked app access.

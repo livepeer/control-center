@@ -4,7 +4,7 @@
     "lp-aaaaaaaaaaaaaaaa": {
       "version": 1,
       "credential_revision": 1,
-      "mode": "paid",
+      "mode": "onchain",
       "network": "arbitrum-one-mainnet",
       "chain_id": 42161,
       "controller": "0xD8E8328501E9645d16Cf49539efC04f734606ee4",

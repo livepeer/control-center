@@ -167,12 +167,12 @@ func ValidatePolicy(d DefinitionV1, mode PaymentMode) error {
 	if mode != Offchain && mode != Onchain {
 		e.add("price", "Unknown target Node payment mode.")
 	} else if mode == Onchain && len(d.Apps) == 0 && d.Price.Amount == "0" {
-		e.add("price.amount", "Paid Node assignments require an explicit positive price.")
+		e.add("price.amount", "Onchain Node assignments require an explicit positive price.")
 	}
 	if mode == Onchain {
 		for n, o := range d.Apps {
 			if o.Price.Amount == "0" {
-				e.add(fmt.Sprintf("apps[%d].price.amount", n), "Paid Node apps require a positive price.")
+				e.add(fmt.Sprintf("apps[%d].price.amount", n), "Onchain Node apps require a positive price.")
 			}
 		}
 	}

@@ -49,8 +49,8 @@ docker build -f ../runtime/services/Dockerfile.tunnel \
   --build-arg RUNTIME_IMAGE=127.0.0.1:63812/controlcenter/runtime@sha256:<RUNTIME_DIGEST> \
   -t 127.0.0.1:63812/controlcenter/connector:staging ../runtime/services
 docker push 127.0.0.1:63812/controlcenter/connector:staging
-# For paid operation, build a compatible Node binary and package its image with
-# the Runtime startup wrapper (see docs/paid-operation.md).
+# For onchain operation, build a compatible Node binary and package its image with
+# the Runtime startup wrapper (see docs/onchain-operation.md).
 # Set RuntimeImage, RuntimeConnectorImage, and RuntimeNodeImage in config.toml
 # using the public registry hostname and the digests returned by the pushes.
 docker compose config --quiet
@@ -63,7 +63,7 @@ and node address exclusions. Update `TunnelNodeAddresses` with the public and
 management addresses of every machine before enrollment; the bootstrap
 installer's origin firewall remains required.
 
-For fresh managed paid installations, follow [the payment runbook](../docs/paid-operation.md)
+For fresh managed onchain installations, follow [the payment runbook](../docs/onchain-operation.md)
 for the redeemer Compose profile, credential mounts and deployment settings.
 
 The deployed image digests and source provenance are recorded in

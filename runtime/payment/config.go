@@ -36,8 +36,8 @@ type Config struct {
 	MaxTicketsPerRecipient int      `json:"max_tickets_per_recipient,omitempty"`
 }
 
-func Offchain() Config      { return Config{Version: 1, Mode: "offchain"} }
-func (c Config) Paid() bool { return c.Mode == "paid" }
+func Offchain() Config         { return Config{Version: 1, Mode: "offchain"} }
+func (c Config) Onchain() bool { return c.Mode == "onchain" }
 
 var Address = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 var SecretRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$`)
@@ -57,8 +57,8 @@ func (c Config) Validate() error {
 		}
 		return nil
 	}
-	if c.CredentialRevision == 0 || c.ChainID > uint64(^uint64(0)>>1) || !c.Paid() || (c.Network != "arbitrum-one-mainnet" && c.Network != "custom") || c.ChainID == 0 || (c.Network == "arbitrum-one-mainnet" && c.ChainID != 42161) || !validAddress(c.Controller) || !validAddress(c.Recipient) || !SecretRef.MatchString(c.RPCSecret) {
-		return errors.New("paid mode requires a supported network, chain/controller, recipient, versioned RPC secret, and positive credential_revision")
+	if c.CredentialRevision == 0 || c.ChainID > uint64(^uint64(0)>>1) || !c.Onchain() || (c.Network != "arbitrum-one-mainnet" && c.Network != "custom") || c.ChainID == 0 || (c.Network == "arbitrum-one-mainnet" && c.ChainID != 42161) || !validAddress(c.Controller) || !validAddress(c.Recipient) || !SecretRef.MatchString(c.RPCSecret) {
+		return errors.New("onchain mode requires a supported network, chain/controller, recipient, versioned RPC secret, and positive credential_revision")
 	}
 	u, e := url.Parse(c.RedeemerURL)
 	if len(c.RedeemerURL) > 2048 || e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" {
@@ -120,7 +120,7 @@ func Grant(s string) (netip.Addr, uint16, error) {
 
 func (c Config) Compatible(d schema.DefinitionV1) error {
 	mode := schema.Offchain
-	if c.Paid() {
+	if c.Onchain() {
 		mode = schema.Onchain
 	}
 	return schema.ValidatePolicy(d, mode)

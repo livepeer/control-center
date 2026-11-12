@@ -16,7 +16,7 @@ import (
 
 func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied, ready bool, podUID string) *payment.Observation {
 	o := &payment.Observation{Generation: m.Payment.Generation, Mode: m.Payment.Mode, PodUID: podUID, Applied: applied, Ready: ready, Handoff: "unverified"}
-	if !m.Payment.Paid() {
+	if !m.Payment.Onchain() {
 		return o
 	}
 	i.mu.Lock()

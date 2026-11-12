@@ -36,7 +36,7 @@ func integrationFixture(t *testing.T) (*Integration, contract.Metadata, Launch) 
 	dir := t.TempDir()
 	token := filepath.Join(dir, "token")
 	os.WriteFile(token, []byte("machine-secret"), 0600)
-	m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, Generation: 5, ConfigDigest: strings.Repeat("a", 64), Payment: payment.Config{Mode: "paid", Generation: 2}, PaymentCredentialsRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/payment/credentials"}
+	m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, Generation: 5, ConfigDigest: strings.Repeat("a", 64), Payment: payment.Config{Mode: "onchain", Generation: 2}, PaymentCredentialsRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/payment/credentials"}
 	l := Launch{PodName: "orchestrator-test", PodUID: "uid", LaunchID: strings.Repeat("b", 32), ProcessID: strings.Repeat("c", 64)}
 	i := &Integration{TokenFile: token, StateFile: filepath.Join(dir, "grant.json"), Desired: func() (contract.Metadata, bool) { return m, true }}
 	i.Kube = kubeFunc(func(_ context.Context, _, p string, _ any, out any) error {

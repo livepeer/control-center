@@ -72,7 +72,7 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 	if err != nil || identity.Epoch != m.Epoch || identity.CredentialVersion != m.CredentialVersion {
 		return input, errors.New("management_enrollment")
 	}
-	if m.Payment.Paid() && m.PaymentActive {
+	if m.Payment.Onchain() && m.PaymentActive {
 		m.PaymentActive = s.paymentActive(ctx, m)
 	}
 	p, err := appbundle.Read(files, m)

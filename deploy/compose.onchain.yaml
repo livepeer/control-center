@@ -1,11 +1,11 @@
-# Fresh paid deployment: combine with compose.yaml and --profile paid.
+# Fresh onchain deployment: combine with compose.yaml and --profile onchain.
 services:
   redeemer:
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    profiles: [paid]
+    profiles: [onchain]
     image: ${LIVEPEER_REDEEMER_IMAGE:?Set a digest-pinned compatible Node image}
     user: "65532:65532"
     command: [redeemer, --config, /etc/livepeer/redeemer.toml]

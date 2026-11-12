@@ -35,6 +35,6 @@ TunnelNodeAddresses = ["<FLEET_NODE_IP/CIDR>"]
 DiscoveryRefreshInterval = "5m"
 DiscoveryMaxFailedRefreshes = 6
 
-# Enable with compose.paid.yaml after applying deployment-owned payment settings.
+# Enable with compose.onchain.yaml after applying deployment-owned payment settings.
 # PaymentSecretsDir = "/run/payment-rpc"
 # PaymentWebhookSecretFile = "/run/secrets/payment-webhook-auth"
