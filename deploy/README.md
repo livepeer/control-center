@@ -108,8 +108,7 @@ the complete release directory, refuses reused IDs, then `--activate` atomically
 switches the current loader last. Omit `--activate` to stage a release for checks.
 All published assets must be readable by web UID 65532; files are mode 0644 and
 release directories mode 0755. Never put credentials in this directory.
-The published release and focused validation results are recorded in
-[`bootstrap-release.json`](bootstrap-release.json).
+Retain activation and validation records with the deployment artifacts.
 
 For a remote deployment, transfer into a staging directory outside the served
 bootstrap tree, on the same filesystem. After the transfer and checksum checks,
