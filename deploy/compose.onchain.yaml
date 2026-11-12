@@ -17,12 +17,12 @@ services:
 
   api:
     volumes:
-      - ./secrets/payment-rpc:/run/payment-rpc:ro
+      - ./secrets/onchain-rpc:/run/onchain-rpc:ro
     secrets:
-      - payment-webhook-auth
+      - onchain-webhook-auth
 secrets:
-  payment-webhook-auth:
-    file: ./secrets/payment-webhook-auth
+  onchain-webhook-auth:
+    file: ./secrets/onchain-webhook-auth
 
 volumes:
   redeemer-data:

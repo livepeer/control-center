@@ -256,10 +256,10 @@ func httpSource(ctx context.Context, args []string) error {
 	socketErrors := make(chan error, 1)
 	integration := &connector.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
 	integration.Restore()
-	payments := &orchestrator.Integration{Control: control, Kube: kube, Desired: source.Desired, TokenFile: *token, StateFile: filepath.Join(*directory, "payment-grant.json"), AllowHTTP: control.AllowHTTP}
-	payments.Restore()
-	source.Payment = payments.Observe
-	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, payments)
+	onchain := &orchestrator.Integration{Control: control, Kube: kube, Desired: source.Desired, TokenFile: *token, StateFile: filepath.Join(*directory, "onchain-grant.json"), AllowHTTP: control.AllowHTTP}
+	onchain.Restore()
+	source.Onchain = onchain.Observe
+	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, onchain)
 	if err != nil {
 		return err
 	}

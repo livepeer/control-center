@@ -3,8 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
-	"github.com/livepeer/control-center/api/internal/controlplane/payments"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
@@ -16,8 +15,8 @@ func exposure(r tunnel.RoutingState) *machineconfig.Exposure {
 func (s *Server) newConfigurationManager() *machineconfig.Manager {
 	p := s.params
 	return machineconfig.New(machineconfig.Config{APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
-		Payment: func(ctx context.Context, m machineconfig.Machine) (payment.Config, error) {
-			return payments.Load(ctx, s.db, m.NodeID)
+		Onchain: func(ctx context.Context, m machineconfig.Machine) (onchain.Config, error) {
+			return loadOnchain(ctx, s.db, m.NodeID)
 		},
 		Exposure: func(raw json.RawMessage) (*machineconfig.Exposure, error) {
 			var r tunnel.RoutingState

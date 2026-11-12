@@ -51,7 +51,7 @@ func (c *Controller) hooks() OwnerHooks {
 		Eligibility: func(r Registration) (bool, bool) {
 			member, ready := c.Journal.Eligibility(r)
 			state := c.Journal.View()
-			if state.Metadata.Payment.Onchain() && !state.Metadata.PaymentActive {
+			if state.Metadata.Onchain.Onchain() && !state.Metadata.OnchainActive {
 				ready = false
 			}
 			return member, ready && c.Probes != nil && c.Probes.Ready(r.InstanceID, r.PodUID)
@@ -347,12 +347,12 @@ func (c *Controller) Tick(ctx context.Context) error {
 			})
 			for _, g := range groups {
 				a := assignments[g.RevisionID]
-				if s.Metadata.Payment.Onchain() && !s.Metadata.PaymentActive {
-					s.AssignmentReasons[a.RevisionID] = "payment_pending"
+				if s.Metadata.Onchain.Onchain() && !s.Metadata.OnchainActive {
+					s.AssignmentReasons[a.RevisionID] = "onchain_pending"
 					continue
 				}
-				if a.Revision != nil && s.Metadata.Payment.Compatible(a.Revision.Definition) != nil {
-					s.AssignmentReasons[a.RevisionID] = "payment_incompatible"
+				if a.Revision != nil && s.Metadata.Onchain.Compatible(a.Revision.Definition) != nil {
+					s.AssignmentReasons[a.RevisionID] = "onchain_incompatible"
 					continue
 				}
 				if !a.StartAllowed {
@@ -606,14 +606,14 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 			continue
 		}
 		pod, exists := view.Pods[i.Name]
-		if s.Metadata.Payment.Onchain() && !s.Metadata.PaymentActive && i.AppID == "" {
+		if s.Metadata.Onchain.Onchain() && !s.Metadata.OnchainActive && i.AppID == "" {
 			continue
 		}
 		if i.AppID == "" && (!exists || pod.UID != i.PodUID || pod.Deleting || pod.Phase != "Running") {
 			continue
 		}
 		signalOK := i.Definition.Lifecycle.StopSignal == nil || (exists && pod.StopSignal == *i.Definition.Lifecycle.StopSignal)
-		if (!s.Metadata.Payment.Onchain() || s.Metadata.PaymentActive) && i.AppID != "" && ready[id] && signalOK && confirmed && !s.ClockUncertain && !recovery {
+		if (!s.Metadata.Onchain.Onchain() || s.Metadata.OnchainActive) && i.AppID != "" && ready[id] && signalOK && confirmed && !s.ClockUncertain && !recovery {
 			for n := range registrations {
 				registrations[n].Options.Status = "ready"
 			}

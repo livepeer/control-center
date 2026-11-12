@@ -6,7 +6,7 @@ service or Node release.
 
 ## Enable and secure
 
-1. Complete the protected ingress and fleet acceptance checks below. Discovery
+1. Run the [end-to-end harness](development.md#end-to-end-tests). Discovery
    is disabled by default.
 2. Mount the existing `CloudflareKeyringFile` privately, with directory mode
    0700 and file mode 0600, readable by the API identity. All API replicas need
@@ -105,11 +105,3 @@ interpret a failed read as an empty fleet. For Access failures, check credential
 availability, source state and rotation acknowledgement, then restore the correct
 version through the tunnel workflow. After correcting public routes, wait for
 collection.
-
-## Release checks
-
-Before production enablement, test two managed machines for Access, DNS, TLS,
-direct-origin bypass, Node/SDK routing to private gVisor apps, enrollment and app
-convergence, outages and recovery, rotation, removal and cold restart. Record
-sanitized source timelines and check aggregate output against the consumer size
-limit.

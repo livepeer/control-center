@@ -2,16 +2,16 @@
 package contract
 
 import (
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"time"
 )
 
 const BundleFormat = 3
 
 type Metadata struct {
-	Payment                 payment.Config `json:"payment"`
-	PaymentCredentialsRef   string         `json:"payment_credentials_ref,omitempty"`
-	PaymentActive           bool           `json:"payment_active"`
+	Onchain                 onchain.Config `json:"onchain"`
+	OnchainCredentialsRef   string         `json:"onchain_credentials_ref,omitempty"`
+	OnchainActive           bool           `json:"onchain_active"`
 	NodeID                  string         `json:"node_id"`
 	Epoch                   string         `json:"epoch"`
 	CredentialVersion       int64          `json:"credential_version"`

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/runtime/contract"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 )
 
 type kubeFunc func(context.Context, string, string, any, any) error
@@ -36,7 +36,7 @@ func integrationFixture(t *testing.T) (*Integration, contract.Metadata, Launch) 
 	dir := t.TempDir()
 	token := filepath.Join(dir, "token")
 	os.WriteFile(token, []byte("machine-secret"), 0600)
-	m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, Generation: 5, ConfigDigest: strings.Repeat("a", 64), Payment: payment.Config{Mode: "onchain", Generation: 2}, PaymentCredentialsRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/payment/credentials"}
+	m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, Generation: 5, ConfigDigest: strings.Repeat("a", 64), Onchain: onchain.Config{Mode: "onchain", Generation: 2}, OnchainCredentialsRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/onchain/credentials"}
 	l := Launch{PodName: "orchestrator-test", PodUID: "uid", LaunchID: strings.Repeat("b", 32), ProcessID: strings.Repeat("c", 64)}
 	i := &Integration{TokenFile: token, StateFile: filepath.Join(dir, "grant.json"), Desired: func() (contract.Metadata, bool) { return m, true }}
 	i.Kube = kubeFunc(func(_ context.Context, _, p string, _ any, out any) error {
@@ -47,15 +47,15 @@ func integrationFixture(t *testing.T) (*Integration, contract.Metadata, Launch) 
 		return json.Unmarshal(b, out)
 	})
 	i.Control = controlFunc(func(_ context.Context, p string, in any, _ int64) ([]byte, http.Header, error) {
-		if p != "payment/credentials" {
+		if p != "onchain/credentials" {
 			t.Fatal(p)
 		}
-		b, _ := json.Marshal(Grant{Association: Association{Launch: l, Epoch: m.Epoch, CredentialVersion: 1, PaymentGeneration: 2, ConfigDigest: m.ConfigDigest, GrantID: "grant"}, RPCURL: "https://rpc.example/secret", Headers: "Authorization: Bearer redemption-secret"})
+		b, _ := json.Marshal(Grant{Association: Association{Launch: l, Epoch: m.Epoch, CredentialVersion: 1, OnchainGeneration: 2, ConfigDigest: m.ConfigDigest, GrantID: "grant"}, RPCURL: "https://rpc.example/secret", Headers: "Authorization: Bearer redemption-secret"})
 		return b, nil, nil
 	})
 	return i, m, l
 }
-func TestPaymentDeliveryFencesAndSecretPersistence(t *testing.T) {
+func TestOnchainDeliveryFencesAndSecretPersistence(t *testing.T) {
 	i, _, l := integrationFixture(t)
 	g, e := i.fetch(t.Context(), l)
 	if e != nil || g.Headers == "" {
@@ -79,7 +79,7 @@ func TestPaymentDeliveryFencesAndSecretPersistence(t *testing.T) {
 		t.Fatal("insecure delivery")
 	}
 }
-func TestPaymentQueueEvidenceAndHandoffAreIndependent(t *testing.T) {
+func TestOnchainQueueEvidenceAndHandoffAreIndependent(t *testing.T) {
 	i, m, l := integrationFixture(t)
 	g, e := i.fetch(t.Context(), l)
 	if e != nil {
@@ -141,7 +141,7 @@ func processProof(t *testing.T, i *Integration, a Association, ready bool) {
 	t.Helper()
 	b, _ := json.Marshal(ProcessObservation{Association: a, ObservedAt: time.Now(), Ready: ready})
 	w := httptest.NewRecorder()
-	i.ServeHTTP(w, httptest.NewRequest("POST", "/payment/observation", strings.NewReader(string(b))))
+	i.ServeHTTP(w, httptest.NewRequest("POST", "/onchain/observation", strings.NewReader(string(b))))
 	if w.Code != 200 {
 		t.Fatal("process proof rejected", w.Code)
 	}
@@ -162,31 +162,31 @@ func TestProcessObservationCannotBorrowAnotherLaunchOrRenewOldEvidence(t *testin
 		mutate(&o)
 		b, _ := json.Marshal(o)
 		w := httptest.NewRecorder()
-		i.ServeHTTP(w, httptest.NewRequest("POST", "/payment/observation", strings.NewReader(string(b))))
+		i.ServeHTTP(w, httptest.NewRequest("POST", "/onchain/observation", strings.NewReader(string(b))))
 		if w.Code != 409 || i.observation != nil {
 			t.Fatal("stale or foreign process observation accepted", w.Code)
 		}
 	}
 }
 
-func TestInitializedPaymentStateMustSurviveReplacement(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "payments.sqlite")
-	if checkPaymentState(path, false) != nil {
+func TestInitializedOnchainStateMustSurviveReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "onchain.sqlite")
+	if checkOnchainState(path, false) != nil {
 		t.Fatal("fresh installation cannot create its first database")
 	}
-	if checkPaymentState(path, true) == nil {
+	if checkOnchainState(path, true) == nil {
 		t.Fatal("missing durable state silently recreated")
 	}
 	if e := os.WriteFile(path, nil, 0600); e != nil {
 		t.Fatal(e)
 	}
-	if checkPaymentState(path, true) == nil {
+	if checkOnchainState(path, true) == nil {
 		t.Fatal("empty durable state accepted")
 	}
 	if e := os.WriteFile(path, []byte("retained database"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e := checkPaymentState(path, true); e != nil {
+	if e := checkOnchainState(path, true); e != nil {
 		t.Fatal(e)
 	}
 }

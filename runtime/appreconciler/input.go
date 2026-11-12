@@ -72,8 +72,8 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 	if err != nil || identity.Epoch != m.Epoch || identity.CredentialVersion != m.CredentialVersion {
 		return input, errors.New("management_enrollment")
 	}
-	if m.Payment.Onchain() && m.PaymentActive {
-		m.PaymentActive = s.paymentActive(ctx, m)
+	if m.Onchain.Onchain() && m.OnchainActive {
+		m.OnchainActive = s.onchainActive(ctx, m)
 	}
 	p, err := appbundle.Read(files, m)
 	if err != nil {
@@ -85,9 +85,9 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 	return Input{Metadata: m, Payload: p, Digest: a.Digest}, nil
 }
 
-// Payment eligibility is checked against the live process, even when an offline
+// Onchain eligibility is checked against the live process, even when an offline
 // artifact repeats an earlier approval. Dependency loss cannot suppress drain.
-func (s Source) paymentActive(ctx context.Context, m contract.Metadata) bool {
+func (s Source) onchainActive(ctx context.Context, m contract.Metadata) bool {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	var pods struct {

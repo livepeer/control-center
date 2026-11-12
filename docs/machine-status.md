@@ -87,10 +87,7 @@ credential recovery can establish a new scope. Retired enrollments have no new
 credential recovery protocol and remain unconfirmed if their ordering state is
 lost. A process restart alone does not reset report ordering.
 
-## Release verification
+## Verification
 
-Run the Go race suite with `TEST_DATABASE_URL` pointing to disposable PostgreSQL,
-the UI build and Playwright; skipped database tests do not establish acceptance.
-For Runtime checks, follow [Runtime verification](../runtime/README.md#verification).
-Record exact revisions and redacted evidence. Verify real Node/SDK/Flux/gVisor
-integration and external reachability on two machines before production activation.
+See [development checks](development.md#development-checks) and the
+[end-to-end harness](development.md#end-to-end-tests).

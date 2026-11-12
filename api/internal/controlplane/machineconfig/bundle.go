@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/runtime/artifact"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"io/fs"
 	"strings"
 	"time"
@@ -22,16 +22,16 @@ func Build(m Desired) ([]byte, string, error) {
 	if m.NodeImage != "" && !ValidConnectorImage(m.NodeImage) {
 		return nil, "", fmt.Errorf("Node image is not pinned")
 	}
-	if m.PaymentError != nil {
-		return nil, "", m.PaymentError
+	if m.OnchainError != nil {
+		return nil, "", m.OnchainError
 	}
-	if m.Payment.Version == 0 {
-		m.Payment = payment.Offchain()
+	if m.Onchain.Version == 0 {
+		m.Onchain = onchain.Offchain()
 	}
-	if m.State.HeldOrchestrator != "" && m.State.HeldPayment != "" {
-		var held payment.Config
-		if json.Unmarshal([]byte(m.State.HeldPayment), &held) != nil {
-			return nil, "", fmt.Errorf("invalid held payment identity")
+	if m.State.HeldOrchestrator != "" && m.State.HeldOnchain != "" {
+		var held onchain.Config
+		if json.Unmarshal([]byte(m.State.HeldOnchain), &held) != nil {
+			return nil, "", fmt.Errorf("invalid held onchain identity")
 		}
 		if held.Version != 0 {
 			if err := held.Validate(); err != nil {
@@ -39,7 +39,7 @@ func Build(m Desired) ([]byte, string, error) {
 			}
 		}
 	}
-	if err := m.Payment.Validate(); err != nil {
+	if err := m.Onchain.Validate(); err != nil {
 		return nil, "", err
 	}
 	files := map[string][]byte{}

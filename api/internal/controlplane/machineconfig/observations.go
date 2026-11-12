@@ -19,18 +19,18 @@ func validCode(s string) bool  { return s == "" || statusCode.MatchString(s) }
 func optionalID(s string) bool { return s == "" || statusID.MatchString(s) }
 
 func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report) error {
-	if p := r.Payment; p != nil {
+	if p := r.Onchain; p != nil {
 		if r.Component != "runtime" || (p.Mode != "onchain" && p.Mode != "offchain") || p.Generation < 0 || len(p.PodUID) > 128 || p.Unsettled < 0 || p.Unsettled > 10000000 || (p.Handoff != "healthy" && p.Handoff != "degraded" && p.Handoff != "unverified") {
 			return ErrStaleStatus
 		}
 		if p.Applied {
 			meta, _, err := s.applied(ctx, m)
-			if err != nil || r.ConfigDigest != meta.ConfigDigest || p.Generation != meta.Payment.Generation || p.Mode != meta.Payment.Mode || p.PodUID == "" {
+			if err != nil || r.ConfigDigest != meta.ConfigDigest || p.Generation != meta.Onchain.Generation || p.Mode != meta.Onchain.Mode || p.PodUID == "" {
 				return ErrStaleStatus
 			}
 			if p.Mode == "onchain" {
 				var known bool
-				err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.payment_grants WHERE grant_id::text=$1 AND node_id=$2 AND epoch=$3 AND payment_generation=$4 AND config_digest=$5 AND pod_uid=$6 AND revoked_at IS NULL)`, p.GrantID, m.NodeID, m.Epoch, p.Generation, r.ConfigDigest, p.PodUID).Scan(&known)
+				err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.onchain_grants WHERE grant_id::text=$1 AND node_id=$2 AND epoch=$3 AND onchain_generation=$4 AND config_digest=$5 AND pod_uid=$6 AND revoked_at IS NULL)`, p.GrantID, m.NodeID, m.Epoch, p.Generation, r.ConfigDigest, p.PodUID).Scan(&known)
 				if err != nil {
 					return err
 				}

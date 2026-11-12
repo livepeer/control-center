@@ -22,59 +22,75 @@ import (
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"github.com/livepeer/control-center/api/internal/controlplane/payments"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/spf13/cobra"
 )
 
-type paymentInput struct {
-	Version  int                       `json:"version"`
-	Machines map[string]payment.Config `json:"machines"`
+func loadOnchain(ctx context.Context, q rowQuerier, node string) (onchain.Config, error) {
+	c := onchain.Offchain()
+	var b []byte
+	err := q.QueryRowContext(ctx, `SELECT c.config FROM lpcc.onchain_state b JOIN lpcc.onchain_configs c ON c.node_id=b.node_id AND c.generation=b.generation WHERE b.node_id=$1`, node).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return c, nil
+	}
+	if err != nil {
+		return c, err
+	}
+	err = json.Unmarshal(b, &c)
+	if err == nil {
+		err = c.Validate()
+	}
+	return c, err
 }
-type paymentApplyParams struct {
+
+type onchainInput struct {
+	Version  int                       `json:"version"`
+	Machines map[string]onchain.Config `json:"machines"`
+}
+type onchainApplyParams struct {
 	ConfigFile string `name:"config" env:"CONTROL_CENTER_CONFIG" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig"`
 	DatabaseParams
-	PaymentSecretsDir        string `optional:"true"`
-	PaymentWebhookSecret     string `secret:"true" optional:"true"`
-	PaymentWebhookSecretFile string `secretfor:"PaymentWebhookSecret" basepath:"source"`
+	OnchainSecretsDir        string `optional:"true"`
+	OnchainWebhookSecret     string `secret:"true" optional:"true"`
+	OnchainWebhookSecretFile string `secretfor:"OnchainWebhookSecret" basepath:"source"`
 	RuntimeNodeImage         string `env:"RUNTIME_NODE_IMAGE" optional:"true"`
-	File                     string `name:"file" boa:"noconfig" descr:"Payment infrastructure JSON file"`
+	File                     string `name:"file" boa:"noconfig" descr:"Onchain infrastructure JSON file"`
 	AcknowledgeRecovery      string `name:"acknowledge-recovery" optional:"true" boa:"noconfig" descr:"Confirm restored retained state after a fresh empty-queue observation"`
 	ExpectedRevision         int64  `name:"expected-revision" min:"0" boa:"noconfig"`
 }
 
-func PaymentsCommand() *cobra.Command {
-	apply := boa.Cmd[paymentApplyParams]{Use: "apply", Short: "Apply deployment-owned payment infrastructure", Args: cobra.NoArgs, RunFuncE: func(p *paymentApplyParams, cmd *cobra.Command, _ []string) error {
+func OnchainCommand() *cobra.Command {
+	apply := boa.Cmd[onchainApplyParams]{Use: "apply", Short: "Apply deployment-owned onchain infrastructure", Args: cobra.NoArgs, RunFuncE: func(p *onchainApplyParams, cmd *cobra.Command, _ []string) error {
 		b, e := os.ReadFile(p.File)
 		if e != nil {
-			return errors.New("payment input unavailable")
+			return errors.New("onchain input unavailable")
 		}
-		var input paymentInput
+		var input onchainInput
 		if len(b) > 128<<10 || jsonv2.Unmarshal(b, &input, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil || input.Version != 1 || len(input.Machines) == 0 || len(input.Machines) > 1000 {
-			return errors.New("invalid payment infrastructure document")
+			return errors.New("invalid onchain infrastructure document")
 		}
 		db, e := OpenDB(cmd.Context(), p.PGConnstr, p.PGPassword)
 		if e != nil {
 			return e
 		}
 		defer db.Close()
-		s := New(db, Params{PaymentSecretsDir: p.PaymentSecretsDir, PaymentWebhookSecret: p.PaymentWebhookSecret, RuntimeNodeImage: p.RuntimeNodeImage}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		rev, e := s.applyPayments(cmd.Context(), input, p.ExpectedRevision, p.AcknowledgeRecovery)
+		s := New(db, Params{OnchainSecretsDir: p.OnchainSecretsDir, OnchainWebhookSecret: p.OnchainWebhookSecret, RuntimeNodeImage: p.RuntimeNodeImage}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		rev, e := s.applyOnchain(cmd.Context(), input, p.ExpectedRevision, p.AcknowledgeRecovery)
 		if e == nil {
 			fmt.Fprintln(cmd.OutOrStdout(), rev)
 		}
 		return e
 	}}.ToCobra()
-	return boa.Cmd[boa.NoParams]{Use: "payments", Short: "Deployment payment configuration", SubCmds: []*cobra.Command{apply}}.ToCobra()
+	return boa.Cmd[boa.NoParams]{Use: "onchain", Short: "Deployment onchain configuration", SubCmds: []*cobra.Command{apply}}.ToCobra()
 }
 
-// readPaymentRPC never exposes a path or a URL in its errors.
-func (s *Server) readPaymentRPC(ref string) ([]byte, error) {
-	bad := errors.New("payment RPC secret unavailable")
-	if !payment.SecretRef.MatchString(ref) || !filepath.IsAbs(s.params.PaymentSecretsDir) {
+// readOnchainRPC never exposes a path or a URL in its errors.
+func (s *Server) readOnchainRPC(ref string) ([]byte, error) {
+	bad := errors.New("onchain RPC secret unavailable")
+	if !onchain.SecretRef.MatchString(ref) || !filepath.IsAbs(s.params.OnchainSecretsDir) {
 		return nil, bad
 	}
-	path := filepath.Join(s.params.PaymentSecretsDir, ref)
+	path := filepath.Join(s.params.OnchainSecretsDir, ref)
 	info, e := os.Lstat(path)
 	if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 		return nil, bad
@@ -100,9 +116,9 @@ func (s *Server) readPaymentRPC(ref string) ([]byte, error) {
 	return b, nil
 }
 
-func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected int64, acknowledge ...string) (int64, error) {
+func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected int64, acknowledge ...string) (int64, error) {
 	if input.Version != 1 || len(input.Machines) == 0 || len(input.Machines) > 1000 {
-		return 0, errors.New("invalid payment document")
+		return 0, errors.New("invalid onchain document")
 	}
 	nodes := make([]string, 0, len(input.Machines))
 	fingerprints := map[string]string{}
@@ -112,24 +128,24 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 		c.ETHUSDFeed = strings.ToLower(c.ETHUSDFeed)
 		input.Machines[node] = c
 		if !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(node) || c.Generation != 0 {
-			return 0, errors.New("invalid payment machine identity")
+			return 0, errors.New("invalid onchain machine identity")
 		}
 		if e := c.Validate(); e != nil {
 			return 0, e
 		}
 		nodes = append(nodes, node)
 		if c.Onchain() {
-			if len(s.params.PaymentWebhookSecret) < 32 {
+			if len(s.params.OnchainWebhookSecret) < 32 {
 				return 0, errors.New("onchain operation requires a webhook service credential")
 			}
 			if !machineconfigImage(s.params.RuntimeNodeImage) {
 				return 0, errors.New("onchain operation requires a pinned wrapper/Node image")
 			}
-			b, e := s.readPaymentRPC(c.RPCSecret)
+			b, e := s.readOnchainRPC(c.RPCSecret)
 			if e != nil {
 				return 0, e
 			}
-			if e := payment.ValidateEndpoint(string(b), c.RPCGrants); e != nil {
+			if e := onchain.ValidateEndpoint(string(b), c.RPCGrants); e != nil {
 				return 0, e
 			}
 			h := sha256.Sum256(b)
@@ -143,12 +159,12 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 	}
 	defer tx.Rollback()
 	var revision int64
-	if e = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.payment_revision WHERE id=true FOR UPDATE`).Scan(&revision); e != nil {
+	if e = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.onchain_revision WHERE id=true FOR UPDATE`).Scan(&revision); e != nil {
 		return 0, e
 	}
 
 	// Import is a complete desired snapshot: omission never silently disables onchain service.
-	rows, e := tx.QueryContext(ctx, `SELECT node_id FROM lpcc.payment_machines WHERE config->>'mode'='onchain'`)
+	rows, e := tx.QueryContext(ctx, `SELECT b.node_id FROM lpcc.onchain_state b JOIN lpcc.onchain_configs c ON c.node_id=b.node_id AND c.generation=b.generation WHERE c.config->>'mode'='onchain'`)
 	if e != nil {
 		return 0, e
 	}
@@ -171,21 +187,21 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 	}
 	for ref, digest := range fingerprints {
 		var old string
-		e = tx.QueryRowContext(ctx, `SELECT fingerprint FROM lpcc.payment_secrets WHERE reference=$1`, ref).Scan(&old)
+		e = tx.QueryRowContext(ctx, `SELECT fingerprint FROM lpcc.onchain_secrets WHERE reference=$1`, ref).Scan(&old)
 		if e == nil && old != digest {
-			return 0, errors.New("referenced payment secret versions are immutable")
+			return 0, errors.New("referenced onchain secret versions are immutable")
 		}
 		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return 0, e
 		}
-		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.payment_secrets(reference,fingerprint) VALUES($1,$2) ON CONFLICT DO NOTHING`, ref, digest); e != nil {
+		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_secrets(reference,fingerprint) VALUES($1,$2) ON CONFLICT DO NOTHING`, ref, digest); e != nil {
 			return 0, e
 		}
 	}
 	changed := false
 	for _, node := range nodes {
 		c := input.Machines[node]
-		old, e := payments.Load(ctx, tx, node)
+		old, e := loadOnchain(ctx, tx, node)
 		if e != nil {
 			return 0, e
 		}
@@ -218,13 +234,13 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 		}
 		var recipient, controller string
 		var chain uint64
-		e = tx.QueryRowContext(ctx, `SELECT recipient,chain_id,controller FROM lpcc.payment_machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&recipient, &chain, &controller)
+		e = tx.QueryRowContext(ctx, `SELECT recipient,chain_id,controller FROM lpcc.onchain_state WHERE node_id=$1 FOR UPDATE`, node).Scan(&recipient, &chain, &controller)
 		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return 0, e
 		}
 		if c.Onchain() {
 			if recipient != "" && (!strings.EqualFold(recipient, c.Recipient) || chain != c.ChainID || !strings.EqualFold(controller, c.Controller)) {
-				return 0, errors.New("payment recipient and chain binding are immutable")
+				return 0, errors.New("onchain recipient and chain binding are immutable")
 			}
 			recipient = strings.ToLower(c.Recipient)
 			chain = c.ChainID
@@ -234,17 +250,17 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 		}
 		c.Generation = old.Generation + 1
 		after, _ = json.Marshal(c)
-		_, e = tx.ExecContext(ctx, `INSERT INTO lpcc.payment_machines(node_id,recipient,chain_id,controller,generation,config) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id) DO UPDATE SET recipient=EXCLUDED.recipient,chain_id=EXCLUDED.chain_id,controller=EXCLUDED.controller,generation=EXCLUDED.generation,config=EXCLUDED.config,drained=false`, node, recipient, chain, controller, c.Generation, string(after))
-		if e != nil {
+		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_configs VALUES($1,$2,$3)`, node, c.Generation, string(after)); e != nil {
 			return 0, e
 		}
-		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.payment_versions VALUES($1,$2,$3)`, node, c.Generation, string(after)); e != nil {
+		_, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_state(node_id,recipient,chain_id,controller,generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT(node_id) DO UPDATE SET recipient=EXCLUDED.recipient,chain_id=EXCLUDED.chain_id,controller=EXCLUDED.controller,generation=EXCLUDED.generation,drained=false`, node, recipient, chain, controller, c.Generation)
+		if e != nil {
 			return 0, e
 		}
 		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, node); e != nil {
 			return 0, e
 		}
-		if e = writeAudit(ctx, tx, "system", "deployment:payments", "payment.apply", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(c.Generation)}, "success", "changed"); e != nil {
+		if e = writeAudit(ctx, tx, "system", "deployment:onchain", "onchain.apply", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(c.Generation)}, "success", "changed"); e != nil {
 			return 0, e
 		}
 		changed = true
@@ -265,33 +281,33 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 			return 0, e
 		}
 		var required bool
-		if e = tx.QueryRowContext(ctx, `SELECT recovery_required FROM lpcc.payment_machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&required); e != nil {
+		if e = tx.QueryRowContext(ctx, `SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1 FOR UPDATE`, node).Scan(&required); e != nil {
 			return 0, e
 		}
 		if required {
 			var ready bool
-			e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machines m JOIN lpcc.machine_reports r ON r.node_id=m.node_id AND r.epoch=m.enrollment_epoch AND r.credential_version=m.credential_version JOIN lpcc.payment_machines p ON p.node_id=m.node_id JOIN lpcc.payment_grants g ON g.grant_id::text=r.report#>>'{payment,grant_id}' AND g.node_id=m.node_id AND g.epoch=m.enrollment_epoch WHERE m.node_id=$1 AND r.component='runtime' AND r.generation=$2 AND r.report->>'config_digest'=$3 AND g.config_digest=$3 AND g.pod_uid=r.report#>>'{payment,pod_uid}' AND g.payment_generation=p.generation AND r.received_at>now()-interval '2 minutes' AND (r.report->>'observed_at')::timestamptz>now()-interval '2 minutes' AND NOT COALESCE((r.report->>'clock_uncertain')::boolean,false) AND r.report#>>'{payment,applied}'='true' AND r.report#>>'{payment,queue_known}'='true' AND r.report#>>'{payment,unsettled}'='0' AND (r.report#>>'{payment,generation}')::bigint=p.generation AND g.observed_at IS NOT NULL AND g.revoked_at IS NULL)`, node, metadata.Generation, metadata.ConfigDigest).Scan(&ready)
+			e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machines m JOIN lpcc.machine_reports r ON r.node_id=m.node_id AND r.epoch=m.enrollment_epoch AND r.credential_version=m.credential_version JOIN lpcc.onchain_state p ON p.node_id=m.node_id JOIN lpcc.onchain_grants g ON g.grant_id::text=r.report#>>'{onchain,grant_id}' AND g.node_id=m.node_id AND g.epoch=m.enrollment_epoch WHERE m.node_id=$1 AND r.component='runtime' AND r.generation=$2 AND r.report->>'config_digest'=$3 AND g.config_digest=$3 AND g.pod_uid=r.report#>>'{onchain,pod_uid}' AND g.onchain_generation=p.generation AND r.received_at>now()-interval '2 minutes' AND (r.report->>'observed_at')::timestamptz>now()-interval '2 minutes' AND NOT COALESCE((r.report->>'clock_uncertain')::boolean,false) AND r.report#>>'{onchain,applied}'='true' AND r.report#>>'{onchain,queue_known}'='true' AND r.report#>>'{onchain,unsettled}'='0' AND (r.report#>>'{onchain,generation}')::bigint=p.generation AND g.observed_at IS NOT NULL AND g.revoked_at IS NULL)`, node, metadata.Generation, metadata.ConfigDigest).Scan(&ready)
 			if e != nil {
 				return 0, e
 			}
 			if !ready {
-				return 0, errors.New("restore payment state and obtain fresh zero-unsettled evidence before acknowledging recovery")
+				return 0, errors.New("restore onchain state and obtain fresh zero-unsettled evidence before acknowledging recovery")
 			}
-			if _, e = tx.ExecContext(ctx, `UPDATE lpcc.payment_machines SET recovery_required=false WHERE node_id=$1`, node); e != nil {
+			if _, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_state SET recovery_required=false WHERE node_id=$1`, node); e != nil {
 				return 0, e
 			}
-			if e = writeAudit(ctx, tx, "system", "deployment:payments", "payment.recover", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(revision + 1)}, "success", "recovery_acknowledged"); e != nil {
+			if e = writeAudit(ctx, tx, "system", "deployment:onchain", "onchain.recover", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(revision + 1)}, "success", "recovery_acknowledged"); e != nil {
 				return 0, e
 			}
 			changed = true
 		}
 	}
 	if expected > revision || (changed && expected != revision) {
-		return 0, problem(409, "payment_revision_changed", "Payment infrastructure changed.")
+		return 0, problem(409, "onchain_revision_changed", "Onchain infrastructure changed.")
 	}
 	if changed {
 		revision++
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.payment_revision SET revision=$1 WHERE id=true`, revision); e != nil {
+		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_revision SET revision=$1 WHERE id=true`, revision); e != nil {
 			return 0, e
 		}
 	}

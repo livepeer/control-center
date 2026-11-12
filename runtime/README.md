@@ -212,12 +212,4 @@ from the repository root. See the [remote-test guide](../docs/development.md#rem
 for dependencies, remote execution and cleanup. The installer records its
 gVisor smoke test in `logs/gvisor-smoke.log`.
 
-Before production release, build and publish the Runtime image, then test on a
-disposable supported host with the pinned K3s, Flux and gVisor versions. Verify
-installation, rerun, reboot, persistent data and an alternate install directory.
-Test management repair while app reconciliation is broken, including recovery
-from missing committed state. With compatible Node and SDK revisions, run a
-two-machine, two-capability fixture covering both protocol modes, multiple
-replicas, routing, readiness loss, updates, removal, drain expiry and Node
-unavailability. Confirm that deadlines and pending physical cleanup are reported
-accurately. Unit tests and a mock Node do not replace this acceptance test.
+See the [end-to-end harness](../docs/development.md#end-to-end-tests) for host and fleet checks.

@@ -47,7 +47,7 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 			return false, ErrStaleStatus
 		}
 	}
-	reasons := map[string]bool{"payment_not_ready": true, "ready": true, "applying": true, "offline": true, "failed": true, "drain_pending": true, "removed": true, "tls_pending": true}
+	reasons := map[string]bool{"onchain_not_ready": true, "ready": true, "applying": true, "offline": true, "failed": true, "drain_pending": true, "removed": true, "tls_pending": true}
 	if !reasons[report.Reason] {
 		report.Reason = "failed"
 	}
@@ -95,8 +95,8 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 	if previous.Drained && previous.Generation == report.Generation && previous.Evidence != nil && report.Evidence != nil && previous.Evidence.Target == report.Evidence.Target && time.Now().Before(previous.Evidence.ExpiresAt) {
 		drainWake = false
 	}
-	paymentWake := report.Component == "runtime" && report.Payment != nil && (record.RolloutReason == "payment_drain_pending" || (report.Payment.Mode == "onchain" && record.ApprovedConfigDigest != report.ConfigDigest))
-	return paymentWake || drainWake || (report.Component == "runtime" && (report.Ready && record.ApplyingConfigDigest != "" && report.ConfigDigest == record.ApplyingConfigDigest && report.Generation == record.Generation)), nil
+	onchainWake := report.Component == "runtime" && report.Onchain != nil && (record.RolloutReason == "onchain_drain_pending" || (report.Onchain.Mode == "onchain" && record.ApprovedConfigDigest != report.ConfigDigest))
+	return onchainWake || drainWake || (report.Component == "runtime" && (report.Ready && record.ApplyingConfigDigest != "" && report.ConfigDigest == record.ApplyingConfigDigest && report.Generation == record.Generation)), nil
 }
 
 func validDrainEvidence(m Machine, state State, report Report, now time.Time) bool {

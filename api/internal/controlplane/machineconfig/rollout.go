@@ -7,7 +7,7 @@ import (
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/runtime/artifact"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"time"
 )
 
@@ -26,11 +26,11 @@ func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, erro
 // Gate holds the applied workload until a fresh report completes its drain.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
-	if desired.PaymentError != nil {
-		return false, desired.PaymentError
+	if desired.OnchainError != nil {
+		return false, desired.OnchainError
 	}
-	if desired.Payment.Onchain() {
-		state.PaymentSettled = false
+	if desired.Onchain.Onchain() {
+		state.OnchainSettled = false
 	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
@@ -42,10 +42,10 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	digest := Digest(desired)
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
-	// retaining the exact payment/storage binding and the admission freeze.
-	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested && !state.PaymentDrainAfter.IsZero()
+	// retaining the exact onchain/storage binding and the admission freeze.
+	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested && !state.OnchainDrainAfter.IsZero()
 	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
-	if old.ConfigDigest != digest && old.Payment.Onchain() && !old.PaymentActive && state.ApprovedConfigDigest != old.ConfigDigest && paymentJSON(old.Payment) == paymentJSON(desired.Payment) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && onchainJSON(old.Onchain) == onchainJSON(desired.Onchain) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 		state.ApplyingConfigDigest = digest
 		state.ApplyingUpgradeVersion = upgradeVersion(desired)
@@ -76,9 +76,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.ApplyingUpgradeVersion = ""
 	}
 	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
-		if desired.Payment.Onchain() && state.ApprovedConfigDigest != digest {
-			if !desired.PaymentReady {
-				state.RolloutReason = "payment_startup_pending"
+		if desired.Onchain.Onchain() && state.ApprovedConfigDigest != digest {
+			if !desired.OnchainReady {
+				state.RolloutReason = "onchain_startup_pending"
 				return false, nil
 			}
 			state.ApprovedConfigDigest = digest
@@ -94,7 +94,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
 		state.HeldOrchestrator = manifest
-		state.HeldPayment = paymentJSON(old.Payment)
+		state.HeldOnchain = onchainJSON(old.Onchain)
 		s.holdUpgrade(ctx, m, state)
 	}
 	if old.ConfigDigest != digest {
@@ -103,13 +103,13 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 			return true, err
 		}
 	}
-	if old.Payment.Onchain() && (!desired.Payment.Onchain() || desired.Payment.RedeemerURL != old.Payment.RedeemerURL) {
-		if !s.paymentDrained(ctx, m, old, state.PaymentDrainAfter) {
-			state.RolloutReason = "payment_drain_pending"
+	if old.Onchain.Onchain() && (!desired.Onchain.Onchain() || desired.Onchain.RedeemerURL != old.Onchain.RedeemerURL) {
+		if !s.onchainDrained(ctx, m, old, state.OnchainDrainAfter) {
+			state.RolloutReason = "onchain_drain_pending"
 			return true, nil
 		}
-		if !desired.Payment.Onchain() {
-			state.PaymentSettled = true
+		if !desired.Onchain.Onchain() {
+			state.OnchainSettled = true
 		}
 	}
 	state.HeldOrchestrator = ""
@@ -124,8 +124,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 // StageTarget drains for a change whose external prerequisites are prepared by
 // another subsystem. Gate releases the held workload once those facts are ready.
 func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desired Desired, target string) (bool, error) {
-	if desired.PaymentError != nil {
-		return false, desired.PaymentError
+	if desired.OnchainError != nil {
+		return false, desired.OnchainError
 	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
@@ -147,7 +147,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
 		state.HeldOrchestrator = manifest
-		state.HeldPayment = paymentJSON(old.Payment)
+		state.HeldOnchain = onchainJSON(old.Onchain)
 		s.holdUpgrade(ctx, m, state)
 	}
 	done, err := s.drainComplete(ctx, m, state)
@@ -188,7 +188,7 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 		return false, err
 	}
 	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL && validDrainEvidence(m, *state, report, time.Now()) {
-		state.PaymentDrainAfter = evidenceTime(report)
+		state.OnchainDrainAfter = evidenceTime(report)
 		state.RolloutReason = ""
 		return true, nil
 	}
@@ -214,8 +214,8 @@ func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) 
 	if e != nil {
 		return false, e
 	}
-	if !s.paymentDrained(ctx, m, old, state.PaymentDrainAfter) {
-		state.RolloutReason = "payment_drain_pending"
+	if !s.onchainDrained(ctx, m, old, state.OnchainDrainAfter) {
+		state.RolloutReason = "onchain_drain_pending"
 		return false, nil
 	}
 	state.RolloutReason = ""
@@ -247,7 +247,7 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.payment_machines SET drained=true WHERE node_id=$1`, l.Machine.NodeID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.onchain_state SET drained=true WHERE node_id=$1`, l.Machine.NodeID); err != nil {
 		return false, err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2`, l.Machine.NodeID, l.Machine.Epoch); err != nil {
@@ -256,13 +256,13 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 	return true, tx.Commit()
 }
 
-func paymentJSON(c payment.Config) string { b, _ := json.Marshal(c); return string(b) }
-func (s *Manager) paymentDrained(ctx context.Context, m Machine, old Runtime, after time.Time) bool {
-	if !old.Payment.Onchain() {
+func onchainJSON(c onchain.Config) string { b, _ := json.Marshal(c); return string(b) }
+func (s *Manager) onchainDrained(ctx context.Context, m Machine, old Runtime, after time.Time) bool {
+	if !old.Onchain.Onchain() {
 		return true
 	}
 	r, at, e := s.store.Report(ctx, m, "runtime")
-	return e == nil && !after.IsZero() && !r.ObservedAt.Before(after) && r.Generation == old.Generation && !r.ClockUncertain && time.Since(at) <= s.config.StatusTTL && time.Since(r.ObservedAt) <= s.config.StatusTTL && r.ConfigDigest == old.ConfigDigest && r.Payment != nil && r.Payment.Generation == old.Payment.Generation && r.Payment.Applied && r.Payment.QueueKnown && r.Payment.Unsettled == 0
+	return e == nil && !after.IsZero() && !r.ObservedAt.Before(after) && r.Generation == old.Generation && !r.ClockUncertain && time.Since(at) <= s.config.StatusTTL && time.Since(r.ObservedAt) <= s.config.StatusTTL && r.ConfigDigest == old.ConfigDigest && r.Onchain != nil && r.Onchain.Generation == old.Onchain.Generation && r.Onchain.Applied && r.Onchain.QueueKnown && r.Onchain.Unsettled == 0
 }
 
 func evidenceTime(r Report) time.Time {

@@ -110,7 +110,7 @@ export function Catalog({ session, authorityFailure }: { session: Session; autho
     })
   }
   return <div className="app-catalog" aria-labelledby="catalog-title">
-    <div className="section-heading"><div><h3 id="catalog-title">App catalog</h3><p className="muted">Prices belong to each immutable app revision. Payment activation is configured per machine.</p></div><div className="catalog-actions"><button className="button" disabled={busy} onClick={() => loadApps()}>Refresh catalog</button><button className="button lime" disabled={busy} onClick={() => edit(true)}>Create app</button></div></div>
+    <div className="section-heading"><div><h3 id="catalog-title">App catalog</h3><p className="muted">Prices belong to each immutable app revision. Onchain activation is configured per machine.</p></div><div className="catalog-actions"><button className="button" disabled={busy} onClick={() => loadApps()}>Refresh catalog</button><button className="button lime" disabled={busy} onClick={() => edit(true)}>Create app</button></div></div>
     {problem && <div role="alert" className="notice error">{problem}{fields.length > 0 && <ul>{fields.map((f, i) => <li key={i}><code>{f.path}</code>: {f.message}</li>)}</ul>}</div>}
     {message && <div role="status" className="notice success">{message}</div>}
     <ul className="catalog-list">{apps.map(app => <li key={app.name}><button className="button" disabled={busy} onClick={() => inspect(app.name, app.head.revision_id)}>{app.name}</button><span>Revision {app.head.revision} · version {app.head.app_version || '(unversioned)'} · {app.active_revision_count} active</span></li>)}</ul>
