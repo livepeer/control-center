@@ -1,0 +1,65 @@
+#!/bin/sh
+# Generated release loader. The downloaded installer is intentionally Bash.
+set +axm
+unset _lp_token ENROLLMENT_TOKEN
+_lp_token=${LIVEPEER_ENROLLMENT_TOKEN:-}
+unset LIVEPEER_ENROLLMENT_TOKEN
+set -eu
+
+_lp_main() {
+    for _lp_tool in bash curl sha256sum tar gzip mktemp chmod rm setsid sleep; do
+        command -v "$_lp_tool" >/dev/null 2>&1 || {
+            printf 'error: missing prerequisite: %s\n' "$_lp_tool" >&2
+            return 1
+        }
+    done
+    umask 077
+    _lp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/livepeer-bootstrap.XXXXXXXXXX")
+    _lp_child=''
+    trap _lp_cleanup 0
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    chmod 0700 "$_lp_tmp"
+    curl -q --fail --silent --show-error --location --connect-timeout 10 --max-time 120 \
+        --proto '=https' --proto-redir '=https' \
+        --output "$_lp_tmp/runtime-bootstrap.tar.gz" '@BUNDLE_URL@'
+    (cd "$_lp_tmp" && printf '%s  runtime-bootstrap.tar.gz\n' '@BUNDLE_SHA256@' | sha256sum --check --status) || {
+        printf 'error: bootstrap bundle checksum verification failed\n' >&2
+        return 1
+    }
+    tar -xzf "$_lp_tmp/runtime-bootstrap.tar.gz" -C "$_lp_tmp"
+    for _lp_file in @REQUIRED_FILES@; do
+        if [ ! -f "$_lp_tmp/runtime/$_lp_file" ] || [ -L "$_lp_tmp/runtime/$_lp_file" ]; then
+            printf 'error: bootstrap bundle is missing a required asset: %s\n' "$_lp_file" >&2
+            return 1
+        fi
+    done
+    # Job control is disabled, so setsid creates a group led by this child PID.
+    LIVEPEER_ENROLLMENT_TOKEN=$_lp_token setsid --wait bash "$_lp_tmp/runtime/bootstrap-livepeer.sh" "$@" </dev/null &
+    _lp_child=$!
+    _lp_token=''
+    _lp_status=0
+    wait "$_lp_child" || _lp_status=$?
+    _lp_child=''
+    return "$_lp_status"
+}
+
+_lp_cleanup() {
+    _lp_status=$?
+    trap - 0
+    trap '' HUP INT TERM
+    if [ -n "$_lp_child" ]; then
+        kill -TERM "-$_lp_child" 2>/dev/null || :
+        kill -TERM "$_lp_child" 2>/dev/null || :
+        sleep 1
+        kill -KILL "-$_lp_child" 2>/dev/null || :
+        kill -KILL "$_lp_child" 2>/dev/null || :
+        wait "$_lp_child" 2>/dev/null || :
+    fi
+    rm -rf -- "$_lp_tmp" || :
+    exit "$_lp_status"
+}
+
+# Keep execution last so a truncated function definition cannot start installation.
+{ _lp_main "$@"; }

@@ -7,6 +7,26 @@
 	header X-Content-Type-Options nosniff
 	header Referrer-Policy strict-origin-when-cross-origin
 
+	handle /bootstrap.sh {
+		root * /srv/bootstrap
+		header Content-Type text/x-shellscript
+		header Cache-Control no-cache
+		file_server
+	}
+
+	handle /bootstrap/releases/* {
+		root * /srv
+		@missing not file
+		header @missing Cache-Control no-store
+		@published file
+		header @published Cache-Control "public, max-age=31536000, immutable"
+		@archive path *.tar.gz
+		header @archive Content-Type application/gzip
+		@script path *.sh
+		header @script Content-Type text/x-shellscript
+		file_server
+	}
+
 	handle /api/* {
 		reverse_proxy api:43812
 	}

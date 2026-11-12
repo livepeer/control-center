@@ -295,13 +295,53 @@ authenticate_node
             self.assertIn('loopback', result.stderr)
             self.assertFalse((self.root / 'new').exists())
 
-    def test_fresh_enrollment_requires_token_and_api(self):
-        for setup, message in [("ENROLLMENT_TOKEN=''", '--token'),
-                               ("unset LIVEPEER_API_URL", 'LIVEPEER_API_URL')]:
+    def test_fresh_enrollment_requires_token_and_valid_api(self):
+        for setup, message in [("ENROLLMENT_TOKEN=''", 'LIVEPEER_ENROLLMENT_TOKEN'),
+                               ("LIVEPEER_API_URL='file:///invalid'", 'LIVEPEER_API_URL')]:
             result = self.shell('INSTALL_DIR="$1"; ' + setup + '; authenticate_node', str(self.root / 'new'))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(message, result.stderr)
             self.assertFalse((self.root / 'new').exists())
+
+    def test_api_defaults_and_image_precedence(self):
+        result = self.shell('unset LIVEPEER_API_URL; api_url')
+        self.assertEqual(result.stdout, 'https://controlcenter-api.livepeer.live')
+        result = self.shell('LIVEPEER_API_URL=https://custom.example/api/; api_url')
+        self.assertEqual(result.stdout, 'https://custom.example/api')
+        release = self.root / 'release'
+        release.mkdir()
+        default = 'registry.example/default@sha256:' + 'a' * 64
+        saved = 'registry.example/saved@sha256:' + 'b' * 64
+        override = 'registry.example/override@sha256:' + 'c' * 64
+        (release / 'release-runtime-image').write_text(default + '\n')
+        install = self.root / 'install'
+        (install / 'state').mkdir(parents=True)
+        setup = 'INSTALL_DIR="$1"; SCRIPT_DIR="$2"; unset LIVEPEER_RUNTIME_IMAGE; '
+        def selected(extra=''):
+            return self.shell(setup + extra + '; runtime_image; printf "%s" "$RUNTIME_IMAGE"', str(install), str(release))
+        result = selected(':')
+        self.assertEqual(result.stdout, default, result.stderr)
+        (install / 'state/runtime-image').write_text(saved + '\n')
+        self.assertEqual(selected(':').stdout, saved)
+        self.assertEqual(selected('LIVEPEER_RUNTIME_IMAGE=' + override).stdout, override)
+        for value in ('', 'registry.example/runtime:latest'):
+            self.assertNotEqual(selected('LIVEPEER_RUNTIME_IMAGE=' + value).returncode, 0)
+        (install / 'state/runtime-image').write_text('invalid-saved-image\n')
+        self.assertNotEqual(selected(':').returncode, 0)
+
+    def test_direct_entry_consumes_environment_before_helpers_even_with_export_and_trace(self):
+        for options in ([], ['-a'], ['-x'], ['-ax']):
+            result = subprocess.run(['bash', *options, '-c', '''source "$1"
+[[ $ENROLLMENT_TOKEN == header.payload.signature ]]
+python3 -c 'import os; assert "LIVEPEER_ENROLLMENT_TOKEN" not in os.environ; assert "ENROLLMENT_TOKEN" not in os.environ'
+''', 'fixture', str(SCRIPT)], env={**os.environ, 'LIVEPEER_ENROLLMENT_TOKEN': 'header.payload.signature',
+                                 'ENROLLMENT_TOKEN': 'header.payload.signature'}, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn('header.payload.signature', result.stdout + result.stderr)
+        result = subprocess.run(['bash', str(SCRIPT), '--token', 'header.payload.signature'],
+                                text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('header.payload.signature', result.stdout + result.stderr)
 
     def test_failed_or_malformed_registration_never_writes_credentials(self):
         cases = [
