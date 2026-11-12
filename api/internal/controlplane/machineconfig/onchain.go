@@ -27,8 +27,6 @@ func specializeOnchain(raw string, m Desired) string {
 	if !strings.Contains(raw, "  orchestrator.toml: |\n") {
 		return raw
 	}
-	// The Service remains a private route to a live process during dependency loss.
-	raw = strings.Replace(raw, "spec:\n  selector:\n    app: orchestrator", "spec:\n  publishNotReadyAddresses: true\n  selector:\n    app: orchestrator", 1)
 	c := m.Onchain
 	if !c.Onchain() {
 		return raw
@@ -37,7 +35,7 @@ func specializeOnchain(raw string, m Desired) string {
 	meta, _ := json.Marshal(c)
 	hash := sha256.Sum256(meta)
 	raw = strings.Replace(raw, "livepeer.io/config-sha256:", fmt.Sprintf("livepeer.io/onchain-sha256: '%x'\n        livepeer.io/config-sha256:", hash), 1)
-	settings := map[string]any{"Network": c.Network, "ChainID": c.ChainID, "Controller": c.Controller, "OrchestratorAddress": c.Recipient, "RPCURLFile": "/run/onchain/private/rpc", "RedeemerGrants": c.RedeemerGrants, "RedeemerHeadersFile": "/run/onchain/private/headers", "RedeemerDB": "/data/onchain.sqlite", "TicketFaceValue": c.TicketFaceValue, "TicketWinProb": c.TicketWinProb, "MaxPendingTickets": c.MaxPendingTickets, "MaxTicketsPerRecipient": c.MaxTicketsPerRecipient}
+	settings := map[string]any{"RedeemerURL": map[string]string{"Scheme": endpoint.Scheme, "Host": endpoint.Host, "Path": endpoint.Path}, "Network": c.Network, "ChainID": c.ChainID, "Controller": c.Controller, "OrchestratorAddress": c.Recipient, "RPCURLFile": "/run/onchain/private/rpc", "RedeemerGrants": c.RedeemerGrants, "RedeemerHeadersFile": "/run/onchain/private/headers", "RedeemerDB": "/data/onchain.sqlite", "TicketFaceValue": c.TicketFaceValue, "TicketWinProb": c.TicketWinProb, "MaxPendingTickets": c.MaxPendingTickets, "MaxTicketsPerRecipient": c.MaxTicketsPerRecipient}
 	if c.WeiPerUSD != "" {
 		settings["WeiPerUSD"] = c.WeiPerUSD
 	} else {
@@ -51,15 +49,6 @@ func specializeOnchain(raw string, m Desired) string {
 	text := strings.TrimSuffix(b.String(), "\n")
 	text = "    " + strings.ReplaceAll(text, "\n", "\n    ")
 	raw = strings.Replace(raw, `    Network = "offchain"`, text, 1)
-	// Node's URL field is a TOML table. Keep it last so subsequent global
-	// settings are not accidentally decoded as URL fields.
-	b.Reset()
-	_ = toml.NewEncoder(&b).Encode(map[string]any{"RedeemerURL": map[string]string{"Scheme": endpoint.Scheme, "Host": endpoint.Host, "Path": endpoint.Path}})
-	text = "    " + strings.ReplaceAll(strings.TrimSuffix(b.String(), "\n"), "\n", "\n    ")
-	const marker = "  orchestrator.toml: |\n"
-	head, config, _ := strings.Cut(raw, marker)
-	body, tail, _ := strings.Cut(config, "\n---")
-	raw = head + marker + body + "\n" + text + "\n---" + tail
 	raw = strings.Replace(raw, "        args:\n", `        command: [/usr/local/bin/livepeer-runtime, orchestrator-start]
         env:
         - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}

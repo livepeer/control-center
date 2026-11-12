@@ -59,15 +59,10 @@ COMMIT;
 Verify that one row was inserted. Correct `DefaultAdminEmail` and restart; a new
 grant is seeded only if no active grants remain.
 
-## App catalog
+## Apps
 
-Use **Administration → App catalog** to validate and publish TOML, inspect
-revision history, and retire definitions. See the [app registry guide](app-registry.md)
-for definition settings and pricing policy. Catalog changes alone do not assign
-or deploy applications. In the fleet, use **Manage apps** for revision-pinned
-assignments, replica edits and sequential replacement/removal. Runtime completion
-is separate from current health; see the registry guide for the delivery and
-cleanup contract.
+Use **Administration → App catalog** to publish definitions and **Manage apps**
+in the fleet to assign them. See the [app registry guide](app-registry.md).
 
 ## Onchain operation
 
@@ -100,21 +95,12 @@ Node's durable data, including a consistent backup of `/data/onchain.sqlite`
 and its sidecars, and back up the redeemer database and wallet separately. The
 recipient, chain and controller remain immutable for a stable machine even after
 re-enrollment. Private endpoints require exact IP:port `rpc_grants` and
-`redeemer_grants`; these allow orchestrator access only. Apps receive no RPC or
-redemption egress. If onchain readiness is lost, the private Node Service remains
-reachable for management and cleanup.
+`redeemer_grants`; these allow orchestrator access only. Apps receive neither
+these grants nor Node's RPC or redemption credentials. If onchain readiness is lost,
+the private Node Service remains reachable for management and cleanup.
 
-## Machine ingress
+## Machine ingress and discovery
 
-Per-enrollment Cloudflare tunnels and protected Collector discovery are opt-in.
-Follow [the machine tunnel runbook](machine-tunnels.md) for infrastructure
-prerequisites, credential delivery, refresh, rotation, removal, integration
-contracts and release evidence. Keep `CloudflareEnabled` and
-`CloudflareIngressApproved` false until their respective gates are satisfied.
-
-## Fleet discovery
-
-Fleet discovery shares the API process and its TLS proxy. Enable it separately
-after protected ingress approval, using the existing encrypted Access credential
-store and protected keyring. See [fleet discovery](fleet-discovery.md) for
-configuration, source lifecycle, rotation, freshness diagnosis and release gates.
+Machine tunnels and fleet discovery are opt-in. Follow the [tunnel runbook](machine-tunnels.md)
+for setup and removal, then [fleet discovery](fleet-discovery.md) to expose the
+aggregate inventory.

@@ -120,11 +120,7 @@ func Grant(s string) (netip.Addr, uint16, error) {
 }
 
 func (c Config) Compatible(d schema.DefinitionV1) error {
-	mode := schema.Offchain
-	if c.Onchain() {
-		mode = schema.Onchain
-	}
-	return schema.ValidatePolicy(d, mode)
+	return schema.ValidatePolicy(d, schema.PaymentMode(c.Mode))
 }
 
 // Observation never contains credentials or individual ticket data.

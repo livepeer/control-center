@@ -177,19 +177,12 @@ bootstrap JWTs and machine service credentials cannot mutate assignments. Let
 | `DELETE M/{revision_id}` | `epoch`, `expected_generation` |
 | `POST M/{revision_id}/replace` | `epoch`, `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
 
-Writes require a current active enrollment with modern credentials.
-`expected_generation: 0` means never assigned. Replicas range from 1 to 100;
-omitting them uses the definition default on creation and preserves the count on
-scaling. Changed operations return 202 and `{changed, epoch, assignments}`;
-identical completed retries return 200 without advancing generations. Concurrent
-edits return 409. A lost-response retry must match the immediately resulting
-version and complete desired result; an intervening edit conflicts even if values
-return to their earlier state. Audit and desired writes commit together.
-
-At most 100 assignments may be pending, including present, queued and
-unacknowledged removals. Admission reserves room for removal within the 900 KiB
-ConfigMap limit; completed history does not count. Invalid or oversized changes
-leave desired state and the last valid bundle intact.
+Writes require a current active enrollment. `expected_generation: 0` means never
+assigned. Replicas range from 1 to 100; omitting them uses the definition default
+on creation and preserves the count on scaling. Changed operations return 202;
+identical completed retries return 200. Concurrent edits return 409; refresh before
+retrying. At most 100 assignments may be pending, including unacknowledged
+removals. Oversized changes leave the last valid bundle intact.
 
 ### Runtime delivery and completion contract
 
