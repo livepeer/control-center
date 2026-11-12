@@ -33,7 +33,7 @@ for round in {1..30}; do
     ip netns delete "$namespace"
   done
   for interface in wan cni0 lp-gvisor0; do
-    if ip link show "$interface" >/dev/null 2>&1; then ip link delete "$interface"; fi
+    ip link delete "$interface" 2>/dev/null || true
   done
   nft delete table ip service_test
   nft delete table inet operator_owned

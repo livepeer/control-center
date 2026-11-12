@@ -28,15 +28,20 @@ ip -n pod addr add 10.42.0.2/16 dev pod0
 ip -n pod link set pod0 up
 ip -n pod link set lo up
 ip -n pod route add default via 10.42.0.1
+# Forwarding needs a usable link-local source for IPv6 neighbor discovery.
+# Auto-generated addresses may still be tentative when the probes start.
+ip -6 addr add fe80::1/64 dev wan nodad
 ip -6 addr add 2001:db8:1::1/64 dev wan nodad
 ip -n external -6 addr add 2001:db8:1::2/64 dev client nodad
 ip -n external -6 route add default via 2001:db8:1::1
+ip -6 addr add fe80::1/64 dev cni0 nodad
 ip -6 addr add fd42::1/64 dev cni0 nodad
 ip -n pod -6 addr add fd42::2/64 dev pod0 nodad
 ip -n pod -6 route add default via fd42::1
 
 ip link add lp-gvisor0 type bridge
 ip addr add 10.44.0.1/16 dev lp-gvisor0
+ip -6 addr add fe80::1/64 dev lp-gvisor0 nodad
 ip -6 addr add fd44::1/64 dev lp-gvisor0 nodad
 ip link set lp-gvisor0 up
 for suffix in 2 3; do
