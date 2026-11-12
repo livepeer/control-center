@@ -18,9 +18,9 @@ import (
 	"time"
 )
 
-var ErrResourceConflict = errors.New("Cloudflare resource ownership conflict")
-var ErrUnsafeProtection = errors.New("Cloudflare Access protection readback is unsafe")
-var errAmbiguousCreate = errors.New("Cloudflare create outcome unknown; waiting for owned resource")
+var ErrResourceConflict = errors.New("resource ownership conflict in Cloudflare")
+var ErrUnsafeProtection = errors.New("unsafe Cloudflare Access protection readback")
+var errAmbiguousCreate = errors.New("unknown Cloudflare create outcome; waiting for owned resource")
 
 type ProviderError struct {
 	Status    int
@@ -249,7 +249,7 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 			return found, nil
 		}
 	}
-	return nil, errors.New("Cloudflare resource listing exceeds limit")
+	return nil, errors.New("resource listing from Cloudflare exceeds limit")
 }
 
 func resourceOwned(r CFResource, o cfObject) bool {
@@ -380,7 +380,7 @@ func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []Ingre
 		return 0, e
 	}
 	if ingressHash(clean(current.Config.Ingress)) != ingressHash(rules) {
-		return 0, errors.New("Cloudflare ingress readback mismatch")
+		return 0, errors.New("ingress readback mismatch from Cloudflare")
 	}
 	return current.Version, nil
 }
@@ -388,7 +388,7 @@ func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens 
 	// Dedicated application: an unexpected policy could bypass Service Auth.
 	for page := 1; ; page++ {
 		if page > 100 {
-			return errors.New("Cloudflare policy listing exceeds limit")
+			return errors.New("policy listing from Cloudflare exceeds limit")
 		}
 		var policies []cfObject
 		pages, err := c.call(ctx, "GET", c.resourcePath(policy)+"?per_page=100&page="+strconv.Itoa(page), nil, &policies)
@@ -481,7 +481,7 @@ func (c *cloudflareHTTP) Delete(ctx context.Context, r CFResource, _ string) err
 			}
 			for _, v := range remaining {
 				if v.ID == r.ID {
-					return errors.New("Cloudflare deletion readback pending")
+					return errors.New("pending Cloudflare deletion readback")
 				}
 			}
 			return nil

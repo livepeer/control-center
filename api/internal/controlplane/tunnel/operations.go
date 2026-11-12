@@ -50,7 +50,7 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 			return e
 		}
 		if n, _ := result.RowsAffected(); n != 1 {
-			return errors.New("Access credential version is already bound")
+			return errors.New("access credential version is already bound")
 		}
 	} else if r.CredentialVersion > 0 {
 		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND version=$2`, l.Machine.NodeID, r.CredentialVersion); e != nil {

@@ -307,7 +307,7 @@ func serve(ctx context.Context, address string, handler http.Handler, loop func(
 		cancel()
 		<-loopDone
 		if !errors.Is(err, http.ErrServerClosed) {
-			return errors.New("Runtime listener unavailable")
+			return errors.New("runtime listener unavailable")
 		}
 		return nil
 	case <-ctx.Done():

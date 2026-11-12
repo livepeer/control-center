@@ -17,10 +17,10 @@ var templates embed.FS
 
 func Build(m Desired) ([]byte, string, error) {
 	if m.NodeDrainTimeout != nil && (*m.NodeDrainTimeout < 0 || *m.NodeDrainTimeout > 12*time.Hour) {
-		return nil, "", fmt.Errorf("Node drain timeout must be between zero and 12h")
+		return nil, "", fmt.Errorf("node drain timeout must be between zero and 12h")
 	}
 	if m.NodeImage != "" && !ValidConnectorImage(m.NodeImage) {
-		return nil, "", fmt.Errorf("Node image is not pinned")
+		return nil, "", fmt.Errorf("node image is not pinned")
 	}
 	if m.OnchainError != nil {
 		return nil, "", m.OnchainError

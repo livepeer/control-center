@@ -27,7 +27,7 @@ func TestControlOriginsCredentialsAndRedirects(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("b", 64) {
 			t.Error("credential mapping")
 		}
-		http.Redirect(w, r, receiver.URL, 302)
+		http.Redirect(w, r, receiver.URL, http.StatusFound)
 	}))
 	defer server.Close()
 	c, err := NewControl(server.URL+"/v1/nodes/"+node+"/config", file, true)

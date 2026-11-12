@@ -108,7 +108,7 @@ func (p Params) PreValidate() error {
 	}
 	for _, image := range []string{p.RuntimeImage, p.RuntimeNodeImage, p.RuntimeConnectorImage} {
 		if image != "" && !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$`).MatchString(image) {
-			return errors.New("Runtime images must be pinned by sha256 digest")
+			return errors.New("runtime images must be pinned by sha256 digest")
 		}
 	}
 	if err := p.DiscoveryParams.validate(); err != nil {

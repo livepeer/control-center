@@ -69,7 +69,7 @@ func (s *Manager) prepareApps(ctx context.Context, m *Desired, lookupErr error) 
 
 func addManagedApps(files map[string][]byte, m Desired) error {
 	if !ValidConnectorImage(m.RuntimeImage) {
-		return fmt.Errorf("Go Runtime image is not pinned")
+		return fmt.Errorf("runtime image is not pinned")
 	}
 	p := m.AppPayload
 	if p == nil {

@@ -49,7 +49,7 @@ func (s *Manager) Configure(publicAPIURL string) error {
 		return err
 	}
 	if s.params.CloudflareAPIToken == "" {
-		return errors.New("Cloudflare provisioning credential is required")
+		return errors.New("missing Cloudflare provisioning credential")
 	}
 	if err := s.ConfigureCredentials(); err != nil {
 		return err

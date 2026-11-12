@@ -44,6 +44,7 @@ func TestDiscoveryTransportScopeAndRequestClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	//lint:ignore SA1008 Verify the deliberately noncanonical injected header is unchanged.
 	if req.Header["cf-access-client-secret"][0] != "injected" || req.Header.Get("Authorization") == "" {
 		t.Fatal("transport mutated caller request")
 	}

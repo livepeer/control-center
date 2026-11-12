@@ -38,7 +38,7 @@ func (n *nativeNode) serve(w http.ResponseWriter, r *http.Request) {
 		n.unregisters++
 		if n.failUnregister > 0 {
 			n.failUnregister--
-			http.Error(w, "lost", 503)
+			http.Error(w, "lost", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(404)
@@ -58,12 +58,12 @@ func (n *nativeNode) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if n.rejectAuth && r.Header.Get("Authorization") != "bootstrap" {
 		n.rejectAuth = false
-		http.Error(w, "expired owner", 401)
+		http.Error(w, "expired owner", http.StatusUnauthorized)
 		return
 	}
 	if n.failStart > 0 {
 		n.failStart--
-		http.Error(w, "unavailable", 503)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if n.catchup && r.Header.Get("Authorization") == "issued" {
