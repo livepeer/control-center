@@ -1,0 +1,288 @@
+{
+  "version": 1,
+  "run": "cc-e2e-1112071043-bcbd",
+  "date": "2026-11-12",
+  "scope": "fresh installations",
+  "implementation_revision": "fa744f162a4aea818a6031ada21ed10ee49f351a",
+  "source_tree_sha256": "88e91434d846bf03a328ec75dff4f76322dadd6eccb49da9c03350038eb98b36",
+  "api_binary_sha256": "2373492e60bf6e6ddd1e99a6878e72deba1faaa0c5de1d6e98587dcc1f7b1c61",
+  "management_runtime_binary_sha256": "3dcb8489a68907629de585dad25a5cb11cb13b38c62236954922ebf25592deef",
+  "functional_node_source": {
+    "mode": "working-tree",
+    "revision": "0ee73c000bed553f5a02e40c972c1b5bd2d0ba80",
+    "sha256": "b9e54ae392831706c3ce85baa9cd12ecd227d90e807376bcb74262c767f3bd90"
+  },
+  "functional_images": {
+    "runtime": "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/runtime@sha256:1c2ab03692f97ebd36a77edfcfe554fa675f36bfda51fec616e28cc9c27402f1",
+    "connector": "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/connector@sha256:4174086c856a6b85a42be12cd09becf37e75ee8ba54d72949f3a141235156226",
+    "node": "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/node@sha256:a3dab72b2f364f88bc64bcc954e1ede32d43bcb7c6c288165c25a71740e2b57a",
+    "echo": "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/echo@sha256:b20ba6e917c81842f707a3fa4a581c073ceff7c22782b7ec993abe5c27d7863b"
+  },
+  "landed_wrapper_build": {
+    "node_commit": "3533951e66584531a54a771d21c1388873439099",
+    "node_image": "ghcr.io/livepeer/node@sha256:8c13bbd6abf8d7879c4999ea10d537996a6d54b330cfd5303ebf03b3e4782be9",
+    "runtime_image": "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/runtime@sha256:1c2ab03692f97ebd36a77edfcfe554fa675f36bfda51fec616e28cc9c27402f1",
+    "wrapper_image": "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/managed-node@sha256:cc0a711c242df53a1d621082f11876cdad3b04983afe0e87c89fa7529ac28fb9",
+    "actual_dockerfile_built": true,
+    "nonroot": true
+  },
+  "catalog": [
+    {
+      "name": "paid-echo-persistent",
+      "revision_id": "9a96a95f-ff0d-42b3-8ebb-5c6893ba4adb",
+      "digest": "sha256:2253e9cf61444a3da745db4ca77d3c973378b88f43d50bebfaa357ef79597d05",
+      "price": {
+        "amount": "0.001",
+        "currency": "usd",
+        "unit": "hour"
+      }
+    },
+    {
+      "name": "paid-echo-fixed",
+      "revision_id": "e3b5ceb6-cb7f-4e40-b1c6-469f06d2901f",
+      "digest": "sha256:c8482a7f32e1cd6bd56e7a48e5ffc6fc612dc660a34226a5ec51a789d6fa4668",
+      "price": {
+        "amount": "0.001",
+        "currency": "usd",
+        "unit": "fixed"
+      }
+    }
+  ],
+  "workers": {
+    "count": 2,
+    "type": "e2-standard-4",
+    "k3s": "v1.37.2+k3s1",
+    "settings": [
+      "private RPC and redemption",
+      "public RPC and redemption"
+    ]
+  },
+  "checks": {
+    "routing-evidence": [
+      {
+        "check": "orchestrator_exact_private_endpoint",
+        "role": "node-a",
+        "port": 41143,
+        "reachable": true
+      },
+      {
+        "check": "orchestrator_exact_private_endpoint",
+        "role": "node-a",
+        "port": 41144,
+        "reachable": true
+      },
+      {
+        "check": "all_app_workloads_isolated_from_private_payment_endpoints",
+        "role": "node-a",
+        "workloads": 3
+      },
+      {
+        "check": "orchestrator_exact_private_endpoint",
+        "role": "node-b",
+        "port": 41143,
+        "reachable": false
+      },
+      {
+        "check": "orchestrator_exact_private_endpoint",
+        "role": "node-b",
+        "port": 41144,
+        "reachable": false
+      },
+      {
+        "check": "all_app_workloads_isolated_from_private_payment_endpoints",
+        "role": "node-b",
+        "workloads": 3
+      },
+      {
+        "check": "unrelated_private_destination_blocked",
+        "role": "node-a",
+        "host_baseline_reachable": true
+      },
+      {
+        "check": "unrelated_private_destination_blocked",
+        "role": "node-b",
+        "host_baseline_reachable": true
+      },
+      {
+        "check": "unready_service_keeps_management_routing",
+        "same_pod": true,
+        "protected_discovery_status": 200,
+        "protected_stop_status": 404,
+        "sibling_payment_ready": true
+      },
+      {
+        "check": "private_rpc_outage_recovered",
+        "same_pod": true
+      }
+    ],
+    "retained-outage-evidence": {
+      "paid_session_survived_rpc_readiness_loss": true,
+      "protected_diagnostics_reachable": true,
+      "retained_session_stop_succeeded_while_unready": true
+    },
+    "disable-rollback-evidence": [
+      {
+        "check": "disable_blocked_by_real_queued_ticket",
+        "paid_workload_retained": true,
+        "submission_grant_retained": true,
+        "sibling_unchanged": true
+      },
+      {
+        "check": "rollback_reuses_immutable_inputs_with_new_grant",
+        "payment_generation": 4,
+        "retained_database_owner_only": true,
+        "sibling_unchanged": true
+      }
+    ],
+    "forced-recovery-evidence": [
+      {
+        "check": "forced_retirement_with_queued_tickets",
+        "submission_grants_revoked_immediately": true,
+        "recovery_required": true,
+        "payment_drained": false,
+        "database_preserved": true,
+        "unhanded_tickets": 1
+      },
+      {
+        "check": "reenrollment_recovers_retained_payment_state",
+        "new_enrollment": true,
+        "recipient_pin_preserved": true,
+        "tickets_preserved": true,
+        "new_credentials_authorized": true,
+        "recovery_flag_preserved": true
+      }
+    ],
+    "management-refresh-evidence": {
+      "management_credential_version_advanced": true,
+      "node_replaced_after_managed_drain": true,
+      "replacement_grant_observed": true,
+      "older_submission_grants_revoked": true,
+      "payment_storage_preserved": true
+    },
+    "backpressure-evidence": {
+      "queue_limit": 2,
+      "actual_unsettled": 2,
+      "paid_mode_retained": true,
+      "local_admission_not_ready": true
+    },
+    "lost-ack-evidence": {
+      "durable_redeemer_acceptances": 9,
+      "acknowledgements_lost": 6,
+      "remote_health_degraded_then_healthy": true
+    },
+    "ordinary-retirement-evidence": {
+      "ordinary_removal_blocked_by_actual_unsettled_tickets": true,
+      "paid_workload_retained": true,
+      "submission_grants_retained": true,
+      "completion_not_acknowledged": true
+    },
+    "credential-log-scan-evidence": {
+      "sources_scanned": 8,
+      "known_credentials_absent": true,
+      "affected_sources": []
+    },
+    "settlement-restart-evidence": {
+      "transaction_hash": "0x1c9c96fbdb8bc9e2ee538339dd53df937b839cee223643bfb621c66f74886780",
+      "same_signed_bytes_after_restart": true,
+      "same_nonce_after_restart": true,
+      "duplicate_transaction_identities": false
+    },
+    "settlement-final-evidence": {
+      "transactions": [
+        {
+          "hash": "0x1c9c96fbdb8bc9e2ee538339dd53df937b839cee223643bfb621c66f74886780",
+          "nonce": "0",
+          "phase": "confirmed",
+          "raw_sha256": "0c6bb19ee1b6db7a9633f64884e71085e825521247ef81fa23da444671d35c28",
+          "acknowledged": true
+        }
+      ],
+      "settled": 1,
+      "tickets": 6
+    }
+  },
+  "settlement": {
+    "budget": {
+      "approved_maximum_usd": "0.40",
+      "ticket_liability_usd": "0.20",
+      "gas_usd": "0.20",
+      "internal_max_authorizations": 9,
+      "per_ticket_usd": "0.02",
+      "configured_face_value_wei": "8795613362832",
+      "replacements": 0,
+      "fee_ceiling_wei": "45000000"
+    },
+    "additional_authorizations": 7,
+    "additional_winning_tickets": 1,
+    "receipt": {
+      "block_number": "523528218",
+      "chain_id": 42161,
+      "effective_gas_price_wei": "20000000",
+      "gas_cost_wei": "3796600000000",
+      "gas_used": 189830,
+      "redeemer_balance_wei": "496203400000000",
+      "status": 1,
+      "transaction_hash": "0x1c9c96fbdb8bc9e2ee538339dd53df937b839cee223643bfb621c66f74886780"
+    },
+    "finalized": true,
+    "unique_redemption_transaction_identities": 1,
+    "remaining_small_unsettled_tickets": 5
+  },
+  "cleanup": {
+    "status": "verified_for_owned_resources",
+    "run": "cc-e2e-1112071043-bcbd",
+    "audit_source": "saved post-cleanup final-audit.json and all-runs-audit.json",
+    "source_inventory_recorded_at": "2026-11-12T10:12:53.350733+00:00",
+    "cleanup_verified_at": "2026-11-12T10:09:25.022063+00:00",
+    "owned_gcp_resources": {
+      "instances": [],
+      "disks": [],
+      "firewall-rules": [],
+      "networks": [],
+      "subnets": []
+    },
+    "owned_cloudflare_resources": {
+      "cfd_tunnel": [],
+      "access/apps": [],
+      "access/policies": [],
+      "access/service_tokens": [],
+      "dns": [],
+      "certificates": []
+    },
+    "temporary_access_credentials_removed": true,
+    "all_four_attempts_cleaned": true,
+    "baseline_gcp_instances_missing": [],
+    "baseline_preservation_exception": {
+      "unrelated_tunnel_deleted_before_cleanup": true,
+      "deleted_at": "2026-11-12T08:13:03.063799Z",
+      "recorded_in_owned_intents": false,
+      "unconditional_baseline_preservation_passed": false
+    },
+    "other_active_test_run_excluded_from_scope": true,
+    "owned_cleanup_passed": true,
+    "payment_backups": "owner-only local recovery archive"
+  },
+  "remaining_acceptance": [
+    "#90 responder/verifier and #44 collection contract",
+    "#93/#118 full verifier/fleet acceptance matrix",
+    "production image promotion and full production Compose networking acceptance"
+  ],
+  "recovery_archive": {
+    "sqlite_integrity_verified": true,
+    "postgres_dump_catalog_verified": true,
+    "component_images": {
+      "archive_bytes": 188944124,
+      "sha256": "d4721fe28cb056f4fc3ba670266c520056e95c8f8cb0f843c74e6e0bcf658f22",
+      "references": [
+        "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/managed-node@sha256:cc0a711c242df53a1d621082f11876cdad3b04983afe0e87c89fa7529ac28fb9",
+        "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/runtime@sha256:1c2ab03692f97ebd36a77edfcfe554fa675f36bfda51fec616e28cc9c27402f1",
+        "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/connector@sha256:4174086c856a6b85a42be12cd09becf37e75ee8ba54d72949f3a141235156226",
+        "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/node@sha256:a3dab72b2f364f88bc64bcc954e1ede32d43bcb7c6c288165c25a71740e2b57a",
+        "cc-e2e-1112071043-bcbd-registry.livepeer.vip/cc/echo@sha256:b20ba6e917c81842f707a3fa4a581c073ceff7c22782b7ec993abe5c27d7863b"
+      ],
+      "pinned_manifests_preserved": true
+    },
+    "unsettled_small_tickets": 5,
+    "payment_drain_complete": false
+  }
+}

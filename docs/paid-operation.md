@@ -133,6 +133,11 @@ error or reinterpret retained state on a different chain or recipient.
 Back up SQLite through a consistent online backup or while the writer is stopped;
 retain the matching database/WAL state. Back up the redeemer database separately
 from the orchestrator's, and keep signing-key backups under operator control.
+Retain the bound redemption origin and its private routing/trust inputs until
+outstanding tickets are resolved. Restore those routes together with retained
+state; changing destination still requires fresh zero-unsettled evidence.
+Re-enrollment waits for authoritative cleanup of the preceding ingress resources
+before publishing its new protected routes.
 
 ## Acceptance evidence
 
