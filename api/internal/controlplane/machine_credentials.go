@@ -1,13 +1,13 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
@@ -52,18 +52,10 @@ func (s *Server) authenticateMachine(ctx context.Context, node, token string, re
 	}
 	return Machine{}, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 }
-func machineInput(r *http.Request, v any) error {
-	return boundedMachineInput(r, v, 16384)
-}
-func boundedMachineInput(r *http.Request, v any, limit int64) error {
+func boundedInput(r *http.Request, out any, limit int64) error {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-	if err != nil || int64(len(raw)) > limit {
-		return problem(400, "invalid_request", "Provide one bounded machine request.")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(v) != nil || dec.Decode(new(any)) != io.EOF {
-		return problem(400, "invalid_request", "Provide one bounded machine request.")
+	if err != nil || int64(len(raw)) > limit || jsonv2.Unmarshal(raw, out, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil {
+		return problem(400, "invalid_request", "Provide one bounded JSON request with the documented fields.")
 	}
 	return nil
 }
@@ -83,7 +75,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		OperationID     string `json:"operation_id"`
 		ExpectedVersion int64  `json:"expected_credential_version"`
 	}
-	if e = machineInput(r, &in); e != nil {
+	if e = appInput(r, &in); e != nil {
 		s.respondError(w, e)
 		return
 	}
@@ -220,7 +212,7 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var report machineconfig.Report
-	if e = boundedMachineInput(r, &report, 128<<10); e != nil {
+	if e = boundedInput(r, &report, 128<<10); e != nil {
 		s.respondError(w, e)
 		return
 	}
@@ -259,7 +251,7 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 		Digest          string `json:"digest"`
 		ConnectorAbsent bool   `json:"connector_absent"`
 	}
-	if e = machineInput(r, &in); e != nil {
+	if e = appInput(r, &in); e != nil {
 		s.respondError(w, e)
 		return
 	}

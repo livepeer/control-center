@@ -3,7 +3,6 @@ package machineconfig
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/runtime/contract"
 	"regexp"
@@ -26,7 +25,7 @@ func templateValues(m Desired) *strings.Replacer {
 	if strings.HasPrefix(m.ControlAPIURL, "http://") {
 		mode = "development-http"
 	}
-	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
+	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@ENROLLMENT_EPOCH@", m.Epoch, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
 }
 func orchestratorConfiguration(m Desired) string {
 	if m.State.HeldOrchestrator != "" {
@@ -77,6 +76,7 @@ func specializeNode(raw string, m Desired) string {
 	if m.NodeDrainTimeout != nil {
 		timeout = *m.NodeDrainTimeout
 	}
+	raw = specializeOnchain(raw, m)
 	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", timeout.String())
 	if m.NodeImage != "" {
 		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
@@ -94,6 +94,11 @@ type Runtime = contract.Metadata
 
 func DesiredRuntime(m Desired) Runtime {
 	d := Runtime{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
+	d.Onchain = effectiveOnchain(m)
+	d.OnchainActive = !m.State.DrainRequested && m.State.ApplyingConfigDigest == "" && (!d.Onchain.Onchain() || (m.OnchainReady && m.State.ApprovedConfigDigest == d.ConfigDigest))
+	if d.Onchain.Onchain() && !m.Terminal {
+		d.OnchainCredentialsRef = "/v1/nodes/" + m.NodeID + "/onchain/credentials"
+	}
 	d.RunnerServiceURL = PrivateOrchestrator
 	d.Generation = max(m.State.Generation, 1)
 	d.DrainRequested = m.State.DrainRequested
@@ -128,12 +133,6 @@ func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !m.Terminal && m.State.HeldUpgradePlan != "" {
 		files["upgrade-plan/plan.yaml"] = []byte(m.State.HeldUpgradePlan)
 	}
-	d := DesiredRuntime(m)
-	b, e := json.Marshal(d)
-	if e != nil {
-		return e
-	}
-	files["runtime.json"] = b
 	if m.Terminal {
 		docs := strings.Split(string(files["system/node/orchestrator.yaml"]), "\n---\n")
 		if len(docs) < 3 {

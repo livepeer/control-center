@@ -6,7 +6,7 @@ service or Node release.
 
 ## Enable and secure
 
-1. Complete the protected ingress and fleet acceptance checks below. Discovery
+1. Run the [end-to-end harness](development.md#end-to-end-tests). Discovery
    is disabled by default.
 2. Mount the existing `CloudflareKeyringFile` privately, with directory mode
    0700 and file mode 0600, readable by the API identity. All API replicas need
@@ -32,84 +32,41 @@ retain their API process/database meaning, independent of fleet freshness.
 
 ## Sources and credentials
 
-The existing configuration worker derives sources from the managed tunnel
-ledger at startup, after relevant committed changes and at
-`ConfigReconcileInterval` (default one minute). There is no editable source
-list. A failed database read retains the last selection; a confirmed removal
-withdraws the source immediately. An empty selection is valid.
+Sources come from managed tunnels, not an editable list. Selection refreshes on
+changes and at `ConfigReconcileInterval` (default one minute). Failed database
+reads retain the last selection; confirmed removals withdraw sources. Unverified
+or blocked ingress is excluded; approved offline and draining sources continue to
+be polled. Replacement clears the predecessor's cache, even if its URL is reused.
+Follow the [tunnel runbook](machine-tunnels.md#rotation-and-removal) for rotation
+and removal, including discovery acknowledgement before retiring credentials.
+Compromise requires immediate revocation.
 
-Unverified provisioning generations are excluded; previously approved offline
-generations continue polling, including after restart. Draining sources remain
-selected to observe withdrawals. Removed enrollments and blocked ingress are
-excluded. Replacement resets the predecessor's cache even when the URL is
-reused; an unverified replacement cannot retain that cache or admit its new
-endpoint or credential. Follow the tunnel runbook's drain, acknowledgement and
-provider cleanup order before retiring resources.
-
-Credentials are immutable, AES-GCM encrypted PostgreSQL versions; only the
-keyring is mounted as a protected file. Reconciliation loads a source-scoped
-credential snapshot, while in-flight requests retain the version they started
-with. Missing, expired, revoked or malformed credentials fail closed without
-stopping healthy sources. Managed Cloudflare sources use authenticated HTTPS;
-there is no plaintext credential export or unauthenticated fallback.
-
-Requests use verified TLS, a three-second timeout, no environment proxy, cookies
-or redirects, and Node's destination policy and 1 MiB source-body limit. The
-Collector ignores advertised peer metadata and never collects its own origin.
-Credential changes trigger a refresh, including a bounded follow-up when older
-work was already in flight. HTTP reads never poll sources.
-
-For ordinary Access rotation, publish the new credential with provider overlap
-as described in the tunnel runbook. Confirm discovery acknowledgement and
-subsequent provider retirement before finishing. Acknowledgement requires a new,
-successfully decoded observation for the exact source incarnation and credential
-version with the expected owning address. An old in-flight response, login HTML
-or eviction cannot acknowledge it; an unsafe app URL alone does not block
-retirement. Use the runbook's compromise path for immediate revocation and its
-controlled restart/re-encryption procedure for keyring rotation.
+Sources use authenticated HTTPS with verified TLS, a three-second timeout, no
+proxy or redirects, and a 1 MiB response limit. Missing, expired, revoked or
+malformed credentials fail closed without stopping healthy sources. Private
+destinations require explicit `DiscoveryGrants`; HTTP reads use the cache and do
+not poll sources.
 
 ## Inventory and diagnosis
 
 `DiscoveryRefreshInterval` defaults to five minutes and
-`DiscoveryMaxFailedRefreshes` to six; zero evicts on the first failure. Failures
-retain the last records and original times until eviction, and polling continues
-afterward. A valid empty inventory immediately clears that source. Cache is
-in-memory and lost on restart. Each replica collects independently, so snapshots
-can differ during a rolling restart.
-
-The aggregate preserves whole runner records, extensions, exact JSON numbers and
-original observation timestamps. Node's merge selects the newest record, with
-deterministic source ordering for ties. Its decoder validates envelopes,
-identities and timestamps, not every optional schema property. Protected source
-hostnames and peer metadata are omitted. Entries with an unexpected owning
-address are blocked; unsafe runner URLs are filtered individually so safe
-siblings remain. Fix Node's `ServiceURL`, `ProxyURLTemplate` and proxy
-registration when public routes are wrong; records are not rewritten.
+`DiscoveryMaxFailedRefreshes` to six; zero evicts on the first failure. Failed
+polls retain records and their original timestamps until eviction; a valid empty
+inventory clears that source immediately. The in-memory cache is lost on restart
+and each replica collects independently.
 
 Use administrator `GET /api/admin/discovery` to inspect selection freshness,
-source lifecycle and generation, collection state (`uninitialized`, `healthy`,
-`retained` or `evicted`), last success, failures, cached records, bounded
-transport outcomes, credential availability, acknowledgement and blocked
-publication. Collection is stale after two refresh intervals; selection is stale
-after two reconciliation intervals. These thresholds do not evict inventory.
-Response sizes over 1 MiB are logged, without truncating inventory; consumers may reject them.
+source lifecycle, collection state, failures, credential availability, rotation
+acknowledgement and blocked publication. Collection is stale after two refresh
+intervals and selection after two reconciliation intervals; neither threshold
+evicts inventory. A successful empty snapshot is distinct from a failed or stale
+collection, and retained inventory cannot acknowledge a new credential. Status
+does not prove external app reachability. See [machine status](machine-status.md)
+for correlating assignment and registration evidence.
 
-Status supports correlation with assignment, bundle and registration
-reports. It cannot prove an applied deployment or external app reachability:
-a recent collection does not make every record current. Status and logs exclude
-credentials and source URLs; session and credential identities are not metric
-labels.
-
-If selection is stale or reconciliation fails, restore database access; do not
-interpret a failed read as an empty fleet. For Access failures, check credential
-availability, source state and rotation acknowledgement, then restore the correct
-version through the tunnel workflow. After correcting public routes, wait for
-collection.
-
-## Release checks
-
-Before production enablement, test two managed machines for Access, DNS, TLS,
-direct-origin bypass, Node/SDK routing to private gVisor apps, enrollment and app
-convergence, outages and recovery, rotation, removal and cold restart. Record
-sanitized source timelines and check aggregate output against the consumer size
-limit.
+If selection is stale or reconciliation fails, restore database access. For Access
+failures, check credential availability and rotation acknowledgement, then use the
+tunnel workflow. Entries with unexpected owning addresses and unsafe runner URLs
+are filtered. If public routes are wrong, fix Node's `ServiceURL`,
+`ProxyURLTemplate` and proxy registration, then wait for collection. Records are
+not rewritten.

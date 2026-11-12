@@ -179,6 +179,14 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 		if e != nil && !missing {
 			return nil, e
 		}
+		// Deleted tunnels retain an ID/name tombstone but lose config_src.
+		// Confirm its identity before treating that provider evidence as absence.
+		if !missing && r.Kind == "tunnel" && o.DeletedAt != nil && !o.DeletedAt.IsZero() {
+			if o.ID != r.ID || o.Name != r.Name {
+				return nil, ErrResourceConflict
+			}
+			missing = true
+		}
 		if !missing && (!resourceOwned(r, o) || o.ID != r.ID) {
 			return nil, ErrResourceConflict
 		}

@@ -3,10 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
-	"encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"uuid"
@@ -25,11 +22,7 @@ func definitionProblem(err error) error {
 	return err
 }
 func registryInput(r *http.Request, out any) error {
-	b, err := io.ReadAll(io.LimitReader(r.Body, (512<<10)+1))
-	if err != nil || len(b) > 512<<10 || jsonv2.Unmarshal(b, out, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil {
-		return problem(400, "invalid_request", "Provide one bounded JSON request with the documented fields.")
-	}
-	return nil
+	return boundedInput(r, out, 512<<10)
 }
 func (s *Server) validateApp(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
 	var input struct {
@@ -41,9 +34,7 @@ func (s *Server) validateApp(w http.ResponseWriter, r *http.Request, _ UserIdent
 		d, err = schema.ParseTOML([]byte(input.Source))
 		err = definitionProblem(err)
 	}
-	if err == nil {
-		err = definitionProblem(schema.ValidatePolicy(d, s.registryMode()))
-	}
+
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -53,7 +44,7 @@ func (s *Server) validateApp(w http.ResponseWriter, r *http.Request, _ UserIdent
 		s.respondError(w, err)
 		return
 	}
-	respond(w, 200, map[string]any{"payment_mode": s.registryMode(), "definition": d, "canonical_format": schema.CanonicalFormat, "digest": schema.Digest(b)})
+	respond(w, 200, map[string]any{"definition": d, "canonical_format": schema.CanonicalFormat, "digest": schema.Digest(b)})
 }
 func (s *Server) prepareCreateApp(r *http.Request, u UserIdentity) (AdminApply, error) {
 	return s.preparePublication(r, true)
@@ -199,7 +190,7 @@ func (s *Server) listApps(w http.ResponseWriter, r *http.Request, _ UserIdentity
 		apps = apps[:limit]
 		next = &apps[len(apps)-1].Name
 	}
-	respond(w, 200, map[string]any{"payment_mode": s.registryMode(), "apps": apps, "next_after_name": next})
+	respond(w, 200, map[string]any{"apps": apps, "next_after_name": next})
 }
 func (s *Server) inspectApp(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
 	limit, err := pageLimit(r)
@@ -247,7 +238,7 @@ func (s *Server) inspectApp(w http.ResponseWriter, r *http.Request, _ UserIdenti
 		revisions = revisions[:limit]
 		next = &revisions[len(revisions)-1].Revision
 	}
-	respond(w, 200, map[string]any{"payment_mode": s.registryMode(), "app": a, "revisions": revisions, "next_before_revision": next})
+	respond(w, 200, map[string]any{"app": a, "revisions": revisions, "next_before_revision": next})
 }
 func (s *Server) inspectAppRevision(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
 	id, err := uuid.Parse(r.PathValue("revision_id"))

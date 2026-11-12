@@ -89,10 +89,17 @@ func loadPinnedRevision(ctx context.Context, q rowQuerier, ref schema.RevisionRe
 // already holds policyTx's lock, and current must come from the persisted
 // assignment read using tx, never from a request.
 // Unchanged references may scale/recover after retirement or a policy change.
-func revisionForBinding(ctx context.Context, tx *sql.Tx, current *schema.RevisionRef, desired schema.RevisionRef, mode schema.PaymentMode) (CatalogRevision, error) {
+func revisionForBinding(ctx context.Context, tx *sql.Tx, current *schema.RevisionRef, desired schema.RevisionRef, node string) (CatalogRevision, error) {
 	r, err := loadPinnedRevision(ctx, tx, desired)
 	if err != nil {
 		return r, err
+	}
+	config, err := loadOnchain(ctx, tx, node)
+	if err != nil {
+		return r, err
+	}
+	if err := config.Compatible(r.Definition); err != nil {
+		return r, definitionProblem(err)
 	}
 	if current != nil && *current == desired {
 		return r, nil
@@ -100,15 +107,8 @@ func revisionForBinding(ctx context.Context, tx *sql.Tx, current *schema.Revisio
 	if r.Lifecycle.RetiredAt != nil {
 		return r, problem(409, "revision_retired", "Retired revisions cannot receive new bindings.")
 	}
-	return r, definitionProblem(schema.ValidatePolicy(r.Definition, mode))
+	return r, nil
 }
-func (s *Server) registryMode() schema.PaymentMode {
-	if s.params.RegistryPaymentMode == "" {
-		return schema.Offchain
-	}
-	return schema.PaymentMode(s.params.RegistryPaymentMode)
-}
-
 func (s *Server) publishRevision(ctx context.Context, tx *sql.Tx, user UserIdentity, d schema.DefinitionV1, source, expected string, create bool, b []byte) (AdminChange, error) {
 	digest := schema.Digest(b)
 	old, err := readRevision(tx.QueryRowContext(ctx, `SELECT `+revisionColumns+revisionFrom+`WHERE r.app_name=$1 AND r.digest=$2`, d.Name, digest))
@@ -136,9 +136,7 @@ func (s *Server) publishRevision(ctx context.Context, tx *sql.Tx, user UserIdent
 	} else if head == nil || *head != expected {
 		return AdminChange{}, problem(409, "stale_head", "Another revision has been published. Refresh before publishing.")
 	}
-	if err := schema.ValidatePolicy(d, s.registryMode()); err != nil {
-		return AdminChange{}, definitionProblem(err)
-	}
+
 	id := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.app_revisions(revision_id,app_name,revision,app_version,schema_version,canonical_format,canonical,digest,source_toml,published_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, d.Name, next, d.AppVersion, d.SchemaVersion, schema.CanonicalFormat, b, digest, source, user.ID)
 	if err == nil {

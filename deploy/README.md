@@ -49,7 +49,6 @@ docker build -f ../runtime/services/Dockerfile.tunnel \
   --build-arg RUNTIME_IMAGE=127.0.0.1:63812/controlcenter/runtime@sha256:<RUNTIME_DIGEST> \
   -t 127.0.0.1:63812/controlcenter/connector:staging ../runtime/services
 docker push 127.0.0.1:63812/controlcenter/connector:staging
-# Publish a compatible Node image as controlcenter/node as well.
 # Set RuntimeImage, RuntimeConnectorImage, and RuntimeNodeImage in config.toml
 # using the public registry hostname and the digests returned by the pushes.
 # Set NEW_RELEASE_ID to a previously unused ID (see Bootstrap releases below).
@@ -68,12 +67,40 @@ and node address exclusions. Update `TunnelNodeAddresses` with the public and
 management addresses of every machine before enrollment; the bootstrap
 installer's origin firewall remains required.
 
-The deployed image digests and source provenance are recorded in
-[`staging-images.json`](staging-images.json). The initial staging build includes
-the existing working tree changes. Its matching Node source snapshot is retained
-on the server at `/opt/controlcenter/node-source`; it supports the
-`--api-origin-url` setting used by the current orchestrator template. Publish a
-compatible Node image before changing `RuntimeNodeImage`.
+## Onchain setup
+
+Package the Node image with Runtime's startup wrapper and set `RuntimeNodeImage`
+to the pushed digest. Use the same Node build for `LIVEPEER_REDEEMER_IMAGE`.
+The Node build must support `RPCURLFile` and `RedeemerHeadersFile`.
+
+```sh
+docker build -f ../runtime/services/Dockerfile.node \
+  --build-arg NODE_IMAGE=<registry/node@sha256:digest> \
+  --build-arg RUNTIME_IMAGE=<registry/runtime@sha256:digest> \
+  -t <registry/managed-node:build> ../runtime/services
+docker push <registry/managed-node:build>
+```
+
+Copy `redeemer.example.toml` to `redeemer.toml`. Create owner-only files readable
+by UID 65532:
+
+- `secrets/onchain-rpc/<sha256>`: HTTPS RPC URL; name the file with its raw-byte
+  SHA-256 (`shasum -a 256 <rpc-file>`) and use that hash as `rpc_secret`.
+  Preserve the exact bytes, including any final newline.
+- `secrets/onchain-webhook-auth`: random secret of at least 32 bytes.
+- `secrets/redeemer/keystore.json`, `password`, and `rpc`: redeemer wallet inputs.
+- `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.
+- `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
+
+Set `OnchainSecretsDir` and `OnchainWebhookSecretFile` in `config.toml`, then start:
+
+```sh
+docker compose -f compose.yaml -f compose.onchain.yaml --profile onchain up -d
+```
+
+The wallet is mounted only into the redeemer, which uses the separate
+`redeemer-data` volume. Only HTTPS ticket submission is exposed through ingress.
+Apply machine settings using the [operations runbook](../docs/operations.md#onchain-operation).
 
 ## Bootstrap releases
 

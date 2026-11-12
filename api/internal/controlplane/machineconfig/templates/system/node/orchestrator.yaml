@@ -56,7 +56,6 @@ metadata:
   namespace: livepeer
 data:
   orchestrator.toml: |
-    Network = "offchain"
     DataDir = "/data"
     Listen = "unsafe@0.0.0.0:8935"
     MetricsListen = "unsafe@0.0.0.0:8936"
@@ -71,6 +70,7 @@ data:
     RunnerGrants = ["10.43.0.0/16"]
     HealthGrants = []
     SessionProxyGrants = []
+    Network = "offchain"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -87,6 +87,8 @@ spec:
   template:
     metadata:
       annotations:
+        livepeer.io/enrollment-epoch: '@ENROLLMENT_EPOCH@'
+        livepeer.io/credential-version: '@MANAGEMENT_CREDENTIAL_VERSION@'
         livepeer.io/config-sha256: '@ORCHESTRATOR_DIGEST@'
       labels:
         app: orchestrator
@@ -97,6 +99,7 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -166,6 +169,7 @@ metadata:
   name: orchestrator
   namespace: livepeer
 spec:
+  publishNotReadyAddresses: true
   selector:
     app: orchestrator
   ports:

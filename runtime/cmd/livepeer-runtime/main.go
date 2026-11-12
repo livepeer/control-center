@@ -18,7 +18,7 @@ import (
 
 	"github.com/livepeer/control-center/runtime/appreconciler"
 	"github.com/livepeer/control-center/runtime/artifact"
-	"github.com/livepeer/control-center/runtime/connector"
+	"github.com/livepeer/control-center/runtime/consumer"
 	"github.com/livepeer/control-center/runtime/httpsource"
 	"github.com/livepeer/control-center/runtime/management"
 	"github.com/livepeer/control-center/runtime/nodeproxy"
@@ -38,6 +38,13 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("choose http-source, app-reconciler, connector-start, connector-probe, node-proxy or node-proxy-probe")
 	}
 	switch args[0] {
+	case "orchestrator-start":
+		return consumer.Start(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/rpc", os.Getenv("POD_NAME"), os.Getenv("POD_UID"), args[1:])
+	case "orchestrator-probe":
+		if !consumer.Probe(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/launch.json") {
+			return errors.New("orchestrator not ready")
+		}
+		return nil
 	case "http-source":
 		return httpSource(ctx, args[1:])
 	case "app-reconciler":
@@ -73,11 +80,11 @@ func connectorCommand(ctx context.Context, command string, args []string) error 
 		return errors.New("invalid connector configuration")
 	}
 	if command == "connector-start" {
-		return connector.Start(ctx, *socket, *token, *name, *uid)
+		return consumer.Start(ctx, consumer.Connector, *socket, *token, *name, *uid, nil)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	if !connector.Probe(ctx, *socket, *marker) {
+	if !consumer.Probe(ctx, consumer.Connector, *socket, *marker) {
 		return errors.New("connector not ready")
 	}
 	return nil
@@ -246,9 +253,12 @@ func httpSource(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	socketErrors := make(chan error, 1)
-	integration := &connector.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
+	integration := &consumer.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
 	integration.Restore()
-	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired})
+	onchain := &consumer.Integration{Profile: consumer.Orchestrator, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "onchain-grant.json")}
+	onchain.Restore()
+	source.Onchain = onchain.Observe
+	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, onchain)
 	if err != nil {
 		return err
 	}

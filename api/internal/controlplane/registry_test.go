@@ -152,15 +152,14 @@ func TestRegistryPolicyAndBindingSeam(t *testing.T) {
 		t.Fatal(status)
 	}
 	requireStatus(t, request(t, s, "POST", "/api/admin/apps/whoami/revisions/"+first.RevisionID+"/retire", "session-a", map[string]int{"expected_state_version": 1}), 200)
-	s.params.RegistryPaymentMode = "onchain"
-	requireStatus(t, request(t, s, "POST", "/api/admin/apps/validate", "session-a", map[string]string{"source_toml": source}), 400)
+	requireStatus(t, request(t, s, "POST", "/api/admin/apps/validate", "session-a", map[string]string{"source_toml": source}), 200)
 	same, status := revisionResponse(t, s, source, uuid.New().String(), false)
 	if status != 200 || same.RevisionID != first.RevisionID || same.Lifecycle.RetiredAt == nil {
 		t.Fatal("retired retry lost to policy/precondition")
 	}
 	_, status = revisionResponse(t, s, strings.Replace(source, "replicas = 2", "replicas = 3", 1), first.RevisionID, false)
-	if status != 400 {
-		t.Fatal("new free onchain revision accepted")
+	if status != 201 {
+		t.Fatal("generic catalog rejected free price", status)
 	}
 	testBinding := func(current *schema.RevisionRef, ref schema.RevisionRef, want int) {
 		t.Helper()
@@ -169,7 +168,7 @@ func TestRegistryPolicyAndBindingSeam(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback()
-		_, err = revisionForBinding(t.Context(), tx, current, ref, s.registryMode())
+		_, err = revisionForBinding(t.Context(), tx, current, ref, "lp-0000000000000001")
 		if want == 200 && err != nil {
 			t.Fatal(err)
 		}
@@ -179,13 +178,11 @@ func TestRegistryPolicyAndBindingSeam(t *testing.T) {
 	}
 	testBinding(&first.RevisionRef, first.RevisionRef, 200)
 	testBinding(nil, first.RevisionRef, 409)
-	s.params.RegistryPaymentMode = "offchain"
 	active, status := revisionResponse(t, s, strings.Replace(source, "replicas = 2", "replicas = 3", 1), first.RevisionID, false)
-	if status != 201 {
+	if status != 200 {
 		t.Fatal(status)
 	}
-	s.params.RegistryPaymentMode = "onchain"
-	testBinding(nil, active.RevisionRef, 400)
+	testBinding(nil, active.RevisionRef, 200)
 	testBinding(&active.RevisionRef, active.RevisionRef, 200)
 	testBinding(&active.RevisionRef, first.RevisionRef, 409)
 	testBinding(nil, schema.RevisionRef{RevisionID: uuid.New().String(), Digest: active.Digest}, 404)

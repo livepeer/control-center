@@ -3,8 +3,10 @@ package machineconfig
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"io/fs"
 	"strings"
 	"time"
@@ -19,6 +21,26 @@ func Build(m Desired) ([]byte, string, error) {
 	}
 	if m.NodeImage != "" && !ValidConnectorImage(m.NodeImage) {
 		return nil, "", fmt.Errorf("Node image is not pinned")
+	}
+	if m.OnchainError != nil {
+		return nil, "", m.OnchainError
+	}
+	if m.Onchain.Version == 0 {
+		m.Onchain = onchain.Offchain()
+	}
+	if m.State.HeldOrchestrator != "" && m.State.HeldOnchain != "" {
+		var held onchain.Config
+		if json.Unmarshal([]byte(m.State.HeldOnchain), &held) != nil {
+			return nil, "", fmt.Errorf("invalid held onchain identity")
+		}
+		if held.Version != 0 {
+			if err := held.Validate(); err != nil {
+				return nil, "", err
+			}
+		}
+	}
+	if err := m.Onchain.Validate(); err != nil {
+		return nil, "", err
 	}
 	files := map[string][]byte{}
 	err := fs.WalkDir(templates, "templates", func(path string, entry fs.DirEntry, err error) error {

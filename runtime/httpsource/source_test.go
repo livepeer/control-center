@@ -19,6 +19,7 @@ import (
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/internal/testutil"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -97,9 +98,9 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 		case path == fluxPath+"livepeer-node":
 			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 		case strings.Contains(path, "/deployments/orchestrator"):
-			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
 		case strings.Contains(path, "/pods?"):
-			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
+			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
 		default:
 			return nil
 		}
@@ -163,6 +164,10 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 		current = cache(formatInt(int64(n)), 0)
 	}
 	applied, attempted, orphan := cache("applied", 3*time.Hour), cache("attempted", 3*time.Hour), cache("orphan", 4*time.Hour)
+	republished := cache("republished", 4*time.Hour)
+	if err := artifact.AtomicWrite(filepath.Join(f.source.Store.Directory, republished[7:]+".seen"), []byte(republished), 0600); err != nil {
+		t.Fatal(err)
+	}
 	f.kube.reply = func(path string) any {
 		if path == fluxPath+"livepeer-node" {
 			return map[string]any{"status": map[string]any{"lastAppliedRevision": applied, "lastAttemptedRevision": attempted}}
@@ -176,7 +181,7 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 	}
 	f.kube.err = nil
 	f.source.gc(t.Context(), current)
-	for _, digest := range []string{applied, attempted} {
+	for _, digest := range []string{applied, attempted, republished} {
 		if _, err := f.source.Store.Get(digest); err != nil {
 			t.Fatal("peer input collected", err)
 		}
@@ -200,7 +205,7 @@ type sourceFixture struct {
 func newFixture(t *testing.T) *sourceFixture {
 	t.Helper()
 	set := testutil.Assignment(t)
-	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
+	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -412,10 +417,10 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 		}
 		if strings.Contains(path, "/deployments/orchestrator") {
-			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
 		}
 		if strings.Contains(path, "/pods?") {
-			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
+			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
 		}
 		return nil
 	}
@@ -483,7 +488,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *testing.T) {
 	s := &Source{Store: artifact.Store{Directory: t.TempDir()}}
 	cache := func(epoch, node, connector string) string {
-		m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
+		m := contract.Metadata{Onchain: onchain.Offchain(), NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
 		return cacheBundle(t, s.Store, m, map[string][]byte{"system/node/kustomization.yaml": []byte(node), "system/connector/kustomization.yaml": []byte(connector)})
 	}
 	old := cache("11111111-1111-4111-8111-111111111111", "same node", "old connector")

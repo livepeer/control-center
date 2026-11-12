@@ -10,7 +10,6 @@ DefaultAdminEmail = "admin@example.com"
 Listen = "0.0.0.0:43812"
 PublicAPIURL = "https://controlcenter-api.livepeer.live"
 ConfigReconcileInterval = "1m"
-RegistryPaymentMode = "offchain"
 
 # Publish both images to the bundled registry and use the returned digests.
 RuntimeImage = "controlcenter-registry.livepeer.live/controlcenter/runtime@sha256:<RUNTIME_DIGEST>"
@@ -35,3 +34,7 @@ TunnelDrainTimeout = "10m"
 TunnelNodeAddresses = ["<FLEET_NODE_IP/CIDR>"]
 DiscoveryRefreshInterval = "5m"
 DiscoveryMaxFailedRefreshes = 6
+
+# Enable with compose.onchain.yaml after applying deployment-owned onchain settings.
+# OnchainSecretsDir = "/run/onchain-rpc"
+# OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"

@@ -1,0 +1,8 @@
+# syntax=docker/dockerfile:1.7
+ARG NODE_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE} AS runtime
+FROM ${NODE_IMAGE}
+COPY --from=runtime /usr/local/bin/livepeer-runtime /usr/local/bin/livepeer-runtime
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/livepeer"]

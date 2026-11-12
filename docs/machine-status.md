@@ -25,19 +25,12 @@ Public app reachability remains **unverified**. Local checks, a verified tunnel
 and successful discovery collection do not establish that an external client can
 run the app. External probes and their freshness are separate observability work.
 
-Report freshness uses `TunnelStatusTTL` (two minutes by default), but probes,
-Node and connector observations, and Collector snapshots have their own times
-and expiry. A new report or an exact retry does not renew older evidence. The
-view continues to expire evidence if refresh fails. Clock uncertainty cannot
-establish fresh readiness or drain completion.
-
-A successful empty discovery snapshot is different from failed or stale
-collection. After source or credential rotation, retained inventory cannot prove
-membership or absence for the new version until it collects successfully. An
-unrecoverable old artifact generation remains unknown.
-
-Reports are limited to 128 KiB and 128 instances. Counts cover the full reported
-state and omitted details are identified. A healthy subset cannot establish that
+Reports use `TunnelStatusTTL` (two minutes by default); individual probes,
+Node and connector observations, and Collector snapshots have their own expiry.
+An exact report retry does not renew older evidence. A successful empty discovery
+snapshot differs from failed or stale collection; retained inventory cannot prove
+membership after source or credential rotation. Reports include at most 128
+instance details, with omissions identified, so a healthy subset does not prove
 all instances are ready.
 
 ## Diagnose a failure
@@ -87,10 +80,7 @@ credential recovery can establish a new scope. Retired enrollments have no new
 credential recovery protocol and remain unconfirmed if their ordering state is
 lost. A process restart alone does not reset report ordering.
 
-## Release verification
+## Verification
 
-Run the Go race suite with `TEST_DATABASE_URL` pointing to disposable PostgreSQL,
-the UI build and Playwright; skipped database tests do not establish acceptance.
-For Runtime checks, follow [Runtime verification](../runtime/README.md#verification).
-Record exact revisions and redacted evidence. Verify real Node/SDK/Flux/gVisor
-integration and external reachability on two machines before production activation.
+See [development checks](development.md#development-checks) and the
+[end-to-end harness](development.md#end-to-end-tests).

@@ -1,5 +1,5 @@
-// Package connector contains cloudflared credential delivery and observation integration.
-package connector
+// Package consumer delivers credentials to the protected connector and Node processes.
+package consumer
 
 import (
 	"context"
@@ -22,8 +22,24 @@ import (
 
 const observationTTL = 30 * time.Second
 
-type Kubernetes interface {
-	Request(context.Context, string, string, any, any) error
+type Profile int
+
+const (
+	Connector Profile = iota
+	Orchestrator
+)
+
+func (p Profile) endpoint() string {
+	if p == Orchestrator {
+		return "onchain/credentials"
+	}
+	return "tunnel/connector-token"
+}
+func (p Profile) observationPath() string {
+	if p == Orchestrator {
+		return "/onchain/observation"
+	}
+	return "/tunnel/observation"
 }
 
 // Launch identifies one exec in one Kubernetes container incarnation.
@@ -41,38 +57,56 @@ type Association struct {
 	CredentialVersion int64  `json:"credential_version"`
 	TunnelID          string `json:"tunnel_id"`
 	TokenGeneration   int64  `json:"credential_generation"`
+	OnchainGeneration int64  `json:"onchain_generation,omitempty"`
+	ConfigDigest      string `json:"config_digest,omitempty"`
+	GrantID           string `json:"grant_id,omitempty"`
+}
+
+type Request struct {
+	Launch
+	OnchainGeneration int64  `json:"onchain_generation"`
+	ConfigDigest      string `json:"config_digest"`
 }
 
 type Grant struct {
 	Association
-	Token string `json:"token"`
+	Token        string `json:"token"`
+	RPCURL       string `json:"rpc_url,omitempty"`
+	Headers      string `json:"headers,omitempty"`
+	RequireState bool   `json:"require_state,omitempty"`
 }
 
 type Observation struct {
 	Association
-	Ready           bool  `json:"ready"`
-	ProviderVersion int64 `json:"provider_version"`
+	Ready           bool      `json:"ready"`
+	ProviderVersion int64     `json:"provider_version"`
+	ObservedAt      time.Time `json:"observed_at,omitempty"`
 	observedAt      time.Time
 }
 
 type Integration struct {
-	Control        *transport.Control
-	Reporter       transport.Requester
-	Kube           Kubernetes
-	Desired        func() (contract.Metadata, bool)
-	StateFile      string
-	mu             sync.Mutex
-	fetchOrder     uint64
-	validatedOrder uint64
-	grant          *Association
-	observation    *Observation
+	Profile          Profile
+	Control          *transport.Control
+	Reporter         transport.Requester
+	Kube             transport.KubernetesReader
+	Desired          func() (contract.Metadata, bool)
+	StateFile        string
+	mu               sync.Mutex
+	fetchOrder       uint64
+	validatedOrder   uint64
+	grant            *Association
+	observation      *Observation
+	metricsGrant     string
+	lastAck, lastErr float64
+	handoff          string
+	handoffAt        time.Time
 }
 
 // Restore recovers a grant association, never a readiness observation.
 func (i *Integration) Restore() {
 	b, err := os.ReadFile(i.StateFile)
 	var grant Association
-	if err == nil && len(b) <= 16384 && transport.Decode(b, &grant) == nil && validLaunch(grant.Launch) && grant.Epoch != "" && grant.TokenGeneration > 0 {
+	if err == nil && len(b) <= 16384 && transport.Decode(b, &grant) == nil && ValidLaunch(grant.Launch) && grant.Epoch != "" && (grant.TokenGeneration > 0 || grant.GrantID != "") {
 		i.mu.Lock()
 		i.grant = &grant
 		i.observation = nil
@@ -84,7 +118,7 @@ var podName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 var launchID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var processID = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func validLaunch(l Launch) bool {
+func ValidLaunch(l Launch) bool {
 	return podName.MatchString(l.PodName) && l.PodUID != "" && len(l.PodUID) <= 128 && launchID.MatchString(l.LaunchID) && processID.MatchString(l.ProcessID)
 }
 
@@ -99,9 +133,9 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/tunnel/connector-token":
+	case "/" + i.Profile.endpoint():
 		var launch Launch
-		if transport.Decode(b, &launch) != nil || !validLaunch(launch) {
+		if transport.Decode(b, &launch) != nil || !ValidLaunch(launch) {
 			http.Error(w, "launch refused", http.StatusBadRequest)
 			return
 		}
@@ -114,16 +148,16 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(grant)
-	case "/tunnel/observation":
+	case i.Profile.observationPath():
 		var observation Observation
 		m, ok := i.Desired()
-		if transport.Decode(b, &observation) != nil || !ok || !matches(observation.Association, m) {
+		if transport.Decode(b, &observation) != nil || !ok || !i.matches(observation.Association, m) || (i.Profile == Orchestrator && (time.Since(observation.ObservedAt) > 15*time.Second || observation.ObservedAt.After(time.Now().Add(5*time.Second)) || i.checkPod(r.Context(), observation.Launch) != nil)) {
 			http.Error(w, "observation refused", http.StatusConflict)
 			return
 		}
 		i.mu.Lock()
 		defer i.mu.Unlock()
-		if i.grant == nil || *i.grant != observation.Association {
+		if i.grant == nil || *i.grant != observation.Association || (i.observation != nil && observation.ObservedAt.Before(i.observation.ObservedAt)) {
 			http.Error(w, "observation refused", http.StatusConflict)
 			return
 		}
@@ -135,8 +169,22 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func matches(a Association, m contract.Metadata) bool {
-	return !m.TerminalCleanup && a.Epoch == m.Epoch && a.CredentialVersion == m.CredentialVersion && a.TunnelID != "" && a.TunnelID == m.TunnelID && a.TokenGeneration > 0 && a.TokenGeneration == m.TokenGeneration
+func (i *Integration) matches(a Association, m contract.Metadata) bool {
+	if m.TerminalCleanup || a.Epoch != m.Epoch {
+		return false
+	}
+	if i.Profile == Orchestrator {
+		// A held process may retain its submission grant across management refresh.
+		return m.Onchain.Onchain() && a.OnchainGeneration == m.Onchain.Generation && a.ConfigDigest == m.ConfigDigest && a.GrantID != ""
+	}
+	return a.CredentialVersion == m.CredentialVersion && a.TunnelID != "" && a.TunnelID == m.TunnelID && a.TokenGeneration > 0 && a.TokenGeneration == m.TokenGeneration
+}
+func (i *Integration) authorized(m contract.Metadata) bool {
+	ref := m.ConnectorTokenRef
+	if i.Profile == Orchestrator {
+		ref = m.OnchainCredentialsRef
+	}
+	return !m.TerminalCleanup && !i.Control.AllowHTTP && ref == "/v1/nodes/"+m.NodeID+"/"+i.Profile.endpoint()
 }
 
 func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
@@ -145,7 +193,7 @@ func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
 	order := i.fetchOrder
 	i.mu.Unlock()
 	m, ok := i.Desired()
-	if !ok || m.ConnectorTokenRef != "/v1/nodes/"+m.NodeID+"/tunnel/connector-token" || m.TokenGeneration < 1 || m.TerminalCleanup || i.Control.AllowHTTP {
+	if !ok || !i.authorized(m) {
 		return Grant{}, errors.New("connector_not_authorized")
 	}
 	before, err := os.ReadFile(i.Control.TokenFile)
@@ -169,27 +217,36 @@ func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
 		}
 	}
 	i.mu.Unlock()
-	b, _, err := i.Control.Request(ctx, "tunnel/connector-token", nil, 16384)
+	var request any
+	if i.Profile == Orchestrator {
+		request = Request{launch, m.Onchain.Generation, m.ConfigDigest}
+	}
+	b, _, err := i.Control.Request(ctx, i.Profile.endpoint(), request, 16384)
 	if err != nil {
 		return Grant{}, err
 	}
-	var response struct {
-		Token           string `json:"token"`
-		Epoch           string `json:"epoch"`
-		TunnelID        string `json:"tunnel_id"`
-		TokenGeneration int64  `json:"credential_generation"`
-	}
-	if transport.Decode(b, &response) != nil || !validToken(response.Token) || response.Epoch != m.Epoch || response.TunnelID != m.TunnelID || response.TokenGeneration != m.TokenGeneration {
+	var response Grant
+	if transport.Decode(b, &response) != nil {
 		return Grant{}, errors.New("stale_connector_grant")
 	}
-	a := Association{Launch: launch, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, TunnelID: m.TunnelID, TokenGeneration: m.TokenGeneration}
+	if i.Profile == Connector {
+		response.Launch, response.CredentialVersion = launch, m.CredentialVersion
+	}
+	a := response.Association
+	valid := validToken(response.Token)
+	if i.Profile == Orchestrator {
+		valid = response.RPCURL != "" && response.Headers != ""
+	}
+	if !valid || a.Launch != launch || a.CredentialVersion != m.CredentialVersion || !i.matches(a, m) {
+		return Grant{}, errors.New("stale_process_grant")
+	}
 	if i.checkPod(ctx, launch) != nil {
 		return Grant{}, errors.New("connector_changed_during_fetch")
 	}
 	authorized := func() bool {
 		after, err := os.ReadFile(i.Control.TokenFile)
 		current, ok := i.Desired()
-		return ctx.Err() == nil && err == nil && ok && matches(a, current) && current.Generation == m.Generation && current.ConnectorTokenRef == m.ConnectorTokenRef && sha256.Sum256(before) == sha256.Sum256(after)
+		return ctx.Err() == nil && err == nil && ok && i.authorized(current) && i.matches(a, current) && current.CredentialVersion == m.CredentialVersion && current.Generation == m.Generation && sha256.Sum256(before) == sha256.Sum256(after)
 	}
 	data, _ := json.Marshal(a)
 	i.mu.Lock()
@@ -207,7 +264,7 @@ func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
 		return Grant{}, errors.New("connector_changed_during_commit")
 	}
 	i.grant, i.observation = &a, nil
-	return Grant{Association: a, Token: response.Token}, nil
+	return response, nil
 }
 
 func validToken(token string) bool {
@@ -228,9 +285,15 @@ func (i *Integration) checkPod(ctx context.Context, launch Launch) error {
 			UID               string            `json:"uid"`
 			DeletionTimestamp *string           `json:"deletionTimestamp"`
 			Labels            map[string]string `json:"labels"`
+			Annotations       map[string]string `json:"annotations"`
 		} `json:"metadata"`
 	}
-	if !validLaunch(launch) || i.Kube.Request(ctx, http.MethodGet, "/api/v1/namespaces/flux-system/pods/"+url.PathEscape(launch.PodName), nil, &pod) != nil || pod.Metadata.UID != launch.PodUID || pod.Metadata.DeletionTimestamp != nil || pod.Metadata.Labels["app"] != "livepeer-tunnel" {
+	namespace, label := "flux-system", "livepeer-tunnel"
+	if i.Profile == Orchestrator {
+		namespace, label = "livepeer", "orchestrator"
+	}
+	m, ok := i.Desired()
+	if !ValidLaunch(launch) || !ok || i.Kube.Request(ctx, http.MethodGet, "/api/v1/namespaces/"+namespace+"/pods/"+url.PathEscape(launch.PodName), nil, &pod) != nil || pod.Metadata.UID != launch.PodUID || pod.Metadata.DeletionTimestamp != nil || pod.Metadata.Labels["app"] != label || (i.Profile == Orchestrator && pod.Metadata.Annotations["livepeer.io/config-sha256"] != m.ConfigDigest) {
 		return errors.New("connector_incarnation")
 	}
 	return nil
@@ -254,7 +317,7 @@ func (i *Integration) Report(ctx context.Context) error {
 	observedAt := time.Time{}
 	tokenGeneration, providerVersion := int64(0), int64(0)
 	i.mu.Lock()
-	if podValid && i.grant == grant && matches(*grant, m) {
+	if podValid && i.grant == grant && i.matches(*grant, m) {
 		tokenGeneration = grant.TokenGeneration
 		if observation := i.observation; observation != nil && observation.Association == *grant && !observation.observedAt.IsZero() && time.Since(observation.observedAt) <= observationTTL {
 			observedAt = observation.observedAt

@@ -1,4 +1,4 @@
-package connector
+package consumer
 
 import (
 	"crypto/sha256"

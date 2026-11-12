@@ -20,6 +20,7 @@ import (
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/internal/testutil"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/transport"
 	"github.com/livepeer/control-center/schema"
 	runner "github.com/livepeer/golang-runner"
@@ -42,7 +43,7 @@ func (i *testInputs) set(t *testing.T, set schema.AppAssignmentSetV1) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i.value = Input{Metadata: contract.Metadata{NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, AppsGeneration: set.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}, Payload: p, Digest: artifact.Digest([]byte(p.Digest()))}
+	i.value = Input{Metadata: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, AppsGeneration: set.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}, Payload: p, Digest: artifact.Digest([]byte(p.Digest()))}
 }
 
 type testCluster struct {

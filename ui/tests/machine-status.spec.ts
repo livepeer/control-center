@@ -41,7 +41,7 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/me') return route.fulfill({ json: { user_id: user, is_admin: state.admin } })
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
-    if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], payment_mode: 'offchain', next_after_name: null } })
+    if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], onchain_mode: 'offchain', next_after_name: null } })
     if (path === '/api/admin/machines') return route.fulfill({ json: { machines: [listedMachine] } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [listedMachine, { ...machine, node_id: 'lp-bbbbbbbbbbbbbbbb', hostname: 'second-worker', epoch: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }] } })
     if (path.startsWith('/api/admin/machines/') && path.endsWith('/apps')) return route.fulfill({ json: { epoch, assignments: [], apps_generation: 2, published_generation: 1, next_after_revision_id: null, last_config_fetch_at: null } })
@@ -226,4 +226,15 @@ test('expired inventory preserves its unverified source-version explanation', as
   await expect(page.getByText('Status refresh unavailable.', { exact: true })).toBeVisible()
   await page.clock.fastForward(2000)
   await expect(page.getByText('Retained inventory has no confirmation for the current source version', { exact: false })).toBeVisible()
+})
+
+test('onchain readiness stays separate from remote handoff', async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page, false)
+  state.view.onchain = { desired: { mode: 'onchain', generation: 3, recipient: `0x${'2'.repeat(40)}`, network: 'custom' }, delivered_generation: 3 }
+  state.view.components[0].onchain = { generation: 3, mode: 'onchain', applied: true, ready: true, handoff: 'degraded' }
+  await page.clock.fastForward(5100)
+  await expect(page.getByRole('region', { name: 'Onchain operation' })).toContainText('Local onchain admission: ready')
+  await expect(page.getByRole('region', { name: 'Onchain operation' })).toContainText('Remote handoff: degraded')
+
 })

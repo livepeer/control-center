@@ -4,10 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"errors"
-	"io"
 	"math"
 	"net/http"
 	"reflect"
@@ -21,11 +18,7 @@ import (
 )
 
 func appInput(r *http.Request, out any) error {
-	b, err := io.ReadAll(io.LimitReader(r.Body, 16385))
-	if err != nil || len(b) > 16384 || jsonv2.Unmarshal(b, out, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil {
-		return problem(400, "invalid_request", "Provide one bounded JSON request with the documented fields.")
-	}
-	return nil
+	return boundedInput(r, out, 16384)
 }
 func appID(id string) bool {
 	v, e := uuid.Parse(id)
@@ -181,7 +174,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 					if target.Generation != 0 && (target.Desired != "absent" || target.CompletedAt == nil) {
 						return AdminChange{}, problem(409, "target_assigned", "Target must be unassigned or fully removed.")
 					}
-					revision, e := revisionForBinding(ctx, tx, nil, ref, s.registryMode())
+					revision, e := revisionForBinding(ctx, tx, nil, ref, node)
 					if e != nil {
 						return AdminChange{}, e
 					}
@@ -284,7 +277,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				if old.Desired == "present" {
 					current = &old.RevisionRef
 				}
-				if _, e = revisionForBinding(ctx, tx, current, ref, s.registryMode()); e != nil {
+				if _, e = revisionForBinding(ctx, tx, current, ref, node); e != nil {
 					return AdminChange{}, e
 				}
 				if e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, a); e != nil {

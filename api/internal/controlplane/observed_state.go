@@ -16,10 +16,12 @@ import (
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/schema"
 )
 
 type componentObservation struct {
+	Onchain             *onchain.Observation    `json:"onchain,omitempty"`
 	ObserverID          string                  `json:"observer_id,omitempty"`
 	ObserverStartedAt   *time.Time              `json:"observer_started_at,omitempty"`
 	Component           string                  `json:"component"`
@@ -79,6 +81,7 @@ type tunnelObservation struct {
 }
 
 type machineObservation struct {
+	Onchain                     onchainView                 `json:"onchain"`
 	NodeID                      string                      `json:"node_id"`
 	Epoch                       string                      `json:"epoch"`
 	Hostname                    string                      `json:"hostname"`
@@ -172,6 +175,10 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 	} else if err != nil {
 		return v, err
 	}
+	v.Onchain, err = s.onchainView(ctx, m)
+	if err != nil {
+		return v, err
+	}
 	v.Lifecycle, v.RolloutGeneration = record.Lifecycle, record.Generation
 	if m.Terminal {
 		var ack *time.Time
@@ -230,6 +237,17 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 			expires = timePointer(effective.Add(ttl))
 		}
 		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
+		c.Onchain = report.Onchain
+		if c.Onchain != nil {
+			copy := *c.Onchain
+			copy.GrantID = ""
+			if !c.Fresh || !c.Current || c.ClockUncertain {
+				copy.Ready = false
+				copy.Applied = false
+				copy.Handoff = "unverified"
+			}
+			c.Onchain = &copy
+		}
 		c.AppsError = safeObservationReason(report.AppsError)
 		c.Apps, c.Downloaded, c.DownloadedAt = report.Apps, report.Downloaded, timePointer(report.DownloadedAt)
 		c.ObserverID, c.ObserverStartedAt = report.ObserverID, timePointer(report.ObserverStartedAt)
@@ -413,4 +431,36 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 		result = append(result, m)
 	}
 	return result, rows.Err()
+}
+
+type onchainView struct {
+	Desired             onchain.Config `json:"desired"`
+	DeliveredGeneration int64          `json:"delivered_generation"`
+}
+
+func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error) {
+	var v onchainView
+	var err error
+	v.Desired, err = loadOnchain(ctx, s.db, m.NodeID)
+	if err != nil {
+		return v, err
+	}
+	v.Desired.RPCSecret = ""
+	v.Desired.RPCGrants = nil
+	v.Desired.RedeemerGrants = nil
+	var b []byte
+	if m.Terminal {
+		err = s.db.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&b)
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&b)
+	}
+	if err == nil {
+		if meta, _, e := machineconfig.ReadApplied(b); e == nil {
+			v.DeliveredGeneration = meta.Onchain.Generation
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	}
+	return v, err
 }

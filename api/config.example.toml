@@ -27,9 +27,6 @@ Listen = "localhost:41932"
 PublicAPIURL = "http://localhost:41932"
 ConfigReconcileInterval = "1m"
 
-# Registry price validation only; actual Node payment configuration is separate.
-RegistryPaymentMode = "offchain"
-
 # Machine ingress is opt-in. See docs/machine-tunnels.md before enabling it.
 CloudflareEnabled = false
 CloudflareIngressApproved = false
@@ -57,3 +54,6 @@ RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 # TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
 # TunnelDrainTimeout = "<DRAIN_DEADLINE>"
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
+
+# OnchainSecretsDir = "/run/onchain-rpc" # immutable owner-only versioned files
+# OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"

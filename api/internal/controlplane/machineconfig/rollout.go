@@ -3,9 +3,11 @@ package machineconfig
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/runtime/artifact"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"time"
 )
 
@@ -24,6 +26,9 @@ func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, erro
 // Gate holds the applied workload until a fresh report completes its drain.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
+	if desired.OnchainError != nil {
+		return false, desired.OnchainError
+	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
@@ -32,13 +37,27 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
+	// Admission has never opened for this onchain target. Its image or rendering
+	// can be repaired without asking the failed process to drain again, while
+	// retaining storage identity, redemption destination and the admission freeze.
+	frozen := state.ApplyingConfigDigest == old.ConfigDigest
+	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
+	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient && old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller && old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL
+	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+		state.ApplyingConfigDigest = digest
+		state.ApplyingUpgradeVersion = upgradeVersion(desired)
+		state.PendingConfigDigest = digest
+		state.RolloutReason = "rollout_pending"
+		return false, nil
+	}
 	if state.ApplyingConfigDigest != "" {
 		if state.ApplyingConfigDigest == digest {
 			report, at, e := s.store.Report(ctx, m, "runtime")
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return false, e
 			}
-			if !report.Ready || report.Generation != state.Generation || report.ConfigDigest != digest || report.K3sVersion != state.ApplyingUpgradeVersion || time.Since(at) > s.config.StatusTTL {
+			if (desired.Onchain.Onchain() && !desired.OnchainReady) || !report.Ready || report.Generation != state.Generation || report.ConfigDigest != digest || report.K3sVersion != state.ApplyingUpgradeVersion || time.Since(at) > s.config.StatusTTL {
 				state.RolloutReason = "rollout_pending"
 				return false, nil
 			}
@@ -55,6 +74,14 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.ApplyingUpgradeVersion = ""
 	}
 	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
+		if desired.Onchain.Onchain() && state.ApprovedConfigDigest != digest {
+			if !desired.OnchainReady {
+				state.RolloutReason = "onchain_startup_pending"
+				return false, nil
+			}
+			state.ApprovedConfigDigest = digest
+			state.RolloutReason = ""
+		}
 		return false, nil
 	}
 	if state.PendingConfigDigest != digest {
@@ -65,6 +92,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
 		state.HeldOrchestrator = manifest
+		state.HeldOnchain = onchainJSON(old.Onchain)
 		s.holdUpgrade(ctx, m, state)
 	}
 	if old.ConfigDigest != digest {
@@ -85,6 +113,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 // StageTarget drains for a change whose external prerequisites are prepared by
 // another subsystem. Gate releases the held workload once those facts are ready.
 func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desired Desired, target string) (bool, error) {
+	if desired.OnchainError != nil {
+		return false, desired.OnchainError
+	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
@@ -105,6 +136,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
 		state.HeldOrchestrator = manifest
+		state.HeldOnchain = onchainJSON(old.Onchain)
 		s.holdUpgrade(ctx, m, state)
 	}
 	done, err := s.drainComplete(ctx, m, state)
@@ -182,3 +214,5 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 	n, err := result.RowsAffected()
 	return n == 1, err
 }
+
+func onchainJSON(c onchain.Config) string { b, _ := json.Marshal(c); return string(b) }

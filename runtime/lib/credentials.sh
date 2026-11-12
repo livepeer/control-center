@@ -83,6 +83,13 @@ stop_credential_consumers() {
     kube -n flux-system scale deployment/livepeer-app-reconciler --replicas=0
   fi
   kube -n flux-system delete deployment/livepeer-tunnel --ignore-not-found --wait=true
+  if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    # Old app cleanup is already confirmed; stop its Node before issuing credentials.
+    if kube -n livepeer get deployment/orchestrator >/dev/null 2>&1; then
+      kube -n livepeer scale deployment/orchestrator --replicas=0
+    fi
+    kube -n livepeer wait pod -l app=orchestrator --for=delete --timeout=120s
+  fi
   # Replica count alone does not prove old HTTP-speaking processes terminated.
   kube -n flux-system wait pod -l app=livepeer-http-source --for=delete --timeout=120s
   kube -n flux-system wait pod -l app=livepeer-app-reconciler --for=delete --timeout=120s
@@ -128,9 +135,9 @@ transition_credentials() {
   install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/app-reconciler"
   install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
   chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"

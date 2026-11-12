@@ -50,6 +50,10 @@ func (c *Controller) hooks() OwnerHooks {
 	return OwnerHooks{Observe: c.observe, Failure: c.failed, Now: c.now,
 		Eligibility: func(r Registration) (bool, bool) {
 			member, ready := c.Journal.Eligibility(r)
+			state := c.Journal.View()
+			if state.Metadata.Onchain.Onchain() && !state.Metadata.OnchainActive {
+				ready = false
+			}
 			return member, ready && c.Probes != nil && c.Probes.Ready(r.InstanceID, r.PodUID)
 		}}
 }
@@ -343,6 +347,14 @@ func (c *Controller) Tick(ctx context.Context) error {
 			})
 			for _, g := range groups {
 				a := assignments[g.RevisionID]
+				if s.Metadata.Onchain.Onchain() && !s.Metadata.OnchainActive {
+					s.AssignmentReasons[a.RevisionID] = "onchain_pending"
+					continue
+				}
+				if a.Revision != nil && s.Metadata.Onchain.Compatible(a.Revision.Definition) != nil {
+					s.AssignmentReasons[a.RevisionID] = "onchain_incompatible"
+					continue
+				}
 				if !a.StartAllowed {
 					s.AssignmentReasons[a.RevisionID] = "cleanup_prerequisite"
 					continue
@@ -413,7 +425,21 @@ func (c *Controller) Tick(ctx context.Context) error {
 		return err
 	}
 	s = c.Journal.View()
-	ownerErr := c.syncOwner(ctx, s, ready, view)
+	var ownerErr error
+	if inputErr == nil && input.Metadata.Terminal && input.NodeAbsent {
+		ownerErr = c.Owner.Close(ctx)
+		if ownerErr == nil {
+			ownerErr = c.Journal.Update(func(s *State) error {
+				s.Identity, s.OwnerEpoch, s.OwnerReason = Identity{}, "", ""
+				for _, i := range s.Instances {
+					i.RegistrationGone, i.RegistrationPending = true, false
+				}
+				return nil
+			})
+		}
+	} else {
+		ownerErr = c.syncOwner(ctx, s, ready, view)
+	}
 	// Owner requests are bounded; a failed safety withdrawal cannot prevent
 	// deadline removal publication, and artifact failure cannot keep old readiness.
 	s = c.Journal.View()
@@ -594,11 +620,14 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 			continue
 		}
 		pod, exists := view.Pods[i.Name]
+		if s.Metadata.Onchain.Onchain() && !s.Metadata.OnchainActive && i.AppID == "" {
+			continue
+		}
 		if i.AppID == "" && (!exists || pod.UID != i.PodUID || pod.Deleting || pod.Phase != "Running") {
 			continue
 		}
 		signalOK := i.Definition.Lifecycle.StopSignal == nil || (exists && pod.StopSignal == *i.Definition.Lifecycle.StopSignal)
-		if i.AppID != "" && ready[id] && signalOK && confirmed && !s.ClockUncertain && !recovery {
+		if (!s.Metadata.Onchain.Onchain() || s.Metadata.OnchainActive) && i.AppID != "" && ready[id] && signalOK && confirmed && !s.ClockUncertain && !recovery {
 			for n := range registrations {
 				registrations[n].Options.Status = "ready"
 			}

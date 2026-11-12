@@ -7,12 +7,11 @@ type Lifecycle = { version: number; retired_at: string | null; retired_by: strin
 type Summary = Ref & { revision: number; app_version: string; lifecycle: Lifecycle }
 type App = { name: string; head: Summary; revision_count: number; active_revision_count: number }
 type Revision = Summary & { name: string; source_toml: string; definition: unknown; published_at: string; published_by: string }
-type Preview = { definition: unknown; digest: string; payment_mode: string }
+type Preview = { definition: unknown; digest: string }
 const starter = 'name = "my-app"\nschema_version = 1\n\n[container]\nimage = "REPOSITORY@sha256:DIGEST"\n\n[resources.limits]\nmemory = "1GiB"\n\n[http]\nport = 8080\n'
 
 export function Catalog({ session, authorityFailure }: { session: Session; authorityFailure: (error: APIError) => void }) {
   const [apps, setApps] = useState<App[]>([])
-  const [mode, setMode] = useState('offchain')
   const [nextApp, setNextApp] = useState<string | null>(null)
   const [selectedApp, setSelectedApp] = useState<App | null>(null)
   const [history, setHistory] = useState<Summary[]>([])
@@ -56,14 +55,14 @@ export function Catalog({ session, authorityFailure }: { session: Session; autho
     }
   }
   function loadApps(after?: string) {
-    void run('list', signal => api<{ apps: App[]; payment_mode: string; next_after_name: string | null }>(session, '/api/admin/apps' + (after ? `?after_name=${encodeURIComponent(after)}` : ''), { signal }), data => {
+    void run('list', signal => api<{ apps: App[]; next_after_name: string | null }>(session, '/api/admin/apps' + (after ? `?after_name=${encodeURIComponent(after)}` : ''), { signal }), data => {
       setApps(old => after ? [...old, ...data.apps.filter(a => !old.some(b => b.name === a.name))] : data.apps)
-      setMode(data.payment_mode); setNextApp(data.next_after_name)
+      setNextApp(data.next_after_name)
     })
   }
   function loadHistory(name: string, before?: number, rebase = false) {
-    void run('history', signal => api<{ app: App; revisions: Summary[]; next_before_revision: number | null; payment_mode: string }>(session, `/api/admin/apps/${encodeURIComponent(name)}` + (before ? `?before_revision=${before}` : ''), { signal }), data => {
-      setSelectedApp(data.app); setHistory(old => before ? [...old, ...data.revisions] : data.revisions); setNextRevision(data.next_before_revision); setMode(data.payment_mode)
+    void run('history', signal => api<{ app: App; revisions: Summary[]; next_before_revision: number | null }>(session, `/api/admin/apps/${encodeURIComponent(name)}` + (before ? `?before_revision=${before}` : ''), { signal }), data => {
+      setSelectedApp(data.app); setHistory(old => before ? [...old, ...data.revisions] : data.revisions); setNextRevision(data.next_before_revision)
       if (rebase) { setExpectedHead(data.app.head.revision_id); setPreview(null); setConflict(false); setMessage('Publication base refreshed. Validate the draft again.') }
     })
   }
@@ -89,7 +88,7 @@ export function Catalog({ session, authorityFailure }: { session: Session; autho
   }
   function validate() {
     const version = draft.current; setMessage(''); setProblem(''); setFields([]); setPreview(null)
-    void run('validation', signal => api<Preview>(session, '/api/admin/apps/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, body: JSON.stringify({ source_toml: source }) }), data => { if (version === draft.current) { setPreview(data); setMode(data.payment_mode) } })
+    void run('validation', signal => api<Preview>(session, '/api/admin/apps/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, body: JSON.stringify({ source_toml: source }) }), data => { if (version === draft.current) { setPreview(data) } })
   }
   function publish() {
     if (changing.current || !preview || (!creating && (!selectedApp || !expectedHead))) return
@@ -111,7 +110,7 @@ export function Catalog({ session, authorityFailure }: { session: Session; autho
     })
   }
   return <div className="app-catalog" aria-labelledby="catalog-title">
-    <div className="section-heading"><div><h3 id="catalog-title">App catalog</h3><p className="muted">Registry pricing policy: {mode}. Revisions are immutable.</p></div><div className="catalog-actions"><button className="button" disabled={busy} onClick={() => loadApps()}>Refresh catalog</button><button className="button lime" disabled={busy} onClick={() => edit(true)}>Create app</button></div></div>
+    <div className="section-heading"><div><h3 id="catalog-title">App catalog</h3><p className="muted">Prices belong to each immutable app revision. Onchain activation is configured per machine.</p></div><div className="catalog-actions"><button className="button" disabled={busy} onClick={() => loadApps()}>Refresh catalog</button><button className="button lime" disabled={busy} onClick={() => edit(true)}>Create app</button></div></div>
     {problem && <div role="alert" className="notice error">{problem}{fields.length > 0 && <ul>{fields.map((f, i) => <li key={i}><code>{f.path}</code>: {f.message}</li>)}</ul>}</div>}
     {message && <div role="status" className="notice success">{message}</div>}
     <ul className="catalog-list">{apps.map(app => <li key={app.name}><button className="button" disabled={busy} onClick={() => inspect(app.name, app.head.revision_id)}>{app.name}</button><span>Revision {app.head.revision} · version {app.head.app_version || '(unversioned)'} · {app.active_revision_count} active</span></li>)}</ul>

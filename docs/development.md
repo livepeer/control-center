@@ -50,10 +50,6 @@ Docker daemon over a Unix socket. Image retrieval and container package
 installation need network access. Optional kubectl/PyYAML checks report skips
 when unavailable.
 
-The runner checks Bash syntax, runs ShellCheck and Python tests, then exercises
-firewall traffic in a disposable Docker container. See
-[Runtime verification](../runtime/README.md#verification) for test scope and
-host acceptance checks.
 
 Logs and results are written to `.remote-test-results/<run-id>/`; `result.json`
 records test and cleanup outcomes. The command returns nonzero for test,
@@ -61,3 +57,7 @@ transport, or cleanup failures. Interrupted runs may retain a remote container
 or temporary directory; inspect the resource identifiers printed by the helper
 before removing those resources or rerunning. Delete the local run directory
 when its results are no longer needed.
+
+## End-to-end tests
+
+Use the separate `e2e-clankery` harness; commands are in its `README.txt`.

@@ -1,0 +1,28 @@
+# Fresh onchain deployment: combine with compose.yaml and --profile onchain.
+services:
+  redeemer:
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    profiles: [onchain]
+    image: ${LIVEPEER_REDEEMER_IMAGE:?Set a digest-pinned compatible Node image}
+    user: "65532:65532"
+    command: [redeemer, --config, /etc/livepeer/redeemer.toml]
+    volumes:
+      - ./redeemer.toml:/etc/livepeer/redeemer.toml:ro
+      - redeemer-data:/home/livepeer/.lpData
+      - ./secrets/redeemer:/run/redeemer:ro
+    stop_grace_period: 30s
+
+  api:
+    volumes:
+      - ./secrets/onchain-rpc:/run/onchain-rpc:ro
+    secrets:
+      - onchain-webhook-auth
+secrets:
+  onchain-webhook-auth:
+    file: ./secrets/onchain-webhook-auth
+
+volumes:
+  redeemer-data:
