@@ -31,7 +31,7 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	a := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
-	readyTunnel(t, s, a)
+	sourceA := readyTunnel(t, s, a)
 	readyTunnel(t, s, b)
 	adminA(t, s)
 	s.params.DiscoveryParams = DiscoveryParams{DiscoveryEnabled: true, DiscoveryRefreshInterval: time.Second, DiscoveryMaxFailedRefreshes: 6}
@@ -40,11 +40,21 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 	}
 	t.Cleanup(s.CloseDiscovery)
 	var calls atomic.Int32
+	var pauseNext atomic.Bool
+	started, release := make(chan struct{}), make(chan struct{})
 	// The real database/keyring resolver and Collector are used; only the remote
 	// Cloudflare/orchestrator response is simulated. TLS/policy has separate tests.
 	s.CloseDiscovery()
 	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger, Transport: fleetRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
+		if r.URL.String() == sourceA.DiscoveryURL && pauseNext.CompareAndSwap(true, false) {
+			close(started)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
 		sources, err := s.tunnels.DiscoverySources(r.Context())
 		if err != nil {
 			return nil, err
@@ -53,7 +63,14 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 			if source.URL != r.URL.String() {
 				continue
 			}
-			credential, err := s.tunnels.ResolveAccessCredential(r.Context(), source.CredentialRef)
+			// Rotation overlaps credentials until the replacement is acknowledged.
+			// Validate the presented token, not the source's newest credential.
+			var version int64
+			providerID := strings.TrimPrefix(r.Header.Get("CF-Access-Client-Id"), "client-")
+			if err := s.db.QueryRowContext(r.Context(), `SELECT version FROM lpcc.access_credentials WHERE node_id=$1 AND provider_id=$2`, source.NodeID, providerID).Scan(&version); err != nil {
+				return nil, err
+			}
+			credential, err := s.tunnels.ResolveAccessCredential(r.Context(), credentialRef(source.NodeID, version))
 			if err != nil {
 				return nil, err
 			}
@@ -127,9 +144,17 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 		}
 	}
 	managerBeforeRotation := s.tunnels
+	// Rotate while a request still carries the predecessor credential.
+	pauseNext.Store(true)
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("collection did not start before rotation")
+	}
 	rotate := request(t, s, "POST", "/api/admin/machines/"+a["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "access"})
 	requireStatus(t, rotate, 202)
 	driveTunnels(t, s)
+	close(release)
 	reconcileDiscovery(t, s)
 	var acknowledged bool
 	for deadline := time.Now().Add(3 * time.Second); !acknowledged; {
