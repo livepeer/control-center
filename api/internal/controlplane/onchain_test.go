@@ -143,6 +143,9 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 200 {
 		t.Fatal("refresh revoked retained grant")
 	}
+	if _, e = s.db.Exec(`UPDATE lpcc.onchain_state SET initialized=true WHERE fingerprint=$1`, strings.Repeat("a", 64)); e != nil {
+		t.Fatal(e)
+	}
 	if e = s.RetireMachine(t.Context(), node); e != nil {
 		t.Fatal(e)
 	}
@@ -152,6 +155,16 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	fresh := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	if fresh["node_id"] == machine["node_id"] {
 		t.Fatal("enrollment not replaced")
+	}
+	inherited, err := loadOnchain(t.Context(), s.db, fresh["node_id"])
+	inheritedJSON, _ := json.Marshal(inherited)
+	configJSON, _ := json.Marshal(cfg)
+	if err != nil || string(inheritedJSON) != string(configJSON) {
+		t.Fatal("re-enrollment lost onchain configuration", inherited, err)
+	}
+	var initialized bool
+	if err = s.db.QueryRow(`SELECT initialized FROM lpcc.onchain_state WHERE fingerprint=$1`, strings.Repeat("a", 64)).Scan(&initialized); err != nil || !initialized {
+		t.Fatal("re-enrollment lost storage identity", err)
 	}
 	c.Recipient = "0x" + strings.Repeat("3", 40)
 	if _, e = s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{installationFingerprint(t, s, node): c}}, 1); e == nil {
@@ -167,7 +180,6 @@ func TestOnchainActivationAndNormalDrain(t *testing.T) {
 		t.Fatal(e)
 	}
 	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
-	node = c["node_id"]
 	node = c["node_id"]
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
@@ -233,7 +245,6 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 		t.Fatal(e)
 	}
 	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
-	node = c["node_id"]
 	node = c["node_id"]
 	var b []byte
 	if e := s.db.QueryRow(`SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&b); e != nil {

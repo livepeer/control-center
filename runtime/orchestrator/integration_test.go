@@ -50,7 +50,7 @@ func integrationFixture(t *testing.T) (*Integration, contract.Metadata, Launch) 
 		if p != "onchain/credentials" {
 			t.Fatal(p)
 		}
-		b, _ := json.Marshal(Grant{Association: Association{Launch: l, CredentialVersion: 1, OnchainGeneration: 2, ConfigDigest: m.ConfigDigest, GrantID: "grant"}, RPCURL: "https://rpc.example/secret", Headers: "Authorization: Bearer redemption-secret"})
+		b, _ := json.Marshal(Grant{Association: Association{Launch: l, NodeID: m.NodeID, CredentialVersion: 1, OnchainGeneration: 2, ConfigDigest: m.ConfigDigest, GrantID: "grant"}, RPCURL: "https://rpc.example/secret", Headers: "Authorization: Bearer redemption-secret"})
 		return b, nil, nil
 	})
 	return i, m, l

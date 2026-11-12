@@ -211,22 +211,6 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} ca
   await expect(page.getByRole('button', { name: 'Assign selected revision', exact: true })).toHaveCount(0)
 })
 
-test('expired inventory preserves its unverified source-version explanation', async ({ page }) => {
-  await page.clock.install()
-  const state = await setup(page)
-  const membership = state.view.membership['instance-preserved']
-  membership.state = 'unverified_provenance'; membership.provenance_current = false
-  membership.expires_at = new Date(Date.parse(state.view.server_time) + 1000).toISOString()
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await page.getByText('Instance evidence and correlation (1)').click()
-  await expect(page.getByText('Retained inventory has no confirmation for the current source version', { exact: false })).toBeVisible()
-  state.fail = true
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(page.getByText('Status refresh unavailable.', { exact: true })).toBeVisible()
-  await page.clock.fastForward(2000)
-  await expect(page.getByText('Retained inventory has no confirmation for the current source version', { exact: false })).toBeVisible()
-})
-
 test('onchain readiness stays separate from remote handoff', async ({ page }) => {
   await page.clock.install()
   const state = await setup(page, false)

@@ -95,7 +95,7 @@ func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	respond(w, 200, orchestrator.Grant{Association: orchestrator.Association{Launch: in.Launch, CredentialVersion: m.CredentialVersion, OnchainGeneration: in.OnchainGeneration, ConfigDigest: in.ConfigDigest, GrantID: id}, RequireState: initialized, RPCURL: string(rpc), Headers: "Authorization: Bearer " + s.submissionToken(id)})
+	respond(w, 200, orchestrator.Grant{Association: orchestrator.Association{Launch: in.Launch, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, OnchainGeneration: in.OnchainGeneration, ConfigDigest: in.ConfigDigest, GrantID: id}, RequireState: initialized, RPCURL: string(rpc), Headers: "Authorization: Bearer " + s.submissionToken(id)})
 }
 
 func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {

@@ -509,6 +509,7 @@ func TestFleetWorkerStartsEmptyAndClosesPendingWork(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+	f.collector.Refresh(ctx, false) // Join the initial refresh before starting another.
 	block.Store(true)
 	refreshDone := make(chan struct{})
 	go func() { f.collector.Refresh(ctx, false); close(refreshDone) }()
