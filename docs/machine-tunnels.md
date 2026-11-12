@@ -126,12 +126,10 @@ share Access service credentials. TLS, authenticated API/discovery,
 unauthenticated rejection and authenticated isolation probes must succeed for each
 endpoint generation. API/discovery forwarding sets Host to the private orchestrator;
 wildcard application forwarding preserves the actual Host.
-The loopback proxy rejects malformed, port-bearing, nested or reserved application
-Hosts and removes Access headers and cookies before requests reach Node. Paths are matched
-independently of HTTP method; Node enforces endpoint methods. The allowlist is
-reservation, client session stop/payment, payment refresh, application paths,
-`/run` and `/proxy`. Reserved discovery, runner/control, metrics, health and
-Trickle paths precede forwarding rules. Unknown hosts/paths default to 404.
+The loopback proxy rejects invalid app Hosts and strips Access credentials.
+The API host allows reservation, stop/payment and payment refresh; discovery
+allows `/discovery`. Other paths on those hosts return 404. App hosts deny
+reserved paths and forward the rest; Node checks HTTP methods.
 Services remain ClusterIP. Never add public Ingress, NodePort, LoadBalancer,
 hostPort or hostNetwork to generated workloads.
 

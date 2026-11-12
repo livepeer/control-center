@@ -116,10 +116,15 @@ func TestTunnelIngressContract(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{"/apps/a/session", "/apps/a/session/b/stop", "/apps/a/session/b/payment", "/refresh-payment", "/apps/a/app/v1/complete", "/apps/a/session/b/app/ws", "/run/abc/media", "/proxy/abc"} {
+	for _, path := range []string{"/apps/a/session", "/apps/a/session/b/stop", "/apps/a/session/b/payment", "/refresh-payment"} {
 		rule := match(api, path)
 		if rule.Service != ConnectorOrigin || rule.OriginRequest == nil || rule.OriginRequest.Access == nil || !rule.OriginRequest.Access.Required || rule.OriginRequest.Access.Audience[0] != "aud" || rule.OriginRequest.HTTPHostHeader != endpointHost(PrivateOrchestrator) {
 			t.Fatalf("missing client path %s", path)
+		}
+	}
+	for _, path := range []string{"/apps/a/app", "/apps/a/app/v1/complete", "/apps/a/session/b/app", "/apps/a/session/b/app/ws", "/run/abc/media", "/proxy/abc"} {
+		if rule := match(api, path); rule.Service != "http_status:404" {
+			t.Fatalf("application data reached protected API Host: %s", path)
 		}
 	}
 	for _, host := range []string{api, "discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", "api.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery.lp-aaaaaaaaaaaaaaaa.example.invalid"} {

@@ -276,6 +276,9 @@ func TestRecreatedOwnerDoesNotConfirmOldWork(t *testing.T) {
 		t.Fatal("recreated owner supplied confirmed work evidence", s.Identity)
 	}
 	for _, entry := range owner.accepted.Entries {
+		if !entry.Options.Proxy {
+			t.Fatal("managed app omitted generated proxy Host", entry)
+		}
 		if entry.Options.Status != "not-ready" {
 			t.Fatal("recovery admitted new work", entry)
 		}

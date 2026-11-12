@@ -33,7 +33,10 @@ const ConnectorOrigin = contract.ConnectorOrigin
 // Reserve these path segments even under generated app hosts. Go RE2 has no
 // negative lookahead: ordered denial rules precede every forwarding rule.
 const reservedPath = `(?i)(?:^|/)(?:discovery|runners?|metrics|healthz|readyz)(?:/|;|$)|(?:^|/)ai/trickle(?:/|;|$)`
-const clientPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/(?:session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment|app(?:/.*)?))?|app(?:/.*)?)|refresh-payment|(?:run|proxy)/[A-Za-z0-9_-]{1,128}(?:/.*)?)$`
+
+// Managed apps use Proxy=true, so app bytes go through generated proxy Hosts.
+// The protected API Host needs only reservation, stop and payment control.
+const clientPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment))?|refresh-payment)$`
 
 func RoutingFor(node, domain, suffix string) Snapshot {
 	return Snapshot{State: machineconfig.InitialState(false), RoutingState: RoutingState{EndpointGeneration: 1, CredentialGeneration: 1, SourceGeneration: 1, AccessVersion: 1,

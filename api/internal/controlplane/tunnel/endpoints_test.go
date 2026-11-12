@@ -260,10 +260,8 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 			t.Fatal("guessed hostname reached Node API", host, response.StatusCode)
 		}
 	}
-	req, _ = http.NewRequest("GET", state.ServiceURL+"/apps/app-echo/app/echo", nil)
-	req.Header.Set("CF-Access-Client-Id", creds.ClientID)
-	req.Header.Set("CF-Access-Client-Secret", creds.ClientSecret)
-	req.Header.Set("Cf-Access-Jwt-Assertion", "edge-jwt")
+	req, _ = http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
+	req.Header.Set("Cf-Access-Jwt-Assertion", "caller-supplied")
 	req.Header.Set("Cookie", "CF_Authorization=first; session=app-cookie; cf_authorization=second")
 	req.Header.Set("Authorization", "Bearer app-authorization")
 	response, err = client.Do(req)
@@ -273,7 +271,7 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 	defer response.Body.Close()
 	var headers http.Header
 	if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&headers) != nil {
-		t.Fatal("API-origin application echo failed", response.StatusCode)
+		t.Fatal("public application echo failed", response.StatusCode)
 	}
 	for name := range headers {
 		if strings.HasPrefix(strings.ToLower(name), "cf-access-") {
