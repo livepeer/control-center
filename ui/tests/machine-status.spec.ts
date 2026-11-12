@@ -227,3 +227,19 @@ test('expired inventory preserves its unverified source-version explanation', as
   await page.clock.fastForward(2000)
   await expect(page.getByText('Retained inventory has no confirmation for the current source version', { exact: false })).toBeVisible()
 })
+
+test('paid readiness stays separate from handoff and retirement recovery', async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page, false)
+  state.view.payment = { desired: { mode: 'paid', generation: 3, recipient: `0x${'2'.repeat(40)}`, network: 'custom' }, delivered_generation: 3, recovery_required: false }
+  state.view.components[0].payment = { generation: 3, mode: 'paid', applied: true, ready: true, queue_known: true, unsettled: 1, handoff: 'degraded' }
+  await page.clock.fastForward(5100)
+  await expect(page.getByRole('region', { name: 'Payment operation' })).toContainText('Local paid admission: ready')
+  await expect(page.getByRole('region', { name: 'Payment operation' })).toContainText('Remote handoff: degraded')
+  state.view.payment.recovery_required = true
+  await page.clock.fastForward(5100)
+  await expect(page.getByRole('alert')).toContainText('Payment recovery required')
+  state.view.components[0].fresh = false
+  await page.clock.fastForward(5100)
+  await expect(page.getByRole('region', { name: 'Payment operation' })).toContainText('Remote handoff: unverified')
+})

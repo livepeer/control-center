@@ -40,7 +40,7 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 		}
 		w.Write([]byte(`{}`))
 	})
-	sockets, err := Listen(root, connector, apps)
+	sockets, err := Listen(root, connector, apps, http.NotFoundHandler())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +48,11 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 	defer cancel()
 	defer sockets.Close()
 	go sockets.Run(ctx)
-	if other, err := Listen(root, connector, apps); err == nil {
+	if other, err := Listen(root, connector, apps, http.NotFoundHandler()); err == nil {
 		other.Close()
 		t.Fatal("two management publishers acquired the same root")
 	}
-	for _, consumer := range []string{"connector", "apps"} {
+	for _, consumer := range []string{"connector", "apps", "orchestrator"} {
 		info, err := os.Stat(filepath.Join(root, consumer))
 		if err != nil || info.Mode().Perm() != 0700 {
 			t.Fatal("consumer directory exposed")
@@ -108,14 +108,14 @@ func TestSocketStartupRefusesSymlinkAndNonSocketPaths(t *testing.T) {
 	if err = os.Symlink(t.TempDir(), filepath.Join(root, "connector")); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Listen(root, handler, handler); err == nil {
+	if s, err := Listen(root, handler, handler, handler); err == nil {
 		s.Close()
 		t.Fatal("followed consumer symlink")
 	}
 	os.Remove(filepath.Join(root, "connector"))
 	os.Mkdir(filepath.Join(root, "connector"), 0700)
 	os.WriteFile(filepath.Join(root, "connector", "control.sock"), []byte(strings.Repeat("x", 4)), 0600)
-	if s, err := Listen(root, handler, handler); err == nil {
+	if s, err := Listen(root, handler, handler, handler); err == nil {
 		s.Close()
 		t.Fatal("replaced non-socket")
 	}

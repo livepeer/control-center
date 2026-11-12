@@ -61,7 +61,6 @@ data:
     Listen = "unsafe@0.0.0.0:8935"
     MetricsListen = "unsafe@0.0.0.0:8936"
     ServiceURL = "@SERVICE_URL@"
-    APIOriginURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     RunnerServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     ProxyURLTemplate = "@PROXY_URL_TEMPLATE@"
     BootstrapSecretFile = "/credentials/secret"
@@ -97,6 +96,7 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
         fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -71,6 +72,9 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 	if err != nil || identity.Epoch != m.Epoch || identity.CredentialVersion != m.CredentialVersion {
 		return input, errors.New("management_enrollment")
 	}
+	if m.Payment.Paid() && m.PaymentActive {
+		m.PaymentActive = s.paymentActive(ctx, m)
+	}
 	p, err := appbundle.Read(files, m)
 	if err != nil {
 		// Whole-archive/enrollment checks already succeeded. An invalid app payload
@@ -79,4 +83,41 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 		return Input{Metadata: m, Payload: appbundle.Unavailable(), Digest: a.Digest}, nil
 	}
 	return Input{Metadata: m, Payload: p, Digest: a.Digest}, nil
+}
+
+// Payment eligibility is checked against the live process, even when an offline
+// artifact repeats an earlier approval. Dependency loss cannot suppress drain.
+func (s Source) paymentActive(ctx context.Context, m contract.Metadata) bool {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				DeletionTimestamp *string           `json:"deletionTimestamp"`
+				Annotations       map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if s.Kube.Request(ctx, "GET", "/api/v1/namespaces/livepeer/pods?labelSelector=app%3Dorchestrator", nil, &pods) != nil {
+		return false
+	}
+	live := 0
+	for _, p := range pods.Items {
+		if p.Metadata.DeletionTimestamp == nil {
+			if p.Metadata.Annotations["livepeer.io/config-sha256"] != m.ConfigDigest {
+				return false
+			}
+			live++
+		}
+	}
+	if live != 1 {
+		return false
+	}
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://orchestrator.livepeer.svc.cluster.local:8936/readyz", nil)
+	resp, e := s.Client.Do(req)
+	if e != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
 }

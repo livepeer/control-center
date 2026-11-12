@@ -31,22 +31,24 @@ type Params struct {
 	DatabaseParams
 	TunnelParams
 	DiscoveryParams
-	Listen                  string        `env:"LISTEN_ADDR" default:"localhost:41932" descr:"HTTP listen address"`
-	PublicAPIURL            string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
-	SupabaseURL             string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
-	SupabasePublishableKey  string        `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
-	RegistryPaymentMode     string        `env:"REGISTRY_PAYMENT_MODE" default:"offchain" alts:"offchain,onchain" descr:"Registry pricing policy; does not configure Node payments"`
-	DefaultAdminEmail       string        `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
-	JWTSigningSecret        string        `env:"JWT_SIGNING_SECRET" secret:"true" min:"32" descr:"Persistent enrollment signing secret (at least 32 bytes)"`
-	JWTSigningSecretFile    string        `env:"JWT_SIGNING_SECRET_FILE" secretfor:"JWTSigningSecret" basepath:"source" descr:"File containing the enrollment signing secret"`
-	MachineTokenSecret      string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
-	MachineTokenSecretFile  string        `env:"MACHINE_TOKEN_SECRET_FILE" secretfor:"MachineTokenSecret" basepath:"source" descr:"File containing the machine credential secret"`
-	ConfigReconcileInterval time.Duration `env:"CONFIG_RECONCILE_INTERVAL" default:"1m" descr:"Desired configuration reconciliation interval"`
-	RuntimeImage            string        `env:"RUNTIME_IMAGE" descr:"Digest-pinned Go Runtime distribution for system services"`
-	RuntimeConnectorImage   string        `env:"RUNTIME_CONNECTOR_IMAGE" optional:"true" descr:"Digest-pinned Runtime connector image"`
-	RuntimeNodeImage        string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
-	RuntimeNodeDrainTimeout time.Duration `env:"RUNTIME_NODE_DRAIN_TIMEOUT" default:"12h" descr:"Node app drain timeout, from zero to 12h"`
-	AppStopSignals          bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
+	Listen                   string        `env:"LISTEN_ADDR" default:"localhost:41932" descr:"HTTP listen address"`
+	PublicAPIURL             string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
+	SupabaseURL              string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
+	SupabasePublishableKey   string        `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
+	PaymentSecretsDir        string        `optional:"true" descr:"Owner-only immutable RPC secret versions directory"`
+	PaymentWebhookSecret     string        `secret:"true" optional:"true"`
+	PaymentWebhookSecretFile string        `secretfor:"PaymentWebhookSecret" basepath:"source"`
+	DefaultAdminEmail        string        `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
+	JWTSigningSecret         string        `env:"JWT_SIGNING_SECRET" secret:"true" min:"32" descr:"Persistent enrollment signing secret (at least 32 bytes)"`
+	JWTSigningSecretFile     string        `env:"JWT_SIGNING_SECRET_FILE" secretfor:"JWTSigningSecret" basepath:"source" descr:"File containing the enrollment signing secret"`
+	MachineTokenSecret       string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
+	MachineTokenSecretFile   string        `env:"MACHINE_TOKEN_SECRET_FILE" secretfor:"MachineTokenSecret" basepath:"source" descr:"File containing the machine credential secret"`
+	ConfigReconcileInterval  time.Duration `env:"CONFIG_RECONCILE_INTERVAL" default:"1m" descr:"Desired configuration reconciliation interval"`
+	RuntimeImage             string        `env:"RUNTIME_IMAGE" descr:"Digest-pinned Go Runtime distribution for system services"`
+	RuntimeConnectorImage    string        `env:"RUNTIME_CONNECTOR_IMAGE" optional:"true" descr:"Digest-pinned Runtime connector image"`
+	RuntimeNodeImage         string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
+	RuntimeNodeDrainTimeout  time.Duration `env:"RUNTIME_NODE_DRAIN_TIMEOUT" default:"12h" descr:"Node app drain timeout, from zero to 12h"`
+	AppStopSignals           bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
 }
 
 var passwordPlaceholder = regexp.MustCompile(`(?i)\[(?:your[-_])?password\]|\[PG_PASSWORD\]`)

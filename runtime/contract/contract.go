@@ -1,41 +1,47 @@
 // Package contract contains the machine wire contract shared by delivery and Runtime.
 package contract
 
-import "time"
+import (
+	"github.com/livepeer/control-center/runtime/payment"
+	"time"
+)
 
 const BundleFormat = 3
 
 type Metadata struct {
-	NodeID                  string    `json:"node_id"`
-	Epoch                   string    `json:"epoch"`
-	CredentialVersion       int64     `json:"credential_version"`
-	Generation              int64     `json:"generation"`
-	Terminal                bool      `json:"terminal"`
-	TerminalCleanup         bool      `json:"terminal_cleanup,omitempty"`
-	TerminalInputDigest     string    `json:"terminal_input_digest,omitempty"`
-	DrainRequested          bool      `json:"drain_requested"`
-	ConfigDigest            string    `json:"config_digest"`
-	ServiceURL              string    `json:"service_url"`
-	TunnelID                string    `json:"tunnel_id"`
-	TokenGeneration         int64     `json:"credential_generation"`
-	ProviderVersion         int64     `json:"provider_version"`
-	APIURL                  string    `json:"api_url"`
-	RunnerServiceURL        string    `json:"runner_service_url"`
-	ProxyURLTemplate        string    `json:"proxy_url_template"`
-	DiscoveryURL            string    `json:"discovery_url"`
-	IngressDigest           string    `json:"ingress_digest"`
-	AppsGeneration          int64     `json:"apps_generation,omitempty"`
-	AppsDigest              string    `json:"apps_digest,omitempty"`
-	ConnectorTokenRef       string    `json:"connector_token_ref"`
-	BundleFormat            int       `json:"bundle_format,omitempty"`
-	AppsPayloadDigest       string    `json:"apps_payload_digest,omitempty"`
-	AppsError               string    `json:"apps_error,omitempty"`
-	RequestedAppsGeneration int64     `json:"requested_apps_generation,omitempty"`
-	DrainTarget             string    `json:"drain_target,omitempty"`
-	DrainStartedAt          time.Time `json:"drain_started_at,omitempty"`
-	DrainDeadline           time.Time `json:"drain_deadline,omitempty"`
-	UpgradeDigest           string    `json:"upgrade_digest,omitempty"`
-	UpgradeVersion          string    `json:"upgrade_version,omitempty"`
+	Payment                 payment.Config `json:"payment"`
+	PaymentCredentialsRef   string         `json:"payment_credentials_ref,omitempty"`
+	PaymentActive           bool           `json:"payment_active"`
+	NodeID                  string         `json:"node_id"`
+	Epoch                   string         `json:"epoch"`
+	CredentialVersion       int64          `json:"credential_version"`
+	Generation              int64          `json:"generation"`
+	Terminal                bool           `json:"terminal"`
+	TerminalCleanup         bool           `json:"terminal_cleanup,omitempty"`
+	TerminalInputDigest     string         `json:"terminal_input_digest,omitempty"`
+	DrainRequested          bool           `json:"drain_requested"`
+	ConfigDigest            string         `json:"config_digest"`
+	ServiceURL              string         `json:"service_url"`
+	TunnelID                string         `json:"tunnel_id"`
+	TokenGeneration         int64          `json:"credential_generation"`
+	ProviderVersion         int64          `json:"provider_version"`
+	APIURL                  string         `json:"api_url"`
+	RunnerServiceURL        string         `json:"runner_service_url"`
+	ProxyURLTemplate        string         `json:"proxy_url_template"`
+	DiscoveryURL            string         `json:"discovery_url"`
+	IngressDigest           string         `json:"ingress_digest"`
+	AppsGeneration          int64          `json:"apps_generation,omitempty"`
+	AppsDigest              string         `json:"apps_digest,omitempty"`
+	ConnectorTokenRef       string         `json:"connector_token_ref"`
+	BundleFormat            int            `json:"bundle_format,omitempty"`
+	AppsPayloadDigest       string         `json:"apps_payload_digest,omitempty"`
+	AppsError               string         `json:"apps_error,omitempty"`
+	RequestedAppsGeneration int64          `json:"requested_apps_generation,omitempty"`
+	DrainTarget             string         `json:"drain_target,omitempty"`
+	DrainStartedAt          time.Time      `json:"drain_started_at,omitempty"`
+	DrainDeadline           time.Time      `json:"drain_deadline,omitempty"`
+	UpgradeDigest           string         `json:"upgrade_digest,omitempty"`
+	UpgradeVersion          string         `json:"upgrade_version,omitempty"`
 }
 
 type Evidence struct {

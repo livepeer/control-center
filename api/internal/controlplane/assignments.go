@@ -181,7 +181,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 					if target.Generation != 0 && (target.Desired != "absent" || target.CompletedAt == nil) {
 						return AdminChange{}, problem(409, "target_assigned", "Target must be unassigned or fully removed.")
 					}
-					revision, e := revisionForBinding(ctx, tx, nil, ref, s.registryMode())
+					revision, e := revisionForBinding(ctx, tx, nil, ref, node)
 					if e != nil {
 						return AdminChange{}, e
 					}
@@ -284,7 +284,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				if old.Desired == "present" {
 					current = &old.RevisionRef
 				}
-				if _, e = revisionForBinding(ctx, tx, current, ref, s.registryMode()); e != nil {
+				if _, e = revisionForBinding(ctx, tx, current, ref, node); e != nil {
 					return AdminChange{}, e
 				}
 				if e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, a); e != nil {

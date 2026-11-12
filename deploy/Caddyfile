@@ -20,8 +20,26 @@
 }
 
 :8081 {
+	@private path /internal /internal/*
+	handle @private {
+		respond "Not found" 404
+	}
+	@tickets {
+		path /redemption/tickets
+		method POST
+	}
+	handle @tickets {
+		uri strip_prefix /redemption
+		reverse_proxy redeemer:8941
+	}
+	handle /redemption/* {
+		respond "Not found" 404
+	}
+
 	header X-Content-Type-Options nosniff
-	reverse_proxy api:43812
+	handle {
+		reverse_proxy api:43812
+	}
 }
 
 :8082 {

@@ -22,6 +22,7 @@ import (
 	"github.com/livepeer/control-center/runtime/httpsource"
 	"github.com/livepeer/control-center/runtime/management"
 	"github.com/livepeer/control-center/runtime/nodeproxy"
+	"github.com/livepeer/control-center/runtime/orchestrator"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -38,6 +39,13 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("choose http-source, app-reconciler, connector-start, connector-probe, node-proxy or node-proxy-probe")
 	}
 	switch args[0] {
+	case "orchestrator-start":
+		return orchestrator.Start(ctx, args[1:])
+	case "orchestrator-probe":
+		if !orchestrator.Probe(ctx) {
+			return errors.New("orchestrator not ready")
+		}
+		return nil
 	case "http-source":
 		return httpSource(ctx, args[1:])
 	case "app-reconciler":
@@ -248,7 +256,10 @@ func httpSource(ctx context.Context, args []string) error {
 	socketErrors := make(chan error, 1)
 	integration := &connector.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
 	integration.Restore()
-	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired})
+	payments := &orchestrator.Integration{Control: control, Kube: kube, Desired: source.Desired, TokenFile: *token, StateFile: filepath.Join(*directory, "payment-grant.json"), AllowHTTP: control.AllowHTTP}
+	payments.Restore()
+	source.Payment = payments.Observe
+	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, payments)
 	if err != nil {
 		return err
 	}

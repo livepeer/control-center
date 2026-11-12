@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/runtime/payment"
 	"regexp"
 	"strings"
 	"time"
@@ -77,6 +78,7 @@ func specializeNode(raw string, m Desired) string {
 	if m.NodeDrainTimeout != nil {
 		timeout = *m.NodeDrainTimeout
 	}
+	raw = specializePayment(raw, m)
 	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", timeout.String())
 	if m.NodeImage != "" {
 		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
@@ -94,6 +96,14 @@ type Runtime = contract.Metadata
 
 func DesiredRuntime(m Desired) Runtime {
 	d := Runtime{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
+	d.Payment = effectivePayment(m)
+	if d.Payment.Version == 0 {
+		d.Payment = payment.Offchain()
+	}
+	d.PaymentActive = !m.State.DrainRequested && m.State.ApplyingConfigDigest == "" && (!d.Payment.Paid() || (m.PaymentReady && m.State.ApprovedConfigDigest == d.ConfigDigest))
+	if d.Payment.Paid() {
+		d.PaymentCredentialsRef = "/v1/nodes/" + m.NodeID + "/payment/credentials"
+	}
 	d.RunnerServiceURL = PrivateOrchestrator
 	d.Generation = max(m.State.Generation, 1)
 	d.DrainRequested = m.State.DrainRequested

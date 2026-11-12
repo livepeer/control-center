@@ -49,7 +49,8 @@ docker build -f ../runtime/services/Dockerfile.tunnel \
   --build-arg RUNTIME_IMAGE=127.0.0.1:63812/controlcenter/runtime@sha256:<RUNTIME_DIGEST> \
   -t 127.0.0.1:63812/controlcenter/connector:staging ../runtime/services
 docker push 127.0.0.1:63812/controlcenter/connector:staging
-# Publish a compatible Node image as controlcenter/node as well.
+# For paid operation, build a compatible Node binary and package its image with
+# the Runtime startup wrapper (see docs/paid-operation.md).
 # Set RuntimeImage, RuntimeConnectorImage, and RuntimeNodeImage in config.toml
 # using the public registry hostname and the digests returned by the pushes.
 docker compose config --quiet
@@ -62,12 +63,14 @@ and node address exclusions. Update `TunnelNodeAddresses` with the public and
 management addresses of every machine before enrollment; the bootstrap
 installer's origin firewall remains required.
 
+For fresh managed paid installations, follow [the payment runbook](../docs/paid-operation.md)
+for the redeemer Compose profile, credential mounts and deployment settings.
+
 The deployed image digests and source provenance are recorded in
 [`staging-images.json`](staging-images.json). The initial staging build includes
 the existing working tree changes. Its matching Node source snapshot is retained
-on the server at `/opt/controlcenter/node-source`; it supports the
-`--api-origin-url` setting used by the current orchestrator template. Publish a
-compatible Node image before changing `RuntimeNodeImage`.
+on the server at `/opt/controlcenter/node-source`. Publish a compatible Node image
+before changing `RuntimeNodeImage`.
 
 ## Operate
 

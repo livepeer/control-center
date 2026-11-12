@@ -77,16 +77,13 @@ DefaultAdminEmail = "first@example.invalid"
 	if p.SupabaseURL != "https://auth.example" || p.SupabasePublishableKey != "public-key" || p.ConfigReconcileInterval != 75*time.Second || p.PublicAPIURL != "https://public.example" || p.Listen != "localhost:43000" {
 		t.Fatal("configuration fields were not loaded")
 	}
-	if p.RegistryPaymentMode != "offchain" {
-		t.Fatal("registry mode default missing")
-	}
+
 	if p.DefaultAdminEmail != "first@example.invalid" {
 		t.Fatal("default admin config missing")
 	}
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "environment@example.invalid")
-	t.Setenv("REGISTRY_PAYMENT_MODE", "onchain")
 	p = Params{}
-	if err := (boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", filepath.Join(dir, "config.toml")}}).Validate(); err != nil || p.DefaultAdminEmail != "environment@example.invalid" || p.RegistryPaymentMode != "onchain" {
+	if err := (boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", filepath.Join(dir, "config.toml")}}).Validate(); err != nil || p.DefaultAdminEmail != "environment@example.invalid" {
 		t.Fatal("admin environment override", err)
 	}
 }
@@ -94,7 +91,6 @@ DefaultAdminEmail = "first@example.invalid"
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
-	t.Setenv("REGISTRY_PAYMENT_MODE", "")
 	for _, name := range []string{"CONTROL_CENTER_CONFIG", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE"} {
 		t.Setenv(name, "")
 	}
@@ -134,7 +130,6 @@ func TestConfigValidation(t *testing.T) {
 		{func(p *Params) { p.JWTSigningSecret, p.MachineTokenSecret = "", "" }, "missing required param 'jwt-signing-secret'"},
 		{func(p *Params) { p.SupabaseURL = "" }, "missing required param 'supabase-url'"},
 		{func(p *Params) { p.DefaultAdminEmail = "Name <admin@example.com>" }, "single email address"},
-		{func(p *Params) { p.RegistryPaymentMode = "invalid" }, "registry-payment-mode"},
 	} {
 		p := testParams()
 		p.SupabaseURL = "https://auth.example"
