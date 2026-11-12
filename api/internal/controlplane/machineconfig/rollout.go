@@ -29,9 +29,6 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	if desired.OnchainError != nil {
 		return false, desired.OnchainError
 	}
-	if desired.Onchain.Onchain() {
-		state.OnchainSettled = false
-	}
 	old, manifest, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
@@ -43,7 +40,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining the exact onchain/storage binding and the admission freeze.
-	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested && !state.OnchainDrainAfter.IsZero()
+	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested
 	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
 	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && onchainJSON(old.Onchain) == onchainJSON(desired.Onchain) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
@@ -101,15 +98,6 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		done, err := s.drainComplete(ctx, m, state)
 		if err != nil || !done {
 			return true, err
-		}
-	}
-	if old.Onchain.Onchain() && (!desired.Onchain.Onchain() || desired.Onchain.RedeemerURL != old.Onchain.RedeemerURL) {
-		if !s.onchainDrained(ctx, m, old, state.OnchainDrainAfter) {
-			state.RolloutReason = "onchain_drain_pending"
-			return true, nil
-		}
-		if !desired.Onchain.Onchain() {
-			state.OnchainSettled = true
 		}
 	}
 	state.HeldOrchestrator = ""
@@ -188,7 +176,6 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 		return false, err
 	}
 	if report.Drained && report.Generation == state.Generation && time.Since(at) <= s.config.StatusTTL && validDrainEvidence(m, *state, report, time.Now()) {
-		state.OnchainDrainAfter = evidenceTime(report)
 		state.RolloutReason = ""
 		return true, nil
 	}
@@ -210,14 +197,6 @@ func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) 
 		state.RolloutReason = "app_cleanup_pending"
 		return false, err
 	}
-	old, _, e := s.applied(ctx, m)
-	if e != nil {
-		return false, e
-	}
-	if !s.onchainDrained(ctx, m, old, state.OnchainDrainAfter) {
-		state.RolloutReason = "onchain_drain_pending"
-		return false, nil
-	}
 	state.RolloutReason = ""
 	return true, nil
 }
@@ -227,47 +206,12 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 	if err != nil || !done {
 		return false, err
 	}
-	tx, err := s.store.DB.BeginTx(ctx, nil)
+	result, err := s.store.DB.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$5 AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$4 AND lease_until>now())`, l.Machine.NodeID, l.Machine.Epoch, l.ID, l.Revision, l.Machine.CredentialVersion)
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
-	var yes int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`, l.Machine.NodeID, l.Machine.Epoch, l.Machine.CredentialVersion).Scan(&yes)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$4 AND lease_until>now() FOR UPDATE`, l.Machine.NodeID, l.Machine.Epoch, l.ID, l.Revision).Scan(&yes)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.onchain_state SET drained=true WHERE node_id=$1`, l.Machine.NodeID); err != nil {
-		return false, err
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2`, l.Machine.NodeID, l.Machine.Epoch); err != nil {
-		return false, err
-	}
-	return true, tx.Commit()
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 func onchainJSON(c onchain.Config) string { b, _ := json.Marshal(c); return string(b) }
-func (s *Manager) onchainDrained(ctx context.Context, m Machine, old Runtime, after time.Time) bool {
-	if !old.Onchain.Onchain() {
-		return true
-	}
-	r, at, e := s.store.Report(ctx, m, "runtime")
-	return e == nil && !after.IsZero() && !r.ObservedAt.Before(after) && r.Generation == old.Generation && !r.ClockUncertain && time.Since(at) <= s.config.StatusTTL && time.Since(r.ObservedAt) <= s.config.StatusTTL && r.ConfigDigest == old.ConfigDigest && r.Onchain != nil && r.Onchain.Generation == old.Onchain.Generation && r.Onchain.Applied && r.Onchain.QueueKnown && r.Onchain.Unsettled == 0
-}
-
-func evidenceTime(r Report) time.Time {
-	if r.Evidence == nil {
-		return time.Time{}
-	}
-	return r.Evidence.ObservedAt
-}

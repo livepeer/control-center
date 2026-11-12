@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -53,9 +52,6 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 	if e != nil {
 		return o
 	}
-	healthy := false
-	states := map[string]bool{}
-	var total int64
 	var ack, fail float64
 	for name, f := range families {
 		for _, v := range f.Metric {
@@ -67,24 +63,6 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 				continue
 			}
 			switch name {
-			case "livepeer_collector_healthy":
-				if v.Gauge == nil {
-					return o
-				}
-				if labels["collector"] == "redemptions" && v.GetGauge().GetValue() == 1 {
-					healthy = true
-				}
-			case "livepeer_redemption_queue_tickets":
-				if v.Gauge == nil {
-					return o
-				}
-				n := v.GetGauge().GetValue()
-				s := labels["state"]
-				if states[s] || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > 10000000 || math.Trunc(n) != n {
-					return o
-				}
-				states[s] = true
-				total += int64(n)
 			case "livepeer_redemption_transitions_total":
 				if labels["event"] == "acknowledged" {
 					ack += v.GetCounter().GetValue()
@@ -95,11 +73,6 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 			}
 		}
 	}
-	for _, s := range []string{"waiting", "eligible", "in_flight", "awaiting_finality", "rejected", "blocked", "unknown"} {
-		if !states[s] {
-			return o
-		}
-	}
 	if i.checkPod(ctx, a.Launch, m) != nil {
 		return o
 	}
@@ -108,8 +81,6 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 	if i.grant != a {
 		return o
 	}
-	o.QueueKnown = healthy && len(states) == 7
-	o.Unsettled = total
 	now := time.Now()
 	if i.metricsGrant == a.GrantID && (ack < i.lastAck || fail < i.lastErr) {
 		return o

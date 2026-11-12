@@ -308,6 +308,11 @@ func (o *SDKOwner) Unregister(ctx context.Context, id Identity) error {
 	o.lifecycle.Lock()
 	defer o.lifecycle.Unlock()
 	credential := id.Credential
+	if id.RunnerID == "" {
+		// An absent owner still needs Node's normal unregister acknowledgement:
+		// a restarted Node may retain winners awaiting durable handoff.
+		id.RunnerID = randomID()
+	}
 	if credential == "" {
 		// A lost bootstrap response leaves an unknown issued credential. Retain
 		// identity on 401 until Node expires it, then accept 404. Never Start.

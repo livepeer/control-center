@@ -171,7 +171,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 			report.Ready = false
 		}
 		report.Reason = "drain_pending"
-		if !s.Metadata.Terminal && clean && s.Identity.RunnerID == "" && s.MaintenanceWithdrawal != "" && !s.ClockUncertain {
+		if !s.Metadata.Terminal && clean && s.Identity.RunnerID == "" && s.MaintenanceWithdrawal != "" && !s.ClockUncertain && (!s.Metadata.Onchain.Onchain() || c.Owner.Unregister(ctx, s.Identity) == nil) {
 			// No live owner can renew admission. This observation follows a successful Kube read
 			// and durable owner retirement, rather than renewing an old heartbeat proof.
 			report.Drained = true

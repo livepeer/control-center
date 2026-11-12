@@ -134,8 +134,6 @@ type Observation struct {
 	GrantID    string `json:"grant_id,omitempty"`
 	Applied    bool   `json:"applied"`
 	Ready      bool   `json:"ready"`
-	QueueKnown bool   `json:"queue_known"`
-	Unsettled  int64  `json:"unsettled"`
 	Handoff    string `json:"handoff"`
 }
 

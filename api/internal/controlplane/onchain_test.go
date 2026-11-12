@@ -70,7 +70,7 @@ func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 		t.Fatal("partial commit", n, e)
 	}
 }
-func TestOnchainCredentialsWebhookAndForcedRecovery(t *testing.T) {
+func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
 	machine := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -149,10 +149,6 @@ func TestOnchainCredentialsWebhookAndForcedRecovery(t *testing.T) {
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
 		t.Fatal("forced retirement did not revoke")
 	}
-	var recovery bool
-	if e = s.db.QueryRow(`SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, node).Scan(&recovery); e != nil || !recovery {
-		t.Fatal(recovery, e)
-	}
 	fresh := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	if fresh["epoch"] == machine["epoch"] {
 		t.Fatal("enrollment not replaced")
@@ -163,7 +159,7 @@ func TestOnchainCredentialsWebhookAndForcedRecovery(t *testing.T) {
 	}
 }
 
-func TestOnchainActivationAndRemovalRequireFreshPostDrainOnchainEvidence(t *testing.T) {
+func TestOnchainActivationAndNormalDrain(t *testing.T) {
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
@@ -199,35 +195,13 @@ func TestOnchainActivationAndRemovalRequireFreshPostDrainOnchainEvidence(t *test
 	requireStatus(t, w, 200)
 	var grant orchestrator.Grant
 	json.Unmarshal(w.Body.Bytes(), &grant)
-	report := func(known bool, n int64) {
+	report := func() {
 		t.Helper()
 		m := metadata()
-		r := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, QueueKnown: known, Unsettled: n, Handoff: "unverified"}})
+		r := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
 		requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
 	}
-	if _, e := s.db.Exec(`UPDATE lpcc.onchain_state SET recovery_required=true WHERE node_id=$1`, node); e != nil {
-		t.Fatal(e)
-	}
-	in := onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}
-	if _, e := s.applyOnchain(t.Context(), in, 1, node); e == nil {
-		t.Fatal("recovery acknowledged without fresh onchain evidence")
-	}
-	report(true, 0)
-	// A fresh report from a previously delivered configuration cannot clear
-	// recovery after publication changes, even within the same onchain generation.
-	if _, e := s.db.Exec(`UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{config_digest}',to_jsonb(repeat('f',64))) WHERE node_id=$1 AND component='runtime'`, node); e != nil {
-		t.Fatal(e)
-	}
-	if _, e := s.applyOnchain(t.Context(), in, 1, node); e == nil {
-		t.Fatal("recovery acknowledged evidence for a different delivered configuration")
-	}
-	report(true, 0)
-	if rev, e := s.applyOnchain(t.Context(), in, 1, node); e != nil || rev != 2 {
-		t.Fatal("explicit restored-state acknowledgement", rev, e)
-	}
-	if rev, e := s.applyOnchain(t.Context(), in, 1, node); e != nil || rev != 2 {
-		t.Fatal("recovery acknowledgement retry", rev, e)
-	}
+	report()
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
@@ -239,37 +213,14 @@ func TestOnchainActivationAndRemovalRequireFreshPostDrainOnchainEvidence(t *test
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	report(true, 0) // This zero predates authoritative completion of active work.
 	reportRuntime(t, s, c, "runner", true)
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 1 {
-		t.Fatal("pre-drain empty queue authorized retirement")
-	}
-	for _, sample := range []struct {
-		known bool
-		n     int64
-	}{{false, 0}, {true, 1}} {
-		report(sample.known, sample.n)
-		if e := s.reconcile(t.Context()); e != nil {
-			t.Fatal(e)
-		}
-		if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 1 {
-			t.Fatal("unknown/nonempty queue authorized retirement")
-		}
-	}
-	report(true, 0)
-	if e := s.reconcile(t.Context()); e != nil {
-		t.Fatal(e)
-	}
 	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 0 {
-		t.Fatal("settled ordinary removal did not complete")
+		t.Fatal("ordinary removal did not complete")
 	}
-	var drained, recovery bool
-	if e := s.db.QueryRow(`SELECT drained,recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, node).Scan(&drained, &recovery); e != nil || !drained || recovery {
-		t.Fatal("ordinary retirement misclassified", drained, recovery, e)
-	}
+
 }
 
 func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
@@ -450,29 +401,6 @@ func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T)
 		t.Fatal(e)
 	}
 	if !read().Onchain.Onchain() {
-		t.Fatal("failed onchain startup bypassed the settlement gate to offchain")
-	}
-}
-
-func TestForcedRetirementCannotUseDesiredOffchainAsSettlementProof(t *testing.T) {
-	s := newTestServer(t)
-	cfg := onchainSettings(t, s)
-	node := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}, 0); e != nil {
-		t.Fatal(e)
-	}
-	_ = enroll(t, s, ownerA, strings.Repeat("a", 64))
-	if _, e := s.db.Exec(`UPDATE lpcc.onchain_state SET initialized=true WHERE node_id=$1`, node); e != nil {
-		t.Fatal(e)
-	}
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: onchain.Offchain()}}, 1); e != nil {
-		t.Fatal(e)
-	}
-	if e := s.RetireMachine(t.Context(), node); e != nil {
-		t.Fatal(e)
-	}
-	var required bool
-	if e := s.db.QueryRow(`SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, node).Scan(&required); e != nil || !required {
-		t.Fatal("pending disable hid retained onchain state", required, e)
+		t.Fatal("failed onchain startup bypassed normal drain to offchain")
 	}
 }

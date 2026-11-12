@@ -91,15 +91,14 @@ versions for held workloads and rollback. Reapply previous settings at the curre
 revision to roll back. Configuration changes use the normal withdrawal/drain flow.
 Inspect configuration, local admission and remote handoff in **Runtime status**.
 
-Disabling onchain operation, changing redemption destination and normal removal
-wait for app drain and zero unsettled tickets. Forced removal revokes submission
-grants immediately and reports `recovery_required`. Re-enroll the same machine
-with its retained state; after a fresh zero-unsettled report, apply with
-`--acknowledge-recovery <machine-id>` to clear the flag.
+Node's normal drain waits for durable redeemer handoff before acknowledging
+retirement. Onchain confirmation continues independently at the redeemer. Forced
+removal revokes submission grants immediately; preserve Node's database and
+re-enroll with the same storage to resume any unfinished handoff.
 
 Back up Node's `/data/onchain.sqlite` and sidecars consistently, and back up the
 redeemer database and wallet separately. Keep the recipient/chain binding and
-redemption routing/trust inputs while tickets remain unsettled. Private endpoints
+redemption routing/trust inputs while handoff remains incomplete. Private endpoints
 require exact IP:port `rpc_grants` / `redeemer_grants`; these allow orchestrator
 access only.
 
