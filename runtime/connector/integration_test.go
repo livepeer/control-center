@@ -148,7 +148,7 @@ type integrationFixture struct {
 
 func fixture(t *testing.T) *integrationFixture {
 	t.Helper()
-	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "epoch", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/tunnel/connector-token"}}
+	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/vkvkvkvkvkvkuaaaaaaaaaaaaa/tunnel/connector-token"}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("b", 64) {
 			t.Error("wrong machine credential")
@@ -159,7 +159,7 @@ func fixture(t *testing.T) *integrationFixture {
 			if f.mutate != nil {
 				f.mutate()
 			}
-			json.NewEncoder(w).Encode(map[string]any{"token": strings.Repeat("x", 63) + string(rune('a'+f.fetched)), "epoch": old.Epoch, "tunnel_id": old.TunnelID, "credential_generation": old.TokenGeneration})
+			json.NewEncoder(w).Encode(map[string]any{"token": strings.Repeat("x", 63) + string(rune('a'+f.fetched)), "node_id": old.NodeID, "tunnel_id": old.TunnelID, "credential_generation": old.TokenGeneration})
 			return
 		}
 		var report map[string]any
@@ -266,13 +266,13 @@ func TestGrantAssociationSurvivesAgentRestartButRequiresFreshEvidence(t *testing
 }
 
 func TestGrantFetchFencesConcurrentSecurityAndProcessChanges(t *testing.T) {
-	for _, change := range []string{"epoch", "generation", "credential", "terminal_cleanup"} {
+	for _, change := range []string{"node_id", "generation", "credential", "terminal_cleanup"} {
 		t.Run(change, func(t *testing.T) {
 			f := fixture(t)
 			f.mutate = func() {
 				switch change {
-				case "epoch":
-					f.m.Epoch = "new-epoch"
+				case "node_id":
+					f.m.NodeID = "new-node"
 				case "generation":
 					f.m.TokenGeneration++
 				case "credential":

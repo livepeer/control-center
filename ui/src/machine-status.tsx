@@ -10,8 +10,8 @@ type Apps = { desired_generation: number; desired_digest?: string; staged?: Stag
 type OnchainEvidence = { generation: number; mode: string; applied: boolean; ready: boolean; handoff: string }
 type Component = { onchain?: OnchainEvidence; observer_id?: string; observer_started_at?: string; component: string; generation: number; observed_at?: string; received_at?: string; expires_at?: string; fresh: boolean; current: boolean; ready: boolean; reason: string; clock_uncertain: boolean; bundle_sha256?: string; downloaded?: Stage; downloaded_at?: string; delivery_reason?: string; apps_error?: string; apps?: Apps; connector_observed_at?: string; connector_expires_at?: string }
 type Assignment = { revision_id: string; digest: string; name: string; version: string; revision: number; generation: number; activation_generation: number; desired: string; replicas: number; start_allowed: boolean; completed_at: string | null; failure?: string; health: { type: string; interval: string; timeout: string; failure_threshold: number } }
-type Membership = { state: string; provenance_current: boolean; queried_at?: string; observed_at?: string; expires_at?: string }
-export type MachineObservation = { onchain?: { desired: { mode: string; generation: number; network?: string; chain_id?: number; recipient?: string; controller?: string; wei_per_usd?: string; eth_usd_feed?: string; ticket_face_value?: string; ticket_win_prob?: string }; delivered_generation: number }; node_id: string; epoch: string; hostname: string; lifecycle: string; rollout_generation: number; requested: Stage; delivered?: Stage; delivered_at?: string; delivery_reason?: string; assignments: Assignment[]; assignments_omitted: boolean; components: Component[]; tunnel: { enabled: boolean; ready: boolean; reason: string; verified_at?: string; expires_at?: string; cleanup_complete: boolean }; discovery_enabled: boolean; discovery_initialized: boolean; discovery_selection_stale: boolean; discovery_selection_expires_at?: string; discovery_source?: { state: string; selection_reason: string; stale: boolean; expires_at?: string; failures: number; transport_outcome?: string; last_attempt?: string; last_success?: string; publication_blocked: boolean }; membership: Record<string, Membership>; external_reachability: string; server_time: string }
+type Membership = { state: string; queried_at?: string; observed_at?: string; expires_at?: string }
+export type MachineObservation = { onchain?: { desired: { mode: string; generation: number; network?: string; chain_id?: number; recipient?: string; controller?: string; wei_per_usd?: string; eth_usd_feed?: string; ticket_face_value?: string; ticket_win_prob?: string }; delivered_generation: number }; node_id: string; hostname: string; lifecycle: string; rollout_generation: number; requested: Stage; delivered?: Stage; delivered_at?: string; delivery_reason?: string; assignments: Assignment[]; assignments_omitted: boolean; components: Component[]; tunnel: { enabled: boolean; ready: boolean; reason: string; verified_at?: string; expires_at?: string; cleanup_complete: boolean }; discovery_enabled: boolean; discovery_initialized: boolean; discovery_selection_stale: boolean; discovery_selection_expires_at?: string; discovery_source?: { state: string; selection_reason: string; stale: boolean; expires_at?: string; failures: number; transport_outcome?: string; last_attempt?: string; last_success?: string; publication_blocked: boolean }; membership: Record<string, Membership>; external_reachability: string; server_time: string }
 
 export function machineStatusSummary(machine: { terminal?: boolean; report_state?: string; last_config_fetch_at?: string | null }) {
   const labels: Record<string, string> = { observed: 'Runtime observed', stale: 'Status stale', clock_uncertain: 'Clock uncertain' }
@@ -29,7 +29,7 @@ function Identity({ value, label }: { value?: Stage; label: string }) {
   return <div className="status-identity"><strong>{label}</strong><span>{value ? `App generation ${value.generation || 'unknown'}` : 'Unobserved'}</span>{value?.apps_digest && <code title="Canonical app intent digest">{value.apps_digest}</code>}{value?.artifact_digest && <code title="Artifact digest">{value.artifact_digest}</code>}</div>
 }
 
-export function MachineStatus({ session, machine, authorityFailure }: { session: Session; machine: { node_id: string; epoch: string; hostname: string }; authorityFailure?: (error: APIError) => void }) {
+export function MachineStatus({ session, machine, authorityFailure }: { session: Session; machine: { node_id: string; hostname: string }; authorityFailure?: (error: APIError) => void }) {
   const [view, setView] = useState<MachineObservation | null>(null)
   const [problem, setProblem] = useState('')
   const [now, setNow] = useState(Date.now())
@@ -43,9 +43,9 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
       pending = true
       const started = performance.now()
       try {
-        const data = await api<MachineObservation>(session, `/api/machines/${encodeURIComponent(machine.node_id)}/status?epoch=${encodeURIComponent(machine.epoch)}`, { signal: controller.signal })
+        const data = await api<MachineObservation>(session, `/api/machines/${encodeURIComponent(machine.node_id)}/status`, { signal: controller.signal })
         if (!current || controller.signal.aborted) return
-        if (data.node_id !== machine.node_id || data.epoch !== machine.epoch) { setView(null); setProblem('Machine enrollment changed. Select the machine again.'); return }
+        if (data.node_id !== machine.node_id) { setView(null); setProblem('Machine enrollment changed. Select the machine again.'); return }
         const arrived = Date.now()
         setOffset(Date.parse(data.server_time) + performance.now() - started - arrived)
         setNow(arrived); setView(data); setProblem('')
@@ -61,7 +61,7 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
     return () => { current = false; controller.abort(); window.clearInterval(poll); window.clearInterval(tick); document.removeEventListener('visibilitychange', load) }
     // The caller keys this panel by account and enrollment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.user.id, session.access_token, machine.node_id, machine.epoch])
+  }, [session.user.id, session.access_token, machine.node_id])
   const clock = now + offset
   const fresh = (c?: Component) => !!c && c.fresh && alive(c.expires_at, clock)
   const runner = view?.components.find(c => c.component === 'runner'), apps = runner?.apps
@@ -73,13 +73,12 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
     if (!view?.discovery_enabled) return 'Disabled'
     if (!m) return 'Unverified'
     if (view.discovery_selection_stale || !alive(view.discovery_selection_expires_at, clock)) return 'Source selection stale'
-    if (m.state === 'unverified_provenance') return reason(m.state)
     if (m.state === 'present' && alive(m.expires_at, clock)) return 'Present in published inventory'
     if (m.expires_at && !alive(m.expires_at, clock)) return 'Stale inventory'
     return m.state === 'absent' ? 'Absent from last successful inventory' : reason(m.state)
   }
   return <section className="machine-observation" aria-label={`Runtime status for ${machine.hostname}`}>
-    <div className="section-heading"><div><h3>Runtime status on {machine.hostname}</h3><code>{machine.node_id} · {machine.epoch}</code></div></div>
+    <div className="section-heading"><div><h3>Runtime status on {machine.hostname}</h3><code>{machine.node_id}</code></div></div>
     {problem && <div className="notice error" role="alert">{problem}</div>}
     {!view && !problem && <p role="status">Loading observed state…</p>}
     {view && <>

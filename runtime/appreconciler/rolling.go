@@ -47,7 +47,7 @@ func retainRolling(s *State, i *Instance, c *Controller, now time.Time) bool {
 				c.mu.Lock()
 				p, ok := c.proofs[other.ID]
 				c.mu.Unlock()
-				if other.WithdrawalID != "" || other.Reason == "process_lost" || other.Reason == "unexpected_pod_replacement" || !ok || p.PodUID != other.PodUID || p.Observation.Epoch != s.OwnerEpoch || p.Observation.Credential != s.Identity.Credential || p.Observation.At.After(now.Add(time.Second)) || p.App.Status != "ready" || !now.Before(p.Observation.At.Add(p.Observation.TTL)) || c.Probes == nil || !c.Probes.Ready(other.ID, other.PodUID) {
+				if other.WithdrawalID != "" || other.Reason == "process_lost" || other.Reason == "unexpected_pod_replacement" || !ok || p.PodUID != other.PodUID || p.Observation.RunnerID != s.Identity.RunnerID || p.Observation.Credential != s.Identity.Credential || p.Observation.At.After(now.Add(time.Second)) || p.App.Status != "ready" || !now.Before(p.Observation.At.Add(p.Observation.TTL)) || c.Probes == nil || !c.Probes.Ready(other.ID, other.PodUID) {
 					blocked = true
 				}
 			}

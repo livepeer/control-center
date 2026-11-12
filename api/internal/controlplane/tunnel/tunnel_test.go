@@ -96,7 +96,7 @@ func (f *recoveryCloudflare) Delete(_ context.Context, r CFResource, _ string) e
 	return nil
 }
 func TestTunnelIngressContract(t *testing.T) {
-	rules := ingressFor(RoutingFor("lp-aaaaaaaaaaaaaaaa", "example.invalid", "aaaaaaa").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "aud")
+	rules := ingressFor(RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "aud")
 	match := func(host, path string) IngressRule {
 		for _, r := range rules {
 			hostOK := r.Hostname == "" || r.Hostname == host || strings.HasPrefix(r.Hostname, "*.") && strings.HasSuffix(host, r.Hostname[1:])
@@ -107,8 +107,8 @@ func TestTunnelIngressContract(t *testing.T) {
 		t.Fatal("no catch-all")
 		return IngressRule{}
 	}
-	api := "api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid"
-	app := "proxy.lp-aaaaaaaaaaaaaaaa.example.invalid"
+	api := "api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"
+	app := "proxy.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"
 	for _, host := range []string{api, app} {
 		for _, path := range []string{"/discovery", "/prefix/discovery", "/runners/heartbeat", "/runner/a/session/b/channels", "/ai/trickle/x/0", "/metrics", "/readyz"} {
 			if match(host, path).Service != "http_status:404" {
@@ -127,7 +127,7 @@ func TestTunnelIngressContract(t *testing.T) {
 			t.Fatalf("application data reached protected API Host: %s", path)
 		}
 	}
-	for _, host := range []string{api, "discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", "api.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery.lp-aaaaaaaaaaaaaaaa.example.invalid"} {
+	for _, host := range []string{api, "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"} {
 		if match(host, "/unknown").Service != "http_status:404" {
 			t.Fatal("exact hostname fell through to wildcard", host)
 		}
@@ -135,7 +135,7 @@ func TestTunnelIngressContract(t *testing.T) {
 	if rule := match(app, "/v1/completions"); rule.Service != ConnectorOrigin || rule.OriginRequest != nil {
 		t.Fatal("proxy Host was not preserved")
 	}
-	protected := match("discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", "/discovery")
+	protected := match("discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "/discovery")
 	if protected.OriginRequest == nil || !protected.OriginRequest.Access.Required || protected.OriginRequest.Access.Audience[0] != "aud" {
 		t.Fatal("discovery not audience protected")
 	}
@@ -153,7 +153,7 @@ func TestAccessKeyringBindingAndRotation(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	ref := "access/node/epoch/1"
+	ref := "access/node/1"
 	secret := AccessCredential{"id", "high-entropy-secret"}
 	id, b, e := k.seal(ref, secret)
 	if e != nil || bytes.Contains(b, []byte(secret.ClientSecret)) {
@@ -162,7 +162,7 @@ func TestAccessKeyringBindingAndRotation(t *testing.T) {
 	if v, e := k.open(id, ref, b); e != nil || v != secret {
 		t.Fatal(e)
 	}
-	for _, wrong := range []string{"access/other/epoch/1", "access/node/epoch/2"} {
+	for _, wrong := range []string{"access/other/1", "access/node/2"} {
 		if _, e := k.open(id, wrong, b); e == nil {
 			t.Fatal("credential reference substitution")
 		}
@@ -201,7 +201,7 @@ func TestCloudflareOwnershipAndDeletionReadback(t *testing.T) {
 			w.WriteHeader(404)
 			return
 		}
-		name := "epoch-owner"
+		name := "node-owner"
 		if renamed.Load() {
 			name = "foreign-owner"
 		}
@@ -209,7 +209,7 @@ func TestCloudflareOwnershipAndDeletionReadback(t *testing.T) {
 	}))
 	defer api.Close()
 	cf := &cloudflareHTTP{base: api.URL, client: api.Client(), params: Config{CloudflareAccountID: strings.Repeat("a", 32)}}
-	r := CFResource{Kind: "tunnel", ID: "tunnel-id", Name: "epoch-owner"}
+	r := CFResource{Kind: "tunnel", ID: "tunnel-id", Name: "node-owner"}
 	if e := cf.Delete(t.Context(), r, ""); e == nil {
 		t.Fatal("unconfirmed provider deletion counted as absent")
 	}
@@ -258,7 +258,7 @@ func TestCloudflareDNSRecordEnvelopes(t *testing.T) {
 	}))
 	defer server.Close()
 	c := &cloudflareHTTP{client: server.Client(), base: server.URL, params: Config{CloudflareZoneID: "zone"}}
-	r := CFResource{Kind: "dns", Name: "owned-epoch-dns", Host: "api.example.invalid"}
+	r := CFResource{Kind: "dns", Name: "owned-node-dns", Host: "api.example.invalid"}
 	created, _, _, e := c.Create(t.Context(), r, "tunnel-id")
 	if e != nil {
 		t.Fatal(e)
@@ -288,12 +288,12 @@ func claimTestTunnel(t *testing.T) (*Manager, *recoveryCloudflare, *tunnelLease)
 	}
 	owner := "11111111-1111-4111-8111-111111111111"
 	execSQL(t, db, `INSERT INTO auth.users(id) VALUES($1)`, owner)
-	m := Machine{NodeID: "lp-aaaaaaaaaaaaaaaa", InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1", CredentialVersion: 1}
-	err := db.QueryRow(`INSERT INTO lpcc.machines(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,'test',$4,$5,1,true) RETURNING enrollment_epoch::text`, m.NodeID, owner, strings.Repeat("a", 64), m.InstallDir, m.K3sVersion).Scan(&m.Epoch)
+	m := Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1", CredentialVersion: 1}
+	err := db.QueryRow(`INSERT INTO lpcc.machines(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,'test',$4,$5,1,true) RETURNING node_id::text`, m.NodeID, owner, strings.Repeat("a", 64), m.InstallDir, m.K3sVersion).Scan(&m.NodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,epoch,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,enrollment_epoch,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
+	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	fake := newRecoveryCloudflare()
 	s := New(Config{CloudflareBaseDomain: "fleet.example.invalid", CloudflareAccessLifetime: 24 * time.Hour,
@@ -376,7 +376,7 @@ func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
 			}
 			var original AccessCredential
 			if kind == "token" {
-				original, e = s.ResolveAccessCredential(t.Context(), credentialRef(m.NodeID, m.Epoch, 1))
+				original, e = s.ResolveAccessCredential(t.Context(), credentialRef(m.NodeID, 1))
 				if e != nil {
 					t.Fatal(e)
 				}
@@ -392,7 +392,7 @@ func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
 				t.Fatal("late result replaced selected identity", again, f.resources)
 			}
 			if kind == "token" {
-				current, e := s.ResolveAccessCredential(t.Context(), credentialRef(m.NodeID, m.Epoch, 1))
+				current, e := s.ResolveAccessCredential(t.Context(), credentialRef(m.NodeID, 1))
 				if e != nil || current != original {
 					t.Fatal("immutable secret changed", e)
 				}
@@ -483,7 +483,7 @@ func TestAccessSecretCheckpointAndStrandedDeletionRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	var bound string
-	if e = s.db.QueryRow(`SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=1`, m.NodeID, m.Epoch).Scan(&bound); e != nil || bound != selected.ID || len(base.resources) != 1 {
+	if e = s.db.QueryRow(`SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND version=1`, m.NodeID).Scan(&bound); e != nil || bound != selected.ID || len(base.resources) != 1 {
 		t.Fatal("resource/secret binding did not converge", bound, selected, e)
 	}
 }
@@ -526,7 +526,7 @@ func TestSupersededCreateHandoffSurvivesCleanupFailure(t *testing.T) {
 			if _, e = l.ensure(t.Context(), key, "policy", "app-id", "token-b"); e == nil {
 				t.Fatal("cleanup failure not injected")
 			}
-			persisted, _, e := s.Load(t.Context(), m.NodeID, m.Epoch)
+			persisted, _, e := s.Load(t.Context(), m.NodeID)
 			if e != nil {
 				t.Fatal(e)
 			}

@@ -58,7 +58,7 @@ func (c *Controller) hooks() OwnerHooks {
 		}}
 }
 func (c *Controller) failed(f OwnerFailure) {
-	if c.Journal.View().OwnerEpoch != f.Epoch {
+	if c.Journal.View().Identity.RunnerID != f.RunnerID {
 		return
 	}
 	c.mu.Lock()
@@ -77,7 +77,7 @@ func (c *Controller) observe(o Observation) error {
 		if o.Credential == "" {
 			return errors.New("owner_credential")
 		}
-		if o.Epoch != s.OwnerEpoch || s.Identity.RunnerID != o.RunnerID {
+		if s.Identity.RunnerID != o.RunnerID {
 			return ErrSuperseded
 		}
 		if s.Identity.Credential != o.PreviousCredential && s.Identity.Credential != o.Credential {
@@ -235,7 +235,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 	}
 	if inputErr == nil {
 		m := input.Metadata
-		if before.InputDigest != "" && (m.NodeID != before.Metadata.NodeID || m.Epoch != before.Metadata.Epoch || m.CredentialVersion < before.Metadata.CredentialVersion || (before.Metadata.Terminal && !m.Terminal)) {
+		if before.InputDigest != "" && (m.NodeID != before.Metadata.NodeID || m.CredentialVersion < before.Metadata.CredentialVersion || (before.Metadata.Terminal && !m.Terminal)) {
 			return errors.New("input_enrollment_regression")
 		}
 		if m.Generation < before.Metadata.Generation || (input.Payload.Index.Available && before.Payload.Intent != nil && (input.Payload.Intent.Generation < before.Payload.Intent.Generation || (input.Payload.Intent.Generation == before.Payload.Intent.Generation && input.Payload.Index.IntentDigest != before.Payload.Index.IntentDigest))) {
@@ -569,7 +569,7 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 				}
 				if err := c.Journal.Update(func(s *State) error {
 					s.Identity = Identity{}
-					s.OwnerEpoch, s.OwnerReason, s.Retirement = "", "", nil
+					s.OwnerReason, s.Retirement = "", nil
 					for _, i := range s.Instances {
 						i.RegistrationPending = false
 						if i.AppID == "" && i.WithdrawalID != "" {
@@ -636,9 +636,6 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 		s = c.Journal.View()
 	}
 	if err := c.Journal.Update(func(s *State) error {
-		if s.OwnerEpoch == "" {
-			s.OwnerEpoch = randomID()
-		}
 		for _, e := range entries {
 			if i := s.Instances[e.InstanceID]; i != nil && i.AppID == "" {
 				i.RegistrationPending = true
@@ -649,7 +646,7 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 		return err
 	}
 	s = c.Journal.View()
-	r := OwnerRequest{Epoch: s.OwnerEpoch, Identity: s.Identity, Entries: entries, Tracked: tracked}
+	r := OwnerRequest{Identity: s.Identity, Entries: entries, Tracked: tracked}
 	if err := c.Owner.Sync(ctx, r, c.hooks()); err != nil {
 		c.mu.Lock()
 		reason := c.fault
@@ -657,7 +654,7 @@ func (c *Controller) syncOwner(ctx context.Context, s State, ready map[string]bo
 		if reason == "" {
 			reason = "registration_pending"
 		}
-		c.failed(OwnerFailure{Epoch: r.Epoch, Reason: reason})
+		c.failed(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: reason})
 		return errors.Join(err, c.Journal.Update(func(s *State) error { s.OwnerReason = reason; return nil }))
 	}
 	return c.Journal.Update(func(s *State) error { s.OwnerReason = ""; return nil })
@@ -683,7 +680,6 @@ func (c *Controller) retireOwner(ctx context.Context, s State) error {
 			}
 		}
 		s.Identity = Identity{}
-		s.OwnerEpoch = ""
 		s.OwnerReason = ""
 		return nil
 	})

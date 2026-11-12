@@ -22,7 +22,7 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 	a := i.grant
 	proof := i.observation
 	i.mu.Unlock()
-	if !applied || a == nil || proof == nil || proof.Association != *a || time.Since(proof.ObservedAt) > 30*time.Second || a.PodUID != podUID || a.Epoch != m.Epoch || a.OnchainGeneration != m.Onchain.Generation || a.ConfigDigest != m.ConfigDigest || i.checkPod(ctx, a.Launch, m) != nil {
+	if !applied || a == nil || proof == nil || proof.Association != *a || time.Since(proof.ObservedAt) > 30*time.Second || a.PodUID != podUID || a.NodeID != m.NodeID || a.OnchainGeneration != m.Onchain.Generation || a.ConfigDigest != m.ConfigDigest || i.checkPod(ctx, a.Launch, m) != nil {
 		o.Applied = false
 		o.Ready = false
 		return o

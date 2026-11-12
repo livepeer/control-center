@@ -96,7 +96,7 @@ func TestCredentialRefreshSerializesWithBlockedStateWrite(t *testing.T) {
 	if status := <-refreshed; status != 200 {
 		t.Fatal("refresh failed", status)
 	}
-	current, err := store.Load(t.Context(), m.NodeID, m.Epoch)
+	current, err := store.Load(t.Context(), m.NodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,14 +123,14 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	if err = s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	state, _, err := s.loadTunnel(t.Context(), m.NodeID, m.Epoch)
+	state, _, err := s.loadTunnel(t.Context(), m.NodeID)
 	if err != nil || !state.DrainRequested || state.HeldOrchestrator != previous {
 		t.Fatal("private replacement was not drain gated", state, err)
 	}
 	if s.tunnels.Enabled() || state.TunnelID != "" {
 		t.Fatal("private rollout acquired provider resources")
 	}
-	stale := currentReport(t, s, m.NodeID, machineconfig.Report{Epoch: m.Epoch, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
+	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
 	for len(s.reconcileWake) > 0 {
 		<-s.reconcileWake
 	}
@@ -157,7 +157,7 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 		t.Fatal("matching drain did not release replacement")
 	}
 	adminA(t, s)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+m.NodeID, "session-a", map[string]any{"epoch": m.Epoch}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+m.NodeID, "session-a", map[string]any{}), 202)
 	if err = s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {
 	if err != nil || len(sources) != 1 || sources[0].Ready || sources[0].Reason != "rollout_pending" {
 		t.Fatal("prior generation advertised during workload replacement", sources, err)
 	}
-	state, _, err := s.loadTunnel(t.Context(), m.NodeID, m.Epoch)
+	state, _, err := s.loadTunnel(t.Context(), m.NodeID)
 	if err != nil || state.Ready || state.Reason != "rollout_pending" {
 		t.Fatal("prior generation reported ready", state, err)
 	}
@@ -259,7 +259,7 @@ func TestRemovalKeepsAppliedWorkload(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	m, prior := priorMachineConfiguration(t, s, c, nil)
 	adminA(t, s)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+m.NodeID, "session-a", map[string]any{"epoch": m.Epoch}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+m.NodeID, "session-a", map[string]any{}), 202)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestRotationRejectsConfigOnlyRow(t *testing.T) {
 	}
 	adminA(t, s)
 	for _, kind := range []string{"connector", "access"} {
-		w := request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": c["epoch"], "kind": kind, "compromised": true})
+		w := request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": kind, "compromised": true})
 		requireStatus(t, w, 404)
 	}
 	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='tunnel.rotate' AND outcome='success'`) != 0 {
@@ -474,14 +474,14 @@ func TestRetirementReasonSurvivesOldDrainReason(t *testing.T) {
 	readyTunnel(t, s, c)
 	adminA(t, s)
 	path := "/api/admin/machines/" + c["node_id"]
-	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"epoch": c["epoch"]}), 202)
+	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
 	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"epoch": c["epoch"], "force": true}), 202)
+	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"force": true}), 202)
 	driveTunnels(t, s)
-	state, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, err := s.loadTunnel(t.Context(), c["node_id"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,7 @@ func TestCompletedEndpointDrainDoesNotMaskProviderFailure(t *testing.T) {
 	testTunnelDeps(s).Provider = &appCreateFailure{f}
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
-	state, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, err := s.loadTunnel(t.Context(), c["node_id"])
 	if err != nil {
 		t.Fatal(err)
 	}

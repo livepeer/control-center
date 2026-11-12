@@ -36,7 +36,7 @@ func integrationFixture(t *testing.T) (*Integration, contract.Metadata, Launch) 
 	dir := t.TempDir()
 	token := filepath.Join(dir, "token")
 	os.WriteFile(token, []byte("machine-secret"), 0600)
-	m := contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, Generation: 5, ConfigDigest: strings.Repeat("a", 64), Onchain: onchain.Config{Mode: "onchain", Generation: 2}, OnchainCredentialsRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/onchain/credentials"}
+	m := contract.Metadata{NodeID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", CredentialVersion: 1, Generation: 5, ConfigDigest: strings.Repeat("a", 64), Onchain: onchain.Config{Mode: "onchain", Generation: 2}, OnchainCredentialsRef: "/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/onchain/credentials"}
 	l := Launch{PodName: "orchestrator-test", PodUID: "uid", LaunchID: strings.Repeat("b", 32), ProcessID: strings.Repeat("c", 64)}
 	i := &Integration{TokenFile: token, StateFile: filepath.Join(dir, "grant.json"), Desired: func() (contract.Metadata, bool) { return m, true }}
 	i.Kube = kubeFunc(func(_ context.Context, _, p string, _ any, out any) error {
@@ -50,7 +50,7 @@ func integrationFixture(t *testing.T) (*Integration, contract.Metadata, Launch) 
 		if p != "onchain/credentials" {
 			t.Fatal(p)
 		}
-		b, _ := json.Marshal(Grant{Association: Association{Launch: l, Epoch: m.Epoch, CredentialVersion: 1, OnchainGeneration: 2, ConfigDigest: m.ConfigDigest, GrantID: "grant"}, RPCURL: "https://rpc.example/secret", Headers: "Authorization: Bearer redemption-secret"})
+		b, _ := json.Marshal(Grant{Association: Association{Launch: l, CredentialVersion: 1, OnchainGeneration: 2, ConfigDigest: m.ConfigDigest, GrantID: "grant"}, RPCURL: "https://rpc.example/secret", Headers: "Authorization: Bearer redemption-secret"})
 		return b, nil, nil
 	})
 	return i, m, l

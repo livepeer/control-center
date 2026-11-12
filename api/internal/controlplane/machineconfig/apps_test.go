@@ -12,7 +12,7 @@ import (
 )
 
 func TestIndependentManagementAndFullWorkloadDigest(t *testing.T) {
-	m := Desired{Machine: Machine{NodeID: "lp-" + strings.Repeat("a", 16), Epoch: "22222222-2222-4222-8222-222222222222", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
+	m := Desired{Machine: Machine{NodeID: strings.Repeat("a", 26), CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
 	missing := m
 	missing.RuntimeImage = ""
 	if _, _, err := Build(missing); err == nil {
@@ -73,9 +73,9 @@ func TestIndependentManagementAndFullWorkloadDigest(t *testing.T) {
 }
 func TestDrainProofDoesNotGainFreshnessFromDeliveryRetry(t *testing.T) {
 	now := time.Now().UTC()
-	m := Machine{NodeID: "node", Epoch: "epoch"}
+	m := Machine{NodeID: "node"}
 	state := State{Generation: 7, DrainRequested: true, DrainStartedAt: now.Add(-time.Hour), PendingConfigDigest: "target"}
-	r := Report{Generation: 7, Drained: true, Evidence: &contract.Evidence{Kind: "no_owner", Target: DrainTarget(m.NodeID, m.Epoch, state), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}}
+	r := Report{Generation: 7, Drained: true, Evidence: &contract.Evidence{Kind: "no_owner", Target: DrainTarget(m.NodeID, state), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}}
 	if !validDrainEvidence(m, state, r, now) {
 		t.Fatal("late confirmed completion rejected")
 	}

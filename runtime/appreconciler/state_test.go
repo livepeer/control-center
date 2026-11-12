@@ -20,7 +20,6 @@ func TestJournalRecoversLatestCommittedIdentity(t *testing.T) {
 	}
 	deadline := time.Now().UTC().Truncate(time.Second)
 	if err = j.Update(func(s *State) error {
-		s.OwnerEpoch = "epoch"
 		s.Identity = Identity{RunnerID: "runner", Credential: "private"}
 		s.Instances["one"] = &Instance{ID: "one", Phase: "draining", Deadline: deadline, WithdrawalID: "withdrawal", RegistrationGone: true}
 		return nil
@@ -98,7 +97,7 @@ func TestHistoryCollectionPinsPendingReceiptsAndPublications(t *testing.T) {
 func TestJournalRecoveryRequiresTheLatestFence(t *testing.T) {
 	dir := t.TempDir()
 	j, _ := OpenJournal(dir)
-	j.Update(func(s *State) error { s.OwnerEpoch = "ready"; return nil })
+	j.Update(func(s *State) error { s.Identity.RunnerID = "ready"; return nil })
 	old, err := os.ReadFile(filepath.Join(dir, "checkpoint"))
 	if err != nil {
 		t.Fatal(err)

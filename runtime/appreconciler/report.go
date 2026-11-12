@@ -16,7 +16,7 @@ type Report struct {
 	ReportVersion     int                `json:"report_version,omitempty"`
 	ObservedAt        time.Time          `json:"observed_at,omitempty"`
 	ClockUncertain    bool               `json:"clock_uncertain,omitempty"`
-	Epoch             string             `json:"epoch"`
+	NodeID            string             `json:"node_id"`
 	CredentialVersion int64              `json:"credential_version"`
 	Component         string             `json:"component"`
 	Generation        int64              `json:"generation"`
@@ -46,7 +46,7 @@ func DiagnoseMetadata(ctx context.Context, m contract.Metadata, reporter Reporte
 	if reason == "" {
 		status = "ready"
 	}
-	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
+	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
 }
 
 func (r ControlReporter) Status(ctx context.Context, value Report) error {
@@ -54,7 +54,7 @@ func (r ControlReporter) Status(ctx context.Context, value Report) error {
 	return err
 }
 func (r ControlReporter) Receipt(ctx context.Context, m contract.Metadata, value Receipt) error {
-	payload := map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "generation": value.Generation, "activation_generation": value.ActivationGeneration, "apps_digest": value.AppsDigest, "phase": value.Phase, "reason": value.Reason}
+	payload := map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "generation": value.Generation, "activation_generation": value.ActivationGeneration, "apps_digest": value.AppsDigest, "phase": value.Phase, "reason": value.Reason}
 	_, _, err := r.Client.Request(ctx, "apps/"+value.RevisionID+"/status", payload, 16384)
 	return err
 }
@@ -161,7 +161,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
 	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
-	report := Report{ReportVersion: 1, ClockUncertain: s.ClockUncertain, Epoch: s.Metadata.Epoch, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}
+	report := Report{ReportVersion: 1, ClockUncertain: s.ClockUncertain, NodeID: s.Metadata.NodeID, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}
 	if fault != "" {
 		report.Ready = false
 		report.Reason = "failed"

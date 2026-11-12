@@ -12,7 +12,7 @@ import (
 )
 
 func TestControlOriginsCredentialsAndRedirects(t *testing.T) {
-	node := "lp-" + strings.Repeat("a", 16)
+	node := strings.Repeat("a", 26)
 	file := filepath.Join(t.TempDir(), "token")
 	os.WriteFile(file, []byte(strings.Repeat("b", 64)), 0600)
 	for _, origin := range []string{"http://example/v1/nodes/" + node + "/config", "https://user:password@example/v1/nodes/" + node + "/config", "https://example/v1/nodes/" + node + "/config?token=secret", "https://example/v1/nodes/" + node + "/%63onfig"} {
@@ -106,12 +106,12 @@ func TestDecodeAndIdentityValidation(t *testing.T) {
 	}
 	file := filepath.Join(t.TempDir(), "identity")
 	for _, version := range []string{`"2"`, `0`, `-1`, `null`} {
-		os.WriteFile(file, []byte(`{"epoch":"11111111-1111-4111-8111-111111111111","credential_version":`+version+`}`), 0600)
+		os.WriteFile(file, []byte(`{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","credential_version":`+version+`}`), 0600)
 		if _, err := ReadIdentity(file); err == nil {
 			t.Fatal("accepted invalid credential version", version)
 		}
 	}
-	os.WriteFile(file, []byte(`{"epoch":"11111111-1111-4111-8111-111111111111","credential_version":2}`), 0600)
+	os.WriteFile(file, []byte(`{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","credential_version":2}`), 0600)
 	if i, err := ReadIdentity(file); err != nil || i.CredentialVersion != 2 {
 		t.Fatal(i, err)
 	}

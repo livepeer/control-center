@@ -18,14 +18,15 @@ class CredentialTransitions(unittest.TestCase):
         self.root = Path(self.temp.name)
         for name in ('credentials', 'state', 'volumes/http-source'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        (self.root / 'credentials/node-id').write_text('lp-' + 'a' * 16)
+        (self.root / 'credentials/node-id').write_text('a' * 26)
+        (self.root / 'credentials/fingerprint').write_text('a' * 64)
         (self.root / 'credentials/service-token').write_text('b' * 64)
         (self.root / 'credentials/runner-bootstrap.secret').write_text('runner-bootstrap')
-        (self.root / 'credentials/config-url').write_text('https://control.example.invalid/v1/nodes/lp-' + 'a' * 16 + '/config')
-        (self.root / 'credentials/identity.json').write_text(json.dumps({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}))
+        (self.root / 'credentials/config-url').write_text('https://control.example.invalid/v1/nodes/' + 'a' * 26 + '/config')
+        (self.root / 'credentials/identity.json').write_text(json.dumps({'node_id': 'a' * 26, 'credential_version': 1}))
         (self.root / 'state/k3s-version').write_text('v1.37.10+k3s1')
 
-    def transition(self, fail='', mode='refresh', epoch='22222222-2222-4222-8222-222222222222'):
+    def transition(self, fail='', mode='refresh', node='c' * 26):
         script = r'''
 set -Eeuo pipefail
 source "$1"
@@ -76,22 +77,22 @@ curl() {
     previous=$arg
   done
   [[ "$FAIL_AT" != request ]] || return 1
-  printf '{"node_id":"lp-aaaaaaaaaaaaaaaa","token":"%s","epoch":"%s","credential_version":1,"config_url":"https://control.example.invalid/v1/nodes/lp-aaaaaaaaaaaaaaaa/config"}\n200' \
-    cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "$TEST_EPOCH"
+  printf '{"node_id":"%s","token":"%s","credential_version":1,"config_url":"%s/v1/nodes/%s/config"}\n200' \
+    "$TEST_NODE" cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc https://control.example.invalid "$TEST_NODE"
 }
 transition_credentials
 '''
         return subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY), str(self.root)],
-                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_EPOCH': epoch},
+                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_NODE': ('a' * 26 if mode == 'refresh' else node)},
                               text=True, capture_output=True)
 
-    def test_identity_requires_uuid_and_positive_numeric_version(self):
+    def test_identity_requires_base32_node_and_positive_numeric_version(self):
         for identity, valid in [
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}, True),
-            ({'epoch': 'a' * 36, 'credential_version': 1}, False),
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': '1'}, False),
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 0}, False),
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1.5}, False),
+            ({'node_id': 'a' * 26, 'credential_version': 1}, True),
+            ({'node_id': 'a' * 36, 'credential_version': 1}, False),
+            ({'node_id': 'a' * 26, 'credential_version': '1'}, False),
+            ({'node_id': 'a' * 26, 'credential_version': 0}, False),
+            ({'node_id': 'a' * 26, 'credential_version': 1.5}, False),
         ]:
             result = subprocess.run(['bash', '-c', 'source "$1"; read_identity "$2"',
                                      'fixture', str(LIBRARY), json.dumps(identity)], capture_output=True)
@@ -119,7 +120,7 @@ transition_credentials
         self.assertLess(writer_stop, writer_gone)
         self.assertLess(writer_gone, steps.index('refresh'))
         self.assertGreater(next(i for i, x in enumerate(steps) if 'scale deployment/kustomize-controller --replicas=1' in x), secret)
-        self.assertLess(steps.index('https-code'), steps.index('refresh'))
+        self.assertLess(steps.index('refresh'), steps.index('https-code'))
         self.assertGreater(next(i for i, x in enumerate(steps) if 'rollout status' in x), secret)
         self.assertTrue(any('create secret generic livepeer-runner-bootstrap' in x for x in steps[:next(i for i,x in enumerate(steps) if 'rollout status' in x)]))
 
@@ -136,19 +137,19 @@ transition_credentials
         (state / 'journal').write_text('previous owner')
         result = self.transition('artifact', mode='reenroll')
         self.assertNotEqual(result.returncode, 0)
-        archived = state.parent / 'state.11111111-1111-4111-8111-111111111111/journal'
+        archived = state.parent / 'state.aaaaaaaaaaaaaaaaaaaaaaaaaa/journal'
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertTrue((self.root / 'state/credential-transition.json').exists())
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertFalse((self.root / 'state/credential-transition.json').exists())
-        self.assertTrue((state.parent / 'reenrolled-22222222-2222-4222-8222-222222222222').exists())
+        self.assertTrue((state.parent / 'reenrolled-cccccccccccccccccccccccccc').exists())
 
     def test_reenrollment_resume_rejects_a_different_issued_identity(self):
         self.assertNotEqual(self.transition('artifact', mode='reenroll').returncode, 0)
         identity = (self.root / 'credentials/identity.json').read_bytes()
-        result = self.transition(mode='reenroll', epoch='33333333-3333-4333-8333-333333333333')
+        result = self.transition(mode='reenroll', node='d' * 26)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('different identity', result.stderr)
         self.assertEqual((self.root / 'credentials/identity.json').read_bytes(), identity)

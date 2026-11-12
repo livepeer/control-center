@@ -37,7 +37,7 @@ type Launch struct {
 // Association is safe to persist; it contains no connector or machine credential.
 type Association struct {
 	Launch
-	Epoch             string `json:"epoch"`
+	NodeID            string `json:"node_id"`
 	CredentialVersion int64  `json:"credential_version"`
 	TunnelID          string `json:"tunnel_id"`
 	TokenGeneration   int64  `json:"credential_generation"`
@@ -72,7 +72,7 @@ type Integration struct {
 func (i *Integration) Restore() {
 	b, err := os.ReadFile(i.StateFile)
 	var grant Association
-	if err == nil && len(b) <= 16384 && transport.Decode(b, &grant) == nil && validLaunch(grant.Launch) && grant.Epoch != "" && grant.TokenGeneration > 0 {
+	if err == nil && len(b) <= 16384 && transport.Decode(b, &grant) == nil && validLaunch(grant.Launch) && grant.NodeID != "" && grant.TokenGeneration > 0 {
 		i.mu.Lock()
 		i.grant = &grant
 		i.observation = nil
@@ -136,7 +136,7 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func matches(a Association, m contract.Metadata) bool {
-	return !m.TerminalCleanup && a.Epoch == m.Epoch && a.CredentialVersion == m.CredentialVersion && a.TunnelID != "" && a.TunnelID == m.TunnelID && a.TokenGeneration > 0 && a.TokenGeneration == m.TokenGeneration
+	return !m.TerminalCleanup && a.NodeID == m.NodeID && a.CredentialVersion == m.CredentialVersion && a.TunnelID != "" && a.TunnelID == m.TunnelID && a.TokenGeneration > 0 && a.TokenGeneration == m.TokenGeneration
 }
 
 func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
@@ -175,14 +175,14 @@ func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
 	}
 	var response struct {
 		Token           string `json:"token"`
-		Epoch           string `json:"epoch"`
+		NodeID          string `json:"node_id"`
 		TunnelID        string `json:"tunnel_id"`
 		TokenGeneration int64  `json:"credential_generation"`
 	}
-	if transport.Decode(b, &response) != nil || !validToken(response.Token) || response.Epoch != m.Epoch || response.TunnelID != m.TunnelID || response.TokenGeneration != m.TokenGeneration {
+	if transport.Decode(b, &response) != nil || !validToken(response.Token) || response.NodeID != m.NodeID || response.TunnelID != m.TunnelID || response.TokenGeneration != m.TokenGeneration {
 		return Grant{}, errors.New("stale_connector_grant")
 	}
-	a := Association{Launch: launch, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, TunnelID: m.TunnelID, TokenGeneration: m.TokenGeneration}
+	a := Association{Launch: launch, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, TunnelID: m.TunnelID, TokenGeneration: m.TokenGeneration}
 	if i.checkPod(ctx, launch) != nil {
 		return Grant{}, errors.New("connector_changed_during_fetch")
 	}
@@ -271,6 +271,6 @@ func (i *Integration) Report(ctx context.Context) error {
 	if reporter == nil {
 		reporter = i.Control
 	}
-	_, _, err := reporter.Request(ctx, "status", map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "connector", "generation": m.Generation, "token_generation": tokenGeneration, "provider_version": providerVersion, "ready": ready, "https": strings.HasPrefix(i.Control.ConfigURL, "https://"), "reason": reason, "observed_at": time.Now().UTC(), "connector_observed_at": observedAt, "connector_expires_at": observedAt.Add(observationTTL)}, 16384)
+	_, _, err := reporter.Request(ctx, "status", map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "connector", "generation": m.Generation, "token_generation": tokenGeneration, "provider_version": providerVersion, "ready": ready, "https": strings.HasPrefix(i.Control.ConfigURL, "https://"), "reason": reason, "observed_at": time.Now().UTC(), "connector_observed_at": observedAt, "connector_expires_at": observedAt.Add(observationTTL)}, 16384)
 	return err
 }

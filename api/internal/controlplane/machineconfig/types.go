@@ -13,9 +13,9 @@ import (
 const PrivateOrchestrator = contract.PrivateOrchestrator
 
 type Machine struct {
-	NodeID, Epoch, InstallDir, K3sVersion string
-	CredentialVersion                     int64
-	Terminal                              bool
+	NodeID, Fingerprint, InstallDir, K3sVersion string
+	CredentialVersion                           int64
+	Terminal                                    bool
 }
 
 // State is the enrollment's workload rollout, independent of any provider.
@@ -93,7 +93,7 @@ type Report struct {
 	ReportVersion       int                     `json:"report_version,omitempty"`
 	ObservedAt          time.Time               `json:"observed_at,omitempty"`
 	Downloaded          *contract.StageIdentity `json:"downloaded,omitempty"`
-	Epoch               string                  `json:"epoch"`
+	NodeID              string                  `json:"node_id"`
 	CredentialVersion   int64                   `json:"credential_version"`
 	Component           string                  `json:"component"`
 	Generation          int64                   `json:"generation"`

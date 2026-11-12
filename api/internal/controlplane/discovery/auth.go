@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -20,39 +21,29 @@ import (
 func (Credential) String() string   { return "[redacted Access credential]" }
 func (Credential) GoString() string { return "[redacted Access credential]" }
 
+// Each immutable authorization owns its collection confirmation and diagnostics.
+// Confirmation permits retirement of an older credential; it does not version inventory.
 type authorization struct {
-	source     Source
-	credential Credential
-	available  bool
+	source                  Source
+	credential              Credential
+	available               bool
+	confirmed, acknowledged bool
+	attempt                 attempt
 }
-
 type attempt struct {
-	source    Source
 	completed time.Time
-	before    time.Time
-	revision  uint64
 	outcome   string
 	status    int
 }
-
 type transport struct {
-	base          http.RoundTripper
-	selection     atomic.Pointer[authorizationSnapshot]
-	nextSelection atomic.Uint64
-	before        func(string) time.Time
-	mu            sync.Mutex
-	attempts      map[string]attempt
+	base      http.RoundTripper
+	selection atomic.Pointer[authorizationSnapshot]
+	mu        sync.Mutex
 }
+type authorizationSnapshot struct{ sources map[string]*authorization }
 
-type authorizationSnapshot struct {
-	revision uint64
-	sources  map[string]authorization
-}
-
-func (t *transport) install(sources map[string]authorization) uint64 {
-	revision := t.nextSelection.Add(1)
-	t.selection.Store(&authorizationSnapshot{revision: revision, sources: sources})
-	return revision
+func (t *transport) install(sources map[string]*authorization) {
+	t.selection.Store(&authorizationSnapshot{sources: sources})
 }
 
 // Complete, canonical endpoints are the authorization keys, not host suffixes or
@@ -113,23 +104,10 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !ok {
 		return nil, errors.New("discovery source is not configured")
 	}
-	var before time.Time
-	if t.before != nil {
-		before = t.before(u.String())
-	}
 	finish := func(status int, outcome string) {
-		current := t.selection.Load()
-		if current == nil || !sameVersion(current.sources[u.String()].source, auth.source) {
-			return
-		}
 		t.mu.Lock()
-		defer t.mu.Unlock()
-		if t.attempts == nil {
-			t.attempts = map[string]attempt{}
-		}
-		// The Collector joins each batch, including body close, before the
-		// next batch starts; attempts for one URL cannot finish out of order.
-		t.attempts[u.String()] = attempt{source: auth.source, completed: time.Now().UTC(), before: before, revision: selection.revision, status: status, outcome: outcome}
+		auth.attempt = attempt{completed: time.Now().UTC(), status: status, outcome: outcome}
+		t.mu.Unlock()
 	}
 	clone := req.Clone(req.Context())
 	if clone.Header == nil {
@@ -179,20 +157,30 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	} else if resp.StatusCode != 200 {
 		outcome = "http_error"
 	}
-	resp.Body = &responseBody{ReadCloser: resp.Body, done: func() { finish(resp.StatusCode, outcome) }}
+	finish(resp.StatusCode, outcome)
+	// Confirm the exact credential against Node's bounded, decoded wire contract.
+	// The Collector still owns its snapshots and failure policy. Re-reading these
+	// bounded bytes there avoids correlating transport attempts with cache timestamps.
+	if resp.StatusCode == http.StatusOK {
+		data, readErr := shared.Read(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, errors.New("invalid discovery response")
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		entries, decodeErr := shared.Decode[runner](data, time.Now())
+		valid := decodeErr == nil
+		for _, entry := range entries {
+			valid = valid && publicAddress(auth.source, entry.Address)
+		}
+		if valid {
+			t.mu.Lock()
+			auth.confirmed = true
+			t.mu.Unlock()
+		}
+	}
 	return resp, nil
 }
-
-// Collector closes the body before recording decode success. Acknowledgement
-// compares the successful snapshot marker before/after this exact request;
-// wall-clock ordering is deliberately not used as evidence of collection.
-type responseBody struct {
-	io.ReadCloser
-	once sync.Once
-	done func()
-}
-
-func (b *responseBody) Close() error { err := b.ReadCloser.Close(); b.once.Do(b.done); return err }
 
 func (t *transport) CloseIdleConnections() {
 	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {

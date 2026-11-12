@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"io"
@@ -167,7 +168,7 @@ func currentReport(t *testing.T, s *Server, node string, report machineconfig.Re
 	report.ReportVersion = 1
 	report.ObservedAt = time.Now().UTC()
 	var previous uint64
-	err := s.db.QueryRow(`SELECT COALESCE((report->>'sequence')::numeric,0) FROM lpcc.machine_reports WHERE node_id=$1 AND epoch::text=$2 AND component=$3`, node, report.Epoch, report.Component).Scan(&previous)
+	err := s.db.QueryRow(`SELECT COALESCE((report->>'sequence')::numeric,0) FROM lpcc.machine_reports WHERE node_id=$1 AND component=$2`, node, report.Component).Scan(&previous)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func credentials(t *testing.T, data []byte) map[string]string {
 	}
 	result := map[string]string{}
 	var resultValue string
-	for _, key := range []string{"node_id", "epoch", "token", "config_url"} {
+	for _, key := range []string{"node_id", "node_id", "token", "config_url"} {
 		if err := json.Unmarshal(raw[key], &resultValue); err != nil {
 			t.Fatal(err)
 		}
@@ -233,6 +234,9 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	archiveFiles(t, w.Body.Bytes())
+	if id, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(first["node_id"])); err != nil || len(id) != 16 {
+		t.Fatal("node ID must encode 128 random bits as unpadded base32", err)
+	}
 	for session, count := range map[string]int{"session-a": 2, "session-b": 1} {
 		w := request(t, s, "GET", "/api/machines", session, nil)
 		if w.Code != 200 {

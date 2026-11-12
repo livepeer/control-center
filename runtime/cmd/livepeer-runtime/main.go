@@ -200,7 +200,7 @@ func appReconciler(ctx context.Context, args []string) error {
 				}
 				if reason != lastDiagnosis || !time.Now().Before(nextDiagnosis) {
 					m := journal.View().Metadata
-					if m.Epoch != "" {
+					if m.NodeID != "" {
 						appreconciler.DiagnoseMetadata(ctx, m, controller.Reporter, reason)
 					} else {
 						appreconciler.Diagnose(ctx, controller.Input, controller.Reporter, reason)

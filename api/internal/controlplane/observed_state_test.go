@@ -61,7 +61,7 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], currentReport(t, s, c["node_id"], machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "applying"})), 200)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], currentReport(t, s, c["node_id"], machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "applying"})), 200)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 	}
 
 	var intent []byte
-	if err := s.db.QueryRow(`SELECT entries FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 AND apps_digest=$3 LIMIT 1`, m.NodeID, m.Epoch, m.AppsDigest).Scan(&intent); err != nil {
+	if err := s.db.QueryRow(`SELECT entries FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 LIMIT 1`, m.NodeID, m.AppsDigest).Scan(&intent); err != nil {
 		t.Fatal(err)
 	}
 	var entries []schema.AppAssignment
@@ -93,7 +93,7 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 
 func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfig.Report {
 	now := time.Now().UTC()
-	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
+	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
 }
 
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
@@ -101,7 +101,7 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	report := observationReport(m, a)
 	path := "/v1/nodes/" + m.NodeID + "/status"
 	requireStatus(t, request(t, s, "POST", path, c["token"], report), 200)
-	read := "/api/machines/" + m.NodeID + "/status?epoch=" + m.Epoch
+	read := "/api/machines/" + m.NodeID + "/status"
 	w := request(t, s, "GET", read, "session-a", nil)
 	requireStatus(t, w, 200)
 	var v machineObservation
@@ -119,7 +119,7 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	requireStatus(t, request(t, s, "GET", read, "session-b", nil), 404)
 	requireStatus(t, request(t, s, "GET", read, c["token"], nil), 401)
 	other := enroll(t, s, ownerB, strings.Repeat("b", 64))
-	requireStatus(t, request(t, s, "GET", "/api/machines/"+other["node_id"]+"/status?epoch="+other["epoch"], "session-a", nil), 200)
+	requireStatus(t, request(t, s, "GET", "/api/machines/"+other["node_id"]+"/status", "session-a", nil), 200)
 	// Owner B can inspect its status, but has no assignment/admin mutation authority.
 	requireStatus(t, request(t, s, "GET", "/api/machines/"+other["node_id"]+"/status", "session-b", nil), 200)
 	requireStatus(t, request(t, s, "PUT", "/api/admin/machines/"+other["node_id"]+"/apps/"+a.RevisionID, "session-b", map[string]any{}), 403)
@@ -156,7 +156,7 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	}
 	var generation int64
 	var digest string
-	if err := s.db.QueryRow(`SELECT apps_generation,apps_digest FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 ORDER BY apps_generation DESC LIMIT 1`, m.NodeID, m.Epoch).Scan(&generation, &digest); err != nil {
+	if err := s.db.QueryRow(`SELECT apps_generation,apps_digest FROM lpcc.machine_app_deliveries WHERE node_id=$1 ORDER BY apps_generation DESC LIMIT 1`, m.NodeID).Scan(&generation, &digest); err != nil {
 		t.Fatal(err)
 	}
 	newer := observationReport(m, a)
@@ -176,7 +176,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	p := "/v1/nodes/" + m.NodeID + "/status"
 	runner := observationReport(m, a)
 	requireStatus(t, request(t, s, "POST", p, c["token"], runner), 200)
-	r := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), Epoch: m.Epoch, CredentialVersion: 1, Component: "app-reconciler", Generation: m.Generation, Sequence: 2, Reason: "failed", Apps: &contract.AppStatus{Reason: "state_recovery_failed", Instances: []contract.InstanceStatus{}}}
+	r := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), NodeID: m.NodeID, CredentialVersion: 1, Component: "app-reconciler", Generation: m.Generation, Sequence: 2, Reason: "failed", Apps: &contract.AppStatus{Reason: "state_recovery_failed", Instances: []contract.InstanceStatus{}}}
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 200)
 	var at, before time.Time
 	s.db.QueryRow(`SELECT received_at FROM lpcc.machine_reports WHERE node_id=$1 AND component='app-reconciler'`, m.NodeID).Scan(&before)
@@ -191,7 +191,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	r.ObservedAt = r.ObservedAt.Add(-time.Hour)
 	r.Ready = true
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 200)
-	stored, effective, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1}), "app-reconciler")
+	stored, effective, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, CredentialVersion: 1}), "app-reconciler")
 	if err != nil || !stored.ClockUncertain || !effective.IsZero() {
 		t.Fatal("clock regression attested readiness", stored, effective, err)
 	}
@@ -202,7 +202,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 		runtime.Sequence = sequence
 		runtime.ObservedAt = runtime.ObservedAt.Add(time.Second)
 		requireStatus(t, request(t, s, "POST", p, c["token"], runtime), 200)
-		_, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1}), "runtime")
+		_, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, CredentialVersion: 1}), "runtime")
 		if err != nil || (!at.IsZero() && time.Since(at) < 2*time.Minute) {
 			t.Fatal("continuing old clock established fresh runtime readiness", at, err)
 		}
@@ -236,7 +236,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	}
 	runtime.Sequence, runtime.ObservedAt = 6, time.Now().UTC()
 	requireStatus(t, request(t, s, "POST", p, c["token"], runtime), 200)
-	recovered, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1}), "runtime")
+	recovered, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, CredentialVersion: 1}), "runtime")
 	if err != nil || recovered.ClockUncertain || at.IsZero() || time.Since(at) > 2*time.Minute {
 		t.Fatal("valid clock did not recover trusted observation", recovered, at, err)
 	}
@@ -247,7 +247,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	for _, sequence := range []uint64{5, 6} {
 		r.Sequence, r.ClockUncertain, r.ObservedAt = sequence, true, time.Now().UTC()
 		requireStatus(t, request(t, s, "POST", p, c["token"], r), 200)
-		stored, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1}), "app-reconciler")
+		stored, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, CredentialVersion: 1}), "app-reconciler")
 		if err != nil || !stored.ClockUncertain || !at.IsZero() {
 			t.Fatal("producer clock uncertainty discarded", stored, at, err)
 		}
@@ -285,7 +285,7 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 	handler := s.Handler()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == p+"/config" {
-			w.Header().Set("X-Livepeer-Epoch", m.Epoch)
+			w.Header().Set("X-Livepeer-Node-ID", m.NodeID)
 			w.Header().Set("X-Livepeer-Credential-Version", "1")
 			_, _ = w.Write(data)
 			return
@@ -305,15 +305,15 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := filepath.Join(directory, "identity.json")
-	if err := os.WriteFile(identity, []byte(fmt.Sprintf(`{"epoch":%q,"credential_version":1}`, m.Epoch)), 0600); err != nil {
+	if err := os.WriteFile(identity, []byte(fmt.Sprintf(`{"node_id":%q,"credential_version":1}`, m.NodeID)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	reportDir := filepath.Join(directory, "reports")
 	if err := os.MkdirAll(reportDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	counter := filepath.Join(reportDir, "runtime-"+strings.TrimPrefix(artifact.Digest([]byte(m.Epoch)), "sha256:")+".json")
-	if err := os.WriteFile(counter, []byte(fmt.Sprintf(`{"epoch":%q,"credential_version":1,"sequence":1}`, m.Epoch)), 0600); err != nil {
+	counter := filepath.Join(reportDir, "runtime-"+strings.TrimPrefix(artifact.Digest([]byte(m.NodeID)), "sha256:")+".json")
+	if err := os.WriteFile(counter, []byte(fmt.Sprintf(`{"node_id":%q,"credential_version":1,"sequence":1}`, m.NodeID)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	source := &httpsource.Source{IdentityFile: identity, Control: control, Reporter: &transport.Reports{Client: control, Directory: reportDir}, Kube: &transport.Kube{Base: kube.URL, Client: kube.Client()}, Store: artifact.Store{Directory: filepath.Join(directory, "artifacts")}, ArtifactURL: "http://adapter.invalid"}
@@ -324,7 +324,7 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := machineconfig.Store{DB: s.db}
-	machine := configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1})
+	machine := configurationMachine(Machine{NodeID: m.NodeID, CredentialVersion: 1})
 	first, _, err := store.Report(t.Context(), machine, "runtime")
 	if err != nil || first.Downloaded == nil || first.Downloaded.AppsDigest != m.AppsDigest {
 		t.Fatal("valid predecessor missing", first, err)
@@ -363,7 +363,7 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	s, c, m, a := observationFixture(t)
 	prior := observationReport(m, a)
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], prior), 200)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+m.NodeID, "session-a", map[string]any{"epoch": m.Epoch, "force": true}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+m.NodeID, "session-a", map[string]any{"force": true}), 202)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -387,9 +387,9 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	prior.Apps.Assignments = nil
 	prior.Apps.Instances[0].Reason = "cleanup_unconfirmed"
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], prior), 200)
-	diagnosis := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), Epoch: m.Epoch, CredentialVersion: 1, Component: "app-reconciler", Generation: terminal.Generation, Sequence: 1, Reason: "failed", Apps: &contract.AppStatus{Reason: "state_recovery_failed", Instances: []contract.InstanceStatus{}}}
+	diagnosis := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), NodeID: m.NodeID, CredentialVersion: 1, Component: "app-reconciler", Generation: terminal.Generation, Sequence: 1, Reason: "failed", Apps: &contract.AppStatus{Reason: "state_recovery_failed", Instances: []contract.InstanceStatus{}}}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], diagnosis), 200)
-	read := "/api/machines/" + m.NodeID + "/status?epoch=" + m.Epoch
+	read := "/api/machines/" + m.NodeID + "/status"
 	w = request(t, s, "GET", read, "session-a", nil)
 	requireStatus(t, w, 200)
 	if !strings.Contains(w.Body.String(), "cleanup_unconfirmed") {
@@ -397,7 +397,7 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	}
 	list := request(t, s, "GET", "/api/machines", "session-a", nil)
 	requireStatus(t, list, 200)
-	if !strings.Contains(list.Body.String(), m.Epoch) || !strings.Contains(list.Body.String(), "cleanup_pending") {
+	if !strings.Contains(list.Body.String(), m.NodeID) || !strings.Contains(list.Body.String(), "cleanup_pending") {
 		t.Fatal("pending retirement disappeared")
 	}
 	prior.Sequence++
@@ -405,7 +405,7 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], prior), 409)
 	prior.Drained = false
 	replacement := enroll(t, s, ownerB, strings.Repeat("a", 64))
-	if replacement["node_id"] != m.NodeID || replacement["epoch"] == m.Epoch {
+	if replacement["node_id"] == m.NodeID {
 		t.Fatal("expected replacement enrollment")
 	}
 	if _, err := s.db.Exec(`UPDATE lpcc.administrator_grants SET revoked_at=now() WHERE bound_user_id=$1`, ownerA); err != nil {
@@ -413,8 +413,8 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	}
 	requireStatus(t, request(t, s, "GET", read, "session-b", nil), 404)
 	requireStatus(t, request(t, s, "GET", read, "session-a", nil), 200)
-	requireStatus(t, request(t, s, "GET", "/api/machines/"+m.NodeID+"/status?epoch="+replacement["epoch"], "session-a", nil), 404)
-	requireStatus(t, request(t, s, "GET", "/api/machines/"+m.NodeID+"/status?epoch="+replacement["epoch"], "session-b", nil), 200)
+	requireStatus(t, request(t, s, "GET", "/api/machines/"+replacement["node_id"]+"/status", "session-a", nil), 404)
+	requireStatus(t, request(t, s, "GET", "/api/machines/"+replacement["node_id"]+"/status", "session-b", nil), 200)
 	prior.Sequence++
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], prior), 200)
 	var removal schema.AppAssignmentSetV1
@@ -424,10 +424,10 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	for _, a := range removal.Entries {
 		requireStatus(t, appReport(t, s, c, a, terminal.AppsDigest, "removed"), 200)
 	}
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/removal-ack", c["token"], map[string]any{"epoch": m.Epoch, "digest": terminalDigest, "connector_absent": true}), 200)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/removal-ack", c["token"], map[string]any{"node_id": m.NodeID, "digest": terminalDigest, "connector_absent": true}), 200)
 	list = request(t, s, "GET", "/api/machines", "session-a", nil)
 	requireStatus(t, list, 200)
-	if strings.Contains(list.Body.String(), m.Epoch) {
+	if strings.Contains(list.Body.String(), m.NodeID) {
 		t.Fatal("acknowledged retired enrollment still listed")
 	}
 
@@ -473,7 +473,7 @@ func TestObservedStateComposesExactDiscoveryMembership(t *testing.T) {
 	}
 	route := tunnel.RoutingState{ServiceURL: "https://orch.example", ProxyURLTemplate: "https://{proxy}.apps.example"}
 	raw, _ := json.Marshal(route)
-	if _, err := s.db.Exec(`UPDATE lpcc.machine_states SET state=$3 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, string(raw)); err != nil {
+	if _, err := s.db.Exec(`UPDATE lpcc.machine_states SET state=$2 WHERE node_id=$1`, m.NodeID, string(raw)); err != nil {
 		t.Fatal(err)
 	}
 	report := observationReport(m, shot)
@@ -488,7 +488,7 @@ func TestObservedStateComposesExactDiscoveryMembership(t *testing.T) {
 	var version atomic.Value
 	version.Store("wrong-version")
 	f, err := fleet.New(fleet.Config{RefreshInterval: time.Second, ReconcileInterval: time.Minute}, fleet.Dependencies{
-		Store: statusDiscoverySource{fleet.Source{ID: "source", NodeID: m.NodeID, Epoch: m.Epoch, URL: "https://source.example/discovery", ServiceURL: route.ServiceURL, ProxyURLTemplate: route.ProxyURLTemplate, AuthMode: fleet.AuthNone, Lifecycle: "active", Ready: true, Generation: 1, VerifiedGeneration: 1}}, Logger: s.logger,
+		Store: statusDiscoverySource{fleet.Source{NodeID: m.NodeID, URL: "https://source.example/discovery", ServiceURL: route.ServiceURL, ProxyURLTemplate: route.ProxyURLTemplate, AuthMode: fleet.AuthNone, Lifecycle: "active", Ready: true, Generation: 1, VerifiedGeneration: 1}}, Logger: s.logger,
 		Transport: fleetRoundTripFunc(func(*http.Request) (*http.Response, error) {
 			body := `[{"address":"https://orch.example","runners":[{"url":"https://shot-app.apps.example","app":"whoami","version":"1","observed_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"},{"url":"https://orch.example/apps/persistent-app/session","app":"whoami-persistent","version":"` + version.Load().(string) + `","observed_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}]}]`
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
@@ -511,7 +511,7 @@ func TestObservedStateComposesExactDiscoveryMembership(t *testing.T) {
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status?epoch="+m.Epoch, "session-a", nil)
+			w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
 			requireStatus(t, w, 200)
 			var view machineObservation
 			if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
@@ -531,14 +531,14 @@ func TestObservedStateComposesExactDiscoveryMembership(t *testing.T) {
 func TestLargeObservedReportCrossesRelayAndIngestion(t *testing.T) {
 	s, c, m, a := observationFixture(t)
 	store := machineconfig.Store{DB: s.db}
-	state, err := store.Load(t.Context(), m.NodeID, m.Epoch)
+	state, err := store.Load(t.Context(), m.NodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	state.DrainRequested, state.DrainStartedAt = true, now.Add(-time.Second)
 	raw, _ := json.Marshal(state.State)
-	if _, err := s.db.Exec(`UPDATE lpcc.machine_states SET rollout=$3 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, string(raw)); err != nil {
+	if _, err := s.db.Exec(`UPDATE lpcc.machine_states SET rollout=$2 WHERE node_id=$1`, m.NodeID, string(raw)); err != nil {
 		t.Fatal(err)
 	}
 	backend := httptest.NewServer(s.Handler())
@@ -554,7 +554,7 @@ func TestLargeObservedReportCrossesRelayAndIngestion(t *testing.T) {
 	relay := management.AppReports{Control: control, Desired: func() (contract.Metadata, bool) { return m, true }}
 	r := observationReport(m, a)
 	r.Drained, r.Ready, r.Reason = true, false, "drain_pending"
-	r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, m.Epoch, state.State), OwnerID: "retained-owner", CredentialFingerprint: "sha256:" + strings.Repeat("f", 64), WithdrawalID: "withdrawal", MutationSequence: new(uint64(0)), ObservedAt: now, ExpiresAt: now.Add(time.Minute)}
+	r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, state.State), OwnerID: "retained-owner", CredentialFingerprint: "sha256:" + strings.Repeat("f", 64), WithdrawalID: "withdrawal", MutationSequence: new(uint64(0)), ObservedAt: now, ExpiresAt: now.Add(time.Minute)}
 	proof := *r.Evidence
 	r.Apps.Instances = nil
 	r.Apps.Assignments[0].Instances, r.Apps.Assignments[0].Ready, r.Apps.Assignments[0].Registered = 128, 0, 0
@@ -591,7 +591,7 @@ func TestLargeObservedReportCrossesRelayAndIngestion(t *testing.T) {
 		w := httptest.NewRecorder()
 		relay.ServeHTTP(w, httptest.NewRequest("POST", "http://management/status", bytes.NewReader(body)))
 		requireStatus(t, w, 200)
-		stored, _, err := store.Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: 1}), "runner")
+		stored, _, err := store.Report(t.Context(), configurationMachine(Machine{NodeID: m.NodeID, CredentialVersion: 1}), "runner")
 		if err != nil || stored.Evidence == nil || !reflect.DeepEqual(*stored.Evidence, proof) || len(stored.Apps.Instances) != len(r.Apps.Instances) || stored.Apps.InstancesOmitted != r.Apps.InstancesOmitted || stored.Apps.InstancesTotal != 128 {
 			t.Fatal("relay/ingestion changed bounded state or proof", len(body), stored, err)
 		}

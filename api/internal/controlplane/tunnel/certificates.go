@@ -229,7 +229,7 @@ func (l *tunnelLease) ensureCertificate(ctx context.Context, template string) (b
 	defer cert.close()
 	// Fence acquisition against machine retirement and superseded workers.
 	var node string
-	err = l.s.db.QueryRowContext(ctx, `INSERT INTO lpcc.machine_certificate_refs(zone_id,wildcard_host,node_id,epoch) SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT FROM lpcc.machine_states s JOIN lpcc.enrollments e USING(node_id,epoch) WHERE s.node_id=$3 AND s.epoch=$4 AND s.lease_id=$5 AND s.revision=$6 AND s.lease_until>now() AND e.retired_at IS NULL) ON CONFLICT(zone_id,wildcard_host,node_id,epoch) DO UPDATE SET node_id=EXCLUDED.node_id RETURNING node_id`, l.state.ZoneID, wildcard, l.Machine.NodeID, l.Machine.Epoch, l.Lease.ID, l.Revision).Scan(&node)
+	err = l.s.db.QueryRowContext(ctx, `INSERT INTO lpcc.machine_certificate_refs(zone_id,wildcard_host,node_id) SELECT $1,$2,$3 WHERE EXISTS(SELECT FROM lpcc.machine_states s JOIN lpcc.enrollments e USING(node_id) WHERE s.node_id=$3 AND s.lease_id=$4 AND s.revision=$5 AND s.lease_until>now() AND e.retired_at IS NULL) ON CONFLICT(zone_id,wildcard_host,node_id) DO UPDATE SET node_id=EXCLUDED.node_id RETURNING node_id`, l.state.ZoneID, wildcard, l.Machine.NodeID, l.Lease.ID, l.Revision).Scan(&node)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, errTunnelFenced
 	}
@@ -248,7 +248,7 @@ func (l *tunnelLease) ensureCertificate(ctx context.Context, template string) (b
 // Release only this enrollment's references. Namespace reconciliation, rather
 // than an enrollment's resource sweep, owns every certificate DELETE.
 func (l *tunnelLease) releaseCertificates(ctx context.Context, keep ...string) error {
-	rows, err := l.s.db.QueryContext(ctx, `SELECT r.zone_id,r.wildcard_host,c.account_id FROM lpcc.machine_certificate_refs r JOIN lpcc.machine_certificates c USING(zone_id,wildcard_host) WHERE r.node_id=$1 AND r.epoch=$2`, l.Machine.NodeID, l.Machine.Epoch)
+	rows, err := l.s.db.QueryContext(ctx, `SELECT r.zone_id,r.wildcard_host,c.account_id FROM lpcc.machine_certificate_refs r JOIN lpcc.machine_certificates c USING(zone_id,wildcard_host) WHERE r.node_id=$1`, l.Machine.NodeID)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (l *tunnelLease) releaseCertificates(ctx context.Context, keep ...string) e
 		if err != nil {
 			return err
 		}
-		_, err = l.s.db.ExecContext(ctx, `DELETE FROM lpcc.machine_certificate_refs WHERE zone_id=$1 AND wildcard_host=$2 AND node_id=$3 AND epoch=$4 AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$3 AND epoch=$4 AND lease_id=$5 AND revision=$6 AND lease_until>now())`, n.zone, n.host, l.Machine.NodeID, l.Machine.Epoch, l.Lease.ID, l.Revision)
+		_, err = l.s.db.ExecContext(ctx, `DELETE FROM lpcc.machine_certificate_refs WHERE zone_id=$1 AND wildcard_host=$2 AND node_id=$3 AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$3 AND lease_id=$4 AND revision=$5 AND lease_until>now())`, n.zone, n.host, l.Machine.NodeID, l.Lease.ID, l.Revision)
 		if err == nil {
 			_, err = cert.reconcile(ctx)
 		}

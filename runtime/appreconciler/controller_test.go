@@ -43,7 +43,7 @@ func (i *testInputs) set(t *testing.T, set schema.AppAssignmentSetV1) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i.value = Input{Metadata: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, AppsGeneration: set.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}, Payload: p, Digest: artifact.Digest([]byte(p.Digest()))}
+	i.value = Input{Metadata: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, AppsGeneration: set.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}, Payload: p, Digest: artifact.Digest([]byte(p.Digest()))}
 }
 
 type testCluster struct {
@@ -125,7 +125,7 @@ func (o *testOwner) Sync(_ context.Context, r OwnerRequest, h OwnerHooks) error 
 	if credential == "" {
 		credential = "issued-secret"
 	}
-	obs := Observation{Epoch: r.Epoch, RunnerID: r.Identity.RunnerID, Credential: credential, PreviousCredential: r.Identity.Credential, Accepted: true, Sequence: n, Bootstrap: r.Identity.Credential == "" || (o.credential != "" && o.credential != r.Identity.Credential), At: h.Now(), TTL: 30 * time.Second, Entries: r.Entries, Withdrawals: r.Tracked}
+	obs := Observation{RunnerID: r.Identity.RunnerID, Credential: credential, PreviousCredential: r.Identity.Credential, Accepted: true, Sequence: n, Bootstrap: r.Identity.Credential == "" || (o.credential != "" && o.credential != r.Identity.Credential), At: h.Now(), TTL: 30 * time.Second, Entries: r.Entries, Withdrawals: r.Tracked}
 	submitted := map[string]bool{}
 	for _, e := range r.Entries {
 		id := e.Options.ID
@@ -207,7 +207,7 @@ func TestOwnerFailureKeepsClassificationAndUsesCurrentRecoveryDecision(t *testin
 			}
 			o.syncFailure = func(r OwnerRequest, h OwnerHooks) error {
 				calls++
-				h.Failure(OwnerFailure{Epoch: r.Epoch, Reason: reason, Reset: reset})
+				h.Failure(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: reason, Reset: reset})
 				if reset {
 					return &transport.HTTPError{Status: 401}
 				}
@@ -526,13 +526,12 @@ func TestUnavailableInputAndStateLossNeverPublishEmpty(t *testing.T) {
 func TestRemovalObservationIsBoundAndDurable(t *testing.T) {
 	c, _, _, _, _, now := fixtureController(t)
 	c.Journal.Update(func(s *State) error {
-		s.OwnerEpoch = "epoch"
 		s.Identity = Identity{RunnerID: "owner", Credential: "issued"}
 		s.Instances["i"] = &Instance{ID: "i", AppID: "app", WithdrawalID: "withdrawal", PodUID: "pod"}
 		return nil
 	})
 	e := Registration{InstanceID: "i", WithdrawalID: "wrong", PodUID: "pod"}
-	o := Observation{Epoch: "epoch", RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, At: *now, TTL: time.Minute, Apps: []AppObservation{}, Withdrawals: []Registration{e}}
+	o := Observation{RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, At: *now, TTL: time.Minute, Apps: []AppObservation{}, Withdrawals: []Registration{e}}
 	c.observe(o)
 	if c.Journal.View().Instances["i"].RegistrationGone {
 		t.Fatal("wrong withdrawal accepted")
@@ -561,14 +560,13 @@ func TestRemovalObservationIsBoundAndDurable(t *testing.T) {
 	}
 }
 
-func TestCredentialLineageAndOwnerEpochFence(t *testing.T) {
+func TestCredentialLineageAndOwnerIdentityFence(t *testing.T) {
 	c, _, _, _, _, _ := fixtureController(t)
 	c.Journal.Update(func(s *State) error {
 		s.Identity = Identity{RunnerID: "owner", Credential: "old", Confirmed: true}
-		s.OwnerEpoch = "epoch"
 		return nil
 	})
-	o := Observation{RunnerID: "owner", Epoch: "epoch", PreviousCredential: "old", Credential: "rotated", Bootstrap: true}
+	o := Observation{RunnerID: "owner", PreviousCredential: "old", Credential: "rotated", Bootstrap: true}
 	if err := c.observe(o); err != nil {
 		t.Fatal(err)
 	}
@@ -582,20 +580,19 @@ func TestCredentialLineageAndOwnerEpochFence(t *testing.T) {
 	}
 	o.PreviousCredential = "rotated"
 	o.Credential = "other"
-	o.Epoch = "other"
+	o.RunnerID = "other"
 	if err := c.observe(o); !errors.Is(err, ErrSuperseded) {
-		t.Fatal("stale epoch accepted", err)
+		t.Fatal("stale node accepted", err)
 	}
 }
 
 func TestRetirementPersistsCredentialIssuedBeforeHeartbeatJoin(t *testing.T) {
 	c, _, _, _, _, _ := fixtureController(t)
 	c.Journal.Update(func(s *State) error {
-		s.OwnerEpoch = "epoch"
 		s.Identity = Identity{RunnerID: "owner", Credential: "issued", Confirmed: true, Retiring: true}
 		return nil
 	})
-	o := Observation{Epoch: "epoch", RunnerID: "owner", PreviousCredential: "issued", Credential: "rotated", Bootstrap: true, Accepted: true, Sequence: 0}
+	o := Observation{RunnerID: "owner", PreviousCredential: "issued", Credential: "rotated", Bootstrap: true, Accepted: true, Sequence: 0}
 	if err := c.observe(o); err != nil {
 		t.Fatal("lost credential while joining SDK loop", err)
 	}
@@ -948,7 +945,6 @@ func TestAppRemovalRequiresCompleteNodeAbsence(t *testing.T) {
 	i := &Instance{ID: "shared", PodUID: "pod", Definition: definition, WithdrawalID: "withdrawal", WithdrawnAt: *now, Phase: "withdrawing"}
 	i.AppID = appID(i, 0)
 	if err := c.Journal.Update(func(s *State) error {
-		s.OwnerEpoch = "epoch"
 		s.Identity = Identity{RunnerID: "owner", Credential: "issued"}
 		s.Instances[i.ID] = i
 		return nil
@@ -959,7 +955,7 @@ func TestAppRemovalRequiresCompleteNodeAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := Observation{Epoch: "epoch", RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, At: *now, TTL: time.Minute, Withdrawals: tracked, Apps: []AppObservation{{ID: appID(i, 1), Status: "draining", SessionIDs: []string{"work"}}}}
+	o := Observation{RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, At: *now, TTL: time.Minute, Withdrawals: tracked, Apps: []AppObservation{{ID: appID(i, 1), Status: "draining", SessionIDs: []string{"work"}}}}
 	if err = c.observe(o); err != nil {
 		t.Fatal(err)
 	}

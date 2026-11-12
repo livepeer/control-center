@@ -30,7 +30,7 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 	var keyID string
 	var ciphertext []byte
 	if secret != nil {
-		keyID, ciphertext, e = l.s.keys.seal(credentialRef(l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion), *secret)
+		keyID, ciphertext, e = l.s.keys.seal(credentialRef(l.Machine.NodeID, r.CredentialVersion), *secret)
 		if e != nil {
 			return e
 		}
@@ -45,7 +45,7 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 		return e
 	}
 	if secret != nil {
-		result, e := tx.ExecContext(ctx, `INSERT INTO lpcc.access_credentials(node_id,epoch,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,epoch,version) DO NOTHING`, l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion, r.ID, keyID, ciphertext, expiry)
+		result, e := tx.ExecContext(ctx, `INSERT INTO lpcc.access_credentials(node_id,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id,version) DO NOTHING`, l.Machine.NodeID, r.CredentialVersion, r.ID, keyID, ciphertext, expiry)
 		if e != nil {
 			return e
 		}
@@ -53,7 +53,7 @@ func (l *tunnelLease) storeResource(ctx context.Context, key string, r CFResourc
 			return errors.New("Access credential version is already bound")
 		}
 	} else if r.CredentialVersion > 0 {
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2 AND version=$3`, l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion); e != nil {
+		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND version=$2`, l.Machine.NodeID, r.CredentialVersion); e != nil {
 			return e
 		}
 	}

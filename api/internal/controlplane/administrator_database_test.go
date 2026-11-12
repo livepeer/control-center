@@ -63,7 +63,7 @@ func TestAdministratorDatabasePrivileges(t *testing.T) {
 			t.Fatal("schema access", role, usage, err)
 		}
 		var view, execute bool
-		if err := db.QueryRow(`SELECT has_table_privilege($1,'lpcc.machine_app_heads','SELECT,INSERT,UPDATE,DELETE'),has_function_privilege($1,'lpcc.remove_machine_apps(text,uuid,text)','EXECUTE')`, role).Scan(&view, &execute); err != nil || view || execute {
+		if err := db.QueryRow(`SELECT has_table_privilege($1,'lpcc.machine_app_heads','SELECT,INSERT,UPDATE,DELETE'),has_function_privilege($1,'lpcc.remove_machine_apps(text,text)','EXECUTE')`, role).Scan(&view, &execute); err != nil || view || execute {
 			t.Fatal("assignment view/function access", role, view, execute, err)
 		}
 		for _, table := range []string{"administrator_grants", "admin_audit_events", "apps", "app_revisions", "app_revision_state", "enrollments", "credential_refreshes", "machine_reports", "machine_states", "access_credentials", "machine_app_versions", "machine_app_deliveries", "machine_app_completions", "machine_app_diagnostics", "onchain_revision", "onchain_state", "onchain_configs", "onchain_secrets", "onchain_grants"} {

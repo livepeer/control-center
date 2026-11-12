@@ -23,7 +23,7 @@ import (
 type Launch = connector.Launch
 type Association struct {
 	Launch
-	Epoch             string `json:"epoch"`
+	NodeID            string `json:"node_id"`
 	CredentialVersion int64  `json:"credential_version"`
 	OnchainGeneration int64  `json:"onchain_generation"`
 	ConfigDigest      string `json:"config_digest"`
@@ -108,7 +108,7 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/onchain/observation" {
 		var o ProcessObservation
 		m, ok := i.Desired()
-		if transport.Decode(b, &o) != nil || !ok || m.TerminalCleanup || o.Epoch != m.Epoch || o.ConfigDigest != m.ConfigDigest || o.OnchainGeneration != m.Onchain.Generation || time.Since(o.ObservedAt) > 15*time.Second || o.ObservedAt.After(time.Now().Add(5*time.Second)) || i.checkPod(r.Context(), o.Launch, m) != nil {
+		if transport.Decode(b, &o) != nil || !ok || m.TerminalCleanup || o.NodeID != m.NodeID || o.ConfigDigest != m.ConfigDigest || o.OnchainGeneration != m.Onchain.Generation || time.Since(o.ObservedAt) > 15*time.Second || o.ObservedAt.After(time.Now().Add(5*time.Second)) || i.checkPod(r.Context(), o.Launch, m) != nil {
 			http.Error(w, "observation refused", 409)
 			return
 		}
@@ -160,7 +160,7 @@ func (i *Integration) fetch(ctx context.Context, l Launch) (Grant, error) {
 		return Grant{}, bad
 	}
 	var g Grant
-	if transport.Decode(b, &g) != nil || g.Launch != l || g.Epoch != m.Epoch || g.CredentialVersion != m.CredentialVersion || g.OnchainGeneration != m.Onchain.Generation || g.ConfigDigest != m.ConfigDigest || g.GrantID == "" || g.RPCURL == "" || g.Headers == "" {
+	if transport.Decode(b, &g) != nil || g.Launch != l || g.NodeID != m.NodeID || g.CredentialVersion != m.CredentialVersion || g.OnchainGeneration != m.Onchain.Generation || g.ConfigDigest != m.ConfigDigest || g.GrantID == "" || g.RPCURL == "" || g.Headers == "" {
 		return Grant{}, bad
 	}
 	if i.checkPod(ctx, l, m) != nil {
@@ -169,7 +169,7 @@ func (i *Integration) fetch(ctx context.Context, l Launch) (Grant, error) {
 	authorized := func() bool {
 		after, e := os.ReadFile(i.TokenFile)
 		n, ok := i.Desired()
-		return ctx.Err() == nil && e == nil && ok && n.Epoch == m.Epoch && n.CredentialVersion == m.CredentialVersion && n.Generation == m.Generation && n.ConfigDigest == m.ConfigDigest && n.Onchain.Generation == m.Onchain.Generation && sha256.Sum256(before) == sha256.Sum256(after)
+		return ctx.Err() == nil && e == nil && ok && n.NodeID == m.NodeID && n.CredentialVersion == m.CredentialVersion && n.Generation == m.Generation && n.ConfigDigest == m.ConfigDigest && n.Onchain.Generation == m.Onchain.Generation && sha256.Sum256(before) == sha256.Sum256(after)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()

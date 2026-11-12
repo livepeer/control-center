@@ -3,33 +3,33 @@
 CREATE TABLE lpcc.onchain_revision (id BOOLEAN PRIMARY KEY DEFAULT true CHECK(id), revision BIGINT NOT NULL DEFAULT 0);
 INSERT INTO lpcc.onchain_revision DEFAULT VALUES;
 CREATE TABLE lpcc.onchain_configs (
- node_id TEXT NOT NULL, generation BIGINT NOT NULL, config JSONB NOT NULL,
- PRIMARY KEY(node_id,generation)
+ fingerprint TEXT NOT NULL, generation BIGINT NOT NULL, config JSONB NOT NULL,
+ PRIMARY KEY(fingerprint,generation)
 );
 CREATE TABLE lpcc.onchain_state (
- node_id TEXT PRIMARY KEY CHECK(node_id ~ '^lp-[0-9a-f]{16}$'),
+ fingerprint TEXT PRIMARY KEY CHECK(fingerprint ~ '^[0-9a-f]{64}$'),
  recipient TEXT NOT NULL DEFAULT '', chain_id BIGINT NOT NULL DEFAULT 0, controller TEXT NOT NULL DEFAULT '',
  generation BIGINT NOT NULL CHECK(generation>0),
  initialized BOOLEAN NOT NULL DEFAULT false,
- FOREIGN KEY(node_id,generation) REFERENCES lpcc.onchain_configs(node_id,generation)
+ FOREIGN KEY(fingerprint,generation) REFERENCES lpcc.onchain_configs(fingerprint,generation)
 );
 CREATE TABLE lpcc.onchain_secrets (reference TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
 CREATE TABLE lpcc.onchain_grants (
- grant_id UUID PRIMARY KEY, issued_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE, node_id TEXT NOT NULL, epoch UUID NOT NULL,
+ grant_id UUID PRIMARY KEY, issued_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE, node_id TEXT NOT NULL,
  onchain_generation BIGINT NOT NULL, config_digest TEXT NOT NULL,
  pod_uid TEXT NOT NULL, launch_id TEXT NOT NULL, process_id TEXT NOT NULL,
  observed_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ,
- UNIQUE(node_id,epoch,onchain_generation,pod_uid,launch_id,process_id)
+ UNIQUE(node_id,onchain_generation,pod_uid,launch_id,process_id)
 );
-CREATE INDEX onchain_grants_machine ON lpcc.onchain_grants(node_id,epoch);
+CREATE INDEX onchain_grants_machine ON lpcc.onchain_grants(node_id);
 
 CREATE OR REPLACE FUNCTION lpcc.capture_runtime_retirement() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
  SET search_path=pg_catalog,lpcc AS $$
 BEGIN
- UPDATE lpcc.onchain_grants SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=OLD.node_id AND epoch=OLD.enrollment_epoch;
+ UPDATE lpcc.onchain_grants SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=OLD.node_id;
  UPDATE lpcc.enrollments e SET retained_bundle=c.bundle
  FROM lpcc.machine_configs c
- WHERE e.node_id=OLD.node_id AND e.epoch=OLD.enrollment_epoch AND c.node_id=OLD.node_id
+ WHERE e.node_id=OLD.node_id AND c.node_id=OLD.node_id
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;
@@ -61,7 +61,7 @@ CREATE OR REPLACE FUNCTION lpcc.capture_runtime_retirement() RETURNS trigger LAN
 BEGIN
  UPDATE lpcc.enrollments e SET retained_bundle=c.bundle
  FROM lpcc.machine_configs c
- WHERE e.node_id=OLD.node_id AND e.epoch=OLD.enrollment_epoch AND c.node_id=OLD.node_id
+ WHERE e.node_id=OLD.node_id AND c.node_id=OLD.node_id
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;

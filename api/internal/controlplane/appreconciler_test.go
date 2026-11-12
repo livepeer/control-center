@@ -18,7 +18,7 @@ func TestAppReconcilerReportOrderingAndDuplicateFreshness(t *testing.T) {
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	payload := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), Epoch: c["epoch"], CredentialVersion: 1, Component: "runner", Generation: 1, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}}
+	payload := machineconfig.Report{ReportVersion: 1, ObservedAt: time.Now().UTC(), NodeID: c["node_id"], CredentialVersion: 1, Component: "runner", Generation: 1, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}}
 	path := "/v1/nodes/" + c["node_id"] + "/status"
 	requireStatus(t, request(t, s, "POST", path, c["token"], payload), 200)
 	var received time.Time
@@ -51,7 +51,7 @@ func TestTerminalConnectorSurvivesOnlyPendingAppCleanup(t *testing.T) {
 			initial := readyTunnel(t, s, c)
 			s.params.AppStopSignals = true
 			s.configs = s.newConfigurationManager()
-			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], currentReport(t, s, c["node_id"], machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: initial.Generation, BundleFormat: contract.BundleFormat, Reason: "ready"})), 200)
+			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], currentReport(t, s, c["node_id"], machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: initial.Generation, BundleFormat: contract.BundleFormat, Reason: "ready"})), 200)
 			if err := s.reconcile(t.Context()); err != nil {
 				t.Fatal(err)
 			}
@@ -61,15 +61,15 @@ func TestTerminalConnectorSurvivesOnlyPendingAppCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			if compromise != "none" {
-				requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": c["epoch"], "kind": compromise, "compromised": true}), 202)
+				requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": compromise, "compromised": true}), 202)
 			}
-			requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"epoch": c["epoch"], "force": true}), 202)
+			requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"force": true}), 202)
 			path := "/v1/nodes/" + c["node_id"] + "/tunnel/connector-token"
 			if compromise != "none" {
 				requireStatus(t, request(t, s, "POST", path, c["token"], map[string]any{}), 409)
 			}
 			driveTunnels(t, s)
-			retained, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			retained, _, err := s.loadTunnel(t.Context(), c["node_id"])
 			if compromise != "none" {
 				if err != nil || !retained.CleanupComplete || len(f.resources) != 0 || count(t, s, `SELECT count(*) FROM lpcc.access_credentials WHERE revoked_at IS NULL`) != 0 {
 					t.Fatal("known compromise did not override app cleanup hold", retained, err)
@@ -96,7 +96,7 @@ func TestTerminalConnectorSurvivesOnlyPendingAppCleanup(t *testing.T) {
 			}
 			requireStatus(t, request(t, s, "POST", path, c["token"], map[string]any{}), 401)
 			driveTunnels(t, s)
-			final, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			final, _, err := s.loadTunnel(t.Context(), c["node_id"])
 			if err != nil || !final.CleanupComplete || len(f.resources) != 0 {
 				t.Fatal("provider cleanup failed after receipts", final, err)
 			}
@@ -112,7 +112,7 @@ func TestManagementSurvivesUnsupportedAppRendering(t *testing.T) {
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	supported := machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "ready"}
+	supported := machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "ready"}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], currentReport(t, s, c["node_id"], supported)), 200)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
@@ -149,23 +149,23 @@ func TestMaintenanceAdmissionFreezeEndsOnlyAtActualTarget(t *testing.T) {
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	runtime := machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "ready"}
+	runtime := machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: 1, BundleFormat: contract.BundleFormat, Reason: "ready"}
 	path := "/v1/nodes/" + c["node_id"] + "/status"
 	requireStatus(t, request(t, s, "POST", path, c["token"], currentReport(t, s, c["node_id"], runtime)), 200)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	state, err := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"], c["epoch"])
+	state, err := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"])
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	drain := machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runner", Generation: state.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Drained: true, Reason: "drain_pending", Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, Evidence: &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(c["node_id"], c["epoch"], state.State), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}}
+	drain := machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runner", Generation: state.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Drained: true, Reason: "drain_pending", Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, Evidence: &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(c["node_id"], state.State), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}}
 	requireStatus(t, request(t, s, "POST", path, c["token"], currentReport(t, s, c["node_id"], drain)), 200)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	state, err = (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"], c["epoch"])
+	state, err = (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestMaintenanceAdmissionFreezeEndsOnlyAtActualTarget(t *testing.T) {
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	pending, _ := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"], c["epoch"])
+	pending, _ := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"])
 	if !pending.DrainRequested {
 		t.Fatal("unobserved K3s target reopened admission")
 	}
@@ -189,7 +189,7 @@ func TestMaintenanceAdmissionFreezeEndsOnlyAtActualTarget(t *testing.T) {
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	complete, _ := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"], c["epoch"])
+	complete, _ := (machineconfig.Store{DB: s.db}).Load(t.Context(), c["node_id"])
 	if complete.DrainRequested || complete.ApplyingConfigDigest != "" {
 		t.Fatal("verified actual target did not release admission", complete.State)
 	}

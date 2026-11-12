@@ -38,11 +38,10 @@ const reservedPath = `(?i)(?:^|/)(?:discovery|runners?|metrics|healthz|readyz)(?
 // The protected API Host needs only reservation, stop and payment control.
 const clientPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment))?|refresh-payment)$`
 
-func RoutingFor(node, domain, suffix string) Snapshot {
+func RoutingFor(node, domain string) Snapshot {
 	return Snapshot{State: machineconfig.InitialState(false), RoutingState: RoutingState{EndpointGeneration: 1, CredentialGeneration: 1, SourceGeneration: 1, AccessVersion: 1,
-		EndpointSuffix:   suffix,
-		ServiceURL:       "https://api-" + suffix + "." + node + "." + domain,
-		ProxyURLTemplate: "https://{proxy}." + node + "." + domain, DiscoveryURL: "https://discovery-" + suffix + "." + node + "." + domain + "/discovery", Resources: map[string]CFResource{}}}
+		ServiceURL:       "https://api." + node + "." + domain,
+		ProxyURLTemplate: "https://{proxy}." + node + "." + domain, DiscoveryURL: "https://discovery." + node + "." + domain + "/discovery", Resources: map[string]CFResource{}}}
 }
 func ingressFor(state RoutingState, p Config, audience string) []IngressRule {
 	api := endpointHost(state.ServiceURL)
@@ -56,8 +55,6 @@ func ingressFor(state RoutingState, p Config, audience string) []IngressRule {
 		{Hostname: api, Service: "http_status:404"},
 		{Hostname: discovery, Path: `^/discovery$`, Service: ConnectorOrigin, OriginRequest: origin},
 		{Hostname: discovery, Service: "http_status:404"},
-		{Hostname: "api." + namespace, Service: "http_status:404"},
-		{Hostname: "discovery." + namespace, Service: "http_status:404"},
 		{Hostname: apps, Path: reservedPath, Service: "http_status:404"},
 		{Hostname: apps, Service: ConnectorOrigin},
 		{Service: "http_status:404"},
@@ -82,6 +79,6 @@ func ingressHash(r []IngressRule) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
-func credentialRef(node, epoch string, version int64) string {
-	return fmt.Sprintf("access/%s/%s/%d", node, epoch, version)
+func credentialRef(node string, version int64) string {
+	return fmt.Sprintf("access/%s/%d", node, version)
 }

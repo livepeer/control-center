@@ -22,9 +22,7 @@ type Status struct {
 }
 
 type SourceStatus struct {
-	ID                  string     `json:"id"`
 	NodeID              string     `json:"node_id"`
-	Epoch               string     `json:"epoch"`
 	Generation          int64      `json:"generation"`
 	SelectedGeneration  int64      `json:"selected_generation,omitempty"`
 	Lifecycle           string     `json:"lifecycle"`
@@ -67,7 +65,7 @@ func (f *Manager) Status() Status {
 	}
 	selected := make([]SourceStatus, len(f.selected))
 	for i, source := range f.selected {
-		selected[i] = SourceStatus{ID: source.ID, Selected: true, SelectedGeneration: source.Generation}
+		selected[i] = SourceStatus{NodeID: source.NodeID, Selected: true, SelectedGeneration: source.Generation}
 	}
 	collectDiscoveryMetrics(f.collector.CollectMetrics, func(name string, value float64, labels map[string]string) {
 		i, err := strconv.Atoi(labels["source_index"])
@@ -104,21 +102,24 @@ func (f *Manager) Status() Status {
 		if auth := f.transport.selection.Load(); auth != nil {
 			s.CredentialAvailable = auth.sources[source.URL].available
 		}
-		if attempt, ok := f.transport.attempts[source.URL]; ok && sameVersion(attempt.source, source) {
-			stamp := attempt.completed
-			s.LastAttempt = &stamp
-			s.TransportOutcome = attempt.outcome
-			s.HTTPStatus = attempt.status
+		if auth := f.transport.selection.Load(); auth != nil && auth.sources[source.URL] != nil {
+			a := auth.sources[source.URL]
+			if !a.attempt.completed.IsZero() {
+				stamp := a.attempt.completed
+				s.LastAttempt = &stamp
+				s.TransportOutcome = a.attempt.outcome
+				s.HTTPStatus = a.attempt.status
+			}
+			s.Acknowledged = a.acknowledged
 		}
-		s.Acknowledged = f.acknowledged[ackKey(source)]
-		byID[source.ID] = s
+		byID[source.NodeID] = s
 	}
 	for _, snapshot := range f.collector.Snapshots() {
 		for _, source := range f.selected {
 			if source.URL != snapshot.URL {
 				continue
 			}
-			s := byID[source.ID]
+			s := byID[source.NodeID]
 			for _, entry := range snapshot.Entries {
 				if !publicEntry(source, entry) {
 					s.PublicationBlocked = true
@@ -136,13 +137,13 @@ func (f *Manager) Status() Status {
 					}
 				}
 			}
-			byID[source.ID] = s
+			byID[source.NodeID] = s
 		}
 	}
 	for _, source := range f.configured {
-		s, ok := byID[source.ID]
+		s, ok := byID[source.NodeID]
 		if !ok {
-			s = SourceStatus{ID: source.ID, State: "excluded", Stale: true}
+			s = SourceStatus{NodeID: source.NodeID, State: "excluded", Stale: true}
 		}
 		s.SelectionReason = "selected"
 		if !ok {
@@ -154,8 +155,6 @@ func (f *Manager) Status() Status {
 				s.SelectionReason = "blocked"
 			}
 		}
-		s.NodeID = source.NodeID
-		s.Epoch = source.Epoch
 		s.Generation = source.Generation
 		s.Lifecycle = source.Lifecycle
 		status.Sources = append(status.Sources, s)

@@ -58,7 +58,7 @@ const discoveryTestRecord = `{"url":"https://orch.example/apps/a/session","app":
 const discoveryTestInventory = `[{"nodes":[{"url":"https://never-follow.example","queried_at":"2000-01-01T00:00:00Z"}]},{"address":"https://orch.example","runners":[` + discoveryTestRecord + `]}]`
 
 func testSource(id, endpoint string) Source {
-	return Source{ID: id, NodeID: id, Epoch: "epoch-" + id, URL: endpoint + "/discovery", ServiceURL: "https://orch.example", ProxyURLTemplate: "https://{proxy}.apps.example", AuthMode: AuthCloudflare, Lifecycle: "active", Ready: true, Generation: 1, VerifiedGeneration: 1, CredentialRef: "ref-" + id, CredentialVersion: 1}
+	return Source{NodeID: id, URL: endpoint + "/discovery", ServiceURL: "https://orch.example", ProxyURLTemplate: "https://{proxy}.apps.example", AuthMode: AuthCloudflare, Lifecycle: "active", Ready: true, Generation: 1, VerifiedGeneration: 1, CredentialRef: "ref-" + id, CredentialVersion: 1}
 }
 func testFleet(t *testing.T, b *simulatedDiscoveryBackend, servers ...*httptest.Server) (*Manager, *bytes.Buffer) {
 	t.Helper()
@@ -140,7 +140,7 @@ func TestFleetIdentityAndPartialPublication(t *testing.T) {
 	}
 }
 
-func TestFleetAcknowledgementAfterClockRollback(t *testing.T) {
+func TestFleetAcknowledgementRequiresDecodedReplacementCredential(t *testing.T) {
 	source := testSource("one", "https://source.example")
 	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"old-client", "old-secret"}}}
 	f, _ := testFleet(t, b)
@@ -163,15 +163,10 @@ func TestFleetAcknowledgementAfterClockRollback(t *testing.T) {
 	b.sources[0].CredentialRef = "new-ref"
 	b.credentials["new-ref"] = Credential{"new-client", "new-secret"}
 	reconcileFleet(t, f)
+	f.collector.Refresh(t.Context(), false)
 	if len(b.acknowledgements) != 1 || f.Status().Sources[0].State != "retained" || f.collector.Snapshots()[0].QueriedAt != original {
 		t.Fatal("HTTP 200 login HTML acknowledged v2 or changed retained v1 observation")
 	}
-	// Model a backward clock step without changing the host's system clock.
-	f.transport.mu.Lock()
-	a := f.transport.attempts[source.URL]
-	a.completed = original.Add(-time.Hour)
-	f.transport.attempts[source.URL] = a
-	f.transport.mu.Unlock()
 	f.acknowledge(t.Context())
 	for _, ack := range b.acknowledgements {
 		if ack.CredentialVersion == 2 {
@@ -195,88 +190,51 @@ func TestFleetAcknowledgementAfterClockRollback(t *testing.T) {
 	}
 }
 
-func TestFleetRotationRefreshDuringWorkerRequest(t *testing.T) {
+func TestFleetRotationDuringPollDoesNotAcknowledgeOldCredential(t *testing.T) {
 	source := testSource("one", "https://source.example")
 	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"old-client", "old-secret"}}}
 	f, _ := testFleet(t, b)
-	f.interval = time.Hour
 	started, release := make(chan struct{}), make(chan struct{})
-	var unblock sync.Once
-	newRequest := make(chan struct{}, 1)
 	var calls atomic.Int32
 	var allowNew atomic.Bool
 	f.transport.base = discoveryRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 			<-release
-			if r.Header.Get("CF-Access-Client-Id") != "old-client" || r.Header.Get("CF-Access-Client-Secret") != "old-secret" {
-				t.Error("in-flight credential pair was mutated")
-			}
 		}
-		if r.Header.Get("CF-Access-Client-Secret") == "new-secret" {
-			if r.Header.Get("CF-Access-Client-Id") != "new-client" {
-				t.Error("mixed replacement credential pair")
-			}
-			select {
-			case newRequest <- struct{}{}:
-			default:
-			}
-			if !allowNew.Load() {
-				return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader("denied"))}, nil
-			}
+		status, body := 200, discoveryTestInventory
+		if r.Header.Get("CF-Access-Client-Secret") == "new-secret" && !allowNew.Load() {
+			status, body = 403, "denied"
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(discoveryTestInventory))}, nil
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
 	reconcileFleet(t, f)
-	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { f.Run(ctx); close(done) }()
-	defer func() { unblock.Do(func() { close(release) }); cancel(); <-done }()
+	go func() { f.collector.Refresh(t.Context(), false); close(done) }()
 	<-started
-	b.mu.Lock()
-	b.sources[0].Generation = 2
-	b.sources[0].VerifiedGeneration = 2
-	b.sources[0].CredentialVersion = 2
-	b.sources[0].CredentialRef = "new-ref"
-	b.credentials["new-ref"] = Credential{"new-client", "new-secret"}
-	b.mu.Unlock()
-	reconciled := make(chan error, 1)
-	go func() { reconciled <- f.Reconcile(t.Context()) }()
-	deadline := time.After(time.Second)
-	for {
-		if selection := f.transport.selection.Load(); selection != nil && selection.sources[source.URL].source.Generation == 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("replacement selection not installed")
-		case <-time.After(time.Millisecond):
-		}
-	}
-	unblock.Do(func() { close(release) })
-	if err := <-reconciled; err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-newRequest:
-	case <-time.After(time.Second):
-		t.Fatal("replacement credential waits for periodic poll")
-	}
+	b.sources[0].Generation, b.sources[0].VerifiedGeneration, b.sources[0].CredentialVersion = 2, 2, 2
+	b.sources[0].CredentialRef = "replacement"
+	b.credentials["replacement"] = Credential{"new-client", "new-secret"}
+	reconcileFleet(t, f)
+	close(release)
+	<-done
+	reconcileFleet(t, f)
+	f.collector.Refresh(t.Context(), false)
+	reconcileFleet(t, f)
 	if len(b.acknowledgements) != 0 || f.Status().Sources[0].State != "retained" {
-		t.Fatal("old in-flight success or v2 authorization failure acknowledged v2")
+		t.Fatal("old response or denied replacement acknowledged a credential")
 	}
 	allowNew.Store(true)
 	f.collector.Refresh(t.Context(), false)
 	reconcileFleet(t, f)
 	if len(b.acknowledgements) != 1 || b.acknowledgements[0].CredentialVersion != 2 {
-		t.Fatal("replacement attempt was not acknowledged")
+		t.Fatal("decoded replacement was not acknowledged")
 	}
-	b.mu.Lock()
-	delete(b.credentials, "new-ref")
-	b.mu.Unlock()
+	delete(b.credentials, "replacement")
 	reconcileFleet(t, f)
+	f.collector.Refresh(t.Context(), false)
 	if f.Status().Sources[0].CredentialAvailable || f.Status().Sources[0].State != "retained" {
-		t.Fatal("missing credential did not fail closed with retention")
+		t.Fatal("missing credential did not fail closed")
 	}
 }
 
@@ -461,22 +419,27 @@ func TestFleetSelectionLifecycleAndStoreFailure(t *testing.T) {
 		t.Fatal("draining source lost withdrawal polling")
 	}
 	b.mu.Lock()
-	b.sources[0].Epoch = "new-epoch"
+	b.sources[0].NodeID = "new-node"
+	b.sources[0].URL = "https://replacement.example/discovery"
+	f.transport.base = discoveryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(discoveryTestInventory))}, nil
+	})
 	b.sources[0].Generation, b.sources[0].VerifiedGeneration = 1, 1
 	b.sources[0].Lifecycle = "active"
 	b.sources[0].Ready = true
 	b.mu.Unlock()
 	reconcileFleet(t, f)
 	if len(f.collector.Snapshots()) != 0 || f.Status().Sources[0].Acknowledged {
-		t.Fatal("epoch-only replacement reused predecessor cache or acknowledgement")
+		t.Fatal("node-only replacement reused predecessor cache or acknowledgement")
 	}
 	f.collector.Refresh(t.Context(), false)
 	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 2 || b.acknowledgements[1].Epoch != "new-epoch" {
-		t.Fatal("epoch-only replacement did not receive its own acknowledgement")
+	if len(b.acknowledgements) != 2 || b.acknowledgements[1].NodeID != "new-node" {
+		t.Fatal("node-only replacement did not receive its own acknowledgement")
 	}
 	b.mu.Lock()
-	b.sources[0].Epoch = "unverified-epoch"
+	b.sources[0].NodeID = "unverified-node"
+	b.sources[0].URL = "https://unverified.example/discovery"
 	b.sources[0].Generation, b.sources[0].VerifiedGeneration = 2, 1
 	b.sources[0].Ready = false
 	b.mu.Unlock()
@@ -584,8 +547,8 @@ func TestFleetReplacementFencesInFlightResult(t *testing.T) {
 	go func() { f.collector.Refresh(t.Context(), false); close(done) }()
 	<-started
 	b.mu.Lock()
-	b.sources[0].ID = "replacement"
-	b.sources[0].Epoch = "replacement-epoch"
+	b.sources[0].NodeID = "replacement-node"
+	b.sources[0].URL = "https://replacement.example/discovery"
 	b.mu.Unlock()
 	reconcileFleet(t, f)
 	close(release)

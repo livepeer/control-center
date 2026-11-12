@@ -10,7 +10,7 @@ import (
 )
 
 func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
-	state := RoutingFor("lp-aaaaaaaaaaaaaaaa", "example.invalid", "aaaaaaa")
+	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid")
 	want := CFResource{Kind: "app", Name: "owned", Host: endpointHost(state.DiscoveryURL), Hosts: []string{endpointHost(state.ServiceURL), endpointHost(state.DiscoveryURL)}}
 	var current cfObject
 	var foreign *cfObject
@@ -52,7 +52,7 @@ func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
 		t.Fatal("public override accepted", err)
 	}
 	current.Destinations[0].Overrides = nil
-	current.Destinations = append(current.Destinations, accessDestination{Type: "public", URI: "*.lp-aaaaaaaaaaaaaaaa.example.invalid"})
+	current.Destinations = append(current.Destinations, accessDestination{Type: "public", URI: "*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"})
 	if _, err := provider.Find(t.Context(), created); !errors.Is(err, ErrUnsafeProtection) {
 		t.Fatal("wildcard protection accepted", err)
 	}
@@ -64,7 +64,7 @@ func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
 	if found, err := provider.FindOwned(t.Context(), created); err != nil || len(found) != 1 {
 		t.Fatal("foreign conflict prevented owned cleanup", found, err)
 	}
-	for _, hostname := range []string{"api-*.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery-*.lp-aaaaaaaaaaaaaaaa.example.invalid", "*-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", "api-*.*.example.invalid"} {
+	for _, hostname := range []string{"ap*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discover*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "a*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "ap*.*.example.invalid"} {
 		foreign.Destinations[0].URI = hostname + "/apps"
 		if _, err := provider.Find(t.Context(), created); !errors.Is(err, ErrResourceConflict) {
 			t.Fatal("partial-label overlap missed", hostname, err)

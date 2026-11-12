@@ -87,7 +87,6 @@ spec:
   template:
     metadata:
       annotations:
-        livepeer.io/enrollment-epoch: '@ENROLLMENT_EPOCH@'
         livepeer.io/credential-version: '@MANAGEMENT_CREDENTIAL_VERSION@'
         livepeer.io/config-sha256: '@ORCHESTRATOR_DIGEST@'
       labels:

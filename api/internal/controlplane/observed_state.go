@@ -84,7 +84,6 @@ type tunnelObservation struct {
 type machineObservation struct {
 	Onchain                     onchainView                 `json:"onchain"`
 	NodeID                      string                      `json:"node_id"`
-	Epoch                       string                      `json:"epoch"`
 	Hostname                    string                      `json:"hostname"`
 	Lifecycle                   string                      `json:"lifecycle"`
 	RolloutGeneration           int64                       `json:"rollout_generation"`
@@ -127,15 +126,11 @@ func (s *Server) observedState(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, err)
 		return
 	}
-	node, epoch := r.PathValue("node_id"), r.URL.Query().Get("epoch")
-	if epoch != "" && !appID(epoch) {
-		s.respondError(w, problem(400, "invalid_epoch", "Provide an enrollment UUID."))
-		return
-	}
+	node := r.PathValue("node_id")
 	var owner string
 	var m Machine
-	err = s.db.QueryRowContext(r.Context(), `SELECT e.epoch::text,e.owner_id::text,e.hostname,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e
- WHERE e.node_id=$1 AND (($2<>'' AND e.epoch::text=$2) OR ($2='' AND EXISTS(SELECT FROM lpcc.machines m WHERE m.node_id=e.node_id AND m.enrollment_epoch=e.epoch)))`, node, epoch).Scan(&m.Epoch, &owner, &m.Hostname, &m.CredentialVersion, &m.Terminal)
+	err = s.db.QueryRowContext(r.Context(), `SELECT e.node_id::text,e.owner_id::text,e.hostname,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e
+ WHERE e.node_id=$1`, node).Scan(&m.NodeID, &owner, &m.Hostname, &m.CredentialVersion, &m.Terminal)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = problem(404, "machine_not_found", "Machine enrollment not found.")
 	}
@@ -165,12 +160,12 @@ func (s *Server) observedState(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObservation, error) {
 	now := time.Now().UTC()
-	v := machineObservation{NodeID: m.NodeID, Epoch: m.Epoch, Hostname: m.Hostname, Assignments: []observedAssignment{}, Components: []componentObservation{}, Membership: map[string]fleet.Membership{}, ExternalReachability: "unverified", ServerTime: now}
+	v := machineObservation{NodeID: m.NodeID, Hostname: m.Hostname, Assignments: []observedAssignment{}, Components: []componentObservation{}, Membership: map[string]fleet.Membership{}, ExternalReachability: "unverified", ServerTime: now}
 	ttl := s.params.TunnelStatusTTL
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
 	}
-	record, err := (machineconfig.Store{DB: s.db}).Load(ctx, m.NodeID, m.Epoch)
+	record, err := (machineconfig.Store{DB: s.db}).Load(ctx, m.NodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		record.State = machineconfig.InitialState(m.Terminal)
 	} else if err != nil {
@@ -183,7 +178,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 	v.Lifecycle, v.RolloutGeneration = record.Lifecycle, record.Generation
 	if m.Terminal {
 		var ack *time.Time
-		if err := s.db.QueryRowContext(ctx, `SELECT removal_ack_at FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&ack); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT removal_ack_at FROM lpcc.enrollments WHERE node_id=$1`, m.NodeID).Scan(&ack); err != nil {
 			return v, err
 		}
 		v.Lifecycle = "cleanup_pending"
@@ -199,14 +194,14 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 	if !route.VerifiedAt.IsZero() {
 		v.Tunnel.ExpiresAt = timePointer(route.VerifiedAt.Add(ttl))
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT apps_generation,COALESCE(apps_error,'') FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&v.Requested.Generation, &v.DeliveryReason)
+	err = s.db.QueryRowContext(ctx, `SELECT apps_generation,COALESCE(apps_error,'') FROM lpcc.machine_states WHERE node_id=$1`, m.NodeID).Scan(&v.Requested.Generation, &v.DeliveryReason)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return v, err
 	}
 	v.DeliveryReason = safeObservationReason(v.DeliveryReason)
 	var delivered contract.StageIdentity
 	var at time.Time
-	err = s.db.QueryRowContext(ctx, `SELECT apps_generation,apps_digest,'sha256:'||bundle_sha256,published_at FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 ORDER BY published_at DESC,apps_generation DESC LIMIT 1`, m.NodeID, m.Epoch).Scan(&delivered.Generation, &delivered.AppsDigest, &delivered.ArtifactDigest, &at)
+	err = s.db.QueryRowContext(ctx, `SELECT apps_generation,apps_digest,'sha256:'||bundle_sha256,published_at FROM lpcc.machine_app_deliveries WHERE node_id=$1 ORDER BY published_at DESC,apps_generation DESC LIMIT 1`, m.NodeID).Scan(&delivered.Generation, &delivered.AppsDigest, &delivered.ArtifactDigest, &at)
 	if err == nil {
 		v.Delivered, v.DeliveredAt = &delivered, &at
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -216,7 +211,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 	if err != nil {
 		return v, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT component,report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND epoch=$2 AND credential_version=$3 ORDER BY component`, m.NodeID, m.Epoch, m.CredentialVersion)
+	rows, err := s.db.QueryContext(ctx, `SELECT component,report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND credential_version=$2 ORDER BY component`, m.NodeID, m.CredentialVersion)
 	if err != nil {
 		return v, err
 	}
@@ -285,7 +280,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 		v.DiscoveryEnabled, v.DiscoveryInitialized, v.DiscoverySelectionStale = status.Enabled, status.Initialized, status.SelectionStale
 		v.DiscoverySelectionExpiresAt = status.SelectionExpiresAt
 		for _, source := range status.Sources {
-			if source.NodeID == m.NodeID && source.Epoch == m.Epoch {
+			if source.NodeID == m.NodeID {
 				v.DiscoverySource = &source
 				break
 			}
@@ -303,7 +298,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 				}
 				queries = append(queries, a.membershipQueries(i, route.ServiceURL, route.ProxyURLTemplate)...)
 			}
-			v.Membership = s.discovery.Memberships(m.NodeID, m.Epoch, queries)
+			v.Membership = s.discovery.Memberships(m.NodeID, queries)
 		}
 	}
 	return v, nil
@@ -331,9 +326,9 @@ func (a observedAssignment) membershipQueries(i contract.InstanceStatus, service
 
 func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observedAssignment, bool, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT v.intent-'revision',r.app_name,r.app_version,r.revision,r.canonical,c.received_at,CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END FROM lpcc.machine_app_heads v `+` JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
- LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.epoch=v.epoch AND c.revision_id=v.revision_id AND c.generation=v.generation
- LEFT JOIN lpcc.machine_app_diagnostics d ON d.node_id=v.node_id AND d.epoch=v.epoch AND d.revision_id=v.revision_id AND d.generation=v.generation
- WHERE v.node_id=$1 AND v.epoch=$2 AND (v.intent->>'desired'='present' OR c.received_at IS NULL) ORDER BY v.revision_id LIMIT 101`, m.NodeID, m.Epoch)
+ LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation
+ LEFT JOIN lpcc.machine_app_diagnostics d ON d.node_id=v.node_id AND d.revision_id=v.revision_id AND d.generation=v.generation
+ WHERE v.node_id=$1 AND (v.intent->>'desired'='present' OR c.received_at IS NULL) ORDER BY v.revision_id LIMIT 101`, m.NodeID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -375,7 +370,6 @@ func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observed
 
 type observedMachineSummary struct {
 	NodeID            string     `json:"node_id"`
-	Epoch             string     `json:"epoch"`
 	Hostname          string     `json:"hostname"`
 	OwnerID           *string    `json:"owner_id,omitempty"`
 	InstallDir        string     `json:"install_dir,omitempty"`
@@ -390,16 +384,16 @@ type observedMachineSummary struct {
 
 func (s *Server) observedMachineList(ctx context.Context, owner string, admin bool) ([]observedMachineSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `WITH inventory AS (
- SELECT m.node_id,m.enrollment_epoch AS epoch,m.hostname,m.owner_id,m.install_dir,m.k3s_version,m.created_at,m.last_config_fetch_at,m.credential_version,false AS terminal,COALESCE(s.rollout->>'lifecycle','active') AS lifecycle
- FROM lpcc.machines m LEFT JOIN lpcc.machine_states s ON s.node_id=m.node_id AND s.epoch=m.enrollment_epoch
+ SELECT m.node_id,m.hostname,m.owner_id,m.install_dir,m.k3s_version,m.created_at,m.last_config_fetch_at,m.credential_version,false AS terminal,COALESCE(s.rollout->>'lifecycle','active') AS lifecycle
+ FROM lpcc.machines m LEFT JOIN lpcc.machine_states s ON s.node_id=m.node_id
  UNION ALL
- SELECT e.node_id,e.epoch,e.hostname,e.owner_id,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,'cleanup_pending'
+ SELECT e.node_id,e.hostname,e.owner_id,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,'cleanup_pending'
  FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL AND e.removal_ack_at IS NULL
- ) SELECT i.node_id,i.epoch::text,i.hostname,i.owner_id::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,i.lifecycle,
+ ) SELECT i.node_id,i.hostname,i.owner_id::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,i.lifecycle,
  CASE WHEN COALESCE((r.report->>'clock_uncertain')::boolean,false) THEN NULL
  ELSE LEAST(r.received_at,(r.report->>'observed_at')::timestamptz) END, COALESCE((r.report->>'clock_uncertain')::boolean,false)
- FROM inventory i LEFT JOIN lpcc.machine_reports r ON r.node_id=i.node_id AND r.epoch=i.epoch AND r.credential_version=i.credential_version AND r.component='runtime'
- WHERE ($1='' OR i.owner_id::text=$1) ORDER BY i.created_at DESC,i.node_id,i.epoch`, owner)
+ FROM inventory i LEFT JOIN lpcc.machine_reports r ON r.node_id=i.node_id AND r.credential_version=i.credential_version AND r.component='runtime'
+ WHERE ($1='' OR i.owner_id::text=$1) ORDER BY i.created_at DESC,i.node_id`, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +407,7 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 		var m observedMachineSummary
 		var id string
 		var clockUncertain bool
-		if err = rows.Scan(&m.NodeID, &m.Epoch, &m.Hostname, &id, &m.InstallDir, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt, &m.Terminal, &m.Lifecycle, &m.LastObservedAt, &clockUncertain); err != nil {
+		if err = rows.Scan(&m.NodeID, &m.Hostname, &id, &m.InstallDir, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt, &m.Terminal, &m.Lifecycle, &m.LastObservedAt, &clockUncertain); err != nil {
 			return nil, err
 		}
 		if admin {
@@ -451,7 +445,7 @@ func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error
 	v.Desired.RedeemerGrants = nil
 	var b []byte
 	if m.Terminal {
-		err = s.db.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&b)
+		err = s.db.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1`, m.NodeID).Scan(&b)
 	} else {
 		err = s.db.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&b)
 	}

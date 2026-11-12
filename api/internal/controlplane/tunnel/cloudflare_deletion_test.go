@@ -11,7 +11,7 @@ import (
 
 func TestDeletedTunnelTombstoneAllowsEnrollmentRecovery(t *testing.T) {
 	now := time.Now().UTC()
-	want := CFResource{Kind: "tunnel", ID: "old", Name: "owned-epoch-tunnel", Watch: true}
+	want := CFResource{Kind: "tunnel", ID: "old", Name: "owned-enrollment-tunnel", Watch: true}
 	object := cfObject{ID: want.ID, Name: want.Name, DeletedAt: &now}
 	var listed []cfObject
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

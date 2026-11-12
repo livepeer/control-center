@@ -46,7 +46,7 @@ func (f *simulatedCloudflare) DeleteCertificate(_ context.Context, id string) er
 	return nil
 }
 
-func TestReenrollmentReplacesSuffixWithoutCrossEnrollmentCertificateDeletion(t *testing.T) {
+func TestReenrollmentNamespacesIsolateCertificateCleanup(t *testing.T) {
 	s, f := tunnelTestServer(t)
 	fingerprint := strings.Repeat("a", 64)
 	first := enroll(t, s, ownerA, fingerprint)
@@ -58,11 +58,11 @@ func TestReenrollmentReplacesSuffixWithoutCrossEnrollmentCertificateDeletion(t *
 	driveTunnels(t, s)
 	second := enroll(t, s, ownerA, fingerprint)
 	after := readyTunnel(t, s, second)
-	if before.EndpointSuffix == after.EndpointSuffix || before.ServiceURL == after.ServiceURL || first["epoch"] == second["epoch"] {
+	if before.ServiceURL == after.ServiceURL || first["node_id"] == second["node_id"] {
 		t.Fatal("re-enrollment reused endpoint identity")
 	}
-	if before.ProxyURLTemplate != after.ProxyURLTemplate {
-		t.Fatal("stable proxy namespace changed")
+	if before.ProxyURLTemplate == after.ProxyURLTemplate {
+		t.Fatal("replacement reused the retired proxy namespace")
 	}
 	if len(f.certificatePacks) != 1 || after.CertificatePackID == oldPack.ID {
 		t.Fatal("replacement certificate not isolated")
@@ -86,7 +86,7 @@ func TestDomainCertificatePrecedesDrainAndReleasesAbandonedCandidates(t *testing
 	s.params.CloudflareBaseDomain = "replacement.example.invalid"
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
-	pending, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	pending, _, err := s.loadTunnel(t.Context(), c["node_id"])
 	if err != nil || pending.DrainRequested || pending.Target != "" || pending.ServiceURL != initial.ServiceURL || pending.ProxyURLTemplate != initial.ProxyURLTemplate {
 		t.Fatal("certificate issuance changed endpoints or started a drain", pending, err)
 	}
@@ -98,14 +98,14 @@ func TestDomainCertificatePrecedesDrainAndReleasesAbandonedCandidates(t *testing
 	pack.Status = "active"
 	f.certificatePacks[pack.ID] = pack
 	driveTunnels(t, s)
-	draining, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	draining, _, err := s.loadTunnel(t.Context(), c["node_id"])
 	if err != nil || !draining.DrainRequested || draining.Target == "" {
 		t.Fatal("usable certificate did not release endpoint staging", draining, err)
 	}
 	s.params.CloudflareBaseDomain = "another.example.invalid"
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
-	canceled, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	canceled, _, err := s.loadTunnel(t.Context(), c["node_id"])
 	if err != nil || canceled.DrainRequested || canceled.Target != "" || canceled.HeldOrchestrator != "" || canceled.ServiceURL != initial.ServiceURL {
 		t.Fatal("new pending certificate delayed obsolete drain cancellation", canceled, err)
 	}

@@ -78,7 +78,7 @@ func TestOnchainCommandHelpDoesNotExposeSecrets(t *testing.T) {
 func TestOnchainInputRejectsUnknownPricingAndDuplicateFields(t *testing.T) {
 	t.Setenv("PG_CONNSTR", "postgres://unused.invalid/no-network")
 	for _, body := range []string{
-		`{"version":1,"machines":{"lp-aaaaaaaaaaaaaaaa":{"version":1,"mode":"offchain","price":"1"}}}`,
+		`{"version":1,"machines":{"vkvkvkvkvkvkuaaaaaaaaaaaaa":{"version":1,"mode":"offchain","price":"1"}}}`,
 		`{"version":1,"version":1,"machines":{}}`,
 		`{"version":2,"machines":{}}`,
 	} {

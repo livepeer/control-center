@@ -172,15 +172,15 @@ bootstrap JWTs and machine service credentials cannot mutate assignments. Let
 | Method and route | Body or query |
 | --- | --- |
 | `GET M` | `limit` (50 default, 100 maximum), exclusive `after_revision_id` |
-| `GET M/{revision_id}` | Optional retained `epoch`; history `limit`, exclusive `before_generation` |
-| `PUT M/{revision_id}` | `epoch`, `digest`, `expected_generation`, optional `replicas` |
-| `DELETE M/{revision_id}` | `epoch`, `expected_generation` |
-| `POST M/{revision_id}/replace` | `epoch`, `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
+| `GET M/{revision_id}` | History `limit`, exclusive `before_generation` |
+| `PUT M/{revision_id}` | `digest`, `expected_generation`, optional `replicas` |
+| `DELETE M/{revision_id}` | `expected_generation` |
+| `POST M/{revision_id}/replace` | `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
 
 Writes require a current active enrollment with modern credentials.
 `expected_generation: 0` means never assigned. Replicas range from 1 to 100;
 omitting them uses the definition default on creation and preserves the count on
-scaling. Changed operations return 202 and `{changed, epoch, assignments}`;
+scaling. Changed operations return 202 and `{changed, node_id, assignments}`;
 identical completed retries return 200 without advancing generations. Concurrent
 edits return 409. A lost-response retry must match the immediately resulting
 version and complete desired result; an intervening edit conflicts even if values
@@ -235,7 +235,7 @@ Runtime reports with the machine service credential to
 to 16 KiB:
 
 ```json
-{"epoch":"<ENROLLMENT_UUID>","credential_version":1,"generation":2,
+{"node_id":"<NODE_ID>","credential_version":1,"generation":2,
  "activation_generation":1,"apps_digest":"sha256:<HEX>",
  "phase":"removed","reason":""}
 ```
@@ -267,7 +267,7 @@ waits for app cleanup and machine drain completion. Force removal and owner
 deletion retain terminal instructions and history. Terminal removal acknowledgement
 also requires app cleanup. A retired enrollment can fetch its terminal bundle and
 acknowledge exact terminal app cleanup, but cannot report active state or
-administer apps. Terminal snapshots are write-once, and old-epoch cleanup cannot
+administer apps. Terminal snapshots are write-once, and retired-node cleanup cannot
 affect reenrollment. Node, routes, the Reconciler and connector credentials
 remain available until app cleanup receipts complete; credential compromise
 overrides that hold.

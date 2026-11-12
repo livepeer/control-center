@@ -14,23 +14,22 @@ import (
 
 func (s *Server) prepareMachineRemoval(r *http.Request, _ UserIdentity) (AdminApply, error) {
 	var in struct {
-		Epoch string `json:"epoch"`
-		Force bool   `json:"force"`
+		Force bool `json:"force"`
 	}
 	if err := machineInput(r, &in); err != nil {
 		return nil, err
 	}
 	node := r.PathValue("node_id")
 	return func(ctx context.Context, tx *sql.Tx, _ UserIdentity) (AdminChange, error) {
-		result, err := s.configs.Remove(ctx, tx, node, in.Epoch, in.Force)
+		result, err := s.configs.Remove(ctx, tx, node, in.Force)
 		if err != nil {
 			return AdminChange{}, configurationProblem(err)
 		}
-		target := AdminTarget{Kind: "machine", ID: node, Revision: in.Epoch}
+		target := AdminTarget{Kind: "machine", ID: node, Revision: node}
 		if result.AlreadyRemoved {
 			return AdminChange{Target: target, Status: 204}, nil
 		}
-		body := map[string]any{"lifecycle": result.Lifecycle, "epoch": result.Epoch}
+		body := map[string]any{"lifecycle": result.Lifecycle, "node_id": result.NodeID}
 		if result.Generation != 0 {
 			target.Revision += ":" + strconv.FormatInt(result.Generation, 10)
 			body["generation"] = result.Generation
@@ -41,19 +40,18 @@ func (s *Server) prepareMachineRemoval(r *http.Request, _ UserIdentity) (AdminAp
 
 func (s *Server) prepareDrainRetry(r *http.Request, _ UserIdentity) (AdminApply, error) {
 	var in struct {
-		Epoch      string `json:"epoch"`
-		Generation int64  `json:"generation"`
+		Generation int64 `json:"generation"`
 	}
 	if err := machineInput(r, &in); err != nil {
 		return nil, err
 	}
 	node := r.PathValue("node_id")
 	return func(ctx context.Context, tx *sql.Tx, _ UserIdentity) (AdminChange, error) {
-		result, err := s.configs.RetryDrain(ctx, tx, node, in.Epoch, in.Generation)
+		result, err := s.configs.RetryDrain(ctx, tx, node, in.Generation)
 		if err != nil {
 			return AdminChange{}, configurationProblem(err)
 		}
-		return AdminChange{Target: AdminTarget{Kind: "machine", ID: node, Revision: in.Epoch + ":" + strconv.FormatInt(result.Generation, 10)}, Changed: result.Changed, Status: 202, Body: map[string]any{"generation": result.Generation, "lifecycle": result.Lifecycle}}, nil
+		return AdminChange{Target: AdminTarget{Kind: "machine", ID: node, Revision: node + ":" + strconv.FormatInt(result.Generation, 10)}, Changed: result.Changed, Status: 202, Body: map[string]any{"generation": result.Generation, "lifecycle": result.Lifecycle}}, nil
 	}, nil
 }
 
@@ -61,8 +59,6 @@ func configurationProblem(err error) error {
 	switch {
 	case errors.Is(err, machineconfig.ErrNotFound):
 		return problem(404, "machine_not_found", "Machine not found.")
-	case errors.Is(err, machineconfig.ErrEnrollmentChanged):
-		return problem(409, "epoch_changed", "Machine enrollment changed.")
 	case errors.Is(err, machineconfig.ErrDrainChanged):
 		return problem(409, "drain_changed", "Drain intent changed.")
 	case errors.Is(err, machineconfig.ErrDrainNotExpired):
@@ -74,7 +70,6 @@ func configurationProblem(err error) error {
 
 func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminApply, error) {
 	var in struct {
-		Epoch       string `json:"epoch"`
 		Kind        string `json:"kind"`
 		Compromised bool   `json:"compromised"`
 	}
@@ -90,7 +85,7 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 		var revision int64
 		var state tunnel.RoutingState
 		var lifecycle string
-		e := tx.QueryRowContext(ctx, `SELECT state,revision,rollout->>'lifecycle' FROM lpcc.machine_states WHERE node_id=$1 AND epoch::text=$2 FOR UPDATE`, node, in.Epoch).Scan(&b, &revision, &lifecycle)
+		e := tx.QueryRowContext(ctx, `SELECT state,revision,rollout->>'lifecycle' FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&b, &revision, &lifecycle)
 		if errors.Is(e, sql.ErrNoRows) {
 			return AdminChange{}, problem(404, "tunnel_not_found", "Tunnel not found.")
 		}
@@ -106,9 +101,6 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 		if lifecycle != "active" {
 			return AdminChange{}, problem(409, "tunnel_inactive", "Tunnel is not active.")
 		}
-		if state.EndpointSuffix == "" {
-			return AdminChange{}, problem(409, "invalid_tunnel_state", "Tunnel routing state is incomplete.")
-		}
 		previous := string(b)
 		if in.Kind == "connector" {
 			state.RotateTunnel = true
@@ -121,8 +113,8 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 		b, _ = json.Marshal(state)
 		changed := previous != string(b)
 		if changed {
-			e = tx.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET state=$3,revision=revision+1,next_attempt_at=now() WHERE node_id=$1 AND epoch=$2 RETURNING revision`, node, in.Epoch, string(b)).Scan(&revision)
+			e = tx.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET state=$2,revision=revision+1,next_attempt_at=now() WHERE node_id=$1 RETURNING revision`, node, string(b)).Scan(&revision)
 		}
-		return AdminChange{Target: AdminTarget{Kind: "tunnel", ID: node, Revision: in.Epoch + ":" + strconv.FormatInt(revision, 10)}, Changed: changed, Status: 202, Body: map[string]string{"status": "rotation_queued"}}, e
+		return AdminChange{Target: AdminTarget{Kind: "tunnel", ID: node, Revision: node + ":" + strconv.FormatInt(revision, 10)}, Changed: changed, Status: 202, Body: map[string]string{"status": "rotation_queued"}}, e
 	}, nil
 }

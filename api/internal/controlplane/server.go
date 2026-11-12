@@ -2,8 +2,10 @@ package controlplane
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,7 +37,6 @@ type Machine struct {
 	K3sVersion        string     `json:"k3s_version"`
 	CreatedAt         time.Time  `json:"created_at"`
 	LastConfigFetchAt *time.Time `json:"last_config_fetch_at"`
-	Epoch             string     `json:"-"`
 	CredentialVersion int64      `json:"-"`
 	Terminal          bool       `json:"-"`
 	DevelopmentHTTP   bool       `json:"development_http,omitempty"`
@@ -198,7 +199,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid machine metadata")
 		return
 	}
-	m.NodeID = "lp-" + m.Fingerprint[:16]
+	var id [16]byte
+	if _, err = rand.Read(id[:]); err != nil {
+		fail(w, 500, "cannot generate node identity")
+		return
+	}
+	m.NodeID = strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(id[:]))
 	m.OwnerID = owner
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -206,14 +212,14 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	// The unique node ID also catches truncated fingerprint collisions. An existing
-	// row is reusable only by the same owner with the same installation identity.
+	// An active installation retains its ID on retry. A retired installation gets
+	// a fresh ID; its retained cleanup records remain scoped to the previous ID.
 	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,1,$7)
- ON CONFLICT(node_id) DO UPDATE SET hostname=EXCLUDED.hostname,updated_at=now()
+ ON CONFLICT(fingerprint) DO UPDATE SET hostname=EXCLUDED.hostname,updated_at=now()
  WHERE lpcc.machines.owner_id=EXCLUDED.owner_id AND lpcc.machines.fingerprint=EXCLUDED.fingerprint
 	 AND lpcc.machines.install_dir=EXCLUDED.install_dir AND lpcc.machines.k3s_version=EXCLUDED.k3s_version
- RETURNING enrollment_epoch::text,credential_version`, m.NodeID, m.Fingerprint, owner, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
-	err = row.Scan(&m.Epoch, &m.CredentialVersion)
+ RETURNING node_id,credential_version`, m.NodeID, m.Fingerprint, owner, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
+	err = row.Scan(&m.NodeID, &m.CredentialVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 409, "machine already registered with a different owner or installation")
 		return
@@ -222,7 +228,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,epoch,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(node_id,epoch) DO NOTHING`, m.NodeID, m.Epoch, m.OwnerID, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion); err != nil {
+	// A random collision with a retained node must fail, never reuse cleanup state.
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7)
+ ON CONFLICT(node_id) DO UPDATE SET hostname=EXCLUDED.hostname
+ WHERE lpcc.enrollments.retired_at IS NULL AND lpcc.enrollments.owner_id=EXCLUDED.owner_id AND lpcc.enrollments.fingerprint=EXCLUDED.fingerprint
+ RETURNING node_id`, m.NodeID, m.OwnerID, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion).Scan(&m.NodeID); err != nil {
 		s.databaseError(w, err)
 		return
 	}
@@ -244,7 +254,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) machineCredentials(m Machine) map[string]any {
-	return map[string]any{"node_id": m.NodeID, "epoch": m.Epoch, "credential_version": m.CredentialVersion, "token": s.enrollmentToken(m), "config_url": strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/config"}
+	return map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "token": s.enrollmentToken(m), "config_url": strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/config"}
 }
 
 func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
@@ -256,9 +266,9 @@ func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
 	var digest string
 	var data []byte
 	if m.Terminal {
-		err = s.db.QueryRowContext(r.Context(), `SELECT terminal_bundle,terminal_sha256 FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND terminal_bundle IS NOT NULL`, m.NodeID, m.Epoch).Scan(&data, &digest)
+		err = s.db.QueryRowContext(r.Context(), `SELECT terminal_bundle,terminal_sha256 FROM lpcc.enrollments WHERE node_id=$1 AND terminal_bundle IS NOT NULL`, m.NodeID).Scan(&data, &digest)
 	} else {
-		err = s.db.QueryRowContext(r.Context(), `SELECT c.bundle,c.sha256 FROM lpcc.machine_configs c JOIN lpcc.machines m USING(node_id) WHERE m.node_id=$1 AND m.enrollment_epoch=$2`, m.NodeID, m.Epoch).Scan(&data, &digest)
+		err = s.db.QueryRowContext(r.Context(), `SELECT c.bundle,c.sha256 FROM lpcc.machine_configs c JOIN lpcc.machines m USING(node_id) WHERE m.node_id=$1`, m.NodeID).Scan(&data, &digest)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "machine configuration not found")
@@ -268,15 +278,15 @@ func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
-	if _, err := s.db.ExecContext(r.Context(), `UPDATE lpcc.machines SET last_config_fetch_at=now() WHERE node_id=$1 AND enrollment_epoch=$2`, m.NodeID, m.Epoch); err != nil {
+	if _, err := s.db.ExecContext(r.Context(), `UPDATE lpcc.machines SET last_config_fetch_at=now() WHERE node_id=$1`, m.NodeID); err != nil {
 		s.databaseError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("ETag", `"`+digest+`"`)
-	w.Header().Set("X-Livepeer-Epoch", m.Epoch)
+	w.Header().Set("X-Livepeer-Node-ID", m.NodeID)
 	if m.Terminal {
-		pending, err := machineapps.Pending(r.Context(), s.db, m.NodeID, m.Epoch)
+		pending, err := machineapps.Pending(r.Context(), s.db, m.NodeID)
 		if err != nil {
 			s.databaseError(w, err)
 			return

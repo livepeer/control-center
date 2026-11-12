@@ -11,8 +11,8 @@ import (
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
-func DrainTarget(node, epoch string, state State) string {
-	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%s/%s", node, epoch, state.Generation, state.PendingConfigDigest, state.Target)))
+func DrainTarget(node string, state State) string {
+	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%s/%s", node, node, state.Generation, state.PendingConfigDigest, state.Target)))
 }
 func (s *Manager) connectorSettings(m Machine, record *Record) {
 	if m.Terminal {
@@ -52,12 +52,12 @@ func (s *Manager) prepareApps(ctx context.Context, m *Desired, lookupErr error) 
 		query := `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`
 		args := []any{m.NodeID}
 		if m.Terminal {
-			query = `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`
-			args = append(args, m.Epoch)
+			query = `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1`
+			args = append(args, m.NodeID)
 		}
 		if s.store.DB.QueryRowContext(ctx, query, args...).Scan(&prior) == nil {
 			if files, e := artifact.Read(prior); e == nil {
-				if metadata, e := transport.ReadMetadata(files["runtime.json"]); e == nil && metadata.NodeID == m.NodeID && metadata.Epoch == m.Epoch {
+				if metadata, e := transport.ReadMetadata(files["runtime.json"]); e == nil && metadata.NodeID == m.NodeID {
 					if old, e := appbundle.Read(files, metadata); e == nil {
 						p = old
 					}

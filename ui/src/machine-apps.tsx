@@ -5,10 +5,10 @@ import { api, APIError } from './api'
 type Revision = { revision_id: string; digest: string; name: string; revision: number; app_version: string; lifecycle: { retired_at: string | null }; definition: { name: string; instances: { replicas: number } } }
 type Summary = Pick<Revision, 'revision_id' | 'digest' | 'revision' | 'app_version' | 'lifecycle'>
 type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: 'present' | 'absent'; replicas?: number; revision?: Revision; start_after?: unknown; replacement?: unknown; start_allowed: boolean; completed_at: string | null; failure?: string; observed_at: string | null; created_at: string; actor_id: string }
-type Listing = { epoch: string; assignments: Assignment[]; apps_generation: number; published_generation: number; delivery_error: string | null; next_after_revision_id: string | null; last_config_fetch_at: string | null }
+type Listing = { assignments: Assignment[]; apps_generation: number; published_generation: number; delivery_error: string | null; next_after_revision_id: string | null; last_config_fetch_at: string | null }
 type Detail = { assignment: Assignment; revision: Revision; history: Assignment[]; next_before_generation: number | null }
 
-export function MachineApps({ session, machine, authorityFailure }: { session: Session; machine: { node_id: string; hostname: string; epoch: string }; authorityFailure: (error: APIError) => void }) {
+export function MachineApps({ session, machine, authorityFailure }: { session: Session; machine: { node_id: string; hostname: string; }; authorityFailure: (error: APIError) => void }) {
   const base = `/api/admin/machines/${machine.node_id}/apps`
   const [listing, setListing] = useState<Listing | null>(null)
   const [apps, setApps] = useState<{ name: string }[]>([])
@@ -23,16 +23,16 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
   const [problem, setProblem] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
-  const epoch = useRef(0), serial = useRef<Record<string, number>>({}), changing = useRef(false)
+  const requestGeneration = useRef(0), serial = useRef<Record<string, number>>({}), changing = useRef(false)
   const controllers = useRef(new Set<AbortController>())
   const loadedPages = useRef(1), listingRequest = useRef<Promise<void> | null>(null)
   const failure = useRef(authorityFailure); failure.current = authorityFailure
 
-  function cancel() { epoch.current++; controllers.current.forEach(c => c.abort()); controllers.current.clear(); changing.current = false; listingRequest.current = null }
+  function cancel() { requestGeneration.current++; controllers.current.forEach(c => c.abort()); controllers.current.clear(); changing.current = false; listingRequest.current = null }
   async function run<T>(key: string, operation: (signal: AbortSignal) => Promise<T>, apply: (value: T) => void) {
-    const e = epoch.current, ticket = (serial.current[key] || 0) + 1; serial.current[key] = ticket
+    const e = requestGeneration.current, ticket = (serial.current[key] || 0) + 1; serial.current[key] = ticket
     const controller = new AbortController(); controllers.current.add(controller)
-    const current = () => e === epoch.current && ticket === serial.current[key] && !controller.signal.aborted
+    const current = () => e === requestGeneration.current && ticket === serial.current[key] && !controller.signal.aborted
     try { const value = await operation(controller.signal); if (current()) apply(value) }
     catch (error) {
       if (!current()) return
@@ -47,13 +47,11 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
       let data = await page(after)
       const assignments = [...data.assignments]
       for (let i = 1; !after && i < loadedPages.current && data.next_after_revision_id; i++) {
-        if (data.epoch !== machine.epoch) break
         data = await page(data.next_after_revision_id)
         assignments.push(...data.assignments)
       }
       return { ...data, assignments }
     }, data => {
-      if (data.epoch !== machine.epoch) { cancel(); setListing(null); setProblem('Machine enrollment changed. Select the machine again.'); return }
       if (after) loadedPages.current++
       else setCounts(old => Object.fromEntries(Object.entries(old).filter(([id, draft]) => data.assignments.some(a => a.revision_id === id && a.desired === 'present' && a.activation_generation === draft.activation))))
       setListing(old => after && old ? { ...data, assignments: [...old.assignments, ...data.assignments.filter(a => !old.assignments.some(b => a.revision_id === b.revision_id))] } : data)
@@ -77,7 +75,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
   }
   function inspect(id: string, before?: number) {
     if (!before) setDetail(null)
-    void run('detail', signal => api<Detail>(session, `${base}/${id}?epoch=${machine.epoch}` + (before ? `&before_generation=${before}` : ''), { signal }), data => setDetail(old => before && old ? { ...data, history: [...old.history, ...data.history] } : data))
+    void run('detail', signal => api<Detail>(session, `${base}/${id}` + (before ? `?before_generation=${before}` : ''), { signal }), data => setDetail(old => before && old ? { ...data, history: [...old.history, ...data.history] } : data))
   }
   useEffect(() => {
     setBusy(false); load(); loadApps()
@@ -85,7 +83,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     return () => { window.clearInterval(timer); cancel() }
     // The parent keys this component by account, machine and enrollment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.access_token, machine.node_id, machine.epoch])
+  }, [session.access_token, machine.node_id])
 
   function mutate(path: string, method: string, body: unknown) {
     if (changing.current || !listing) return
@@ -118,16 +116,16 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
       <label>Catalog app <select aria-label="Catalog app for machine" value={appName} disabled={busy} onChange={e => chooseApp(e.target.value)}><option value="">Choose an app</option>{apps.map(a => <option key={a.name}>{a.name}</option>)}</select></label>
       <label>Revision <select aria-label="Catalog revision for machine" value={selected?.revision_id || ''} disabled={busy || !appName} onChange={e => chooseRevision(e.target.value)}><option value="">Choose a revision</option>{revisions.map(r => <option key={r.revision_id} value={r.revision_id}>Revision {r.revision} · version {r.app_version || '(unversioned)'}{r.lifecycle.retired_at ? ' (retired)' : ''}</option>)}</select></label>
       <label>Replicas <input aria-label="New assignment replicas" type="number" min="1" max="100" value={replicas} disabled={busy} onChange={e => setReplicas(Number(e.target.value))} /></label>
-      <button className="button lime" disabled={busy || !listing || !selected || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${selected.revision_id}`, 'PUT', { epoch: machine.epoch, digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas })}>Assign selected revision</button>
+      <button className="button lime" disabled={busy || !listing || !selected || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${selected.revision_id}`, 'PUT', { digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas })}>Assign selected revision</button>
       {moreApps && <button className="button" disabled={busy} onClick={() => loadApps(moreApps)}>More catalog apps</button>}{moreRevisions && <button className="button" disabled={busy} onClick={() => chooseApp(appName, moreRevisions)}>Older catalog revisions</button>}
     </div>
     {selected && <details><summary>Inspect selected revision</summary><code>{selected.digest}</code><pre>{JSON.stringify(selected.definition, null, 2)}</pre></details>}
     <ul className="catalog-list">{listing?.assignments.map(a => <li key={a.revision_id}>
       <div><strong>{a.app_name} / revision {a.revision_number}</strong><p>{label(a)}</p><code>{a.revision_id}</code><p className="muted">Desired {a.generation} · activation {a.activation_generation}{a.observed_at ? ` · last observation ${new Date(a.observed_at).toLocaleString()}` : ''}</p></div>
       <div className="catalog-actions"><button className="button" disabled={busy} onClick={() => inspect(a.revision_id)}>Inspect assignment {a.revision_id}</button>
-        {present(a) && <><label>Replicas <input aria-label={`Replicas for ${a.revision_id}`} type="number" min="1" max="100" value={count(a)} disabled={busy} onChange={e => setCounts(old => ({ ...old, [a.revision_id]: { value: Number(e.target.value), activation: a.activation_generation } }))} /></label><button className="button" disabled={busy || !validCount(count(a))} onClick={() => mutate(`${base}/${a.revision_id}`, 'PUT', { epoch: machine.epoch, digest: a.digest, expected_generation: a.generation, replicas: count(a) })}>Save replicas</button>
-        <button className="button" disabled={busy} onClick={() => mutate(`${base}/${a.revision_id}`, 'DELETE', { epoch: machine.epoch, expected_generation: a.generation })}>Remove revision {a.revision?.revision}</button>
-        <button className="button" disabled={busy || !selected || selected.revision_id === a.revision_id || selected.name !== a.revision?.name || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(a.start_after && !a.start_allowed) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${a.revision_id}/replace`, 'POST', { epoch: machine.epoch, expected_generation: a.generation, target: { revision_id: selected.revision_id, digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas } })}>Replace revision {a.revision?.revision}</button></>}
+        {present(a) && <><label>Replicas <input aria-label={`Replicas for ${a.revision_id}`} type="number" min="1" max="100" value={count(a)} disabled={busy} onChange={e => setCounts(old => ({ ...old, [a.revision_id]: { value: Number(e.target.value), activation: a.activation_generation } }))} /></label><button className="button" disabled={busy || !validCount(count(a))} onClick={() => mutate(`${base}/${a.revision_id}`, 'PUT', { digest: a.digest, expected_generation: a.generation, replicas: count(a) })}>Save replicas</button>
+        <button className="button" disabled={busy} onClick={() => mutate(`${base}/${a.revision_id}`, 'DELETE', { expected_generation: a.generation })}>Remove revision {a.revision?.revision}</button>
+        <button className="button" disabled={busy || !selected || selected.revision_id === a.revision_id || selected.name !== a.revision?.name || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(a.start_after && !a.start_allowed) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${a.revision_id}/replace`, 'POST', { expected_generation: a.generation, target: { revision_id: selected.revision_id, digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas } })}>Replace revision {a.revision?.revision}</button></>}
       </div>
     </li>)}</ul>
     {listing?.assignments.length === 0 && <p>No app assignments.</p>}{listing?.next_after_revision_id && <button className="button" disabled={busy} onClick={() => load(listing.next_after_revision_id!)}>More assignments</button>}

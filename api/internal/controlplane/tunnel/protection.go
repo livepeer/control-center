@@ -95,7 +95,7 @@ func (l *tunnelLease) restoreProtectedIngress(ctx context.Context) error {
 
 func (l *tunnelLease) accessAcknowledged(ctx context.Context) (bool, error) {
 	var ack bool
-	e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3 AND acknowledged_at IS NOT NULL AND acknowledged_generation=$4 AND revoked_at IS NULL AND expires_at>now())`, l.Machine.NodeID, l.Machine.Epoch, l.state.AccessVersion, l.state.SourceGeneration).Scan(&ack)
+	e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND version=$2 AND acknowledged_at IS NOT NULL AND acknowledged_generation=$3 AND revoked_at IS NULL AND expires_at>now())`, l.Machine.NodeID, l.state.AccessVersion, l.state.SourceGeneration).Scan(&ack)
 	return ack, e
 }
 

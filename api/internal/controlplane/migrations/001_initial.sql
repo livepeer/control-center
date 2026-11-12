@@ -1,7 +1,7 @@
 -- UP
 REVOKE ALL ON SCHEMA lpcc FROM PUBLIC;
 CREATE TABLE lpcc.machines (
- node_id TEXT PRIMARY KEY CHECK(node_id ~ '^lp-[0-9a-f]{16}$'),
+ node_id TEXT PRIMARY KEY CHECK(node_id ~ '^[a-z2-7]{26}$'),
  fingerprint TEXT NOT NULL UNIQUE CHECK(fingerprint ~ '^[0-9a-f]{64}$'),
  owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
  hostname TEXT NOT NULL,

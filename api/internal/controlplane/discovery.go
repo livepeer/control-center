@@ -87,7 +87,7 @@ func (s discoveryStore) Sources(ctx context.Context) ([]fleet.Source, error) {
 	}
 	result := make([]fleet.Source, 0, len(sources))
 	for _, source := range sources {
-		result = append(result, fleet.Source{ID: source.ID, NodeID: source.NodeID, Epoch: source.Epoch, URL: source.URL,
+		result = append(result, fleet.Source{NodeID: source.NodeID, URL: source.URL,
 			ServiceURL: source.ServiceURL, ProxyURLTemplate: source.ProxyURLTemplate, AuthMode: fleet.AuthCloudflare,
 			Lifecycle: source.Lifecycle, Ready: source.Ready, Blocked: source.Blocked, Generation: source.Generation,
 			VerifiedGeneration: source.VerifiedGeneration, CredentialRef: source.CredentialRef, CredentialVersion: source.CredentialVersion})
@@ -102,6 +102,6 @@ func (s discoveryStore) Resolve(ctx context.Context, ref string) (fleet.Credenti
 	return fleet.Credential{ClientID: credential.ClientID, ClientSecret: credential.ClientSecret}, nil
 }
 func (s discoveryStore) Acknowledge(ctx context.Context, source fleet.Source) error {
-	return s.server.tunnels.AcknowledgeDiscovery(ctx, tunnel.DiscoverySource{ID: source.ID, NodeID: source.NodeID, Epoch: source.Epoch,
+	return s.server.tunnels.AcknowledgeDiscovery(ctx, tunnel.DiscoverySource{NodeID: source.NodeID,
 		URL: source.URL, Generation: source.Generation, CredentialRef: source.CredentialRef, CredentialVersion: source.CredentialVersion})
 }

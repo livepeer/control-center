@@ -29,7 +29,6 @@ type Registration struct {
 	Options                          runner.AppOptions
 }
 type OwnerRequest struct {
-	Epoch    string
 	Identity Identity
 	Entries  []Registration
 	Tracked  []Registration
@@ -37,19 +36,19 @@ type OwnerRequest struct {
 
 type AppObservation = runner.HeartbeatAppStatus
 type Observation struct {
-	Request                                         runner.HeartbeatRequest
-	Epoch, RunnerID, Credential, PreviousCredential string
-	Sequence                                        uint64
-	Accepted                                        bool
-	Bootstrap                                       bool
-	At                                              time.Time
-	TTL                                             time.Duration
-	Entries, Withdrawals                            []Registration
-	Apps                                            []AppObservation
+	Request                                  runner.HeartbeatRequest
+	RunnerID, Credential, PreviousCredential string
+	Sequence                                 uint64
+	Accepted                                 bool
+	Bootstrap                                bool
+	At                                       time.Time
+	TTL                                      time.Duration
+	Entries, Withdrawals                     []Registration
+	Apps                                     []AppObservation
 }
 type OwnerFailure struct {
-	Epoch, Reason  string
-	Reset, Partial bool
+	RunnerID, Reason string
+	Reset, Partial   bool
 }
 type OwnerHooks struct {
 	Observe     func(Observation) error
@@ -217,7 +216,7 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 	h, r, lineage := o.hooks, copyRequest(o.request), o.lineage
 	fail := func(reason string, reset bool) {
 		if h.Failure != nil {
-			h.Failure(OwnerFailure{Epoch: r.Epoch, Reason: reason, Reset: reset})
+			h.Failure(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: reason, Reset: reset})
 		}
 	}
 	if event.Err != nil {
@@ -252,7 +251,7 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		o.mu.Unlock()
 		return
 	}
-	obs := Observation{Request: event.Request, Epoch: r.Epoch, RunnerID: resp.RunnerID, Credential: resp.HeartbeatSecret, PreviousCredential: lineage, Sequence: event.Request.Seq, Accepted: event.AcceptedSeq != nil, Bootstrap: event.Credential == o.bootstrap, At: event.At.UTC(), TTL: event.TTL, Apps: resp.Apps}
+	obs := Observation{Request: event.Request, RunnerID: resp.RunnerID, Credential: resp.HeartbeatSecret, PreviousCredential: lineage, Sequence: event.Request.Seq, Accepted: event.AcceptedSeq != nil, Bootstrap: event.Credential == o.bootstrap, At: event.At.UTC(), TTL: event.TTL, Apps: resp.Apps}
 	if obs.Credential == "" {
 		obs.Credential = event.Credential
 	}
@@ -300,7 +299,7 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 	}
 	o.accepted = Identity{RunnerID: resp.RunnerID, Credential: obs.Credential, Confirmed: obs.Accepted && !obs.Bootstrap, Sequence: event.AcceptedSeq}
 	if time.Now().Before(o.rejectedUntil) && len(obs.Entries) < len(o.request.Entries) && h.Failure != nil {
-		h.Failure(OwnerFailure{Epoch: r.Epoch, Reason: o.rejectedReason, Partial: true})
+		h.Failure(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: o.rejectedReason, Partial: true})
 	}
 	_ = o.setAppsLocked()
 }

@@ -25,7 +25,7 @@ import (
 	"github.com/livepeer/control-center/runtime/contract"
 )
 
-var nodePath = regexp.MustCompile(`^(.*)/v1/nodes/(lp-[a-f0-9]{16})/config$`)
+var nodePath = regexp.MustCompile(`^(.*)/v1/nodes/([a-z2-7]{26})/config$`)
 var tokenPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var appReportPath = regexp.MustCompile(`^apps/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/status$`)
 
@@ -117,11 +117,11 @@ func (c *Control) Request(ctx context.Context, endpoint string, payload any, lim
 }
 
 type Identity struct {
-	Epoch             string
+	NodeID            string
 	CredentialVersion int64
 }
 
-var epochPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+var nodePattern = regexp.MustCompile(`^[a-z2-7]{26}$`)
 
 func ReadIdentity(name string) (Identity, error) {
 	var i Identity
@@ -130,18 +130,18 @@ func ReadIdentity(name string) (Identity, error) {
 		return i, errors.New("identity_file")
 	}
 	var raw struct {
-		Epoch   string `json:"epoch"`
+		NodeID  string `json:"node_id"`
 		Version int64  `json:"credential_version"`
 	}
-	if Decode(b, &raw) != nil || raw.Version < 1 || !epochPattern.MatchString(raw.Epoch) {
+	if Decode(b, &raw) != nil || raw.Version < 1 || !nodePattern.MatchString(raw.NodeID) {
 		return i, errors.New("identity_json")
 	}
-	return Identity{raw.Epoch, raw.Version}, nil
+	return Identity{raw.NodeID, raw.Version}, nil
 }
 
 func ReadMetadata(b []byte) (contract.Metadata, error) {
 	var m contract.Metadata
-	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 1 || !epochPattern.MatchString(m.Epoch) || m.BundleFormat != contract.BundleFormat {
+	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^[a-z2-7]{26}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 1 || m.BundleFormat != contract.BundleFormat {
 		return m, errors.New("metadata_invalid")
 	}
 	if m.Onchain.Validate() != nil {

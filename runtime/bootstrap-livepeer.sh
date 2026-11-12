@@ -77,7 +77,7 @@ parse_args() {
 # Reruns reuse the saved machine credential and never require another JWT.
 authenticate_node() {
   local credentials="$INSTALL_DIR/credentials" key fingerprint request response api status
-  NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; ENROLLMENT_EPOCH=''; CREDENTIAL_VERSION=0
+  NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; IDENTITY_NODE_ID=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
     for key in node-id service-token config-url; do
       [[ -f "$credentials/$key" && -s "$credentials/$key" ]] || die "saved credential is missing or invalid: $key; restore it from backup"
@@ -125,9 +125,10 @@ authenticate_node() {
     if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} != 1 ]]; then
       [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" ]] || die 'enrollment returned invalid HTTPS configuration URL'
     fi
-    [[ "$NODE_ID" == "lp-${fingerprint:0:16}" ]] || die 'enrollment returned an unexpected node identity'
+    printf '%s' "$fingerprint" | atomic_write "$credentials/fingerprint"
   fi
-  [[ "$NODE_ID" =~ ^lp-[a-f0-9]{16}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
+  [[ "$IDENTITY_NODE_ID" == "$NODE_ID" ]] || die 'saved identity does not match the node'
+  [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
   [[ "$CONFIG_URL" =~ ^https?://[a-zA-Z0-9/_.:-]+$ ]] || die 'invalid configuration URL'
   [[ "$CONFIG_URL" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'saved HTTP credential requires --refresh-credentials over HTTPS'
   [[ ! "${CONFIG_URL,,}" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]] ||

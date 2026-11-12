@@ -41,9 +41,8 @@ withdraws the source immediately. An empty selection is valid.
 Unverified provisioning generations are excluded; previously approved offline
 generations continue polling, including after restart. Draining sources remain
 selected to observe withdrawals. Removed enrollments and blocked ingress are
-excluded. Replacement resets the predecessor's cache even when the URL is
-reused; an unverified replacement cannot retain that cache or admit its new
-endpoint or credential. Follow the tunnel runbook's drain, acknowledgement and
+excluded. Re-enrollment has a fresh node ID and endpoint. Removing the old
+source removes its cached inventory; an unverified replacement stays excluded. Follow the tunnel runbook's drain, acknowledgement and
 provider cleanup order before retiring resources.
 
 Credentials are immutable, AES-GCM encrypted PostgreSQL versions; only the
@@ -56,14 +55,15 @@ there is no plaintext credential export or unauthenticated fallback.
 Requests use verified TLS, a three-second timeout, no environment proxy, cookies
 or redirects, and Node's destination policy and 1 MiB source-body limit. The
 Collector ignores advertised peer metadata and never collects its own origin.
-Credential changes trigger a refresh, including a bounded follow-up when older
-work was already in flight. HTTP reads never poll sources.
+Credential changes apply to the next scheduled poll. Existing snapshots retain
+their original times across credential rotation. HTTP reads never poll sources.
 
 For ordinary Access rotation, publish the new credential with provider overlap
 as described in the tunnel runbook. Confirm discovery acknowledgement and
 subsequent provider retirement before finishing. Acknowledgement requires a new,
-successfully decoded observation for the exact source incarnation and credential
-version with the expected owning address. An old in-flight response, login HTML
+successfully decoded response using the current source credential with the
+expected owning address. The transport validates bounded response bytes using
+Node's shared codec; the Collector independently owns cached observations. An old in-flight response, login HTML
 or eviction cannot acknowledge it; an unsafe app URL alone does not block
 retirement. Use the runbook's compromise path for immediate revocation and its
 controlled restart/re-encryption procedure for keyring rotation.

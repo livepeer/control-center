@@ -30,14 +30,14 @@ verify_retired_apps() {
 
 read_identity() {
   local identity="$1"
-  ENROLLMENT_EPOCH=$(jq -er '.epoch | select(type == "string")' <<< "$identity") || return 1
+  IDENTITY_NODE_ID=$(jq -er '.node_id | select(type == "string")' <<< "$identity") || return 1
   CREDENTIAL_VERSION=$(jq -er '.credential_version | select(type == "number" and . >= 1 and . == floor)' <<< "$identity") || return 1
-  [[ "$ENROLLMENT_EPOCH" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ && "$CREDENTIAL_VERSION" =~ ^[1-9][0-9]*$ ]]
+  [[ "$IDENTITY_NODE_ID" =~ ^[a-z2-7]{26}$ && "$CREDENTIAL_VERSION" =~ ^[1-9][0-9]*$ ]]
 }
 
 save_identity() {
   local identity
-  identity=$(jq -nc --arg epoch "$ENROLLMENT_EPOCH" --argjson version "$CREDENTIAL_VERSION" '{epoch:$epoch,credential_version:$version}')
+  identity=$(jq -nc --arg node_id "$IDENTITY_NODE_ID" --argjson version "$CREDENTIAL_VERSION" '{node_id:$node_id,credential_version:$version}')
   if [[ -f "$INSTALL_DIR/credentials/identity.json" && $(cat "$INSTALL_DIR/credentials/identity.json") == "$identity" ]]; then return; fi
   printf '%s\n' "$identity" | atomic_write "$INSTALL_DIR/credentials/identity.json"
 }
@@ -85,7 +85,7 @@ stop_credential_consumers() {
 }
 
 transition_credentials() {
-  local api fingerprint operation expected response status request metadata previous_epoch issued_epoch apps replicas
+  local api fingerprint operation expected response status request metadata previous_node issued_node apps replicas
   managed_installation || die 'credential transition requires an initialized installation'
   [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]] || die 'restore the runner bootstrap credential before changing credentials'
   runtime_image
@@ -94,9 +94,9 @@ transition_credentials() {
   api=${LIVEPEER_API_URL:-}; api=${api%/}
   [[ "$api" =~ ^https://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*$ ]] || die 'set LIVEPEER_API_URL to the verified HTTPS API'
   NODE_ID=$(cat "$INSTALL_DIR/credentials/node-id")
-  [[ "$NODE_ID" =~ ^lp-[a-f0-9]{16}$ ]] || die 'invalid saved machine ID'
+  [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ ]] || die 'invalid saved machine ID'
   fingerprint=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum); fingerprint=${fingerprint:0:64}
-  [[ "$NODE_ID" == "lp-${fingerprint:0:16}" ]] || die 'installation fingerprint changed'
+  [[ $(cat "$INSTALL_DIR/credentials/fingerprint") == "$fingerprint" ]] || die 'installation fingerprint changed'
   if [[ -f "$INSTALL_DIR/state/credential-transition.json" ]]; then
     metadata=$(cat "$INSTALL_DIR/state/credential-transition.json")
     [[ $(jq -r '.mode' <<< "$metadata") == "$CREDENTIAL_TRANSITION" ]] || die 'resume the existing credential transition mode'
@@ -107,13 +107,13 @@ transition_credentials() {
     [[ -s "$INSTALL_DIR/credentials/identity.json" ]] || die 'restore the enrollment identity before changing credentials'
     read_identity "$(cat "$INSTALL_DIR/credentials/identity.json")" || die 'invalid saved enrollment identity'
     expected=$CREDENTIAL_VERSION
-    previous_epoch=$ENROLLMENT_EPOCH
-    jq -nc --arg mode "$CREDENTIAL_TRANSITION" --arg api "$api" --arg operation "$operation" --argjson expected "$expected" --arg previous_epoch "$previous_epoch" \
-      '{mode:$mode,api:$api,operation:$operation,expected:$expected,previous_epoch:$previous_epoch,cleanup_verified:($mode=="reenroll")}' | atomic_write "$INSTALL_DIR/state/credential-transition.json"
+    previous_node=$IDENTITY_NODE_ID
+    jq -nc --arg mode "$CREDENTIAL_TRANSITION" --arg api "$api" --arg operation "$operation" --argjson expected "$expected" --arg previous_node "$previous_node" \
+      '{mode:$mode,api:$api,operation:$operation,expected:$expected,previous_node:$previous_node,cleanup_verified:($mode=="reenroll")}' | atomic_write "$INSTALL_DIR/state/credential-transition.json"
     metadata=$(cat "$INSTALL_DIR/state/credential-transition.json")
   fi
-  previous_epoch=$(jq -er '.previous_epoch' <<< "$metadata")
-  [[ "$previous_epoch" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || die 'invalid previous enrollment identity'
+  previous_node=$(jq -er '.previous_node' <<< "$metadata")
+  [[ "$previous_node" =~ ^[a-z2-7]{26}$ ]] || die 'invalid previous enrollment identity'
   jq -e '.expected | type == "number" and . >= 1' <<< "$metadata" >/dev/null || die 'invalid credential transition version'
   stop_credential_consumers
   install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
@@ -127,7 +127,6 @@ transition_credentials() {
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"
   # Publish HTTPS-enforcing source files and settings before releasing credentials.
   # The Deployment remains scaled to zero until the complete new manifest applies.
-  stage_manifests
   if [[ "$CREDENTIAL_TRANSITION" == refresh ]]; then
     request=$(jq -nc --arg fingerprint "$fingerprint" --arg install_dir "$INSTALL_DIR" \
       --arg operation_id "$(jq -r '.operation' <<< "$metadata")" --argjson expected "$(jq -r '.expected' <<< "$metadata")" \
@@ -146,32 +145,41 @@ transition_credentials() {
   fi
   status=${response##*$'\n'}; [[ "$status" == 200 ]] || die 'credential transition did not return HTTP 200; resume with the same operation'
   response=${response%$'\n'*}
-  [[ $(jq -r '.node_id' <<< "$response") == "$NODE_ID" ]] || die 'credential transition returned a different machine'
+  if [[ "$CREDENTIAL_TRANSITION" == refresh ]]; then
+    [[ $(jq -r '.node_id' <<< "$response") == "$NODE_ID" ]] || die 'credential refresh returned a different node'
+  else
+    NODE_ID=$(jq -er '.node_id | select(type == "string")' <<< "$response")
+    [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ && "$NODE_ID" != "$previous_node" ]] || die 're-enrollment did not issue a fresh node'
+    CONFIG_URL="$api/v1/nodes/$NODE_ID/config"
+  fi
   [[ $(jq -r '.config_url' <<< "$response") == "$CONFIG_URL" ]] || die 'credential destination changed'
   SERVICE_TOKEN=$(jq -er '.token' <<< "$response")
   read_identity "$response" || die 'invalid refreshed machine identity'
   [[ "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid refreshed machine credential'
   if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
-    issued_epoch=$(jq -r '.issued_epoch // empty' "$INSTALL_DIR/state/credential-transition.json")
-    [[ -z "$issued_epoch" || "$issued_epoch" == "$ENROLLMENT_EPOCH" ]] || die 're-enrollment returned a different identity; restore the prior transition'
-    if [[ -z "$issued_epoch" ]]; then
-      jq --arg epoch "$ENROLLMENT_EPOCH" '. + {issued_epoch:$epoch}' "$INSTALL_DIR/state/credential-transition.json" | atomic_write "$INSTALL_DIR/state/credential-transition.json"
+    issued_node=$(jq -r '.issued_node // empty' "$INSTALL_DIR/state/credential-transition.json")
+    [[ -z "$issued_node" || "$issued_node" == "$IDENTITY_NODE_ID" ]] || die 're-enrollment returned a different identity; restore the prior transition'
+    if [[ -z "$issued_node" ]]; then
+      jq --arg node_id "$IDENTITY_NODE_ID" '. + {issued_node:$node_id}' "$INSTALL_DIR/state/credential-transition.json" | atomic_write "$INSTALL_DIR/state/credential-transition.json"
     fi
   fi
   printf '%s' "$SERVICE_TOKEN" | atomic_write "$INSTALL_DIR/credentials/service-token"
   printf '%s' "$CONFIG_URL" | atomic_write "$INSTALL_DIR/credentials/config-url"
+  [[ "$IDENTITY_NODE_ID" == "$NODE_ID" ]] || die 'credential identity does not match the node'
+  printf '%s' "$NODE_ID" | atomic_write "$INSTALL_DIR/credentials/node-id"
   save_identity
+  stage_manifests
   install_machine_secret
   if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
     [[ $(jq -r '.cleanup_verified' <<< "$metadata") == true ]] || die 'prior app cleanup was not verified; restore the prior credential transition before re-enrolling'
-    if [[ ! -f "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$ENROLLMENT_EPOCH" ]]; then
+    if [[ ! -f "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$IDENTITY_NODE_ID" ]]; then
       if [[ -d "$INSTALL_DIR/volumes/app-reconciler/state" ]]; then
-        mv -- "$INSTALL_DIR/volumes/app-reconciler/state" "$INSTALL_DIR/volumes/app-reconciler/state.$previous_epoch"
+        mv -- "$INSTALL_DIR/volumes/app-reconciler/state" "$INSTALL_DIR/volumes/app-reconciler/state.$previous_node"
         sync -- "$INSTALL_DIR/volumes/app-reconciler"
       fi
-      printf '1\n' | atomic_write "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$ENROLLMENT_EPOCH"
+      printf '1\n' | atomic_write "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$IDENTITY_NODE_ID"
     fi
-    # Fence the previous epoch's cached artifact and watermark while Flux is suspended.
+    # Fence the retired node's cached artifact and watermark while Flux is suspended.
     rm -f -- "$INSTALL_DIR/volumes/http-source/enrollment.json"
     kube -n flux-system patch externalartifact livepeer-service --subresource=status --type merge -p '{"status":{"artifact":null,"conditions":[]}}'
     apps=$(kube -n flux-system get externalartifact livepeer-apps --ignore-not-found -o name)

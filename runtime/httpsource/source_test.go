@@ -201,7 +201,7 @@ type sourceFixture struct {
 func newFixture(t *testing.T) *sourceFixture {
 	t.Helper()
 	set := testutil.Assignment(t)
-	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
+	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -212,7 +212,7 @@ func newFixture(t *testing.T) *sourceFixture {
 			if f.cleanupReady {
 				w.Header().Set("X-Livepeer-App-Cleanup-Ready", "true")
 			}
-			w.Header().Set("X-Livepeer-Epoch", f.meta.Epoch)
+			w.Header().Set("X-Livepeer-Node-ID", f.meta.NodeID)
 			w.Header().Set("X-Livepeer-Credential-Version", "1")
 			w.WriteHeader(f.status)
 			w.Write(f.data)
@@ -230,7 +230,7 @@ func newFixture(t *testing.T) *sourceFixture {
 	token := filepath.Join(root, "token")
 	os.WriteFile(token, []byte(strings.Repeat("b", 64)), 0600)
 	identity := filepath.Join(root, "identity")
-	b, _ := json.Marshal(map[string]any{"epoch": set.Epoch, "credential_version": 1})
+	b, _ := json.Marshal(map[string]any{"node_id": set.NodeID, "credential_version": 1})
 	os.WriteFile(identity, b, 0600)
 	control, err := transport.NewControl(server.URL+"/v1/nodes/"+set.NodeID+"/config", token, true)
 	if err != nil {
@@ -483,16 +483,16 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 
 func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *testing.T) {
 	s := &Source{Store: artifact.Store{Directory: t.TempDir()}}
-	cache := func(epoch, node, connector string) string {
-		m := contract.Metadata{Onchain: onchain.Offchain(), NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
+	cache := func(nodeID, node, connector string) string {
+		m := contract.Metadata{Onchain: onchain.Offchain(), NodeID: nodeID, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
 		return cacheBundle(t, s.Store, m, map[string][]byte{"system/node/kustomization.yaml": []byte(node), "system/connector/kustomization.yaml": []byte(connector)})
 	}
-	old := cache("11111111-1111-4111-8111-111111111111", "same node", "old connector")
-	current := cache("11111111-1111-4111-8111-111111111111", "same node", "broken connector")
+	old := cache(strings.Repeat("a", 26), "same node", "old connector")
+	current := cache(strings.Repeat("a", 26), "same node", "broken connector")
 	if !s.componentUnchanged("livepeer-node", old, current) || s.componentUnchanged("livepeer-connector", old, current) {
 		t.Fatal("component evidence coupled")
 	}
-	if s.componentUnchanged("livepeer-node", old, cache("22222222-2222-4222-8222-222222222222", "same node", "old connector")) {
+	if s.componentUnchanged("livepeer-node", old, cache(strings.Repeat("b", 26), "same node", "old connector")) {
 		t.Fatal("borrowed old enrollment proof")
 	}
 	os.WriteFile(filepath.Join(s.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)

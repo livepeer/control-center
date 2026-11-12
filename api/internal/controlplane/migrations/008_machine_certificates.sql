@@ -14,10 +14,9 @@ CREATE TABLE lpcc.machine_certificate_refs (
     zone_id text NOT NULL,
     wildcard_host text NOT NULL,
     node_id text NOT NULL,
-    epoch uuid NOT NULL,
-    PRIMARY KEY (zone_id, wildcard_host, node_id, epoch),
+    PRIMARY KEY (zone_id, wildcard_host, node_id),
     FOREIGN KEY (zone_id, wildcard_host) REFERENCES lpcc.machine_certificates,
-    FOREIGN KEY (node_id, epoch) REFERENCES lpcc.enrollments
+    FOREIGN KEY (node_id) REFERENCES lpcc.enrollments
 );
 ALTER TABLE lpcc.machine_certificates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.machine_certificate_refs ENABLE ROW LEVEL SECURITY;

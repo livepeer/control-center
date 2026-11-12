@@ -36,7 +36,6 @@ func appConflict() error {
 }
 
 type assignmentInput struct {
-	Epoch    string `json:"epoch"`
 	Digest   string `json:"digest"`
 	Expected *int64 `json:"expected_generation"`
 	Replicas *int   `json:"replicas"`
@@ -50,29 +49,26 @@ type assignmentInput struct {
 
 // Lock the live enrollment before state/history, shared with configuration
 // publication and credential changes. The policy lock is already held.
-func lockAppMachine(ctx context.Context, tx *sql.Tx, node, epoch string) (string, error) {
-	var current string
-	err := tx.QueryRowContext(ctx, `SELECT enrollment_epoch::text FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&current)
+func lockAppMachine(ctx context.Context, tx *sql.Tx, node string) (string, error) {
+	var present int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&present)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", problem(404, "machine_not_found", "Machine not found.")
 	}
 	if err != nil {
 		return "", err
 	}
-	if current != epoch {
-		return "", problem(409, "epoch_changed", "Machine enrollment changed.")
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,epoch,state) VALUES($1,$2,'{}') ON CONFLICT DO NOTHING`, node, epoch)
+	_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,state) VALUES($1,'{}') ON CONFLICT DO NOTHING`, node)
 	if err != nil {
 		return "", err
 	}
 	var lifecycle string
-	err = tx.QueryRowContext(ctx, `SELECT rollout->>'lifecycle' FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 FOR UPDATE`, node, epoch).Scan(&lifecycle)
+	err = tx.QueryRowContext(ctx, `SELECT rollout->>'lifecycle' FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&lifecycle)
 	return lifecycle, err
 }
 
-func optionalHead(ctx context.Context, q machineapps.Querier, node, epoch, id string) (machineapps.Version, error) {
-	v, err := machineapps.Head(ctx, q, node, epoch, id)
+func optionalHead(ctx context.Context, q machineapps.Querier, node, id string) (machineapps.Version, error) {
+	v, err := machineapps.Head(ctx, q, node, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return machineapps.Version{}, nil
 	}
@@ -103,21 +99,21 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 	}
 	node, id, method := r.PathValue("node_id"), r.PathValue("revision_id"), r.Method
 	replace := method == "POST"
-	if !appID(in.Epoch) || !appID(id) || in.Expected == nil || *in.Expected < 0 || *in.Expected == math.MaxInt64 || (!replace && in.Target != nil) || (method == "DELETE" && (in.Digest != "" || in.Replicas != nil)) {
-		return nil, problem(400, "invalid_precondition", "Provide an enrollment epoch, revision UUID and expected_generation.")
+	if !appID(id) || in.Expected == nil || *in.Expected < 0 || *in.Expected == math.MaxInt64 || (!replace && in.Target != nil) || (method == "DELETE" && (in.Digest != "" || in.Replicas != nil)) {
+		return nil, problem(400, "invalid_precondition", "Provide a revision UUID and expected_generation.")
 	}
 	if replace && (in.Digest != "" || in.Replicas != nil || in.Target == nil || !appID(in.Target.RevisionID) || in.Target.RevisionID == id || in.Target.Expected == nil || *in.Target.Expected < 0 || *in.Target.Expected == math.MaxInt64) {
 		return nil, problem(400, "invalid_replacement", "Provide a distinct target revision and its expected_generation.")
 	}
 	return func(ctx context.Context, tx *sql.Tx, u UserIdentity) (AdminChange, error) {
-		lifecycle, err := lockAppMachine(ctx, tx, node, in.Epoch)
+		lifecycle, err := lockAppMachine(ctx, tx, node)
 		if err != nil {
 			return AdminChange{}, err
 		}
 		if lifecycle != "active" {
 			return AdminChange{}, problem(409, "machine_inactive", "Machine removal is in progress.")
 		}
-		old, err := optionalHead(ctx, tx, node, in.Epoch, id)
+		old, err := optionalHead(ctx, tx, node, id)
 		if err != nil {
 			return AdminChange{}, err
 		}
@@ -133,7 +129,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 			}
 			if replace {
 				if old.Replacement != nil {
-					done, e := machineapps.CleanupComplete(ctx, tx, node, in.Epoch, schema.AppStartAfter{RevisionID: old.Replacement.RevisionID, Generation: old.Replacement.Generation})
+					done, e := machineapps.CleanupComplete(ctx, tx, node, schema.AppStartAfter{RevisionID: old.Replacement.RevisionID, Generation: old.Replacement.Generation})
 					if e != nil {
 						return AdminChange{}, e
 					}
@@ -142,7 +138,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 					}
 				}
 				if old.StartAfter != nil {
-					done, e := machineapps.CleanupComplete(ctx, tx, node, in.Epoch, *old.StartAfter)
+					done, e := machineapps.CleanupComplete(ctx, tx, node, *old.StartAfter)
 					if e != nil {
 						return AdminChange{}, e
 					}
@@ -152,7 +148,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				}
 				targetID := in.Target.RevisionID
 				affected = append(affected, targetID)
-				target, e := optionalHead(ctx, tx, node, in.Epoch, targetID)
+				target, e := optionalHead(ctx, tx, node, targetID)
 				if e != nil {
 					return AdminChange{}, e
 				}
@@ -201,8 +197,8 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 						a.StartAllowed = true
 						a.Replacement = &schema.AppReplacement{RevisionID: id, ActivationGeneration: old.ActivationGeneration, Generation: removal.Generation, Replicas: n}
 					}
-					if e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, removal); e == nil {
-						e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, a)
+					if e = machineapps.Append(ctx, tx, node, u.ID, removal); e == nil {
+						e = machineapps.Append(ctx, tx, node, u.ID, a)
 					}
 					if e != nil {
 						return AdminChange{}, e
@@ -218,7 +214,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 					if old.Generation != *in.Expected {
 						return AdminChange{}, appConflict()
 					}
-					if err = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, removal); err != nil {
+					if err = machineapps.Append(ctx, tx, node, u.ID, removal); err != nil {
 						return AdminChange{}, err
 					}
 					changed = true
@@ -239,7 +235,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				}
 				base = machineapps.Version{}
 				if *in.Expected > 0 {
-					base, e = machineapps.AtGeneration(ctx, tx, node, in.Epoch, id, *in.Expected)
+					base, e = machineapps.AtGeneration(ctx, tx, node, id, *in.Expected)
 					if e != nil {
 						return AdminChange{}, e
 					}
@@ -260,7 +256,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				a.ActivationGeneration = base.ActivationGeneration
 				a.Replacement = base.Replacement
 				if base.Replacement != nil && n != base.Replicas {
-					done, e := machineapps.CleanupComplete(ctx, tx, node, in.Epoch, schema.AppStartAfter{RevisionID: base.Replacement.RevisionID, Generation: base.Replacement.Generation})
+					done, e := machineapps.CleanupComplete(ctx, tx, node, schema.AppStartAfter{RevisionID: base.Replacement.RevisionID, Generation: base.Replacement.Generation})
 					if e != nil {
 						return AdminChange{}, e
 					}
@@ -287,17 +283,17 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 				if _, e = revisionForBinding(ctx, tx, current, ref, node); e != nil {
 					return AdminChange{}, e
 				}
-				if e = machineapps.Append(ctx, tx, node, in.Epoch, u.ID, a); e != nil {
+				if e = machineapps.Append(ctx, tx, node, u.ID, a); e != nil {
 					return AdminChange{}, e
 				}
 				changed = true
 			}
 		}
 		if changed {
-			if err = machineapps.Bump(ctx, tx, node, in.Epoch); err != nil {
+			if err = machineapps.Bump(ctx, tx, node); err != nil {
 				return AdminChange{}, err
 			}
-			set, e := machineapps.Snapshot(ctx, tx, node, in.Epoch)
+			set, e := machineapps.Snapshot(ctx, tx, node)
 			if e != nil {
 				return AdminChange{}, e
 			}
@@ -308,12 +304,12 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 		sort.Strings(affected)
 		versions := []machineapps.Version{}
 		for _, key := range affected {
-			v, e := machineapps.Head(ctx, tx, node, in.Epoch, key)
+			v, e := machineapps.Head(ctx, tx, node, key)
 			if e != nil {
 				return AdminChange{}, e
 			}
 			if v.StartAfter != nil {
-				v.StartAllowed, e = machineapps.CleanupComplete(ctx, tx, node, in.Epoch, *v.StartAfter)
+				v.StartAllowed, e = machineapps.CleanupComplete(ctx, tx, node, *v.StartAfter)
 				if e != nil {
 					return AdminChange{}, e
 				}
@@ -337,16 +333,15 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 		if changed {
 			status = 202
 		}
-		return AdminChange{Target: AdminTarget{Kind: "machine_app", ID: node + ":" + in.Epoch + ":" + id, Revision: auditRevision}, Changed: changed, Status: status, Body: map[string]any{"changed": changed, "epoch": in.Epoch, "assignments": versions}}, nil
+		return AdminChange{Target: AdminTarget{Kind: "machine_app", ID: node + ":" + node + ":" + id, Revision: auditRevision}, Changed: changed, Status: status, Body: map[string]any{"changed": changed, "node_id": node, "assignments": versions}}, nil
 	}, nil
 }
 
 func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
 	ctx := r.Context()
 	node := r.PathValue("node_id")
-	var epoch string
 	var last *time.Time
-	err := s.db.QueryRowContext(ctx, `SELECT enrollment_epoch::text,last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&epoch, &last)
+	err := s.db.QueryRowContext(ctx, `SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&last)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = problem(404, "machine_not_found", "Machine not found.")
 	}
@@ -365,7 +360,7 @@ func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserI
 		return
 	}
 	// Read all current heads through a bounded database page, including completed history.
-	rows, err := s.db.QueryContext(ctx, `SELECT `+machineapps.VersionColumns+` FROM lpcc.machine_app_heads v `+machineapps.VersionJoins+` WHERE v.node_id=$1 AND v.epoch=$2 AND ($3='' OR v.revision_id::text>$3) ORDER BY v.revision_id LIMIT $4`, node, epoch, after, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+machineapps.VersionColumns+` FROM lpcc.machine_app_heads v `+machineapps.VersionJoins+` WHERE v.node_id=$1 AND ($2='' OR v.revision_id::text>$2) ORDER BY v.revision_id LIMIT $3`, node, after, limit+1)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -377,7 +372,7 @@ func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserI
 	}
 	for i := range versions {
 		if versions[i].StartAfter != nil {
-			versions[i].StartAllowed, err = machineapps.CleanupComplete(ctx, s.db, node, epoch, *versions[i].StartAfter)
+			versions[i].StartAllowed, err = machineapps.CleanupComplete(ctx, s.db, node, *versions[i].StartAfter)
 			if err != nil {
 				s.respondError(w, err)
 				return
@@ -391,12 +386,12 @@ func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserI
 	}
 	var gen, published int64
 	var failure *string
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT apps_generation FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2),0),COALESCE((SELECT max(apps_generation) FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2),0),(SELECT apps_error FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2)`, node, epoch).Scan(&gen, &published, &failure)
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT apps_generation FROM lpcc.machine_states WHERE node_id=$1),0),COALESCE((SELECT max(apps_generation) FROM lpcc.machine_app_deliveries WHERE node_id=$1),0),(SELECT apps_error FROM lpcc.machine_states WHERE node_id=$1)`, node).Scan(&gen, &published, &failure)
 	if err != nil {
 		s.respondError(w, err)
 		return
 	}
-	respond(w, 200, map[string]any{"epoch": epoch, "assignments": versions, "apps_generation": gen, "published_generation": published, "delivery_error": failure, "last_config_fetch_at": last, "next_after_revision_id": next})
+	respond(w, 200, map[string]any{"assignments": versions, "apps_generation": gen, "published_generation": published, "delivery_error": failure, "last_config_fetch_at": last, "next_after_revision_id": next})
 }
 
 func (s *Server) inspectAssignment(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
@@ -406,23 +401,7 @@ func (s *Server) inspectAssignment(w http.ResponseWriter, r *http.Request, _ Use
 		s.respondError(w, problem(400, "invalid_revision_id", "Provide a revision UUID."))
 		return
 	}
-	var epoch string
-	// Explicit retained epoch permits administrators to inspect deleted-enrollment history.
-	epoch = r.URL.Query().Get("epoch")
-	var err error
-	if epoch == "" {
-		err = s.db.QueryRowContext(ctx, `SELECT enrollment_epoch::text FROM lpcc.machines WHERE node_id=$1`, node).Scan(&epoch)
-	} else if !appID(epoch) {
-		err = problem(400, "invalid_epoch", "Provide an enrollment UUID.")
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		err = problem(404, "machine_not_found", "Machine not found.")
-	}
-	if err != nil {
-		s.respondError(w, err)
-		return
-	}
-	head, err := machineapps.Head(ctx, s.db, node, epoch, id)
+	head, err := machineapps.Head(ctx, s.db, node, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = problem(404, "assignment_not_found", "Assignment not found.")
 	}
@@ -431,7 +410,7 @@ func (s *Server) inspectAssignment(w http.ResponseWriter, r *http.Request, _ Use
 		return
 	}
 	if head.StartAfter != nil {
-		head.StartAllowed, err = machineapps.CleanupComplete(ctx, s.db, node, epoch, *head.StartAfter)
+		head.StartAllowed, err = machineapps.CleanupComplete(ctx, s.db, node, *head.StartAfter)
 		if err != nil {
 			s.respondError(w, err)
 			return
@@ -455,7 +434,7 @@ func (s *Server) inspectAssignment(w http.ResponseWriter, r *http.Request, _ Use
 			return
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+machineapps.VersionColumns+` FROM lpcc.machine_app_versions v `+machineapps.VersionJoins+` WHERE v.node_id=$1 AND v.epoch=$2 AND v.revision_id=$3 AND v.generation<$4 ORDER BY v.generation DESC LIMIT $5`, node, epoch, id, before, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+machineapps.VersionColumns+` FROM lpcc.machine_app_versions v `+machineapps.VersionJoins+` WHERE v.node_id=$1 AND v.revision_id=$2 AND v.generation<$3 ORDER BY v.generation DESC LIMIT $4`, node, id, before, limit+1)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -470,11 +449,11 @@ func (s *Server) inspectAssignment(w http.ResponseWriter, r *http.Request, _ Use
 		history = history[:limit]
 		next = &history[len(history)-1].Generation
 	}
-	respond(w, 200, map[string]any{"epoch": epoch, "assignment": head, "revision": revision, "history": history, "next_before_generation": next})
+	respond(w, 200, map[string]any{"assignment": head, "revision": revision, "history": history, "next_before_generation": next})
 }
 
 type assignmentReport struct {
-	Epoch                string `json:"epoch"`
+	NodeID               string `json:"node_id"`
 	CredentialVersion    int64  `json:"credential_version"`
 	Generation           int64  `json:"generation"`
 	ActivationGeneration int64  `json:"activation_generation"`
@@ -495,7 +474,7 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("revision_id")
-	if !appID(id) || report.Epoch != m.Epoch || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || report.ActivationGeneration < 1 || !digestRefPattern(report.AppsDigest) || (report.Phase != "applied" && report.Phase != "failed" && report.Phase != "removed") {
+	if !appID(id) || report.NodeID != m.NodeID || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || report.ActivationGeneration < 1 || !digestRefPattern(report.AppsDigest) || (report.Phase != "applied" && report.Phase != "failed" && report.Phase != "removed") {
 		s.respondError(w, problem(409, "invalid_app_status", "Status does not match an enrolled assignment."))
 		return
 	}
@@ -511,17 +490,17 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	// Live publication locks the machine first; old terminal epochs lock only
-	// their retained enrollment and cannot block or mutate a new epoch's intents.
+	// Live publication locks the machine first; retired nodes lock only
+	// their retained enrollment and cannot block or mutate a replacement node's intents.
 	var present int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 FOR UPDATE`, m.NodeID, m.Epoch).Scan(&present)
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, m.NodeID).Scan(&present)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.respondError(w, err)
 		return
 	}
 	var version int64
 	var terminal bool
-	err = tx.QueryRowContext(ctx, `SELECT credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 FOR NO KEY UPDATE`, m.NodeID, m.Epoch).Scan(&version, &terminal)
+	err = tx.QueryRowContext(ctx, `SELECT credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1 FOR NO KEY UPDATE`, m.NodeID).Scan(&version, &terminal)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -531,7 +510,7 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var receiptDigest string
-	err = tx.QueryRowContext(ctx, `SELECT apps_digest FROM lpcc.machine_app_completions WHERE node_id=$1 AND epoch=$2 AND revision_id=$3 AND generation=$4 AND activation_generation=$5 AND phase=$6`, m.NodeID, m.Epoch, id, report.Generation, report.ActivationGeneration, report.Phase).Scan(&receiptDigest)
+	err = tx.QueryRowContext(ctx, `SELECT apps_digest FROM lpcc.machine_app_completions WHERE node_id=$1 AND revision_id=$2 AND generation=$3 AND activation_generation=$4 AND phase=$5`, m.NodeID, id, report.Generation, report.ActivationGeneration, report.Phase).Scan(&receiptDigest)
 	recorded := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.respondError(w, err)
@@ -546,7 +525,7 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var membership []byte
-	err = tx.QueryRowContext(ctx, `SELECT entries FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 AND apps_digest=$3 AND (NOT $4 OR terminal) LIMIT 1`, m.NodeID, m.Epoch, report.AppsDigest, m.Terminal && !recorded).Scan(&membership)
+	err = tx.QueryRowContext(ctx, `SELECT entries FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 AND (NOT $3 OR terminal) LIMIT 1`, m.NodeID, report.AppsDigest, m.Terminal && !recorded).Scan(&membership)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = problem(409, "unknown_delivery", "Status must refer to a published app configuration.")
 	}
@@ -575,7 +554,7 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]string{"status": "already_recorded"})
 		return
 	}
-	head, err := machineapps.Head(ctx, tx, m.NodeID, m.Epoch, id)
+	head, err := machineapps.Head(ctx, tx, m.NodeID, id)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -589,11 +568,11 @@ func (s *Server) assignmentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if report.Phase == "failed" {
-		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_app_diagnostics(node_id,epoch,revision_id,generation,reason) VALUES($1,$2,$3,$4,$5) ON CONFLICT(node_id,epoch,revision_id) DO UPDATE SET generation=EXCLUDED.generation,reason=EXCLUDED.reason,received_at=now() WHERE lpcc.machine_app_diagnostics.generation<=EXCLUDED.generation`, m.NodeID, m.Epoch, id, report.Generation, report.Reason)
+		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_app_diagnostics(node_id,revision_id,generation,reason) VALUES($1,$2,$3,$4) ON CONFLICT(node_id,revision_id) DO UPDATE SET generation=EXCLUDED.generation,reason=EXCLUDED.reason,received_at=now() WHERE lpcc.machine_app_diagnostics.generation<=EXCLUDED.generation`, m.NodeID, id, report.Generation, report.Reason)
 	} else {
-		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_app_completions(node_id,epoch,revision_id,generation,activation_generation,phase,apps_digest) VALUES($1,$2,$3,$4,$5,$6,$7)`, m.NodeID, m.Epoch, id, report.Generation, report.ActivationGeneration, report.Phase, report.AppsDigest)
+		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_app_completions(node_id,revision_id,generation,activation_generation,phase,apps_digest) VALUES($1,$2,$3,$4,$5,$6)`, m.NodeID, id, report.Generation, report.ActivationGeneration, report.Phase, report.AppsDigest)
 		if err == nil && report.Phase == "removed" && !m.Terminal {
-			err = machineapps.Bump(ctx, tx, m.NodeID, m.Epoch)
+			err = machineapps.Bump(ctx, tx, m.NodeID)
 		}
 	}
 	if err == nil {

@@ -168,7 +168,7 @@ func TestRegistryPolicyAndBindingSeam(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback()
-		_, err = revisionForBinding(t.Context(), tx, current, ref, "lp-0000000000000001")
+		_, err = revisionForBinding(t.Context(), tx, current, ref, "aaaaaaaaaaaacaaaaaaaaaaaaa")
 		if want == 200 && err != nil {
 			t.Fatal(err)
 		}

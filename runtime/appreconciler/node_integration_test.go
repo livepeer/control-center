@@ -110,7 +110,7 @@ func TestMergedNodeSDKDrain(t *testing.T) {
 				for _, id := range []string{"first", "sibling"} {
 					entries = append(entries, Registration{InstanceID: id, PodUID: "pod-" + id, Options: runner.AppOptions{ID: id, App: id, RunnerURL: app.URL + "/" + id, Mode: mode, Status: "not-ready", Capacity: 2}})
 				}
-				r := OwnerRequest{Epoch: "epoch", Identity: Identity{RunnerID: "owner"}, Entries: entries, Tracked: append([]Registration{}, entries...)}
+				r := OwnerRequest{Identity: Identity{RunnerID: "owner"}, Entries: entries, Tracked: append([]Registration{}, entries...)}
 				ch := make(chan Observation, 1024)
 				hooks := OwnerHooks{Observe: func(o Observation) error { ch <- o; return nil }}
 				if err := owner.Sync(t.Context(), r, hooks); err != nil {
@@ -248,7 +248,7 @@ func TestMergedNodeSDKRestoredMembership(t *testing.T) {
 			}
 			defer owner.Close(context.Background())
 			e := Registration{InstanceID: "instance", PodUID: "pod", Options: runner.AppOptions{ID: "app", App: "app", RunnerURL: app.URL, Mode: "persistent", Status: "not-ready", Capacity: 2}}
-			r := OwnerRequest{Epoch: "epoch", Identity: Identity{RunnerID: "owner"}, Entries: []Registration{e}, Tracked: []Registration{e}}
+			r := OwnerRequest{Identity: Identity{RunnerID: "owner"}, Entries: []Registration{e}, Tracked: []Registration{e}}
 			events := make(chan Observation, 1024)
 			hooks := OwnerHooks{Observe: func(o Observation) error { events <- o; return nil }}
 			if err := owner.Sync(t.Context(), r, hooks); err != nil {
@@ -360,7 +360,7 @@ func TestNativeNodeSharedAppsAndOwnedDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer owner.Close(t.Context())
-	request := OwnerRequest{Epoch: "epoch", Identity: Identity{RunnerID: "owner"}, Entries: entries, Tracked: append([]Registration{}, entries...)}
+	request := OwnerRequest{Identity: Identity{RunnerID: "owner"}, Entries: entries, Tracked: append([]Registration{}, entries...)}
 	observations := make(chan Observation, 1024)
 	hooks := OwnerHooks{Observe: func(o Observation) error { observations <- o; return nil }}
 	if err = owner.Sync(t.Context(), request, hooks); err != nil {

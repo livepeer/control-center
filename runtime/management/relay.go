@@ -34,12 +34,12 @@ func (a AppReports) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	var identity struct {
-		Epoch             string `json:"epoch"`
+		NodeID            string `json:"node_id"`
 		CredentialVersion int64  `json:"credential_version"`
 		Component         string `json:"component"`
 	}
 	m, ok := a.Desired()
-	if err != nil || int64(len(b)) > limit || transport.Decode(b, &identity) != nil || !ok || identity.Epoch != m.Epoch || identity.CredentialVersion != m.CredentialVersion || (endpoint == "status" && identity.Component != "runner" && identity.Component != "app-reconciler") {
+	if err != nil || int64(len(b)) > limit || transport.Decode(b, &identity) != nil || !ok || identity.NodeID != m.NodeID || identity.CredentialVersion != m.CredentialVersion || (endpoint == "status" && identity.Component != "runner" && identity.Component != "app-reconciler") {
 		http.Error(w, "report refused", http.StatusForbidden)
 		return
 	}

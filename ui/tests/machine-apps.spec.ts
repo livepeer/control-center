@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 
-const owner = '11111111-1111-4111-8111-111111111111', epoch = '22222222-2222-4222-8222-222222222222'
+const owner = '11111111-1111-4111-8111-111111111111'
 const r1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', r2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-const node = 'lp-aaaaaaaaaaaaaaaa', base = `/api/admin/machines/${node}/apps`
+const node = 'vkvkvkvkvkvkuaaaaaaaaaaaaa', base = `/api/admin/machines/${node}/apps`
 const expires = Math.floor(Date.now() / 1000) + 3600
 const saved = { access_token: `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ sub: owner, exp: expires })).toString('base64url')}.fixture`, refresh_token: 'fixture', token_type: 'bearer', expires_at: expires, expires_in: 3600, user: { id: owner, email: 'a@example.invalid', aud: 'authenticated', role: 'authenticated', app_metadata: {}, user_metadata: {}, created_at: '2026-11-07T00:00:00Z' } }
 function revision(id: string, n: number) { return { revision_id: id, digest: 'sha256:' + (n === 1 ? 'a' : 'b').repeat(64), name: 'whoami', revision: n, app_version: String(n), lifecycle: { retired_at: null, version: 1 }, definition: { name: 'whoami', instances: { replicas: 2 } } } }
@@ -24,7 +24,7 @@ async function setup(page: Page) {
     if (path === '/api/me') return route.fulfill({ json: { user_id: owner, is_admin: state.admin } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
-    if (path === '/api/admin/machines') return route.fulfill({ json: { machines: [{ node_id: node, epoch, hostname: 'worker-apps', owner_id: owner, k3s_version: 'v1.37.2+k3s1', created_at: '2026-11-07T00:00:00Z', last_config_fetch_at: null }] } })
+    if (path === '/api/admin/machines') return route.fulfill({ json: { machines: [{ node_id: node, hostname: 'worker-apps', owner_id: owner, k3s_version: 'v1.37.2+k3s1', created_at: '2026-11-07T00:00:00Z', last_config_fetch_at: null }] } })
     if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [{ name: 'whoami', head: revision(r2, 2), active_revision_count: 2 }], payment_mode: 'offchain', next_after_name: null } })
     if (path === '/api/admin/apps/whoami') return route.fulfill({ json: { revisions: [revision(r2, 2), revision(r1, 1)], next_before_revision: null } })
     if (path.startsWith('/api/admin/apps/whoami/revisions/')) return route.fulfill({ json: revision(path.endsWith(r1) ? r1 : r2, path.endsWith(r1) ? 1 : 2) })
@@ -34,7 +34,7 @@ async function setup(page: Page) {
       const after = new URL(route.request().url()).searchParams.get('after_revision_id') || ''
       const remaining = [...state.assignments].sort((a, b) => a.revision_id.localeCompare(b.revision_id)).filter(a => a.revision_id > after)
       const assignments = remaining.slice(0, 100)
-      return route.fulfill({ json: { epoch, assignments, apps_generation: state.gen, published_generation: 0, next_after_revision_id: remaining.length > 100 ? assignments.at(-1)!.revision_id : null, last_config_fetch_at: null } })
+      return route.fulfill({ json: { assignments, apps_generation: state.gen, published_generation: 0, next_after_revision_id: remaining.length > 100 ? assignments.at(-1)!.revision_id : null, last_config_fetch_at: null } })
     }
     if (path.startsWith(base + '/') && method !== 'GET') {
       const body = route.request().postDataJSON(); state.posts.push({ method, path, body }); state.gen++
@@ -47,7 +47,7 @@ async function setup(page: Page) {
         absent(old); old.generation++
         state.assignments.push({ ...assignment(body.target.revision_id, 2), replicas: body.target.replicas, start_allowed: false, start_after: { source_revision_id: id, source_removal_generation: old.generation } })
       }
-      return route.fulfill({ status: 202, json: { changed: true, epoch, assignments: state.assignments.filter(a => a.revision_id === id || a.revision_id === body.target?.revision_id) } })
+      return route.fulfill({ status: 202, json: { changed: true, assignments: state.assignments.filter(a => a.revision_id === id || a.revision_id === body.target?.revision_id) } })
     }
     return route.fulfill({ status: 404, json: { error: 'Not found' } })
   })
@@ -62,7 +62,7 @@ test('machine apps assign, scale and replace only after cleanup', async ({ page 
   await page.getByLabel('Catalog revision for machine').selectOption(r1)
   await page.getByRole('button', { name: 'Assign selected revision', exact: true }).click()
   await expect(page.getByText('Pending Runtime completion', { exact: true })).toBeVisible()
-  expect(state.posts[0].body).toMatchObject({ epoch, expected_generation: 0, replicas: 2 })
+  expect(state.posts[0].body).toMatchObject({ expected_generation: 0, replicas: 2 })
   await page.getByLabel(`Replicas for ${r1}`).fill('3')
   await page.getByRole('button', { name: 'Save replicas', exact: true }).click()
   await expect.poll(() => state.assignments[0].replicas).toBe(3)
@@ -71,7 +71,7 @@ test('machine apps assign, scale and replace only after cleanup', async ({ page 
   await expect(page.getByText('Waiting for previous revision cleanup', { exact: true })).toBeVisible()
   await expect(page.getByText('Removing — waiting for cleanup', { exact: true })).toBeVisible()
   await expect(page.getByText('whoami / revision 1', { exact: true })).toBeVisible()
-  expect(state.posts.at(-1)?.body).toMatchObject({ epoch, expected_generation: 2, target: { revision_id: r2, expected_generation: 0 } })
+  expect(state.posts.at(-1)?.body).toMatchObject({ expected_generation: 2, target: { revision_id: r2, expected_generation: 0 } })
   await page.getByRole('button', { name: 'Remove revision 2', exact: true }).click()
   await expect.poll(() => state.assignments[1].desired).toBe('absent')
 })
@@ -85,7 +85,7 @@ test('revocation unmounts app panel and ignores late assignment responses', asyn
   state.admin = false
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(page.getByRole('heading', { name: 'Apps on worker-apps' })).toHaveCount(0)
-  for (const route of state.held) await route.fulfill({ json: { epoch, assignments: [], apps_generation: 99, published_generation: 99, next_after_revision_id: null } })
+  for (const route of state.held) await route.fulfill({ json: { assignments: [], apps_generation: 99, published_generation: 99, next_after_revision_id: null } })
   await expect(page.getByRole('heading', { name: 'Apps on worker-apps' })).toHaveCount(0)
 })
 
@@ -118,7 +118,7 @@ test('manual assignment refresh supersedes an in-flight poll', async ({ page }) 
   state.assignments = [assignment(r1, 1)]; state.hold = false
   await page.getByRole('button', { name: 'Refresh assignments', exact: true }).click()
   await expect(page.getByLabel(`Replicas for ${r1}`)).toHaveValue('2')
-  await state.held[0].fulfill({ json: { epoch, assignments: [], apps_generation: 0, published_generation: 0, next_after_revision_id: null } })
+  await state.held[0].fulfill({ json: { assignments: [], apps_generation: 0, published_generation: 0, next_after_revision_id: null } })
   await expect(page.getByLabel(`Replicas for ${r1}`)).toHaveValue('2')
 })
 

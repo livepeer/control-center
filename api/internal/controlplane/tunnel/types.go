@@ -10,7 +10,6 @@ import (
 // reconciler renders it. A source generation changes when its URL or credential
 // reference changes; transport health alone does not replace a Collector source.
 type RoutingState struct {
-	EndpointSuffix       string                `json:"endpoint_suffix"`
 	CertificatePackID    string                `json:"certificate_pack_id,omitempty"`
 	CertificateStatus    string                `json:"certificate_status,omitempty"`
 	EndpointGeneration   int64                 `json:"endpoint_generation"`
@@ -75,9 +74,7 @@ type AccessCredential struct {
 }
 
 type DiscoverySource struct {
-	ID                 string `json:"id"`
 	NodeID             string `json:"node_id"`
-	Epoch              string `json:"epoch"`
 	URL                string `json:"url"`
 	ServiceURL         string `json:"service_url"`
 	ProxyURLTemplate   string `json:"proxy_url_template"`
