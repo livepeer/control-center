@@ -17,7 +17,7 @@ USER 65532:65532
 ENTRYPOINT ["controlcenter"]
 CMD ["serve", "--config", "/etc/controlcenter/config.toml"]
 
-FROM node:22-alpine AS ui-build
+FROM node:26-alpine AS ui-build
 WORKDIR /src/ui
 COPY ui/package.json ui/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
