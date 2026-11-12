@@ -85,9 +85,9 @@ docker run --rm --name "$container" --cidfile "$cidfile" \
   -e LIVEPEER_FIREWALL_CONTAINER_TEST=1 -v "$project:/src:ro" \
   "$image" bash -ec '
     apt-get update -qq
-    apt-get install -y -qq nftables iproute2 curl python3 jq >/tmp/packages.log
+    apt-get install -y -qq nftables iproute2 curl python3 jq tcpdump >/tmp/packages.log
     echo LIVEPEER_FIREWALL_TEST_STARTED
-    bash /src/tests/firewall-network.sh
+    bash /src/tests/firewall-repro.sh
   ' 2>&1 | tee "$state/firewall.log"
 statuses=("${PIPESTATUS[@]}")
 code=${statuses[0]}
