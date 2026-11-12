@@ -446,7 +446,7 @@ func TestNativeRestoredMembershipRejectionPreservesSibling(t *testing.T) {
 			controller, _, _, _, _, _ := fixtureController(t)
 			controller.Now = nil
 			if err := controller.Journal.Update(func(s *State) error {
-				s.Identity.RunnerID, s.Identity = r.Identity.RunnerID, r.Identity
+				s.Identity = r.Identity
 				s.Instances["one"] = &Instance{ID: "one", PodUID: "pod"}
 				return nil
 			}); err != nil {

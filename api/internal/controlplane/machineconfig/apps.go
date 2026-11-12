@@ -12,7 +12,7 @@ import (
 )
 
 func DrainTarget(node string, state State) string {
-	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%s/%s", node, node, state.Generation, state.PendingConfigDigest, state.Target)))
+	return artifact.Digest([]byte(fmt.Sprintf("%s/%d/%s/%s", node, state.Generation, state.PendingConfigDigest, state.Target)))
 }
 func (s *Manager) connectorSettings(m Machine, record *Record) {
 	if m.Terminal {

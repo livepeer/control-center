@@ -333,7 +333,7 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 		if changed {
 			status = 202
 		}
-		return AdminChange{Target: AdminTarget{Kind: "machine_app", ID: node + ":" + node + ":" + id, Revision: auditRevision}, Changed: changed, Status: status, Body: map[string]any{"changed": changed, "node_id": node, "assignments": versions}}, nil
+		return AdminChange{Target: AdminTarget{Kind: "machine_app", ID: node + ":" + id, Revision: auditRevision}, Changed: changed, Status: status, Body: map[string]any{"changed": changed, "node_id": node, "assignments": versions}}, nil
 	}, nil
 }
 

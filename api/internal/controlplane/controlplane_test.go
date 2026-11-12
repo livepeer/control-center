@@ -184,7 +184,7 @@ func credentials(t *testing.T, data []byte) map[string]string {
 	}
 	result := map[string]string{}
 	var resultValue string
-	for _, key := range []string{"node_id", "node_id", "token", "config_url"} {
+	for _, key := range []string{"node_id", "token", "config_url"} {
 		if err := json.Unmarshal(raw[key], &resultValue); err != nil {
 			t.Fatal(err)
 		}

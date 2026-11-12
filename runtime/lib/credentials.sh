@@ -129,8 +129,6 @@ transition_credentials() {
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"
-  # Publish HTTPS-enforcing source files and settings before releasing credentials.
-  # The Deployment remains scaled to zero until the complete new manifest applies.
   if [[ "$CREDENTIAL_TRANSITION" == refresh ]]; then
     request=$(jq -nc --arg fingerprint "$fingerprint" --arg install_dir "$INSTALL_DIR" \
       --arg operation_id "$(jq -r '.operation' <<< "$metadata")" --argjson expected "$(jq -r '.expected' <<< "$metadata")" \
