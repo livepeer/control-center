@@ -14,4 +14,3 @@ ui/playwright-report/
 /deploy/config.toml
 /deploy/secrets/
 /deploy/bootstrap/
-/deploy/bootstrap-release.json
