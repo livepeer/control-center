@@ -330,7 +330,7 @@ func (s *Manager) ResolveAccessCredential(ctx context.Context, ref string) (Acce
 	var b []byte
 	e = s.db.QueryRowContext(ctx, `SELECT c.key_id,c.ciphertext FROM lpcc.access_credentials c JOIN lpcc.enrollments e USING(node_id) WHERE c.node_id=$1 AND c.version=$2 AND c.revoked_at IS NULL AND c.expires_at>now() AND e.retired_at IS NULL`, parts[1], version).Scan(&key, &b)
 	if e != nil {
-		return empty, errors.New("Access credential is unavailable")
+		return empty, errors.New("access credential is unavailable")
 	}
 	return s.keys.open(key, ref, b)
 }

@@ -6,7 +6,7 @@ commands below from the repository root.
 
 ## Run locally
 
-Requires Go 1.27.3+, Node.js 22.12+, TLS-enabled PostgreSQL 15+, and authentication.
+Requires Go 1.27.4+, Node.js 22.12+, TLS-enabled PostgreSQL 15+, and authentication.
 Configure credentials and sign-in using
 [api/config.example.toml](../api/config.example.toml) and the
 [operations runbook](operations.md). Then run:
@@ -32,6 +32,19 @@ npm --prefix ui run test:browser
 Database tests skip without `TEST_DATABASE_URL` for a disposable PostgreSQL
 instance with database and test-role creation privileges. Browser tests use
 Chrome and mocks.
+
+[GitHub Actions CI](../.github/workflows/ci.yml) runs on pull requests and can
+be run manually. It checks Go formatting, race tests, Vet, Staticcheck and
+Govulncheck; builds and browser-tests the UI; and runs bootstrap, remote runner
+and Runtime tests. CI supplies PostgreSQL, Livepeer Node and cloudflared for
+integration tests. Pushes to `main` also run these checks.
+
+Tests requiring `NODE_BINARY` or an isolated Flux/gVisor cluster remain opt-in.
+
+[Build](../.github/workflows/build.yml) validates the API, web and Runtime
+Docker images on native Linux amd64 and arm64 runners for pull requests and
+`main` pushes, and can be run manually. Image publication and bootstrap
+activation follow the [deployment process](../deploy/README.md).
 
 ## Remote Runtime tests
 

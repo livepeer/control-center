@@ -1,0 +1,145 @@
+name: Check and test code
+
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      GOTOOLCHAIN: local
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            echo "$unformatted"
+            echo 'Run go fmt ./... to fix formatting.' >&2
+            exit 1
+          fi
+      - name: Node fixture paths
+        run: |
+          {
+            echo "LIVEPEER_NODE_TEST_BINARY=$RUNNER_TEMP/bin/livepeer-orchestrator"
+            echo "CLOUDFLARED_BINARY=$RUNNER_TEMP/bin/cloudflared"
+          } >> "$GITHUB_ENV"
+      - name: Install pinned Livepeer Node fixture
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/livepeer/node/cmd/livepeer-orchestrator@c4e2e5d3b4807c09e5b027cf1f1d75fd1f9db142
+      - name: Pin cloudflared fixture
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.10.7/cloudflared-linux-amd64 \
+            --output "$CLOUDFLARED_BINARY"
+          echo "1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872  $CLOUDFLARED_BINARY" | sha256sum --check
+          chmod +x "$CLOUDFLARED_BINARY"
+      - name: Race and real-process tests
+        run: |
+          mkdir -p "${{ runner.temp }}/livepeer-test-artifacts"
+          go test -race -artifacts -outputdir=${{ runner.temp }}/livepeer-test-artifacts ./...
+      - name: Save test artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-artifacts
+          overwrite: true
+          path: ${{ runner.temp }}/livepeer-test-artifacts
+          if-no-files-found: ignore
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          staticcheck ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck ./...
+
+  ui:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - name: Build UI
+        run: npm run build
+      - name: Install Chrome
+        run: npx playwright install --with-deps chrome
+      - name: Browser tests
+        run: npm run test:browser
+      - name: Save browser test artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-test-artifacts
+          path: |
+            ui/test-results
+            ui/playwright-report
+          if-no-files-found: ignore
+
+  runtime:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install Runtime test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck jq
+      - name: Bootstrap release and remote runner tests
+        run: python3 -m unittest discover -s tools/tests -v
+      - name: Runtime tests
+        env:
+          LIVEPEER_TEST_STATE_DIR: ${{ runner.temp }}/runtime-test-artifacts
+        run: |
+          mkdir -p "$LIVEPEER_TEST_STATE_DIR"
+          bash runtime/tests/run.sh
+      - name: Save Runtime test artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-test-artifacts
+          path: ${{ runner.temp }}/runtime-test-artifacts
+          if-no-files-found: ignore

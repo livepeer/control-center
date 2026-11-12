@@ -704,7 +704,7 @@ func TestBootstrapOutageRemovalWaitsForNode(t *testing.T) {
 	var available atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if !available.Load() {
-			http.Error(w, "outage", 503)
+			http.Error(w, "outage", http.StatusServiceUnavailable)
 			return
 		}
 		if req.URL.Path != "/runners/heartbeat" {
@@ -782,7 +782,7 @@ func TestLostBootstrapRetainsOldOwnerUntilNodeAbsence(t *testing.T) {
 				}
 				if rejectHeartbeats {
 					unexpectedHeartbeats++
-					http.Error(w, "heartbeat unavailable", 503)
+					http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
 					return
 				}
 				var req runner.HeartbeatRequest

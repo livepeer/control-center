@@ -177,11 +177,11 @@ func TestAssignmentAuthorizationPolicyAndInvalidChanges(t *testing.T) {
 	requireStatus(t, putApp(t, s, c, r, 0, 1), 202)
 	requireStatus(t, request(t, s, "POST", "/api/admin/apps/whoami/revisions/"+r.RevisionID+"/retire", "session-a", map[string]int{"expected_state_version": 1}), 200)
 	requireStatus(t, putApp(t, s, c, r, 1, 2), 202)
+	set, _, _ := appBundle(t, s, c)
+	findApp(t, set, r.RevisionID)
+	requireStatus(t, request(t, s, "DELETE", appPath(c, r), "session-a", map[string]any{"expected_generation": 2}), 202)
 	set, digest, _ := appBundle(t, s, c)
 	a := findApp(t, set, r.RevisionID)
-	requireStatus(t, request(t, s, "DELETE", appPath(c, r), "session-a", map[string]any{"expected_generation": 2}), 202)
-	set, digest, _ = appBundle(t, s, c)
-	a = findApp(t, set, r.RevisionID)
 	requireStatus(t, appReport(t, s, c, a, digest, "removed"), 200)
 	requireStatus(t, putApp(t, s, c, r, 3, 1), 409)
 	execSQL(t, s.db, `UPDATE lpcc.administrator_grants SET revoked_at=now(),revision=revision+1 WHERE grant_id=$1`, grant)
@@ -390,7 +390,7 @@ func TestAssignmentBlockedTargetEditsAndCancellation(t *testing.T) {
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", impossibleRetry), 409)
 	currentNoop := map[string]any{"expected_generation": 2, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 2}}
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", currentNoop), 200)
-	set, digest, _ := appBundle(t, s, c)
+	set, _, _ := appBundle(t, s, c)
 	target := findApp(t, set, next.RevisionID)
 	if target.StartAllowed || target.StartAfter == nil || target.Generation != 2 || target.ActivationGeneration != 1 {
 		t.Fatal("replica edit cleared prerequisite")
@@ -398,7 +398,7 @@ func TestAssignmentBlockedTargetEditsAndCancellation(t *testing.T) {
 	chain := map[string]any{"expected_generation": 2, "target": map[string]any{"revision_id": r.RevisionID, "digest": r.Digest, "expected_generation": 2}}
 	requireStatus(t, request(t, s, "POST", appPath(c, next)+"/replace", "session-a", chain), 409)
 	requireStatus(t, request(t, s, "DELETE", appPath(c, next), "session-a", map[string]any{"expected_generation": 2}), 202)
-	set, digest, _ = appBundle(t, s, c)
+	set, digest, _ := appBundle(t, s, c)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, r.RevisionID), digest, "removed"), 200)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, next.RevisionID), digest, "removed"), 200)
 	empty, _, _ := appBundle(t, s, c)

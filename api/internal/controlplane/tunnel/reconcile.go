@@ -190,7 +190,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		return l.protectionFailure(ctx, e)
 	}
 	if app.Audience == "" {
-		return errors.New("Access application audience is missing")
+		return errors.New("access application audience is missing")
 	}
 	policy, e := l.ensure(ctx, prefix+"policy", "policy", app.ID, token.ID)
 	if e != nil {

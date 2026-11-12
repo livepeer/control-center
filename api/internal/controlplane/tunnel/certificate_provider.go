@@ -62,7 +62,7 @@ func (c *cloudflareHTTP) ListCertificatePacks(ctx context.Context) ([]Certificat
 			return result, nil
 		}
 	}
-	return nil, errors.New("Cloudflare certificate listing exceeds limit")
+	return nil, errors.New("certificate listing from Cloudflare exceeds limit")
 }
 func (c *cloudflareHTTP) CertificatePack(ctx context.Context, id string) (CertificatePack, error) {
 	var pack CertificatePack

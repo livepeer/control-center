@@ -35,7 +35,7 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 	apps := AppReports{Control: control, Desired: func() (contract.Metadata, bool) { return m, true }}
 	connector := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/tunnel/connector-token" {
-			http.Error(w, "refused", 403)
+			http.Error(w, "refused", http.StatusForbidden)
 			return
 		}
 		w.Write([]byte(`{}`))
