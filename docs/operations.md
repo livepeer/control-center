@@ -91,10 +91,11 @@ versions for held workloads and rollback. Reapply previous settings at the curre
 revision to roll back. Configuration changes use the normal withdrawal/drain flow.
 Inspect configuration, local admission and remote handoff in **Runtime status**.
 
-Node's normal drain waits for durable redeemer handoff before acknowledging
-retirement. Onchain confirmation continues independently at the redeemer. Forced
-removal revokes submission grants immediately; preserve Node's database and
-re-enroll with the same storage to resume any unfinished handoff.
+App and session drain govern runner retirement. Node retains winning tickets
+and resumes redeemer handoff after restart; confirmation continues at the
+redeemer. Forced removal revokes submission grants and stops Node. Preserve its
+database when re-enrolling to resume unfinished handoff. Disabling onchain
+operation or removing a machine can leave pending tickets unredeemed.
 
 Back up Node's `/data/onchain.sqlite` and sidecars consistently, and back up the
 redeemer database and wallet separately. Keep the recipient/chain binding and

@@ -20,48 +20,6 @@ type onchainTransport func(*http.Request) (*http.Response, error)
 
 func (f onchainTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestOnchainEmptyOwnerStillRequiresNodeDrainAcknowledgement(t *testing.T) {
-	c, input, _, owner, reporter, _ := fixtureController(t)
-	input.value.Metadata.Onchain = onchain.Config{Version: 1, Mode: "onchain"}
-	input.value.Metadata.DrainRequested = true
-	input.value.Metadata.DrainTarget = "drain-target"
-	owner.unregisterFail = true
-	tick(t, c)
-	if reporter.reports[len(reporter.reports)-1].Drained || owner.unregisters == 0 {
-		t.Fatal("empty owner bypassed Node's durable handoff drain")
-	}
-	owner.unregisterFail = false
-	tick(t, c)
-	if !reporter.reports[len(reporter.reports)-1].Drained {
-		t.Fatal("Node's normal drain acknowledgement did not release maintenance")
-	}
-}
-
-func TestEmptySDKOwnerUnregisterChecksNodeInsteadOfSkippingRequest(t *testing.T) {
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/unregister") || r.Header.Get("Authorization") != "bootstrap" {
-			t.Error("invalid normal unregister request")
-		}
-		if calls == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-	owner, err := NewSDKOwner(server.URL, "bootstrap", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner.Unregister(t.Context(), Identity{}) == nil {
-		t.Fatal("pending handoff was acknowledged")
-	}
-	if err := owner.Unregister(t.Context(), Identity{}); err != nil || calls != 2 {
-		t.Fatal("Node acknowledgement was not observed", err, calls)
-	}
-}
 func TestOnchainAdmissionRequiresLiveMatchingNode(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	pods := 1
