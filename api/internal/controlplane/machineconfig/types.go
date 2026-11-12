@@ -30,8 +30,6 @@ type State struct {
 	DrainStartedAt         time.Time `json:"drain_started_at,omitempty"`
 	DrainedGeneration      int64     `json:"drained_generation,omitempty"`
 	Target                 string    `json:"target,omitempty"`
-	OnchainSettled         bool      `json:"onchain_settled,omitempty"`
-	OnchainDrainAfter      time.Time `json:"onchain_drain_after,omitempty"`
 	HeldOnchain            string    `json:"held_onchain,omitempty"`
 	HeldOrchestrator       string    `json:"held_orchestrator,omitempty"`
 	PendingConfigDigest    string    `json:"pending_config_digest,omitempty"`

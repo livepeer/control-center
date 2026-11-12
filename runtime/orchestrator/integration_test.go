@@ -79,7 +79,7 @@ func TestOnchainDeliveryFencesAndSecretPersistence(t *testing.T) {
 		t.Fatal("insecure delivery")
 	}
 }
-func TestOnchainQueueEvidenceAndHandoffAreIndependent(t *testing.T) {
+func TestOnchainReadinessAndHandoffAreIndependent(t *testing.T) {
 	i, m, l := integrationFixture(t)
 	g, e := i.fetch(t.Context(), l)
 	if e != nil {
@@ -91,16 +91,13 @@ func TestOnchainQueueEvidenceAndHandoffAreIndependent(t *testing.T) {
 	processProof(t, i, g.Association, true)
 	old := http.DefaultClient
 	t.Cleanup(func() { http.DefaultClient = old })
-	body := "# TYPE livepeer_collector_healthy gauge\n# TYPE livepeer_redemption_queue_tickets gauge\n# TYPE livepeer_redemption_transitions_total counter\nlivepeer_collector_healthy{component=\"orchestrator\",collector=\"redemptions\"} 1\n"
-	for _, s := range []string{"waiting", "eligible", "in_flight", "awaiting_finality", "rejected", "blocked", "unknown"} {
-		body += "livepeer_redemption_queue_tickets{component=\"orchestrator\",state=\"" + s + "\"} 0\n"
-	}
+	body := "# TYPE livepeer_redemption_transitions_total counter\n"
 	metrics := body
 	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(metrics)), Header: make(http.Header)}, nil
 	})}
 	o := i.Observe(t.Context(), m, true, true, l.PodUID)
-	if !o.QueueKnown || o.Unsettled != 0 || !o.Ready || o.Handoff != "unverified" {
+	if !o.Ready || o.Handoff != "unverified" {
 		t.Fatal(o)
 	}
 	metrics = body + "livepeer_redemption_transitions_total{component=\"orchestrator\",event=\"retryable\"} 1\n"
@@ -124,11 +121,7 @@ func TestOnchainQueueEvidenceAndHandoffAreIndependent(t *testing.T) {
 		t.Fatal("management restart renewed old handoff evidence")
 	}
 
-	metrics = "livepeer_collector_healthy{component=\"orchestrator\",collector=\"redemptions\"} 1\n"
-	if i.Observe(t.Context(), m, true, true, l.PodUID).QueueKnown {
-		t.Fatal("missing samples fabricated empty queue")
-	}
-	if i.Observe(t.Context(), m, true, true, "replacement").QueueKnown {
+	if i.Observe(t.Context(), m, true, true, "replacement").Applied {
 		t.Fatal("borrowed replaced pod evidence")
 	}
 	i.observation.ObservedAt = time.Now().Add(-31 * time.Second)

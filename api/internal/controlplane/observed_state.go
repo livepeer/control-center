@@ -245,7 +245,6 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 			if !c.Fresh || !c.Current || c.ClockUncertain {
 				copy.Ready = false
 				copy.Applied = false
-				copy.QueueKnown = false
 				copy.Handoff = "unverified"
 			}
 			c.Onchain = &copy
@@ -438,7 +437,6 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 type onchainView struct {
 	Desired             onchain.Config `json:"desired"`
 	DeliveredGeneration int64          `json:"delivered_generation"`
-	RecoveryRequired    bool           `json:"recovery_required"`
 }
 
 func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error) {
@@ -451,7 +449,6 @@ func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error
 	v.Desired.RPCSecret = ""
 	v.Desired.RPCGrants = nil
 	v.Desired.RedeemerGrants = nil
-	_ = s.db.QueryRowContext(ctx, `SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, m.NodeID).Scan(&v.RecoveryRequired)
 	var b []byte
 	if m.Terminal {
 		err = s.db.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&b)

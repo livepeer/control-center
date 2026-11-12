@@ -1,5 +1,5 @@
 -- UP
--- Retain storage identity and recovery state after the active machine is removed.
+-- Retain storage identity after the active machine is removed.
 CREATE TABLE lpcc.onchain_revision (id BOOLEAN PRIMARY KEY DEFAULT true CHECK(id), revision BIGINT NOT NULL DEFAULT 0);
 INSERT INTO lpcc.onchain_revision DEFAULT VALUES;
 CREATE TABLE lpcc.onchain_configs (
@@ -10,7 +10,7 @@ CREATE TABLE lpcc.onchain_state (
  node_id TEXT PRIMARY KEY CHECK(node_id ~ '^lp-[0-9a-f]{16}$'),
  recipient TEXT NOT NULL DEFAULT '', chain_id BIGINT NOT NULL DEFAULT 0, controller TEXT NOT NULL DEFAULT '',
  generation BIGINT NOT NULL CHECK(generation>0),
- initialized BOOLEAN NOT NULL DEFAULT false, drained BOOLEAN NOT NULL DEFAULT false, recovery_required BOOLEAN NOT NULL DEFAULT false,
+ initialized BOOLEAN NOT NULL DEFAULT false,
  FOREIGN KEY(node_id,generation) REFERENCES lpcc.onchain_configs(node_id,generation)
 );
 CREATE TABLE lpcc.onchain_secrets (reference TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
@@ -27,8 +27,6 @@ CREATE OR REPLACE FUNCTION lpcc.capture_runtime_retirement() RETURNS trigger LAN
  SET search_path=pg_catalog,lpcc AS $$
 BEGIN
  UPDATE lpcc.onchain_grants SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=OLD.node_id AND epoch=OLD.enrollment_epoch;
- UPDATE lpcc.onchain_state b SET recovery_required=b.recovery_required OR (NOT b.drained AND (b.initialized OR c.config->>'mode'='onchain') AND NOT EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=OLD.node_id AND epoch=OLD.enrollment_epoch AND rollout->>'onchain_settled'='true'))
- FROM lpcc.onchain_configs c WHERE b.node_id=OLD.node_id AND c.node_id=b.node_id AND c.generation=b.generation;
  UPDATE lpcc.enrollments e SET retained_bundle=c.bundle
  FROM lpcc.machine_configs c
  WHERE e.node_id=OLD.node_id AND e.epoch=OLD.enrollment_epoch AND c.node_id=OLD.node_id

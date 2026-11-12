@@ -65,6 +65,8 @@ installer's origin firewall remains required.
 
 Package the Node image with Runtime's startup wrapper and set `RuntimeNodeImage`
 to the pushed digest. Use the same Node build for `LIVEPEER_REDEEMER_IMAGE`.
+The Node build must support `RPCURLFile`, `RedeemerHeadersFile` and unregister
+acknowledgements that wait for durable redeemer handoff.
 
 ```sh
 docker build -f ../runtime/services/Dockerfile.node \

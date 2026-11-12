@@ -110,7 +110,7 @@ func checkOnchainState(path string, required bool) error {
 	}
 	info, e := os.Lstat(path)
 	if e != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		return errors.New("onchain_state_recovery_required")
+		return errors.New("onchain_storage_missing")
 	}
 	return nil
 }

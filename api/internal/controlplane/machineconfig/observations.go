@@ -20,7 +20,7 @@ func optionalID(s string) bool { return s == "" || statusID.MatchString(s) }
 
 func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report) error {
 	if p := r.Onchain; p != nil {
-		if r.Component != "runtime" || (p.Mode != "onchain" && p.Mode != "offchain") || p.Generation < 0 || len(p.PodUID) > 128 || p.Unsettled < 0 || p.Unsettled > 10000000 || (p.Handoff != "healthy" && p.Handoff != "degraded" && p.Handoff != "unverified") {
+		if r.Component != "runtime" || (p.Mode != "onchain" && p.Mode != "offchain") || p.Generation < 0 || len(p.PodUID) > 128 || (p.Handoff != "healthy" && p.Handoff != "degraded" && p.Handoff != "unverified") {
 			return ErrStaleStatus
 		}
 		if p.Applied {

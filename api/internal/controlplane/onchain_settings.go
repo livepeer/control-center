@@ -21,7 +21,6 @@ import (
 
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
-	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/spf13/cobra"
 )
@@ -55,7 +54,6 @@ type onchainApplyParams struct {
 	OnchainWebhookSecretFile string `secretfor:"OnchainWebhookSecret" basepath:"source"`
 	RuntimeNodeImage         string `env:"RUNTIME_NODE_IMAGE" optional:"true"`
 	File                     string `name:"file" boa:"noconfig" descr:"Onchain infrastructure JSON file"`
-	AcknowledgeRecovery      string `name:"acknowledge-recovery" optional:"true" boa:"noconfig" descr:"Confirm restored retained state after a fresh empty-queue observation"`
 	ExpectedRevision         int64  `name:"expected-revision" min:"0" boa:"noconfig"`
 }
 
@@ -75,7 +73,7 @@ func OnchainCommand() *cobra.Command {
 		}
 		defer db.Close()
 		s := New(db, Params{OnchainSecretsDir: p.OnchainSecretsDir, OnchainWebhookSecret: p.OnchainWebhookSecret, RuntimeNodeImage: p.RuntimeNodeImage}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		rev, e := s.applyOnchain(cmd.Context(), input, p.ExpectedRevision, p.AcknowledgeRecovery)
+		rev, e := s.applyOnchain(cmd.Context(), input, p.ExpectedRevision)
 		if e == nil {
 			fmt.Fprintln(cmd.OutOrStdout(), rev)
 		}
@@ -116,7 +114,7 @@ func (s *Server) readOnchainRPC(ref string) ([]byte, error) {
 	return b, nil
 }
 
-func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected int64, acknowledge ...string) (int64, error) {
+func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected int64) (int64, error) {
 	if input.Version != 1 || len(input.Machines) == 0 || len(input.Machines) > 1000 {
 		return 0, errors.New("invalid onchain document")
 	}
@@ -253,7 +251,7 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_configs VALUES($1,$2,$3)`, node, c.Generation, string(after)); e != nil {
 			return 0, e
 		}
-		_, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_state(node_id,recipient,chain_id,controller,generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT(node_id) DO UPDATE SET recipient=EXCLUDED.recipient,chain_id=EXCLUDED.chain_id,controller=EXCLUDED.controller,generation=EXCLUDED.generation,drained=false`, node, recipient, chain, controller, c.Generation)
+		_, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_state(node_id,recipient,chain_id,controller,generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT(node_id) DO UPDATE SET recipient=EXCLUDED.recipient,chain_id=EXCLUDED.chain_id,controller=EXCLUDED.controller,generation=EXCLUDED.generation`, node, recipient, chain, controller, c.Generation)
 		if e != nil {
 			return 0, e
 		}
@@ -264,43 +262,6 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 			return 0, e
 		}
 		changed = true
-	}
-	if len(acknowledge) > 0 && acknowledge[0] != "" {
-		node := acknowledge[0]
-		if _, ok := input.Machines[node]; !ok {
-			return 0, errors.New("recovery acknowledgement requires the machine in the desired snapshot")
-		}
-		// Freeze publication and enrollment while checking the evidence against
-		// the currently delivered workload, including configuration-only changes.
-		var bundle []byte
-		if e = tx.QueryRowContext(ctx, `SELECT c.bundle FROM lpcc.machines m JOIN lpcc.machine_configs c USING(node_id) WHERE m.node_id=$1 FOR UPDATE OF m`, node).Scan(&bundle); e != nil {
-			return 0, errors.New("recovery acknowledgement requires a delivered configuration")
-		}
-		metadata, _, e := machineconfig.ReadApplied(bundle)
-		if e != nil {
-			return 0, e
-		}
-		var required bool
-		if e = tx.QueryRowContext(ctx, `SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1 FOR UPDATE`, node).Scan(&required); e != nil {
-			return 0, e
-		}
-		if required {
-			var ready bool
-			e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machines m JOIN lpcc.machine_reports r ON r.node_id=m.node_id AND r.epoch=m.enrollment_epoch AND r.credential_version=m.credential_version JOIN lpcc.onchain_state p ON p.node_id=m.node_id JOIN lpcc.onchain_grants g ON g.grant_id::text=r.report#>>'{onchain,grant_id}' AND g.node_id=m.node_id AND g.epoch=m.enrollment_epoch WHERE m.node_id=$1 AND r.component='runtime' AND r.generation=$2 AND r.report->>'config_digest'=$3 AND g.config_digest=$3 AND g.pod_uid=r.report#>>'{onchain,pod_uid}' AND g.onchain_generation=p.generation AND r.received_at>now()-interval '2 minutes' AND (r.report->>'observed_at')::timestamptz>now()-interval '2 minutes' AND NOT COALESCE((r.report->>'clock_uncertain')::boolean,false) AND r.report#>>'{onchain,applied}'='true' AND r.report#>>'{onchain,queue_known}'='true' AND r.report#>>'{onchain,unsettled}'='0' AND (r.report#>>'{onchain,generation}')::bigint=p.generation AND g.observed_at IS NOT NULL AND g.revoked_at IS NULL)`, node, metadata.Generation, metadata.ConfigDigest).Scan(&ready)
-			if e != nil {
-				return 0, e
-			}
-			if !ready {
-				return 0, errors.New("restore onchain state and obtain fresh zero-unsettled evidence before acknowledging recovery")
-			}
-			if _, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_state SET recovery_required=false WHERE node_id=$1`, node); e != nil {
-				return 0, e
-			}
-			if e = writeAudit(ctx, tx, "system", "deployment:onchain", "onchain.recover", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(revision + 1)}, "success", "recovery_acknowledged"); e != nil {
-				return 0, e
-			}
-			changed = true
-		}
 	}
 	if expected > revision || (changed && expected != revision) {
 		return 0, problem(409, "onchain_revision_changed", "Onchain infrastructure changed.")
