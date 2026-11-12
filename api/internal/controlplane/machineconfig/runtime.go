@@ -27,7 +27,7 @@ func templateValues(m Desired) *strings.Replacer {
 	if strings.HasPrefix(m.ControlAPIURL, "http://") {
 		mode = "development-http"
 	}
-	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
+	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@ENROLLMENT_EPOCH@", m.Epoch, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
 }
 func orchestratorConfiguration(m Desired) string {
 	if m.State.HeldOrchestrator != "" {

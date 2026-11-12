@@ -76,6 +76,16 @@ func TestPaidBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
 		t.Fatal("missing private endpoint policy")
 	}
 	original := Digest(m)
+	refreshed := m
+	refreshed.CredentialVersion++
+	if Digest(refreshed) == original {
+		t.Fatal("management refresh did not schedule Node drain and replacement")
+	}
+	refreshed = m
+	refreshed.Epoch = "22222222-2222-4222-8222-222222222222"
+	if Digest(refreshed) == original {
+		t.Fatal("re-enrollment reused a previous lifetime's Node workload")
+	}
 	m.Payment.Generation++
 	m.Payment.CredentialRevision++
 	if Digest(m) == original {

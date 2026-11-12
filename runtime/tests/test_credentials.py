@@ -172,6 +172,18 @@ transition_credentials
         self.assertEqual((self.root / 'credentials/identity.json').read_bytes(), identity)
         self.assertTrue((self.root / 'state/credential-transition.json').exists())
 
+    def test_reenrollment_stops_prior_node_before_issuing_credentials(self):
+        result = self.transition(mode='reenroll')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = (self.root / 'steps').read_text().splitlines()
+        stopped = next(i for i, x in enumerate(steps) if 'wait pod -l app=orchestrator' in x)
+        self.assertLess(stopped, steps.index('refresh'))
+
+    def test_refresh_keeps_node_for_authoritative_managed_drain(self):
+        result = self.transition()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('scale deployment/orchestrator', (self.root / 'steps').read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

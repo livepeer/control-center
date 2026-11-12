@@ -83,6 +83,14 @@ stop_credential_consumers() {
     kube -n flux-system scale deployment/livepeer-app-reconciler --replicas=0
   fi
   kube -n flux-system delete deployment/livepeer-tunnel --ignore-not-found --wait=true
+  if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    # Prior app cleanup was verified before this transition. Do not let a
+    # retained Node from that lifetime survive issuance of its replacement.
+    if kube -n livepeer get deployment/orchestrator >/dev/null 2>&1; then
+      kube -n livepeer scale deployment/orchestrator --replicas=0
+    fi
+    kube -n livepeer wait pod -l app=orchestrator --for=delete --timeout=120s
+  fi
   # Replica count alone does not prove old HTTP-speaking processes terminated.
   kube -n flux-system wait pod -l app=livepeer-http-source --for=delete --timeout=120s
   kube -n flux-system wait pod -l app=livepeer-app-reconciler --for=delete --timeout=120s
