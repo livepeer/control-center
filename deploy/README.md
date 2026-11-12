@@ -6,7 +6,7 @@ Supabase project selected in the private `config.toml`.
 
 | Hostname | Origin | Routes |
 | --- | --- | --- |
-| `controlcenter.livepeer.live` | `http://localhost:33812` | UI, `/auth/callback`, same-origin `/api/*` proxy |
+| `controlcenter.livepeer.live` | `http://localhost:33812` | UI, `/auth/callback`, `/bootstrap.sh`, versioned `/bootstrap/releases/*`, same-origin `/api/*` proxy |
 | `controlcenter-api.livepeer.live` | `http://localhost:43812` | API, `/v1/*`, `/discovery` |
 | `controlcenter-registry.livepeer.live` | `http://localhost:53812` | Read-only OCI registry `/v2/*` |
 
@@ -52,6 +52,9 @@ docker push 127.0.0.1:63812/controlcenter/connector:staging
 # Publish a compatible Node image as controlcenter/node as well.
 # Set RuntimeImage, RuntimeConnectorImage, and RuntimeNodeImage in config.toml
 # using the public registry hostname and the digests returned by the pushes.
+# Set NEW_RELEASE_ID to a previously unused ID (see Bootstrap releases below).
+python3 ../tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" --output bootstrap --activate
+chmod 0755 bootstrap bootstrap/releases
 docker compose config --quiet
 docker compose up -d --build --wait
 ```
@@ -68,6 +71,65 @@ the existing working tree changes. Its matching Node source snapshot is retained
 on the server at `/opt/controlcenter/node-source`; it supports the
 `--api-origin-url` setting used by the current orchestrator template. Publish a
 compatible Node image before changing `RuntimeNodeImage`.
+
+## Bootstrap releases
+
+The web service mounts `deploy/bootstrap` read-only at `/srv/bootstrap`. The
+current `/bootstrap.sh` resolves to `bootstrap/bootstrap.sh`; a versioned URL
+`/bootstrap/releases/<id>/runtime-bootstrap.tar.gz` resolves to
+`bootstrap/releases/<id>/runtime-bootstrap.tar.gz`. These routes return 404 for
+missing files and never fall back to the UI. The current loader is not cached;
+versioned files are immutable. Keep this directory across web builds/deployments.
+
+From the repository root, choose a previously unused release ID:
+
+```sh
+python3 tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" \
+  --output deploy/bootstrap --activate
+chmod 0755 deploy/bootstrap deploy/bootstrap/releases
+```
+
+The build machine needs Python 3.10+ and Git; target hosts need neither. By
+default the packager uses `RuntimeImage` in `staging-images.json` and
+the public `https://controlcenter.livepeer.live` origin. Supply `--runtime-image`
+with another compatible published digest and `--public-origin https://your-host`
+for a custom deployment. Confirm anonymous Linux amd64 pulls and compatibility
+with the deployed API, Node and connector before activation.
+
+Each release retains the complete bundle, `SHA256SUMS`, its exact `bootstrap.sh`,
+and `release.json` containing checksums, source revision/dirty-state evidence,
+asset hashes and recorded image build provenance when available. Only tracked
+installer assets are packaged; add any newly required helpers/templates to Git
+before packaging. The loader includes the bundle checksum. Publication stages
+the complete release directory, refuses reused IDs, then `--activate` atomically
+switches the current loader last. Omit `--activate` to stage a release for checks.
+All published assets must be readable by web UID 65532; files are mode 0644 and
+release directories mode 0755. Never put credentials in this directory.
+The published release and focused validation results are recorded in
+[`bootstrap-release.json`](bootstrap-release.json).
+
+For a remote deployment, transfer into a staging directory outside the served
+bootstrap tree, on the same filesystem. After the transfer and checksum checks,
+rename the complete directory into `bootstrap/releases/<id>`, then switch the
+current loader. Do not upload directly into the final release directory or replace
+or delete prior releases. Missing artifacts return `404` with `no-store`; existing
+release files use immutable caching.
+
+To activate a staged release or roll back, run on the deployment host from
+`deploy/`, substituting the retained release ID:
+
+```sh
+cp bootstrap/releases/bootstrap-20261112.1/bootstrap.sh bootstrap/.loader-next
+chmod 0644 bootstrap/.loader-next
+mv -f bootstrap/.loader-next bootstrap/bootstrap.sh
+```
+
+Check the public script content type/body, its referenced bundle/checksum,
+anonymous image pulls, and a prepared disposable Debian/Ubuntu host. Check both
+the initial loader download and shell exit status in automated acceptance; a
+plain POSIX pipeline can mask failure of an empty initial download. Reruns must
+retain saved credentials and image selection. Record focused evidence with the
+release; broader host lifecycle and application acceptance remain separate gates.
 
 ## Operate
 

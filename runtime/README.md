@@ -8,24 +8,75 @@ Control Center assigns CPU reusable apps to isolated Pods; Node handles new
 requests, sessions, capacity and private proxying. GPU setup and single-session lifetimes
 remain separate work. Managed Cloudflare ingress is optional.
 
-Runtime lives under `runtime/` in the Control Center repository. Run the
-commands below from that directory.
+The public loader runs under POSIX `sh` (including Debian/Ubuntu's `dash`). It
+downloads a versioned bundle, verifies its embedded SHA-256, and invokes the Bash
+installer with all required helpers and templates. The target host needs no
+repository checkout or Python. Prepare the [packages below](#prerequisites)
+and disable shell tracing (`set +x`) before entering credentials, then run as root:
 
-Copy or clone the whole project onto the target machine. Host installation uses
-Bash and standard Linux utilities. Runtime management, app reconciliation and
-probes use one Go distribution. See [storage and host integration](#storage-and-host-integration)
-for installed paths.
+```sh
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sh -
+```
 
-```bash
-# On the machine that will receive the cluster:
-sudo bash bootstrap-livepeer.sh --check-only
-sudo bash bootstrap-livepeer.sh --status
-export LIVEPEER_API_URL=https://your-control-center-api.example
-export LIVEPEER_RUNTIME_IMAGE=your-registry/livepeer-runtime@sha256:<published-digest>
-sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE bash bootstrap-livepeer.sh --token <TOKEN>
+For a non-root shell, put the token assignment on the sudo side of the pipe:
 
-# Or contain the installation under another absolute directory:
-sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE bash bootstrap-livepeer.sh --token <TOKEN> --install-dir /srv/livepeer
+```sh
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
+  LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sudo --preserve-env=LIVEPEER_ENROLLMENT_TOKEN sh -s --
+```
+
+Do not export the enrollment token in the parent shell: the download-side curl would
+inherit it too. The inline assignment passes it through the execution environment,
+without placing it in sudo, Bash, installer or curl arguments. Environment input
+is not a secret store: it can be inspected, and entering a token can save it in
+shell history. The loader and installer disable their own tracing, remove the
+token from unrelated child environments, and never persist it.
+
+Read-only checks, local status, and reruns need no enrollment token:
+
+```sh
+# Run these as root, or place sudo before sh.
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sh -s -- --check-only
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sh -s -- --status
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sh -
+
+# Choose an alternate installation root on first enrollment:
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
+  LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sh -s -- --install-dir /srv/livepeer
+```
+
+The standard API defaults to `https://controlcenter-api.livepeer.live`; the
+bundle supplies a compatible published Runtime image pinned by digest. These
+exports are optional overrides for another deployment or an explicit image change
+(replace the quoted placeholders):
+
+```sh
+export LIVEPEER_API_URL='https://your-control-center-api.example'
+export LIVEPEER_RUNTIME_IMAGE='your-registry/livepeer-runtime@sha256:<published-digest>'
+```
+
+The API must match the deployment's `PublicAPIURL` and be reachable from both
+the host and its Pods. With sudo, add any exported override names to
+`--preserve-env=LIVEPEER_ENROLLMENT_TOKEN,LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE`.
+Image selection is explicit override, then saved image, then bundle default.
+A new loader does not upgrade a saved selection. An invalid explicit or saved
+image fails instead of silently selecting a different one.
+
+For automation that must detect failure of the initial loader download, download
+it successfully before running it. An ordinary POSIX pipeline reports the last
+command's status, so a failed curl with no output can leave `sh -` returning zero.
+Once the loader starts, bundle download/verification failures are nonzero and the
+installer's exit status is preserved. This root-shell example checks both stages:
+
+```sh
+(
+  set -eu
+  umask 077
+  loader_dir=$(mktemp -d)
+  trap 'rm -rf -- "$loader_dir"' 0
+  curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh -o "$loader_dir/bootstrap.sh"
+  LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sh "$loader_dir/bootstrap.sh"
+)
 ```
 
 The default installation directory is `/opt/livepeer`. On a first run, choose a
@@ -43,7 +94,9 @@ on the host, including outside `--install-dir`.
 ## Prerequisites
 
 Use a host with at least 2 CPUs, nominal 4 GiB RAM, 10 GiB free disk,
-Linux 5.4+, enabled cgroups and namespaces, and no active swap. On a minimal
+Linux 5.4+, enabled cgroups and namespaces, and no active swap. The value returned
+by `hostname` must be at most 63 bytes for Kubernetes node labels; some cloud
+images return the full domain name. On a minimal
 Debian 12+ or Ubuntu 22.04+ image, install prerequisites first:
 
 ```bash
@@ -52,8 +105,13 @@ sudo apt-get install -y ca-certificates curl jq tar bzip2 gzip coreutils \
   gawk iproute2 kmod procps util-linux systemd nftables diffutils findutils
 ```
 
-Eligibility checks run before authentication, downloads, directory creation, or
-service changes. `--check-only` is read-only. Checks include available kernel
+The loader requires `setsid` from `util-linux` before it starts.
+
+Installer eligibility checks run before authentication, component downloads,
+installation-directory creation, or service changes. The hosted loader downloads
+and verifies its temporary bundle before those checks, including for
+`--check-only` and `--status`, then cleans up. These modes do not enroll, install
+packages, or change installation state. Checks include available kernel
 modules, reserved TCP ports 2379/2380/6443/6444/8935/8936/10010/10249/10250/10256/10257/10259/20241,
 UDP 8472, and routes overlapping
 the fixed `10.42.0.0/16` Pod, `10.43.0.0/16` Service and `10.44.0.0/16` gVisor
@@ -87,8 +145,11 @@ the installer trusts the upstream HTTPS release endpoints.
 
 Build the Go Runtime image from the repository root with
 `docker build -f runtime/Dockerfile -t <registry>/livepeer-runtime:<tag> .`, push
-it, and use its published digest for `LIVEPEER_RUNTIME_IMAGE` and backend
-`RUNTIME_IMAGE`. The installer saves its selected image for reruns.
+it, and use its published digest for an explicit `LIVEPEER_RUNTIME_IMAGE` override
+and backend `RUNTIME_IMAGE`. Release operators select the hosted bundle's default
+using the [bootstrap publication steps](../deploy/README.md#bootstrap-releases).
+The existing anonymous deployment registry is supported; moving image hosts is a
+separate operation. The installer saves its selected image for reruns.
 
 For managed external access, Runtime's connector obtains a Cloudflare Tunnel
 token and starts cloudflared; Kubernetes restarts it when needed. Build and publish
@@ -116,10 +177,10 @@ are diagnosed without suppressing management repairs.
 ## Enrollment and desired configuration
 
 Get the enrollment command from the authenticated Livepeer Control Center
-console. Set `LIVEPEER_API_URL` to the API base URL, reachable from the host and
-its Kubernetes pods, and run the command as root. When using sudo, preserve the
-environment variable as shown in Quick start. Backend `PUBLIC_API_URL` must use
-the same reachable base URL. The installer rejects literal loopback configuration
+console and run it as root after package preparation. For a custom deployment,
+override `LIVEPEER_API_URL` with its API base URL, reachable from the host and its
+Kubernetes pods; preserve it through sudo when needed. Backend `PUBLIC_API_URL`
+must use the same reachable base URL. The installer rejects literal loopback configuration
 URLs because pods cannot use host loopback.
 
 The one-hour bootstrap JWT can enroll multiple machines. The installer saves
@@ -144,12 +205,14 @@ for enrollment, configuration, status and token delivery. Development HTTP is
 available only with `LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1` and cannot enable tunnels.
 
 To refresh credentials, run the installer with a fresh owner enrollment JWT and
-the same HTTPS origin and installation directory:
+the same HTTPS origin and installation directory. For a custom deployment, you
+must repeat the original `LIVEPEER_API_URL` override; otherwise the installer
+fails before changing anything:
 
-```bash
-export LIVEPEER_API_URL=https://<CONTROL_CENTER_ORIGIN>
-sudo --preserve-env=LIVEPEER_API_URL bash bootstrap-livepeer.sh \
-  --refresh-credentials --token <FRESH_OWNER_JWT> --install-dir /opt/livepeer
+```sh
+# Run as root. For a custom deployment, export its original LIVEPEER_API_URL first.
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
+  LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --refresh-credentials --install-dir /opt/livepeer
 ```
 
 If refresh is interrupted, rerun the command with a fresh JWT and the same HTTPS
@@ -159,7 +222,14 @@ installed K3s version.
 After the backend removes an enrollment, use `--reenroll` with a fresh owner JWT
 and the same installation root to create a new enrollment while retaining local
 data. The installer requires confirmed app cleanup for the old enrollment.
-Re-enrollment does not accelerate its external cleanup.
+Re-enrollment does not accelerate its external cleanup. Run as root, using the
+same original API override for a custom deployment; without it, re-enrollment
+fails before changing anything:
+
+```sh
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
+  LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --reenroll --install-dir /opt/livepeer
+```
 
 The connector fetches a fresh token before every start; running connectors can
 reconnect during a Control Center outage. Runtime reports applied state, while
@@ -171,7 +241,7 @@ is unsupported.
 
 ## Storage and host integration
 
-`bootstrap-livepeer.sh` uses the repository's `lib/` Bash helpers and renders
+`bootstrap-livepeer.sh` uses the release bundle's `lib/` Bash helpers and renders
 `config/` and `manifests/` templates for the selected installation root:
 
 | Directory | Contents |
