@@ -69,6 +69,40 @@ assignments, replica edits and sequential replacement/removal. Runtime completio
 is separate from current health; see the registry guide for the delivery and
 cleanup contract.
 
+## Onchain operation
+
+Configure the redeemer and secret mounts using [deployment setup](../deploy/README.md#onchain-setup).
+Edit [onchain.example.json](../deploy/onchain.example.json) and apply it from the
+API deployment environment:
+
+```sh
+controlcenter onchain apply --config /etc/controlcenter/config.toml \
+  --file /operator/onchain.json --expected-revision 0
+```
+
+Use the returned revision for the next apply. The file is a complete snapshot;
+retain enabled machines or explicitly set `{"version":1,"mode":"offchain"}` to
+disable one. Unconfigured machines default to offchain. App catalog prices remain
+authoritative; every advertised onchain app needs a positive USD `hour` or `fixed` price.
+
+Provision a new immutable `rpc_secret` file for RPC rotation. Increment
+`credential_revision` to rotate submission credentials. Retain referenced RPC
+versions for held workloads and rollback. Reapply previous settings at the current
+revision to roll back. Configuration changes use the normal withdrawal/drain flow.
+Inspect configuration, local admission and remote handoff in **Runtime status**.
+
+Disabling onchain operation, changing redemption destination and normal removal
+wait for app drain and zero unsettled tickets. Forced removal revokes submission
+grants immediately and reports `recovery_required`. Re-enroll the same machine
+with its retained state; after a fresh zero-unsettled report, apply with
+`--acknowledge-recovery <machine-id>` to clear the flag.
+
+Back up Node's `/data/onchain.sqlite` and sidecars consistently, and back up the
+redeemer database and wallet separately. Keep the recipient/chain binding and
+redemption routing/trust inputs while tickets remain unsettled. Private endpoints
+require exact IP:port `rpc_grants` / `redeemer_grants`; these allow orchestrator
+access only.
+
 ## Machine ingress
 
 Per-enrollment Cloudflare tunnels and protected Collector discovery are opt-in.

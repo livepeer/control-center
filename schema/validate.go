@@ -35,7 +35,7 @@ func ValidateReplicaCount(n int) error {
 }
 
 // Validate checks the entire normalized v1 contract, including cross-field
-// invariants. It applies neither defaults nor deployment/payment policy.
+// invariants. It applies neither defaults nor deployment/onchain policy.
 func Validate(d DefinitionV1) error {
 	if err := boa.Validate(d); err != nil {
 		return schemaError(err)
@@ -165,7 +165,7 @@ func refDigest(r reference.Reference) string {
 func ValidatePolicy(d DefinitionV1, mode PaymentMode) error {
 	e := new(ValidationError)
 	if mode != Offchain && mode != Onchain {
-		e.add("price", "Unknown target Node payment mode.")
+		e.add("price", "Unknown target Node onchain mode.")
 	} else if mode == Onchain && len(d.Apps) == 0 && d.Price.Amount == "0" {
 		e.add("price.amount", "Onchain Node assignments require an explicit positive price.")
 	}

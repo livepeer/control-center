@@ -15,8 +15,8 @@ import (
 
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/orchestrator"
-	"github.com/livepeer/control-center/runtime/payment"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -25,15 +25,15 @@ func (s *Server) submissionToken(id string) string {
 	h.Write([]byte("livepeer-redemption-submit-v1\x00" + id))
 	return id + "." + hex.EncodeToString(h.Sum(nil))
 }
-func (s *Server) paymentCredentials(w http.ResponseWriter, r *http.Request) {
+func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), false)
 	if e != nil {
 		s.respondError(w, e)
 		return
 	}
 	var in orchestrator.Request
-	if boundedMachineInput(r, &in, 4096) != nil || !orchestrator.ValidLaunch(in.Launch) || in.PaymentGeneration < 1 || !fingerprintPattern.MatchString(in.ConfigDigest) || !strings.HasPrefix(s.params.PublicAPIURL, "https://") {
-		fail(w, 403, "payment delivery refused")
+	if boundedMachineInput(r, &in, 4096) != nil || !orchestrator.ValidLaunch(in.Launch) || in.OnchainGeneration < 1 || !fingerprintPattern.MatchString(in.ConfigDigest) || !strings.HasPrefix(s.params.PublicAPIURL, "https://") {
+		fail(w, 403, "onchain delivery refused")
 		return
 	}
 	tx, e := s.db.BeginTx(r.Context(), nil)
@@ -59,30 +59,30 @@ func (s *Server) paymentCredentials(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		metadata, e = transport.ReadMetadata(files["runtime.json"])
 	}
-	if e != nil || metadata.Epoch != m.Epoch || metadata.CredentialVersion != m.CredentialVersion || !metadata.Payment.Onchain() || metadata.Payment.Generation != in.PaymentGeneration || metadata.ConfigDigest != in.ConfigDigest {
-		fail(w, 409, "payment configuration changed")
+	if e != nil || metadata.Epoch != m.Epoch || metadata.CredentialVersion != m.CredentialVersion || !metadata.Onchain.Onchain() || metadata.Onchain.Generation != in.OnchainGeneration || metadata.ConfigDigest != in.ConfigDigest {
+		fail(w, 409, "onchain configuration changed")
 		return
 	}
-	rpc, e := s.readPaymentRPC(metadata.Payment.RPCSecret)
+	rpc, e := s.readOnchainRPC(metadata.Onchain.RPCSecret)
 	if e != nil {
-		fail(w, 503, "payment secret unavailable")
+		fail(w, 503, "onchain secret unavailable")
 		return
 	}
 	hash := sha256.Sum256(rpc)
 	var fingerprint string
-	e = tx.QueryRowContext(r.Context(), `SELECT fingerprint FROM lpcc.payment_secrets WHERE reference=$1`, metadata.Payment.RPCSecret).Scan(&fingerprint)
+	e = tx.QueryRowContext(r.Context(), `SELECT fingerprint FROM lpcc.onchain_secrets WHERE reference=$1`, metadata.Onchain.RPCSecret).Scan(&fingerprint)
 	if e != nil || fingerprint != hex.EncodeToString(hash[:]) {
-		fail(w, 503, "payment secret version changed")
+		fail(w, 503, "onchain secret version changed")
 		return
 	}
 	var initialized bool
-	if e = tx.QueryRowContext(r.Context(), `SELECT initialized FROM lpcc.payment_machines WHERE node_id=$1`, m.NodeID).Scan(&initialized); e != nil {
+	if e = tx.QueryRowContext(r.Context(), `SELECT initialized FROM lpcc.onchain_state WHERE node_id=$1`, m.NodeID).Scan(&initialized); e != nil {
 		s.databaseError(w, e)
 		return
 	}
 	id := uuid.New().String()
 	var revoked sql.NullTime
-	e = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.payment_grants(grant_id,node_id,epoch,payment_generation,config_digest,pod_uid,launch_id,process_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(node_id,epoch,payment_generation,pod_uid,launch_id,process_id) DO UPDATE SET grant_id=lpcc.payment_grants.grant_id RETURNING grant_id::text,revoked_at`, id, m.NodeID, m.Epoch, in.PaymentGeneration, in.ConfigDigest, in.PodUID, in.LaunchID, in.ProcessID).Scan(&id, &revoked)
+	e = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.onchain_grants(grant_id,node_id,epoch,onchain_generation,config_digest,pod_uid,launch_id,process_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(node_id,epoch,onchain_generation,pod_uid,launch_id,process_id) DO UPDATE SET grant_id=lpcc.onchain_grants.grant_id RETURNING grant_id::text,revoked_at`, id, m.NodeID, m.Epoch, in.OnchainGeneration, in.ConfigDigest, in.PodUID, in.LaunchID, in.ProcessID).Scan(&id, &revoked)
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -95,11 +95,11 @@ func (s *Server) paymentCredentials(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	respond(w, 200, orchestrator.Grant{Association: orchestrator.Association{Launch: in.Launch, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, PaymentGeneration: in.PaymentGeneration, ConfigDigest: in.ConfigDigest, GrantID: id}, RequireState: initialized, RPCURL: string(rpc), Headers: "Authorization: Bearer " + s.submissionToken(id)})
+	respond(w, 200, orchestrator.Grant{Association: orchestrator.Association{Launch: in.Launch, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, OnchainGeneration: in.OnchainGeneration, ConfigDigest: in.ConfigDigest, GrantID: id}, RequireState: initialized, RPCURL: string(rpc), Headers: "Authorization: Bearer " + s.submissionToken(id)})
 }
 
 func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
-	secret := s.params.PaymentWebhookSecret
+	secret := s.params.OnchainWebhookSecret
 	if len(secret) < 32 || len(r.Header.Values("Authorization")) != 1 || subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(secret)) != 1 {
 		fail(w, 401, "webhook authentication required")
 		return
@@ -129,10 +129,10 @@ func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
 	var ticket struct {
 		Recipient string `json:"recipient"`
 	}
-	allowed := count == 1 && ok && appID(id) && len(s.params.MachineTokenSecret) >= 32 && hmac.Equal([]byte(token), []byte(s.submissionToken(id))) && json.Unmarshal(in.Ticket, &ticket) == nil && payment.Address.MatchString(ticket.Recipient)
+	allowed := count == 1 && ok && appID(id) && len(s.params.MachineTokenSecret) >= 32 && hmac.Equal([]byte(token), []byte(s.submissionToken(id))) && json.Unmarshal(in.Ticket, &ticket) == nil && onchain.Address.MatchString(ticket.Recipient)
 	if allowed {
 		var recipient string
-		e := s.db.QueryRowContext(r.Context(), `SELECT v.config->>'recipient' FROM lpcc.payment_grants g JOIN lpcc.payment_versions v ON v.node_id=g.node_id AND v.generation=g.payment_generation JOIN lpcc.machines m ON m.node_id=g.node_id AND m.enrollment_epoch=g.epoch WHERE g.grant_id=$1 AND g.revoked_at IS NULL`, id).Scan(&recipient)
+		e := s.db.QueryRowContext(r.Context(), `SELECT v.config->>'recipient' FROM lpcc.onchain_grants g JOIN lpcc.onchain_configs v ON v.node_id=g.node_id AND v.generation=g.onchain_generation JOIN lpcc.machines m ON m.node_id=g.node_id AND m.enrollment_epoch=g.epoch WHERE g.grant_id=$1 AND g.revoked_at IS NULL`, id).Scan(&recipient)
 		allowed = e == nil && strings.EqualFold(recipient, ticket.Recipient)
 	}
 	status := 403
@@ -145,8 +145,8 @@ func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
 // Accept only a fresh, matching observation of the issued grant. This permits a
 // held Node's grant across ordinary management refresh, without allowing it to
 // authenticate to any management endpoint.
-func (s *Server) observePaymentGrant(ctx context.Context, m Machine, reportPayment *payment.Observation, digest string) error {
-	p := reportPayment
+func (s *Server) observeOnchainGrant(ctx context.Context, m Machine, reportOnchain *onchain.Observation, digest string) error {
+	p := reportOnchain
 	if p == nil || !p.Applied || p.PodUID == "" {
 		return nil
 	}
@@ -174,32 +174,32 @@ func (s *Server) observePaymentGrant(ctx context.Context, m Machine, reportPayme
 	if e != nil {
 		return e
 	}
-	if meta.ConfigDigest != digest || meta.Payment.Generation != p.Generation || meta.Payment.Mode != p.Mode {
+	if meta.ConfigDigest != digest || meta.Onchain.Generation != p.Generation || meta.Onchain.Mode != p.Mode {
 		return nil
 	}
 	if p.Mode == "offchain" {
 		// The replacement has no submission bearer to observe. Retire the held
 		// onchain workload's grants only after its offchain successor is applied.
-		_, e = tx.ExecContext(ctx, `UPDATE lpcc.payment_grants SET revoked_at=now() WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL`, m.NodeID, m.Epoch)
+		_, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_grants SET revoked_at=now() WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL`, m.NodeID, m.Epoch)
 		if e != nil {
 			return e
 		}
 		return tx.Commit()
 	}
 	var id string
-	e = tx.QueryRowContext(ctx, `UPDATE lpcc.payment_grants SET observed_at=now() WHERE grant_id=$1 AND node_id=$2 AND epoch=$3 AND payment_generation=$4 AND config_digest=$5 AND pod_uid=$6 AND revoked_at IS NULL RETURNING grant_id::text`, p.GrantID, m.NodeID, m.Epoch, p.Generation, digest, p.PodUID).Scan(&id)
+	e = tx.QueryRowContext(ctx, `UPDATE lpcc.onchain_grants SET observed_at=now() WHERE grant_id=$1 AND node_id=$2 AND epoch=$3 AND onchain_generation=$4 AND config_digest=$5 AND pod_uid=$6 AND revoked_at IS NULL RETURNING grant_id::text`, p.GrantID, m.NodeID, m.Epoch, p.Generation, digest, p.PodUID).Scan(&id)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil
 	}
 	if e != nil {
 		return e
 	}
-	_, e = tx.ExecContext(ctx, `UPDATE lpcc.payment_grants SET revoked_at=now() WHERE node_id=$1 AND epoch=$2 AND grant_id<>$3 AND revoked_at IS NULL AND issued_sequence<(SELECT issued_sequence FROM lpcc.payment_grants WHERE grant_id=$3)`, m.NodeID, m.Epoch, id)
+	_, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_grants SET revoked_at=now() WHERE node_id=$1 AND epoch=$2 AND grant_id<>$3 AND revoked_at IS NULL AND issued_sequence<(SELECT issued_sequence FROM lpcc.onchain_grants WHERE grant_id=$3)`, m.NodeID, m.Epoch, id)
 	if e != nil {
 		return e
 	}
 	if p.Ready {
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.payment_machines SET initialized=true WHERE node_id=$1`, m.NodeID); e != nil {
+		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_state SET initialized=true WHERE node_id=$1`, m.NodeID); e != nil {
 			return e
 		}
 	}

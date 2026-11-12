@@ -1,5 +1,5 @@
-// Package payment defines the nonsecret managed Node payment contract.
-package payment
+// Package onchain defines the nonsecret managed Node onchain contract.
+package onchain
 
 import (
 	"errors"
@@ -45,7 +45,7 @@ var SecretRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$`)
 func validAddress(s string) bool { return Address.MatchString(s) && strings.Trim(s[2:], "0") != "" }
 
 func (c Config) Validate() error {
-	bad := errors.New("invalid payment infrastructure settings")
+	bad := errors.New("invalid onchain infrastructure settings")
 	if c.Version != 1 || c.Generation < 0 {
 		return bad
 	}
@@ -101,7 +101,7 @@ func (c Config) Validate() error {
 		}
 		for _, g := range grants {
 			if _, _, e := Grant(g); e != nil {
-				return errors.New("payment grants must be explicit non-loopback IP:port destinations")
+				return errors.New("onchain grants must be explicit non-loopback IP:port destinations")
 			}
 		}
 	}
@@ -113,7 +113,7 @@ func (c Config) Validate() error {
 func Grant(s string) (netip.Addr, uint16, error) {
 	a, e := netip.ParseAddrPort(s)
 	if e != nil || a.Port() == 0 || a.Addr().IsUnspecified() || a.Addr().IsMulticast() || a.Addr().IsLoopback() || a.Addr().Zone() != "" {
-		return netip.Addr{}, 0, errors.New("payment grants require IP:port")
+		return netip.Addr{}, 0, errors.New("onchain grants require IP:port")
 	}
 	return a.Addr().Unmap(), a.Port(), nil
 }
@@ -142,10 +142,10 @@ type Observation struct {
 // ValidateEndpoint rejects destinations the rendered egress policy cannot reach.
 // Private DNS addresses still require exact grants at the Node/Kubernetes boundary.
 func ValidateEndpoint(raw string, grants []string) error {
-	bad := errors.New("private or nonstandard-port payment destinations require matching IP:port grants")
+	bad := errors.New("private or nonstandard-port onchain destinations require matching IP:port grants")
 	u, e := url.Parse(raw)
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" {
-		return errors.New("payment destinations require HTTPS")
+		return errors.New("onchain destinations require HTTPS")
 	}
 	port := uint64(443)
 	if u.Port() != "" {

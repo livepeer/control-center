@@ -9,7 +9,6 @@ import (
 	"time"
 	"uuid"
 
-	"github.com/livepeer/control-center/api/internal/controlplane/payments"
 	"github.com/livepeer/control-center/schema"
 )
 
@@ -95,7 +94,7 @@ func revisionForBinding(ctx context.Context, tx *sql.Tx, current *schema.Revisio
 	if err != nil {
 		return r, err
 	}
-	config, err := payments.Load(ctx, tx, node)
+	config, err := loadOnchain(ctx, tx, node)
 	if err != nil {
 		return r, err
 	}

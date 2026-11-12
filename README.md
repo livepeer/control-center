@@ -87,10 +87,9 @@ flowchart TB
 
 ## Documentation
 
-- [Managed onchain operation](docs/onchain-operation.md): configure fresh deployments and inspect payment readiness.
 - [App registry](docs/app-registry.md): publish app definitions and assign revisions to machines.
 - [Fleet discovery](docs/fleet-discovery.md): expose managed orchestrators through an aggregate inventory.
 - [Machine status](docs/machine-status.md): inspect rollout, configured health, registration, discovery and cleanup evidence.
 - [Machine ingress](docs/machine-tunnels.md): configure protected tunnels and routing.
-- [Operations](docs/operations.md): configure authentication and administrator access.
+- [Operations](docs/operations.md): configure authentication, administrator access and onchain operation.
 - [Development](docs/development.md): run locally, build, and test.

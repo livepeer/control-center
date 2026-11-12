@@ -1,4 +1,4 @@
-// Package orchestrator delivers payment credentials to a verified Node process.
+// Package orchestrator delivers onchain credentials to a verified Node process.
 package orchestrator
 
 import (
@@ -25,13 +25,13 @@ type Association struct {
 	Launch
 	Epoch             string `json:"epoch"`
 	CredentialVersion int64  `json:"credential_version"`
-	PaymentGeneration int64  `json:"payment_generation"`
+	OnchainGeneration int64  `json:"onchain_generation"`
 	ConfigDigest      string `json:"config_digest"`
 	GrantID           string `json:"grant_id"`
 }
 type Request struct {
 	Launch
-	PaymentGeneration int64  `json:"payment_generation"`
+	OnchainGeneration int64  `json:"onchain_generation"`
 	ConfigDigest      string `json:"config_digest"`
 }
 type Grant struct {
@@ -105,10 +105,10 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request refused", 400)
 		return
 	}
-	if r.URL.Path == "/payment/observation" {
+	if r.URL.Path == "/onchain/observation" {
 		var o ProcessObservation
 		m, ok := i.Desired()
-		if transport.Decode(b, &o) != nil || !ok || m.TerminalCleanup || o.Epoch != m.Epoch || o.ConfigDigest != m.ConfigDigest || o.PaymentGeneration != m.Payment.Generation || time.Since(o.ObservedAt) > 15*time.Second || o.ObservedAt.After(time.Now().Add(5*time.Second)) || i.checkPod(r.Context(), o.Launch, m) != nil {
+		if transport.Decode(b, &o) != nil || !ok || m.TerminalCleanup || o.Epoch != m.Epoch || o.ConfigDigest != m.ConfigDigest || o.OnchainGeneration != m.Onchain.Generation || time.Since(o.ObservedAt) > 15*time.Second || o.ObservedAt.After(time.Now().Add(5*time.Second)) || i.checkPod(r.Context(), o.Launch, m) != nil {
 			http.Error(w, "observation refused", 409)
 			return
 		}
@@ -124,7 +124,7 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("{}\n"))
 		return
 	}
-	if r.URL.Path != "/payment/credentials" {
+	if r.URL.Path != "/onchain/credentials" {
 		http.Error(w, "operation refused", 403)
 		return
 	}
@@ -135,16 +135,16 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	grant, e := i.fetch(r.Context(), l)
 	if e != nil {
-		http.Error(w, "payment credential unavailable", 503)
+		http.Error(w, "onchain credential unavailable", 503)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(grant)
 }
 func (i *Integration) fetch(ctx context.Context, l Launch) (Grant, error) {
-	bad := errors.New("payment_credential_unavailable")
+	bad := errors.New("onchain_credential_unavailable")
 	m, ok := i.Desired()
-	if !ok || i.AllowHTTP || !m.Payment.Onchain() || m.TerminalCleanup || m.PaymentCredentialsRef != "/v1/nodes/"+m.NodeID+"/payment/credentials" {
+	if !ok || i.AllowHTTP || !m.Onchain.Onchain() || m.TerminalCleanup || m.OnchainCredentialsRef != "/v1/nodes/"+m.NodeID+"/onchain/credentials" {
 		return Grant{}, bad
 	}
 	before, e := os.ReadFile(i.TokenFile)
@@ -155,12 +155,12 @@ func (i *Integration) fetch(ctx context.Context, l Launch) (Grant, error) {
 	i.order++
 	order := i.order
 	i.mu.Unlock()
-	b, _, e := i.Control.Request(ctx, "payment/credentials", Request{l, m.Payment.Generation, m.ConfigDigest}, 16384)
+	b, _, e := i.Control.Request(ctx, "onchain/credentials", Request{l, m.Onchain.Generation, m.ConfigDigest}, 16384)
 	if e != nil {
 		return Grant{}, bad
 	}
 	var g Grant
-	if transport.Decode(b, &g) != nil || g.Launch != l || g.Epoch != m.Epoch || g.CredentialVersion != m.CredentialVersion || g.PaymentGeneration != m.Payment.Generation || g.ConfigDigest != m.ConfigDigest || g.GrantID == "" || g.RPCURL == "" || g.Headers == "" {
+	if transport.Decode(b, &g) != nil || g.Launch != l || g.Epoch != m.Epoch || g.CredentialVersion != m.CredentialVersion || g.OnchainGeneration != m.Onchain.Generation || g.ConfigDigest != m.ConfigDigest || g.GrantID == "" || g.RPCURL == "" || g.Headers == "" {
 		return Grant{}, bad
 	}
 	if i.checkPod(ctx, l, m) != nil {
@@ -169,7 +169,7 @@ func (i *Integration) fetch(ctx context.Context, l Launch) (Grant, error) {
 	authorized := func() bool {
 		after, e := os.ReadFile(i.TokenFile)
 		n, ok := i.Desired()
-		return ctx.Err() == nil && e == nil && ok && n.Epoch == m.Epoch && n.CredentialVersion == m.CredentialVersion && n.Generation == m.Generation && n.ConfigDigest == m.ConfigDigest && n.Payment.Generation == m.Payment.Generation && sha256.Sum256(before) == sha256.Sum256(after)
+		return ctx.Err() == nil && e == nil && ok && n.Epoch == m.Epoch && n.CredentialVersion == m.CredentialVersion && n.Generation == m.Generation && n.ConfigDigest == m.ConfigDigest && n.Onchain.Generation == m.Onchain.Generation && sha256.Sum256(before) == sha256.Sum256(after)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()

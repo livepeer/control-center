@@ -19,7 +19,7 @@ import (
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/internal/testutil"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -201,7 +201,7 @@ type sourceFixture struct {
 func newFixture(t *testing.T) *sourceFixture {
 	t.Helper()
 	set := testutil.Assignment(t)
-	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{Payment: payment.Offchain(), NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
+	f := &sourceFixture{status: 200, kube: &fakeKube{}, meta: contract.Metadata{Onchain: onchain.Offchain(), NodeID: set.NodeID, Epoch: set.Epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat, ConfigDigest: strings.Repeat("a", 64), ServiceURL: "https://machine.example"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -484,7 +484,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *testing.T) {
 	s := &Source{Store: artifact.Store{Directory: t.TempDir()}}
 	cache := func(epoch, node, connector string) string {
-		m := contract.Metadata{Payment: payment.Offchain(), NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
+		m := contract.Metadata{Onchain: onchain.Offchain(), NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: epoch, CredentialVersion: 1, Generation: 1, BundleFormat: contract.BundleFormat}
 		return cacheBundle(t, s.Store, m, map[string][]byte{"system/node/kustomization.yaml": []byte(node), "system/connector/kustomization.yaml": []byte(connector)})
 	}
 	old := cache("11111111-1111-4111-8111-111111111111", "same node", "old connector")

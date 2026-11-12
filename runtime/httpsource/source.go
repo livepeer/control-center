@@ -19,7 +19,7 @@ import (
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -31,7 +31,7 @@ type Kubernetes interface {
 	Publish(context.Context, string, *transport.Artifact, bool, string) error
 }
 type Source struct {
-	Payment         func(context.Context, contract.Metadata, bool, bool, string) *payment.Observation
+	Onchain         func(context.Context, contract.Metadata, bool, bool, string) *onchain.Observation
 	Control         *transport.Control
 	Reporter        transport.Requester
 	Kube            Kubernetes
@@ -384,8 +384,8 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		ready = ready && k3sVersion == m.UpgradeVersion
 	}
 	reason := "applying"
-	if m.Payment.Onchain() && applied && actual == m.ConfigDigest && !ready {
-		reason = "payment_not_ready"
+	if m.Onchain.Onchain() && applied && actual == m.ConfigDigest && !ready {
+		reason = "onchain_not_ready"
 	}
 	if ready {
 		reason = "ready"
@@ -396,8 +396,8 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 	}
 	payload := map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
 		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": time.Now().UTC()}
-	if s.Payment != nil {
-		payload["payment"] = s.Payment(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)
+	if s.Onchain != nil {
+		payload["onchain"] = s.Onchain(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)
 	}
 	if d := s.reporting.Load(); d != nil {
 		payload["downloaded"], payload["downloaded_at"] = d.Downloaded, d.DownloadedAt

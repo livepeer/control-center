@@ -8,84 +8,83 @@ import (
 	"testing"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"github.com/livepeer/control-center/api/internal/controlplane/payments"
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/connector"
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/orchestrator"
-	"github.com/livepeer/control-center/runtime/payment"
 )
 
-func onchainSettings(t *testing.T, s *Server) payment.Config {
+func onchainSettings(t *testing.T, s *Server) onchain.Config {
 	t.Helper()
 	dir := t.TempDir()
-	s.params.PaymentSecretsDir = dir
-	s.params.PaymentWebhookSecret = strings.Repeat("w", 32)
+	s.params.OnchainSecretsDir = dir
+	s.params.OnchainWebhookSecret = strings.Repeat("w", 32)
 	if e := os.WriteFile(filepath.Join(dir, "rpc-v1"), []byte("https://rpc.example/private-token"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	return payment.Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 123, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: "rpc-v1", RedeemerURL: "https://api.example/redemption", WeiPerUSD: "1000000000000000", TicketFaceValue: "1000", TicketWinProb: "100", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
+	return onchain.Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 123, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: "rpc-v1", RedeemerURL: "https://api.example/redemption", WeiPerUSD: "1000000000000000", TicketFaceValue: "1000", TicketWinProb: "100", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
 }
-func TestPaymentApplyAtomicBindingAndSecretVersions(t *testing.T) {
+func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
-	in := paymentInput{Version: 1, Machines: map[string]payment.Config{node: c}}
-	if rev, e := s.applyPayments(t.Context(), in, 0); e != nil || rev != 1 {
+	in := onchainInput{Version: 1, Machines: map[string]onchain.Config{node: c}}
+	if rev, e := s.applyOnchain(t.Context(), in, 0); e != nil || rev != 1 {
 		t.Fatal(rev, e)
 	}
-	if rev, e := s.applyPayments(t.Context(), in, 1); e != nil || rev != 1 {
+	if rev, e := s.applyOnchain(t.Context(), in, 1); e != nil || rev != 1 {
 		t.Fatal("retry", rev, e)
 	}
-	if rev, e := s.applyPayments(t.Context(), in, 0); e != nil || rev != 1 {
+	if rev, e := s.applyOnchain(t.Context(), in, 0); e != nil || rev != 1 {
 		t.Fatal("lost response retry", rev, e)
 	}
 	stale := c
 	stale.CredentialRevision++
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: stale}}, 0); e == nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: stale}}, 0); e == nil {
 		t.Fatal("stale edit accepted")
 	}
 	var n int
-	if e := s.db.QueryRow(`SELECT count(*) FROM lpcc.admin_audit_events WHERE action='payment.apply'`).Scan(&n); e != nil || n != 1 {
+	if e := s.db.QueryRow(`SELECT count(*) FROM lpcc.admin_audit_events WHERE action='onchain.apply'`).Scan(&n); e != nil || n != 1 {
 		t.Fatal(n, e)
 	}
 	// Omission and immutable bindings fail without committing another audit event.
-	other := payment.Offchain()
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{"lp-bbbbbbbbbbbbbbbb": other}}, 1); e == nil {
+	other := onchain.Offchain()
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{"lp-bbbbbbbbbbbbbbbb": other}}, 1); e == nil {
 		t.Fatal("omission disabled onchain machine")
 	}
-	for _, mutate := range []func(*payment.Config){func(c *payment.Config) { c.Recipient = "0x" + strings.Repeat("3", 40) }, func(c *payment.Config) { c.ChainID++ }, func(c *payment.Config) { c.TicketWinProb = "0" }} {
+	for _, mutate := range []func(*onchain.Config){func(c *onchain.Config) { c.Recipient = "0x" + strings.Repeat("3", 40) }, func(c *onchain.Config) { c.ChainID++ }, func(c *onchain.Config) { c.TicketWinProb = "0" }} {
 		next := c
 		mutate(&next)
-		if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: next}}, 1); e == nil {
+		if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: next}}, 1); e == nil {
 			t.Fatal("invalid change accepted")
 		}
 	}
-	if e := os.WriteFile(filepath.Join(s.params.PaymentSecretsDir, "rpc-v1"), []byte("https://rpc.example/changed-secret"), 0600); e != nil {
+	if e := os.WriteFile(filepath.Join(s.params.OnchainSecretsDir, "rpc-v1"), []byte("https://rpc.example/changed-secret"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.applyPayments(t.Context(), in, 1); e == nil {
+	if _, e := s.applyOnchain(t.Context(), in, 1); e == nil {
 		t.Fatal("overwritten secret version accepted")
 	}
-	if e := s.db.QueryRow(`SELECT count(*) FROM lpcc.admin_audit_events WHERE action='payment.apply'`).Scan(&n); e != nil || n != 1 {
+	if e := s.db.QueryRow(`SELECT count(*) FROM lpcc.admin_audit_events WHERE action='onchain.apply'`).Scan(&n); e != nil || n != 1 {
 		t.Fatal("partial commit", n, e)
 	}
 }
-func TestPaymentCredentialsWebhookAndForcedRecovery(t *testing.T) {
+func TestOnchainCredentialsWebhookAndForcedRecovery(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
 	machine := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	node := machine["node_id"]
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: c}}, 0); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: c}}, 0); e != nil {
 		t.Fatal(e)
 	}
-	cfg, e := payments.Load(t.Context(), s.db, node)
+	cfg, e := loadOnchain(t.Context(), s.db, node)
 	if e != nil {
 		t.Fatal(e)
 	}
 	// Install an applying bundle; this test exercises the real API boundary, not
 	// Kubernetes attestation (covered by the Runtime consumer tests).
-	desired := machineconfig.Desired{Machine: machineconfig.Machine{NodeID: node, Epoch: machine["epoch"], CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Payment: cfg, RuntimeImage: s.params.RuntimeImage, NodeImage: s.params.RuntimeNodeImage}
+	desired := machineconfig.Desired{Machine: machineconfig.Machine{NodeID: node, Epoch: machine["epoch"], CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: cfg, RuntimeImage: s.params.RuntimeImage, NodeImage: s.params.RuntimeNodeImage}
 	b, digest, e := machineconfig.Build(desired)
 	if e != nil {
 		t.Fatal(e)
@@ -97,8 +96,8 @@ func TestPaymentCredentialsWebhookAndForcedRecovery(t *testing.T) {
 	var meta contract.Metadata
 	json.Unmarshal(files["runtime.json"], &meta)
 	launch := connector.Launch{PodName: "orchestrator-test", PodUID: "uid-test", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
-	in := orchestrator.Request{Launch: launch, PaymentGeneration: cfg.Generation, ConfigDigest: meta.ConfigDigest}
-	path := "/v1/nodes/" + node + "/payment/credentials"
+	in := orchestrator.Request{Launch: launch, OnchainGeneration: cfg.Generation, ConfigDigest: meta.ConfigDigest}
+	path := "/v1/nodes/" + node + "/onchain/credentials"
 	requireStatus(t, request(t, s, "POST", path, "session-a", in), 401)
 	w := request(t, s, "POST", path, machine["token"], in)
 	requireStatus(t, w, 200)
@@ -123,17 +122,17 @@ func TestPaymentCredentialsWebhookAndForcedRecovery(t *testing.T) {
 		return d.Status
 	}
 	h := map[string][]string{"Authorization": {strings.TrimPrefix(g.Headers, "Authorization: ")}}
-	if webhook(c.Recipient, h, s.params.PaymentWebhookSecret) != 200 {
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 200 {
 		t.Fatal("valid submission denied")
 	}
-	if webhook("0x"+strings.Repeat("3", 40), h, s.params.PaymentWebhookSecret) != 403 {
+	if webhook("0x"+strings.Repeat("3", 40), h, s.params.OnchainWebhookSecret) != 403 {
 		t.Fatal("cross recipient allowed")
 	}
 	if webhook(c.Recipient, h, "wrong-service-secret") != 401 {
 		t.Fatal("service authentication bypass")
 	}
 	h["authorization"] = h["Authorization"]
-	if webhook(c.Recipient, h, s.params.PaymentWebhookSecret) != 403 {
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
 		t.Fatal("duplicate authorization allowed")
 	}
 	delete(h, "authorization")
@@ -141,17 +140,17 @@ func TestPaymentCredentialsWebhookAndForcedRecovery(t *testing.T) {
 	if _, e = s.db.Exec(`UPDATE lpcc.machines SET credential_version=credential_version+1 WHERE node_id=$1`, node); e != nil {
 		t.Fatal(e)
 	}
-	if webhook(c.Recipient, h, s.params.PaymentWebhookSecret) != 200 {
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 200 {
 		t.Fatal("refresh revoked retained grant")
 	}
 	if e = s.RetireMachine(t.Context(), node); e != nil {
 		t.Fatal(e)
 	}
-	if webhook(c.Recipient, h, s.params.PaymentWebhookSecret) != 403 {
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
 		t.Fatal("forced retirement did not revoke")
 	}
 	var recovery bool
-	if e = s.db.QueryRow(`SELECT recovery_required FROM lpcc.payment_machines WHERE node_id=$1`, node).Scan(&recovery); e != nil || !recovery {
+	if e = s.db.QueryRow(`SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, node).Scan(&recovery); e != nil || !recovery {
 		t.Fatal(recovery, e)
 	}
 	fresh := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -159,16 +158,16 @@ func TestPaymentCredentialsWebhookAndForcedRecovery(t *testing.T) {
 		t.Fatal("enrollment not replaced")
 	}
 	c.Recipient = "0x" + strings.Repeat("3", 40)
-	if _, e = s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: c}}, 1); e == nil {
+	if _, e = s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: c}}, 1); e == nil {
 		t.Fatal("re-enrollment reset pinned recipient")
 	}
 }
 
-func TestOnchainActivationAndRemovalRequireFreshPostDrainPaymentEvidence(t *testing.T) {
+func TestOnchainActivationAndRemovalRequireFreshPostDrainOnchainEvidence(t *testing.T) {
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: cfg}}, 0); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}, 0); e != nil {
 		t.Fatal(e)
 	}
 	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -191,48 +190,48 @@ func TestOnchainActivationAndRemovalRequireFreshPostDrainPaymentEvidence(t *test
 		}
 		return m
 	}
-	if metadata().PaymentActive {
+	if metadata().OnchainActive {
 		t.Fatal("saved setting treated as active onchain operation")
 	}
 	m0 := metadata()
 	launch := orchestrator.Launch{PodName: "orchestrator-test", PodUID: "node-pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
-	w := request(t, s, "POST", "/v1/nodes/"+node+"/payment/credentials", c["token"], orchestrator.Request{Launch: launch, PaymentGeneration: m0.Payment.Generation, ConfigDigest: m0.ConfigDigest})
+	w := request(t, s, "POST", "/v1/nodes/"+node+"/onchain/credentials", c["token"], orchestrator.Request{Launch: launch, OnchainGeneration: m0.Onchain.Generation, ConfigDigest: m0.ConfigDigest})
 	requireStatus(t, w, 200)
 	var grant orchestrator.Grant
 	json.Unmarshal(w.Body.Bytes(), &grant)
 	report := func(known bool, n int64) {
 		t.Helper()
 		m := metadata()
-		r := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Payment: &payment.Observation{Generation: m.Payment.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, QueueKnown: known, Unsettled: n, Handoff: "unverified"}})
+		r := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, QueueKnown: known, Unsettled: n, Handoff: "unverified"}})
 		requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
 	}
-	if _, e := s.db.Exec(`UPDATE lpcc.payment_machines SET recovery_required=true WHERE node_id=$1`, node); e != nil {
+	if _, e := s.db.Exec(`UPDATE lpcc.onchain_state SET recovery_required=true WHERE node_id=$1`, node); e != nil {
 		t.Fatal(e)
 	}
-	in := paymentInput{Version: 1, Machines: map[string]payment.Config{node: cfg}}
-	if _, e := s.applyPayments(t.Context(), in, 1, node); e == nil {
-		t.Fatal("recovery acknowledged without fresh payment evidence")
+	in := onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}
+	if _, e := s.applyOnchain(t.Context(), in, 1, node); e == nil {
+		t.Fatal("recovery acknowledged without fresh onchain evidence")
 	}
 	report(true, 0)
 	// A fresh report from a previously delivered configuration cannot clear
-	// recovery after publication changes, even within the same payment generation.
+	// recovery after publication changes, even within the same onchain generation.
 	if _, e := s.db.Exec(`UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{config_digest}',to_jsonb(repeat('f',64))) WHERE node_id=$1 AND component='runtime'`, node); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.applyPayments(t.Context(), in, 1, node); e == nil {
+	if _, e := s.applyOnchain(t.Context(), in, 1, node); e == nil {
 		t.Fatal("recovery acknowledged evidence for a different delivered configuration")
 	}
 	report(true, 0)
-	if rev, e := s.applyPayments(t.Context(), in, 1, node); e != nil || rev != 2 {
+	if rev, e := s.applyOnchain(t.Context(), in, 1, node); e != nil || rev != 2 {
 		t.Fatal("explicit restored-state acknowledgement", rev, e)
 	}
-	if rev, e := s.applyPayments(t.Context(), in, 1, node); e != nil || rev != 2 {
+	if rev, e := s.applyOnchain(t.Context(), in, 1, node); e != nil || rev != 2 {
 		t.Fatal("recovery acknowledgement retry", rev, e)
 	}
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	if !metadata().PaymentActive {
+	if !metadata().OnchainActive {
 		t.Fatal("fresh applied Node did not activate")
 	}
 	adminA(t, s)
@@ -268,7 +267,7 @@ func TestOnchainActivationAndRemovalRequireFreshPostDrainPaymentEvidence(t *test
 		t.Fatal("settled ordinary removal did not complete")
 	}
 	var drained, recovery bool
-	if e := s.db.QueryRow(`SELECT drained,recovery_required FROM lpcc.payment_machines WHERE node_id=$1`, node).Scan(&drained, &recovery); e != nil || !drained || recovery {
+	if e := s.db.QueryRow(`SELECT drained,recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, node).Scan(&drained, &recovery); e != nil || !drained || recovery {
 		t.Fatal("ordinary retirement misclassified", drained, recovery, e)
 	}
 }
@@ -277,7 +276,7 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: cfg}}, 0); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}, 0); e != nil {
 		t.Fatal(e)
 	}
 	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -291,7 +290,7 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	issue := func(nonce string) orchestrator.Grant {
 		t.Helper()
 		l := orchestrator.Launch{PodName: "orchestrator-test", PodUID: "same-pod", LaunchID: strings.Repeat(nonce, 32), ProcessID: strings.Repeat(nonce, 64)}
-		w := request(t, s, "POST", "/v1/nodes/"+node+"/payment/credentials", c["token"], orchestrator.Request{Launch: l, PaymentGeneration: m.Payment.Generation, ConfigDigest: m.ConfigDigest})
+		w := request(t, s, "POST", "/v1/nodes/"+node+"/onchain/credentials", c["token"], orchestrator.Request{Launch: l, OnchainGeneration: m.Onchain.Generation, ConfigDigest: m.ConfigDigest})
 		requireStatus(t, w, 200)
 		var g orchestrator.Grant
 		if e := json.Unmarshal(w.Body.Bytes(), &g); e != nil {
@@ -307,27 +306,27 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	}
 	observe := func(g orchestrator.Grant) {
 		t.Helper()
-		if e := s.observePaymentGrant(t.Context(), machine, &payment.Observation{Generation: m.Payment.Generation, Mode: "onchain", PodUID: "same-pod", GrantID: g.GrantID, Applied: true, Ready: true}, m.ConfigDigest); e != nil {
+		if e := s.observeOnchainGrant(t.Context(), machine, &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "same-pod", GrantID: g.GrantID, Applied: true, Ready: true}, m.ConfigDigest); e != nil {
 			t.Fatal(e)
 		}
 	}
 	observe(old)
 	var revoked bool
-	if e := s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.payment_grants WHERE grant_id=$1`, newer.GrantID).Scan(&revoked); e != nil || revoked {
+	if e := s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.onchain_grants WHERE grant_id=$1`, newer.GrantID).Scan(&revoked); e != nil || revoked {
 		t.Fatal("old observation revoked an applying grant", e)
 	}
 	observe(newer)
 	observe(old)
-	if e := s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.payment_grants WHERE grant_id=$1`, old.GrantID).Scan(&revoked); e != nil || !revoked {
+	if e := s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.onchain_grants WHERE grant_id=$1`, old.GrantID).Scan(&revoked); e != nil || !revoked {
 		t.Fatal("replacement did not retire predecessor", e)
 	}
 	third := issue("c")
 	if !third.RequireState {
 		t.Fatal("initialized onchain database can be silently recreated")
 	}
-	off := payment.Offchain()
-	off.Generation = m.Payment.Generation + 1
-	desired := machineconfig.Desired{Machine: machineconfig.Machine{NodeID: node, Epoch: c["epoch"], CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Payment: off, RuntimeImage: s.params.RuntimeImage, NodeImage: s.params.RuntimeNodeImage}
+	off := onchain.Offchain()
+	off.Generation = m.Onchain.Generation + 1
+	desired := machineconfig.Desired{Machine: machineconfig.Machine{NodeID: node, Epoch: c["epoch"], CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: off, RuntimeImage: s.params.RuntimeImage, NodeImage: s.params.RuntimeNodeImage}
 	b, digest, e := machineconfig.Build(desired)
 	if e != nil {
 		t.Fatal(e)
@@ -335,29 +334,29 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	files, _ = artifact.Read(b)
 	var replacement contract.Metadata
 	json.Unmarshal(files["runtime.json"], &replacement)
-	o := &payment.Observation{Generation: off.Generation, Mode: "offchain", PodUID: "offchain-pod", Applied: true}
-	if e = s.observePaymentGrant(t.Context(), machine, o, m.ConfigDigest); e != nil {
+	o := &onchain.Observation{Generation: off.Generation, Mode: "offchain", PodUID: "offchain-pod", Applied: true}
+	if e = s.observeOnchainGrant(t.Context(), machine, o, m.ConfigDigest); e != nil {
 		t.Fatal(e)
 	}
-	if e = s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.payment_grants WHERE grant_id=$1`, third.GrantID).Scan(&revoked); e != nil || revoked {
+	if e = s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.onchain_grants WHERE grant_id=$1`, third.GrantID).Scan(&revoked); e != nil || revoked {
 		t.Fatal("offchain observation revoked a still-held onchain grant", e)
 	}
 	if _, e = s.db.Exec(`UPDATE lpcc.machine_configs SET bundle=$2,sha256=$3 WHERE node_id=$1`, node, b, digest); e != nil {
 		t.Fatal(e)
 	}
-	if e = s.observePaymentGrant(t.Context(), machine, o, replacement.ConfigDigest); e != nil {
+	if e = s.observeOnchainGrant(t.Context(), machine, o, replacement.ConfigDigest); e != nil {
 		t.Fatal(e)
 	}
-	if count(t, s, `SELECT count(*) FROM lpcc.payment_grants WHERE revoked_at IS NULL`) != 0 {
+	if count(t, s, `SELECT count(*) FROM lpcc.onchain_grants WHERE revoked_at IS NULL`) != 0 {
 		t.Fatal("applied offchain replacement retained submission grants")
 	}
 }
 
-func TestPaymentIsolationAndGenericCatalogCompatibility(t *testing.T) {
+func TestOnchainIsolationAndGenericCatalogCompatibility(t *testing.T) {
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
 	onchainNode := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{onchainNode: cfg}}, 0); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{onchainNode: cfg}}, 0); e != nil {
 		t.Fatal(e)
 	}
 	a := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -378,15 +377,15 @@ func TestPaymentIsolationAndGenericCatalogCompatibility(t *testing.T) {
 	}
 	var meta contract.Metadata
 	json.Unmarshal(files["runtime.json"], &meta)
-	if meta.Payment.Onchain() || strings.Contains(string(files["runtime.json"]), cfg.Recipient) {
-		t.Fatal("cross-machine payment delivery")
+	if meta.Onchain.Onchain() || strings.Contains(string(files["runtime.json"]), cfg.Recipient) {
+		t.Fatal("cross-machine onchain delivery")
 	}
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+a["node_id"]+"/payment/credentials", b["token"], map[string]any{}), 401)
-	// Browser administration has no payment-settings mutation interface.
-	requireStatus(t, request(t, s, "PUT", "/api/admin/machines/"+a["node_id"]+"/payment", "session-a", cfg), 404)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+a["node_id"]+"/onchain/credentials", b["token"], map[string]any{}), 401)
+	// Browser administration has no onchain-settings mutation interface.
+	requireStatus(t, request(t, s, "PUT", "/api/admin/machines/"+a["node_id"]+"/onchain", "session-a", cfg), 404)
 }
 
-func TestConcurrentPaymentApplyCannotCommitTwoDifferentTargets(t *testing.T) {
+func TestConcurrentOnchainApplyCannotCommitTwoDifferentTargets(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
@@ -395,7 +394,7 @@ func TestConcurrentPaymentApplyCannotCommitTwoDifferentTargets(t *testing.T) {
 		copy := c
 		copy.CredentialRevision = uint64(n + 1)
 		go func() {
-			_, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: copy}}, 0)
+			_, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: copy}}, 0)
 			errors <- e
 		}()
 	}
@@ -408,7 +407,7 @@ func TestConcurrentPaymentApplyCannotCommitTwoDifferentTargets(t *testing.T) {
 	if successes != 1 {
 		t.Fatal("concurrent edits both committed", successes)
 	}
-	if count(t, s, `SELECT count(*) FROM lpcc.payment_versions`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='payment.apply'`) != 1 {
+	if count(t, s, `SELECT count(*) FROM lpcc.onchain_configs`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='onchain.apply'`) != 1 {
 		t.Fatal("configuration and audit diverged")
 	}
 }
@@ -417,7 +416,7 @@ func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T)
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: cfg}}, 0); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}, 0); e != nil {
 		t.Fatal(e)
 	}
 	enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -441,16 +440,16 @@ func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T)
 		t.Fatal(e)
 	}
 	after := read()
-	if after.ConfigDigest == before.ConfigDigest || !after.Payment.Onchain() || after.PaymentActive || after.Payment.Generation != before.Payment.Generation {
-		t.Fatal("unapproved onchain target could not repair its image under the same payment binding", after)
+	if after.ConfigDigest == before.ConfigDigest || !after.Onchain.Onchain() || after.OnchainActive || after.Onchain.Generation != before.Onchain.Generation {
+		t.Fatal("unapproved onchain target could not repair its image under the same onchain binding", after)
 	}
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: payment.Offchain()}}, 1); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: onchain.Offchain()}}, 1); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	if !read().Payment.Onchain() {
+	if !read().Onchain.Onchain() {
 		t.Fatal("failed onchain startup bypassed the settlement gate to offchain")
 	}
 }
@@ -459,21 +458,21 @@ func TestForcedRetirementCannotUseDesiredOffchainAsSettlementProof(t *testing.T)
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
 	node := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: cfg}}, 0); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}, 0); e != nil {
 		t.Fatal(e)
 	}
 	_ = enroll(t, s, ownerA, strings.Repeat("a", 64))
-	if _, e := s.db.Exec(`UPDATE lpcc.payment_machines SET initialized=true WHERE node_id=$1`, node); e != nil {
+	if _, e := s.db.Exec(`UPDATE lpcc.onchain_state SET initialized=true WHERE node_id=$1`, node); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.applyPayments(t.Context(), paymentInput{Version: 1, Machines: map[string]payment.Config{node: payment.Offchain()}}, 1); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: onchain.Offchain()}}, 1); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.RetireMachine(t.Context(), node); e != nil {
 		t.Fatal(e)
 	}
 	var required bool
-	if e := s.db.QueryRow(`SELECT recovery_required FROM lpcc.payment_machines WHERE node_id=$1`, node).Scan(&required); e != nil || !required {
+	if e := s.db.QueryRow(`SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, node).Scan(&required); e != nil || !required {
 		t.Fatal("pending disable hid retained onchain state", required, e)
 	}
 }

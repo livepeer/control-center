@@ -14,16 +14,15 @@ import (
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"github.com/livepeer/control-center/api/internal/controlplane/payments"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/schema"
 )
 
 type componentObservation struct {
-	Payment             *payment.Observation    `json:"payment,omitempty"`
+	Onchain             *onchain.Observation    `json:"onchain,omitempty"`
 	ObserverID          string                  `json:"observer_id,omitempty"`
 	ObserverStartedAt   *time.Time              `json:"observer_started_at,omitempty"`
 	Component           string                  `json:"component"`
@@ -83,7 +82,7 @@ type tunnelObservation struct {
 }
 
 type machineObservation struct {
-	Payment                     paymentView                 `json:"payment"`
+	Onchain                     onchainView                 `json:"onchain"`
 	NodeID                      string                      `json:"node_id"`
 	Epoch                       string                      `json:"epoch"`
 	Hostname                    string                      `json:"hostname"`
@@ -177,7 +176,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 	} else if err != nil {
 		return v, err
 	}
-	v.Payment, err = s.paymentView(ctx, m)
+	v.Onchain, err = s.onchainView(ctx, m)
 	if err != nil {
 		return v, err
 	}
@@ -239,9 +238,9 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 			expires = timePointer(effective.Add(ttl))
 		}
 		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
-		c.Payment = report.Payment
-		if c.Payment != nil {
-			copy := *c.Payment
+		c.Onchain = report.Onchain
+		if c.Onchain != nil {
+			copy := *c.Onchain
 			copy.GrantID = ""
 			if !c.Fresh || !c.Current || c.ClockUncertain {
 				copy.Ready = false
@@ -249,7 +248,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 				copy.QueueKnown = false
 				copy.Handoff = "unverified"
 			}
-			c.Payment = &copy
+			c.Onchain = &copy
 		}
 		c.AppsError = safeObservationReason(report.AppsError)
 		c.Apps, c.Downloaded, c.DownloadedAt = report.Apps, report.Downloaded, timePointer(report.DownloadedAt)
@@ -436,23 +435,23 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 	return result, rows.Err()
 }
 
-type paymentView struct {
-	Desired             payment.Config `json:"desired"`
+type onchainView struct {
+	Desired             onchain.Config `json:"desired"`
 	DeliveredGeneration int64          `json:"delivered_generation"`
 	RecoveryRequired    bool           `json:"recovery_required"`
 }
 
-func (s *Server) paymentView(ctx context.Context, m Machine) (paymentView, error) {
-	var v paymentView
+func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error) {
+	var v onchainView
 	var err error
-	v.Desired, err = payments.Load(ctx, s.db, m.NodeID)
+	v.Desired, err = loadOnchain(ctx, s.db, m.NodeID)
 	if err != nil {
 		return v, err
 	}
 	v.Desired.RPCSecret = ""
 	v.Desired.RPCGrants = nil
 	v.Desired.RedeemerGrants = nil
-	_ = s.db.QueryRowContext(ctx, `SELECT recovery_required FROM lpcc.payment_machines WHERE node_id=$1`, m.NodeID).Scan(&v.RecoveryRequired)
+	_ = s.db.QueryRowContext(ctx, `SELECT recovery_required FROM lpcc.onchain_state WHERE node_id=$1`, m.NodeID).Scan(&v.RecoveryRequired)
 	var b []byte
 	if m.Terminal {
 		err = s.db.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&b)
@@ -464,7 +463,7 @@ func (s *Server) paymentView(ctx context.Context, m Machine) (paymentView, error
 		if e == nil {
 			var meta contract.Metadata
 			if json.Unmarshal(files["runtime.json"], &meta) == nil {
-				v.DeliveredGeneration = meta.Payment.Generation
+				v.DeliveredGeneration = meta.Onchain.Generation
 			}
 		}
 	}

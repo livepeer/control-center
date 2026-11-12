@@ -70,7 +70,7 @@ func (c *Control) Request(ctx context.Context, endpoint string, payload any, lim
 	if c.ConfigURL != c.approvedURL || c.Base != c.approvedBase {
 		return nil, nil, errors.New("control_origin_changed")
 	}
-	if endpoint != "config" && endpoint != "status" && endpoint != "removal-ack" && endpoint != "tunnel/connector-token" && endpoint != "payment/credentials" && !appReportPath.MatchString(endpoint) {
+	if endpoint != "config" && endpoint != "status" && endpoint != "removal-ack" && endpoint != "tunnel/connector-token" && endpoint != "onchain/credentials" && !appReportPath.MatchString(endpoint) {
 		return nil, nil, errors.New("control_endpoint")
 	}
 	token, err := os.ReadFile(c.TokenFile)
@@ -144,8 +144,8 @@ func ReadMetadata(b []byte) (contract.Metadata, error) {
 	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 1 || !epochPattern.MatchString(m.Epoch) || m.BundleFormat != contract.BundleFormat {
 		return m, errors.New("metadata_invalid")
 	}
-	if m.Payment.Validate() != nil {
-		return m, errors.New("metadata_payment_invalid")
+	if m.Onchain.Validate() != nil {
+		return m, errors.New("metadata_onchain_invalid")
 	}
 	return m, nil
 }

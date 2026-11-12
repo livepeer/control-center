@@ -33,7 +33,7 @@ func (s *Manager) prepareApps(ctx context.Context, m *Desired, lookupErr error) 
 	if err == nil && m.Apps != nil {
 		for _, a := range m.Apps.Entries {
 			if a.Revision != nil && a.Desired == "present" {
-				if e := m.Payment.Compatible(a.Revision.Definition); e != nil {
+				if e := m.Onchain.Compatible(a.Revision.Definition); e != nil {
 					err = e
 					break
 				}
@@ -122,9 +122,9 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		}
 		if prior, e := transport.ReadMetadata(m.RetainedFiles["runtime.json"]); e == nil {
 			metadata.ConfigDigest = prior.ConfigDigest
-			metadata.Payment = prior.Payment
-			metadata.PaymentCredentialsRef = prior.PaymentCredentialsRef
-			metadata.PaymentActive = false
+			metadata.Onchain = prior.Onchain
+			metadata.OnchainCredentialsRef = prior.OnchainCredentialsRef
+			metadata.OnchainActive = false
 			// Retained connectors may restart while the backend still authorizes app cleanup.
 			metadata.TunnelID, metadata.TokenGeneration, metadata.ProviderVersion, metadata.ConnectorTokenRef = prior.TunnelID, prior.TokenGeneration, prior.ProviderVersion, prior.ConnectorTokenRef
 			files["runtime.json"], err = json.Marshal(metadata)

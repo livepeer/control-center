@@ -9,21 +9,21 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/runtime/contract"
-	"github.com/livepeer/control-center/runtime/payment"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 )
 
-func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied, ready bool, podUID string) *payment.Observation {
-	o := &payment.Observation{Generation: m.Payment.Generation, Mode: m.Payment.Mode, PodUID: podUID, Applied: applied, Ready: ready, Handoff: "unverified"}
-	if !m.Payment.Onchain() {
+func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied, ready bool, podUID string) *onchain.Observation {
+	o := &onchain.Observation{Generation: m.Onchain.Generation, Mode: m.Onchain.Mode, PodUID: podUID, Applied: applied, Ready: ready, Handoff: "unverified"}
+	if !m.Onchain.Onchain() {
 		return o
 	}
 	i.mu.Lock()
 	a := i.grant
 	proof := i.observation
 	i.mu.Unlock()
-	if !applied || a == nil || proof == nil || proof.Association != *a || time.Since(proof.ObservedAt) > 30*time.Second || a.PodUID != podUID || a.Epoch != m.Epoch || a.PaymentGeneration != m.Payment.Generation || a.ConfigDigest != m.ConfigDigest || i.checkPod(ctx, a.Launch, m) != nil {
+	if !applied || a == nil || proof == nil || proof.Association != *a || time.Since(proof.ObservedAt) > 30*time.Second || a.PodUID != podUID || a.Epoch != m.Epoch || a.OnchainGeneration != m.Onchain.Generation || a.ConfigDigest != m.ConfigDigest || i.checkPod(ctx, a.Launch, m) != nil {
 		o.Applied = false
 		o.Ready = false
 		return o

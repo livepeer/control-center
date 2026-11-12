@@ -517,7 +517,7 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Empty payment, certificate and retirement snapshot migrations can roll back while
+	// Empty onchain, certificate and retirement snapshot migrations can roll back while
 	// this enrollment is active; assignment history must still be preserved.
 	for range 3 {
 		if err := migrations.Down(t.Context(), s.db, files); err != nil {

@@ -192,18 +192,10 @@ remain, with no active upgrade Plan. Terminal delivery persists through local
 acknowledgement; authentication/fetch errors never mean removal. Verify provider
 absence separately from local cleanup.
 
-## Integration agreements and release evidence
+## Integration checks
 
 App assignments follow the [delivery and cleanup contract](app-registry.md#runtime-delivery-and-completion-contract).
-Before production, test with compatible Node and SDK images and two machines:
-
-1. Verify Cloudflare Access, DNS and TLS, including rejection of invalid or revoked
-   credentials and attempts to bypass the tunnel directly.
-2. Exercise Node routing to private gVisor apps, including session, payment and
-   application paths. Test HTTP, SSE and WebSocket performance.
-3. Test restart, reboot, provider and API outages, rotation, updates and offline
-   removal. Check local and provider cleanup, and test actual CNI/DNAT, NodePort,
-   host-port, direct Pod/Service and IPv6 access.
+Run the [end-to-end harness](development.md#end-to-end-tests) for routing and isolation checks.
 
 Cloudflared normalization affects matching and can differ from the forwarded
 path; configuration inspection is not isolation evidence. Review Cloudflare

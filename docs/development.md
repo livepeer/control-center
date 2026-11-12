@@ -61,3 +61,7 @@ transport, or cleanup failures. Interrupted runs may retain a remote container
 or temporary directory; inspect the resource identifiers printed by the helper
 before removing those resources or rerunning. Delete the local run directory
 when its results are no longer needed.
+
+## End-to-end tests
+
+Use the separate `e2e-clankery` harness; commands are in its `README.txt`.

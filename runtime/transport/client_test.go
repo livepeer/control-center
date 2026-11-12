@@ -37,8 +37,8 @@ func TestControlOriginsCredentialsAndRedirects(t *testing.T) {
 	if _, _, err = c.Request(context.Background(), "config", nil, 1024); !IsStatus(err, 302) || calls != 0 {
 		t.Fatal("redirect leaked request", err, calls)
 	}
-	if _, _, err = c.Request(context.Background(), "payment/credentials", map[string]string{"pod_uid": "current"}, 1024); !IsStatus(err, 302) || calls != 0 {
-		t.Fatal("payment delivery was refused or redirected", err, calls)
+	if _, _, err = c.Request(context.Background(), "onchain/credentials", map[string]string{"pod_uid": "current"}, 1024); !IsStatus(err, 302) || calls != 0 {
+		t.Fatal("onchain delivery was refused or redirected", err, calls)
 	}
 	c.ConfigURL = receiver.URL
 	if _, _, err = c.Request(context.Background(), "config", nil, 1024); err == nil || calls != 0 {

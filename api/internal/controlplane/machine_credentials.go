@@ -245,7 +245,7 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if report.Component == "runtime" && !report.ClockUncertain && !report.ObservedAt.Before(time.Now().Add(-2*time.Minute)) {
-		if e := s.observePaymentGrant(r.Context(), m, report.Payment, report.ConfigDigest); e != nil {
+		if e := s.observeOnchainGrant(r.Context(), m, report.Onchain, report.ConfigDigest); e != nil {
 			s.databaseError(w, e)
 			return
 		}

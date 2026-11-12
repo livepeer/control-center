@@ -54,12 +54,12 @@ func TestMigrationConfig(t *testing.T) {
 	}
 }
 
-func TestPaymentCommandHelpDoesNotExposeSecrets(t *testing.T) {
+func TestOnchainCommandHelpDoesNotExposeSecrets(t *testing.T) {
 	cmd := command()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"payments", "apply", "--help"})
+	cmd.SetArgs([]string{"onchain", "apply", "--help"})
 	if e := cmd.Execute(); e != nil {
 		t.Fatal(e)
 	}
@@ -68,27 +68,27 @@ func TestPaymentCommandHelpDoesNotExposeSecrets(t *testing.T) {
 			t.Fatal("missing flag", flag)
 		}
 	}
-	for _, secret := range []string{"--payment-webhook-secret ", "--pg-password "} {
+	for _, secret := range []string{"--onchain-webhook-secret ", "--pg-password "} {
 		if strings.Contains(out.String(), secret) {
 			t.Fatal("secret CLI flag exposed")
 		}
 	}
 }
 
-func TestPaymentInputRejectsUnknownPricingAndDuplicateFields(t *testing.T) {
+func TestOnchainInputRejectsUnknownPricingAndDuplicateFields(t *testing.T) {
 	t.Setenv("PG_CONNSTR", "postgres://unused.invalid/no-network")
 	for _, body := range []string{
 		`{"version":1,"machines":{"lp-aaaaaaaaaaaaaaaa":{"version":1,"mode":"offchain","price":"1"}}}`,
 		`{"version":1,"version":1,"machines":{}}`,
 		`{"version":2,"machines":{}}`,
 	} {
-		path := filepath.Join(t.TempDir(), "payments.json")
+		path := filepath.Join(t.TempDir(), "onchain.json")
 		if e := os.WriteFile(path, []byte(body), 0600); e != nil {
 			t.Fatal(e)
 		}
 		cmd := command()
-		cmd.SetArgs([]string{"payments", "apply", "--config=", "--file", path, "--expected-revision", "0"})
-		if e := cmd.Execute(); e == nil || e.Error() != "invalid payment infrastructure document" {
+		cmd.SetArgs([]string{"onchain", "apply", "--config=", "--file", path, "--expected-revision", "0"})
+		if e := cmd.Execute(); e == nil || e.Error() != "invalid onchain infrastructure document" {
 			t.Fatal("invalid input was not rejected before database access", e)
 		}
 	}
