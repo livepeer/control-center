@@ -3,7 +3,6 @@ package contract
 import "strings"
 
 const PrivateOrchestrator = "http://orchestrator.livepeer.svc.cluster.local:8935"
-const ConnectorOrigin = "http://127.0.0.1:8935"
 
 // ReservedProxyID protects the machine's control hostname namespace. Generated
 // Node IDs use app- or an unprefixed random label and do not occupy these names.

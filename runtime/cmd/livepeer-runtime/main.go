@@ -21,7 +21,6 @@ import (
 	"github.com/livepeer/control-center/runtime/connector"
 	"github.com/livepeer/control-center/runtime/httpsource"
 	"github.com/livepeer/control-center/runtime/management"
-	"github.com/livepeer/control-center/runtime/nodeproxy"
 	"github.com/livepeer/control-center/runtime/orchestrator"
 	"github.com/livepeer/control-center/runtime/transport"
 )
@@ -36,7 +35,7 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("choose http-source, app-reconciler, connector-start, connector-probe, node-proxy or node-proxy-probe")
+		return errors.New("choose http-source, app-reconciler, connector-start, or connector-probe")
 	}
 	switch args[0] {
 	case "orchestrator-start":
@@ -52,19 +51,6 @@ func run(ctx context.Context, args []string) error {
 		return appReconciler(ctx, args[1:])
 	case "connector-start", "connector-probe":
 		return connectorCommand(ctx, args[0], args[1:])
-	case "node-proxy":
-		flags := flag.NewFlagSet("node-proxy", flag.ContinueOnError)
-		template := flags.String("proxy-url-template", "", "Machine proxy hostname template")
-		serviceURL := flags.String("service-url", "", "Expected Node service URL")
-		if flags.Parse(args[1:]) != nil {
-			return errors.New("invalid Node proxy configuration")
-		}
-		return nodeproxy.Serve(ctx, *template, *serviceURL)
-	case "node-proxy-probe":
-		if !nodeproxy.Ready(ctx) {
-			return errors.New("Node proxy not ready")
-		}
-		return nil
 	default:
 		return errors.New("unsupported Runtime command")
 	}

@@ -1,11 +1,9 @@
 # Machine tunnels and protected discovery
 
 Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
-connector obtains a tunnel token and starts cloudflared; Kubernetes restarts it as
-needed. The tunnel enables external access, and Node routes application traffic
-to private workloads.
-API and discovery use separate hostnames protected by one Cloudflare Access
-application.
+connector starts cloudflared, which forwards directly to the private Node service;
+Node routes application traffic to private workloads. API and discovery use
+separate hostnames protected by one Cloudflare Access application.
 
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
@@ -42,12 +40,11 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
   -t <REGISTRY>/livepeer-tunnel:<RELEASE> runtime/services
 ```
 
-The separate image contains checksum-verified cloudflared 2026.10.7 and the
-connector helper copied from the digest-pinned Runtime image. Push the image and
-set backend `RUNTIME_CONNECTOR_IMAGE` (or `RuntimeConnectorImage` in configuration)
-to its published digest before enabling managed ingress. Startup disables automatic
-updates and enables path normalization. Changing the image replaces the connector
-Deployment.
+Retire existing machines before this release. Use fresh enrollments, Node #86
+revision `2364436ecd1284299e2946044f3715ae6dde43e7` or later, and Runtime and
+connector images built from this release. The connector contains checksum-verified
+cloudflared 2026.10.7; push it and set `RuntimeConnectorImage` to its digest
+before enabling ingress.
 
 ## Credential boundaries
 
@@ -103,7 +100,7 @@ See [machine and app status](machine-status.md) for evidence and recovery rules.
 
 Reports retain their observation time and expiry across delivery retries. The
 agent checks Node's applied revision, readiness, private discovery address and
-installed K3s version, and probes cloudflared and the proxy. Source readiness
+installed K3s version, and probes cloudflared. Source readiness
 expires with `TunnelStatusTTL`.
 
 ## Reconciliation and recovery
@@ -125,7 +122,6 @@ share Access service credentials. TLS, authenticated API/discovery,
 unauthenticated rejection and authenticated isolation probes must succeed for each
 endpoint generation. API/discovery forwarding sets Host to the private orchestrator;
 wildcard application forwarding preserves the actual Host.
-The loopback proxy rejects invalid app Hosts and strips Access credentials.
 The API host allows reservation, stop/payment and payment refresh; discovery
 allows `/discovery`. Other paths on those hosts return 404. App hosts deny
 reserved paths and forward the rest; Node checks HTTP methods.

@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func managedTunnelManifest(m Desired, proxyContainer string) string {
+func managedTunnelManifest(m Desired) string {
 	return fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
 metadata: {name: livepeer-tunnel, namespace: flux-system}
@@ -53,12 +53,12 @@ spec:
         volumeMounts:
         - {name: management, mountPath: /management, readOnly: true}
         - {name: token, mountPath: /run/tunnel}
-%s      volumes:
+      volumes:
       - name: management
         hostPath: {path: '%s/volumes/management-sockets/connector', type: Directory}
       - name: token
         emptyDir: {medium: Memory, sizeLimit: 1Mi}
-`, m.Exposure.CredentialGeneration, m.Connector.Image, m.NodeID, m.Connector.Image, proxyContainer, m.InstallDir)
+`, m.Exposure.CredentialGeneration, m.Connector.Image, m.NodeID, m.Connector.Image, m.InstallDir)
 }
 
 func kustomize(resources ...string) []byte {

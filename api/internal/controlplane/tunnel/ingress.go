@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"github.com/livepeer/control-center/runtime/contract"
 	"net/url"
 	"strings"
 )
@@ -28,7 +27,6 @@ type IngressAccess struct {
 }
 
 const PrivateOrchestrator = machineconfig.PrivateOrchestrator
-const ConnectorOrigin = contract.ConnectorOrigin
 
 // Reserve these path segments even under generated app hosts. Go RE2 has no
 // negative lookahead: ordered denial rules precede every forwarding rule.
@@ -51,12 +49,12 @@ func ingressFor(state RoutingState, p Config, audience string) []IngressRule {
 	origin := protectedOrigin(p, audience)
 	return []IngressRule{
 		{Hostname: api, Path: reservedPath, Service: "http_status:404"},
-		{Hostname: api, Path: clientPath, Service: ConnectorOrigin, OriginRequest: origin},
+		{Hostname: api, Path: clientPath, Service: PrivateOrchestrator, OriginRequest: origin},
 		{Hostname: api, Service: "http_status:404"},
-		{Hostname: discovery, Path: `^/discovery$`, Service: ConnectorOrigin, OriginRequest: origin},
+		{Hostname: discovery, Path: `^/discovery$`, Service: PrivateOrchestrator, OriginRequest: origin},
 		{Hostname: discovery, Service: "http_status:404"},
 		{Hostname: apps, Path: reservedPath, Service: "http_status:404"},
-		{Hostname: apps, Service: ConnectorOrigin},
+		{Hostname: apps, Service: PrivateOrchestrator},
 		{Service: "http_status:404"},
 	}
 }

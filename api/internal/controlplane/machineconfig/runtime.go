@@ -10,8 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/BurntSushi/toml"
 )
 
 func routeEnabled(m Desired) bool {
@@ -28,23 +26,6 @@ func templateValues(m Desired) *strings.Replacer {
 		mode = "development-http"
 	}
 	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
-}
-func orchestratorConfiguration(m Desired) string {
-	if m.State.HeldOrchestrator != "" {
-		return configurationFromManifest(m.State.HeldOrchestrator)
-	}
-	b, _ := templates.ReadFile("templates/system/node/orchestrator.yaml")
-	s := specializeNode(templateValues(m).Replace(string(b)), m)
-	return configurationFromManifest(s)
-}
-func configurationFromManifest(s string) string {
-	_, body, _ := strings.Cut(s, "  orchestrator.toml: |\n")
-	body, _, _ = strings.Cut(body, "\n---")
-	lines := strings.Split(body, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimPrefix(lines[i], "    ")
-	}
-	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
 }
 func Digest(m Desired) string {
 	b, _ := templates.ReadFile("templates/system/node/orchestrator.yaml")
@@ -160,14 +141,7 @@ func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !ValidConnectorImage(m.Connector.Image) {
 		return fmt.Errorf("connector image is not pinned")
 	}
-	if !ValidConnectorImage(m.RuntimeImage) {
-		return fmt.Errorf("Node proxy Runtime image is not pinned")
-	}
-	var node struct{ ServiceURL, ProxyURLTemplate string }
-	if _, err := toml.Decode(orchestratorConfiguration(m), &node); err != nil || node.ServiceURL == "" {
-		return fmt.Errorf("invalid effective Node routing configuration")
-	}
-	files["system/connector/tunnel.yaml"] = []byte(managedTunnelManifest(m, nodeProxyContainer(m, node.ServiceURL, node.ProxyURLTemplate)))
+	files["system/connector/tunnel.yaml"] = []byte(managedTunnelManifest(m))
 	files["system/connector/network.yaml"] = []byte(tunnelNetwork(m))
 	return nil
 }

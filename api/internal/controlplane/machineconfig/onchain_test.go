@@ -49,7 +49,8 @@ func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T)
 	node := string(files["system/node/orchestrator.yaml"])
 	if binary := os.Getenv("NODE_BINARY"); binary != "" {
 		dir := t.TempDir()
-		config := configurationFromManifest(node)
+		_, config, _ := strings.Cut(node, "  orchestrator.toml: |\n")
+		config, _, _ = strings.Cut(config, "\n---")
 		for key, value := range map[string]string{"/run/onchain/private/rpc": "https://rpc.example", "/run/onchain/private/headers": "Authorization: Bearer test-only", "/credentials/secret": "bootstrap-test-only"} {
 			file := filepath.Join(dir, filepath.Base(key))
 			if e := os.WriteFile(file, []byte(value), 0600); e != nil {

@@ -1,9 +1,7 @@
 package machineconfig
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 
@@ -26,42 +24,29 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 		return files
 	}
 	files := build(m)
-	for _, manifest := range [][]byte{files["system/connector/tunnel.yaml"]} {
-		if len(manifest) == 0 {
-			t.Fatal("missing connector manifest")
+	for _, field := range []string{"APIOriginURL", "RunnerServiceURL"} {
+		if !strings.Contains(string(files["system/node/orchestrator.yaml"]), field+` = "`+PrivateOrchestrator+`"`) {
+			t.Fatal("Node omitted private authority", field)
 		}
-		var deployment struct {
-			Spec struct {
-				Template struct {
-					Spec struct {
-						Containers []struct {
-							Name, Image  string
-							VolumeMounts []any `yaml:"volumeMounts"`
-						}
-					}
+	}
+	if !strings.Contains(string(files["system/node/orchestrator.yaml"]), `ExcludedHeaders = ["CF-Access-*"]`) {
+		t.Fatal("Node omitted ingress header exclusion")
+	}
+	var deployment struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct{ Name, Image string }
 				}
 			}
 		}
-		decoder := yaml.NewDecoder(bytes.NewReader(manifest))
-		found := false
-		for {
-			if err := decoder.Decode(&deployment); err == io.EOF {
-				break
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			for _, c := range deployment.Spec.Template.Spec.Containers {
-				if c.Name == "node-proxy" {
-					found = true
-					if c.Image != m.RuntimeImage || len(c.VolumeMounts) != 0 {
-						t.Fatal("Node proxy needs the Go helper without credential mounts")
-					}
-				}
-			}
-		}
-		if !found {
-			t.Fatal("missing Node proxy")
-		}
+	}
+	if err := yaml.Unmarshal(files["system/connector/tunnel.yaml"], &deployment); err != nil {
+		t.Fatal(err)
+	}
+	containers := deployment.Spec.Template.Spec.Containers
+	if len(containers) != 1 || containers[0].Name != "connector" || containers[0].Image != m.Connector.Image {
+		t.Fatal("connector workload must contain only the pinned connector")
 	}
 	if strings.Contains(string(files["management/kustomization.yaml"]), "orchestrator.yaml") || files["system/node/orchestrator.yaml"] == nil {
 		t.Fatal("system inventories were not partitioned")
@@ -105,44 +90,4 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 		t.Fatal("final cleanup did not fence the retained connector")
 	}
 
-}
-
-func TestProxyRoutingFollowsHeldNodeConfiguration(t *testing.T) {
-	{
-		m := Desired{Machine: Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", InstallDir: "/opt/livepeer"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}}
-		build := func() map[string][]byte {
-			t.Helper()
-			bundle, _, err := Build(m)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files, err := artifact.Read(bundle)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return files
-		}
-		prefix, nodeFile, proxyFile := "system/", "node/orchestrator.yaml", "connector/tunnel.yaml"
-		private := build()
-		m.Exposure = &Exposure{TunnelID: "tunnel", ServiceURL: "https://api-aaaaaaa.vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid", ProxyURLTemplate: "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid", IngressDigest: "ingress"}
-		a := build()
-		if !strings.Contains(string(a[prefix+nodeFile]), `APIOriginURL = "`+PrivateOrchestrator+`"`) {
-			t.Fatal("public Node routing omitted the private API origin")
-		}
-		m.State.HeldOrchestrator = string(a[prefix+nodeFile])
-		m.Exposure.ServiceURL = "https://api-aaaaaaa.vkvkvkvkvkvkuaaaaaaaaaaaaa.b.invalid"
-		m.Exposure.ProxyURLTemplate = "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.b.invalid"
-		for _, held := range []string{m.State.HeldOrchestrator, string(private[prefix+nodeFile])} {
-			m.State.HeldOrchestrator = held
-			files := build()
-			manifest := string(files[prefix+proxyFile])
-			_, manifest, _ = strings.Cut(manifest, "- name: node-proxy\n")
-			if strings.Contains(manifest, "vkvkvkvkvkvkuaaaaaaaaaaaaa.b.invalid") || !strings.Contains(manifest, "--service-url") {
-				t.Fatal("guard advanced beyond held Node configuration", manifest)
-			}
-			if strings.Contains(held, "vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid") && !strings.Contains(manifest, "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid") {
-				t.Fatal("guard lost held public proxy template")
-			}
-		}
-	}
 }

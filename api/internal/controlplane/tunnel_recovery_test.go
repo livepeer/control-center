@@ -222,8 +222,8 @@ func TestEndpointFailurePreservesConnectorAndRollbackReusesOwnership(t *testing.
 	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	bundle := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
 	files := archiveFiles(t, bundle.Body.Bytes())
-	if !strings.Contains(files["system/connector/tunnel.yaml"], initial.ProxyURLTemplate) || !strings.Contains(files["system/connector/tunnel.yaml"], initial.ServiceURL) {
-		t.Fatal("failed replacement advanced guard beyond held Node routing")
+	if !strings.Contains(files["system/node/orchestrator.yaml"], initial.ProxyURLTemplate) || !strings.Contains(files["system/node/orchestrator.yaml"], initial.ServiceURL) {
+		t.Fatal("failed replacement changed held Node routing")
 	}
 	if state.IngressDigest != initial.IngressDigest || files["system/connector/tunnel.yaml"] == "" || files["system/connector/network.yaml"] == "" {
 		t.Fatal("failed replacement pruned last connector", state, files["kustomization.yaml"])

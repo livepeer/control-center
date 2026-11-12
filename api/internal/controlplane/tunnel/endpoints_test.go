@@ -17,8 +17,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/livepeer/control-center/runtime/nodeproxy"
 )
 
 type endpointRoundTrip func(*http.Request) (*http.Response, error)
@@ -30,10 +28,6 @@ func (fn endpointRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
 func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accepted map[string]string) *http.Client {
 	t.Helper()
 	rules := ingressFor(state, Config{CloudflareTeamName: "team"}, "audience")
-	guard, err := nodeproxy.Handler(state.ProxyURLTemplate, node)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return &http.Client{Transport: endpointRoundTrip(func(req *http.Request) (*http.Response, error) {
 		w := httptest.NewRecorder()
 		host := strings.ToLower(req.URL.Hostname())
@@ -63,6 +57,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 				if rule.OriginRequest.Access == nil || !rule.OriginRequest.Access.Required || len(rule.OriginRequest.Access.Audience) != 1 || rule.OriginRequest.Access.Audience[0] != "audience" {
 					t.Error("missing shared audience")
 				}
+				clone.Header.Set("Cf-Access-Jwt-Assertion", "edge-assertion")
 				clone.Host = rule.OriginRequest.HTTPHostHeader
 				if clone.Host != endpointHost(PrivateOrchestrator) {
 					t.Error("protected origin Host not rewritten")
@@ -70,7 +65,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 			} else {
 				clone.Host = req.URL.Host
 			}
-			guard.ServeHTTP(w, clone)
+			node.ServeHTTP(w, clone)
 			return w.Result(), nil
 		}
 		panic("missing catch-all")
@@ -169,6 +164,9 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 	}
 	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cf-Access-Jwt-Assertion") != "" || strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=") {
+			t.Error("edge credentials reached application")
+		}
 		if r.URL.Path == "/echo" {
 			_ = json.NewEncoder(w).Encode(r.Header)
 			return
@@ -176,109 +174,137 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 		_, _ = io.WriteString(w, "application response")
 	}))
 	defer app.Close()
-	directory := t.TempDir()
-	address := freeListenerAddress(t)
-	metrics := freeListenerAddress(t)
-	runners := filepath.Join(directory, "runners.toml")
-	if err := os.WriteFile(runners, []byte(fmt.Sprintf("[[Runners]]\nID = \"app-fixture\"\nApp = \"fixture\"\nRunnerURL = %q\nMode = \"persistent\"\nProxy = true\nCapacity = 2\n\n[[Runners]]\nID = \"app-echo\"\nApp = \"echo\"\nRunnerURL = %q\nMode = \"single-shot\"\nProxy = true\nCapacity = 2\n", app.URL, app.URL)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, state.ServiceURL, "http://"+address, state.ProxyURLTemplate, runners, strings.TrimPrefix(app.URL, "http://"))
-	configPath := filepath.Join(directory, "config.toml")
-	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
-		t.Fatal(err)
-	}
-	logfile, err := os.Create(filepath.Join(directory, "node.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.CommandContext(t.Context(), binary, "--config", configPath)
-	command.Stdout = logfile
-	command.Stderr = logfile
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait(); _ = logfile.Close() })
-	ready := false
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		response, err := http.Get("http://" + metrics + "/readyz")
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == 200 {
-				ready = true
-				break
+	for _, backend := range []struct{ name, service, template string }{
+		{"current", state.ServiceURL, state.ProxyURLTemplate},
+		{"missing-template", state.ServiceURL, ""},
+		{"stale-template", state.ServiceURL, "https://{proxy}.old.invalid"},
+		{"held-private", PrivateOrchestrator, ""},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			directory := t.TempDir()
+			address := freeListenerAddress(t)
+			metrics := freeListenerAddress(t)
+			runners := filepath.Join(directory, "runners.toml")
+			if err := os.WriteFile(runners, []byte(fmt.Sprintf("[[Runners]]\nID = \"app-fixture\"\nApp = \"fixture\"\nRunnerURL = %q\nMode = \"persistent\"\nProxy = true\nCapacity = 2\n\n[[Runners]]\nID = \"app-echo\"\nApp = \"echo\"\nRunnerURL = %q\nMode = \"single-shot\"\nProxy = true\nCapacity = 2\n", app.URL, app.URL)), 0600); err != nil {
+				t.Fatal(err)
 			}
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if !ready {
-		data, _ := os.ReadFile(logfile.Name())
-		t.Fatalf("Node did not start: %s", data)
-	}
-	target, _ := url.Parse("http://" + address)
-	private := httputil.NewSingleHostReverseProxy(target)
-	accepted := map[string]string{"current": "secret"}
-	client := endpointFixture(t, state, private, accepted)
-	creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
-	if err := verifyEndpointClient(t.Context(), state, creds, client); err != nil {
-		t.Fatal("real Node readiness", err)
-	}
-	req, _ := http.NewRequest("POST", state.ServiceURL+"/apps/app-fixture/session", bytes.NewReader(nil))
-	req.Header.Set("CF-Access-Client-Id", creds.ClientID)
-	req.Header.Set("CF-Access-Client-Secret", creds.ClientSecret)
-	response, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var reserved struct {
-		AppURL string `json:"app_url"`
-	}
-	if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&reserved) != nil {
-		t.Fatal("authenticated reservation failed", response.StatusCode)
-	}
-	appURL, err := url.Parse(reserved.AppURL)
-	if err != nil || appURL.Host == endpointHost(state.ServiceURL) {
-		t.Fatal("reservation did not generate separate proxy origin", reserved.AppURL, err)
-	}
-	response, err = client.Get(reserved.AppURL + "/test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != 200 || string(body) != "application response" {
-		t.Fatal("Host-preserving public proxy failed", response.StatusCode, string(body))
-	}
-	for _, host := range []string{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"} {
-		response, err = client.Post("https://"+host+"/apps/app-fixture/session", "application/json", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = response.Body.Close()
-		if response.StatusCode != 404 {
-			t.Fatal("guessed hostname reached Node API", host, response.StatusCode)
-		}
-	}
-	req, _ = http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
-	req.Header.Set("Cf-Access-Jwt-Assertion", "caller-supplied")
-	req.Header.Set("Cookie", "CF_Authorization=first; session=app-cookie; cf_authorization=second")
-	req.Header.Set("Authorization", "Bearer app-authorization")
-	response, err = client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var headers http.Header
-	if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&headers) != nil {
-		t.Fatal("public application echo failed", response.StatusCode)
-	}
-	for name := range headers {
-		if strings.HasPrefix(strings.ToLower(name), "cf-access-") {
-			t.Fatal("Access credential reached application", name)
-		}
-	}
-	if headers.Get("Cookie") != "session=app-cookie" || headers.Get("Authorization") != "Bearer app-authorization" {
-		t.Fatal("application authentication was lost or Access cookie leaked", headers)
+			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"CF-Access-*\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
+			configPath := filepath.Join(directory, "config.toml")
+			if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			logfile, err := os.Create(filepath.Join(directory, "node.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.CommandContext(t.Context(), binary, "--config", configPath)
+			command.Stdout = logfile
+			command.Stderr = logfile
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait(); _ = logfile.Close() })
+			ready := false
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+				response, err := http.Get("http://" + metrics + "/readyz")
+				if err == nil {
+					_ = response.Body.Close()
+					if response.StatusCode == 200 {
+						ready = true
+						break
+					}
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if !ready {
+				data, _ := os.ReadFile(logfile.Name())
+				t.Fatalf("Node did not start: %s", data)
+			}
+			target, _ := url.Parse("http://" + address)
+			private := httputil.NewSingleHostReverseProxy(target)
+			accepted := map[string]string{"current": "secret"}
+			client := endpointFixture(t, state, private, accepted)
+			creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
+			for _, host := range []string{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:8443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "foreign.invalid"} {
+				response, err := client.Post("https://"+host+"/apps/app-fixture/session", "application/json", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = response.Body.Close()
+				want := http.StatusNotFound
+				if host == endpointHost(state.ServiceURL) || host == endpointHost(state.DiscoveryURL) {
+					want = http.StatusUnauthorized
+				}
+				if response.StatusCode != want {
+					t.Fatal("unauthorized hostname reached Node API", host, response.StatusCode)
+				}
+			}
+			if backend.template != state.ProxyURLTemplate {
+				return
+			}
+			req, _ := http.NewRequest("GET", state.ServiceURL+"/apps/app-echo/app/echo", nil)
+			req.Header.Set("CF-Access-Client-Id", creds.ClientID)
+			req.Header.Set("CF-Access-Client-Secret", creds.ClientSecret)
+			req.Header.Set("Cookie", "CF_Authorization=edge-cookie")
+			response, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != 404 {
+				t.Fatal("API host admitted application traffic", response.StatusCode)
+			}
+			if err := verifyEndpointClient(t.Context(), state, creds, client); err != nil {
+				t.Fatal("real Node readiness", err)
+			}
+			req, _ = http.NewRequest("POST", state.ServiceURL+"/apps/app-fixture/session", bytes.NewReader(nil))
+			req.Header.Set("CF-Access-Client-Id", creds.ClientID)
+			req.Header.Set("CF-Access-Client-Secret", creds.ClientSecret)
+			response, err = client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			var reserved struct {
+				AppURL string `json:"app_url"`
+			}
+			if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&reserved) != nil {
+				t.Fatal("authenticated reservation failed", response.StatusCode)
+			}
+			appURL, err := url.Parse(reserved.AppURL)
+			if err != nil || appURL.Host == endpointHost(state.ServiceURL) {
+				t.Fatal("reservation did not generate separate proxy origin", reserved.AppURL, err)
+			}
+			response, err = client.Get(reserved.AppURL + "/test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			body, _ := io.ReadAll(response.Body)
+			if response.StatusCode != 200 || string(body) != "application response" {
+				t.Fatal("Host-preserving public proxy failed", response.StatusCode, string(body))
+			}
+			req, _ = http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
+			req.Header.Set("Cf-Access-Jwt-Assertion", "caller-supplied")
+			req.Header.Set("Cookie", "session=app-cookie")
+			req.Header.Set("Authorization", "Bearer app-authorization")
+			response, err = client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			var headers http.Header
+			if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&headers) != nil {
+				t.Fatal("public application echo failed", response.StatusCode)
+			}
+			for name := range headers {
+				if strings.HasPrefix(strings.ToLower(name), "cf-access-") {
+					t.Fatal("Access credential reached application", name)
+				}
+			}
+			if headers.Get("Cookie") != "session=app-cookie" || headers.Get("Authorization") != "Bearer app-authorization" {
+				t.Fatal("application authentication was lost or Access cookie leaked", headers)
+			}
+		})
 	}
 }
