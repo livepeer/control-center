@@ -53,7 +53,7 @@ type Launch struct {
 // Association is safe to persist; it contains no connector or machine credential.
 type Association struct {
 	Launch
-	Epoch             string `json:"epoch"`
+	NodeID            string `json:"node_id"`
 	CredentialVersion int64  `json:"credential_version"`
 	TunnelID          string `json:"tunnel_id"`
 	TokenGeneration   int64  `json:"credential_generation"`
@@ -106,7 +106,7 @@ type Integration struct {
 func (i *Integration) Restore() {
 	b, err := os.ReadFile(i.StateFile)
 	var grant Association
-	if err == nil && len(b) <= 16384 && transport.Decode(b, &grant) == nil && ValidLaunch(grant.Launch) && grant.Epoch != "" && (grant.TokenGeneration > 0 || grant.GrantID != "") {
+	if err == nil && len(b) <= 16384 && transport.Decode(b, &grant) == nil && ValidLaunch(grant.Launch) && grant.NodeID != "" && (grant.TokenGeneration > 0 || grant.GrantID != "") {
 		i.mu.Lock()
 		i.grant = &grant
 		i.observation = nil
@@ -170,7 +170,7 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (i *Integration) matches(a Association, m contract.Metadata) bool {
-	if m.TerminalCleanup || a.Epoch != m.Epoch {
+	if m.TerminalCleanup || a.NodeID != m.NodeID {
 		return false
 	}
 	if i.Profile == Orchestrator {
@@ -334,6 +334,6 @@ func (i *Integration) Report(ctx context.Context) error {
 	if reporter == nil {
 		reporter = i.Control
 	}
-	_, _, err := reporter.Request(ctx, "status", map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "connector", "generation": m.Generation, "token_generation": tokenGeneration, "provider_version": providerVersion, "ready": ready, "https": strings.HasPrefix(i.Control.ConfigURL, "https://"), "reason": reason, "observed_at": time.Now().UTC(), "connector_observed_at": observedAt, "connector_expires_at": observedAt.Add(observationTTL)}, 16384)
+	_, _, err := reporter.Request(ctx, "status", map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "connector", "generation": m.Generation, "token_generation": tokenGeneration, "provider_version": providerVersion, "ready": ready, "https": strings.HasPrefix(i.Control.ConfigURL, "https://"), "reason": reason, "observed_at": time.Now().UTC(), "connector_observed_at": observedAt, "connector_expires_at": observedAt.Add(observationTTL)}, 16384)
 	return err
 }

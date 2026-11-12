@@ -21,36 +21,25 @@ import (
 
 func (s *Server) enrollmentToken(m Machine) string {
 	mac := hmac.New(sha256.New, []byte(s.params.MachineTokenSecret))
-	mac.Write([]byte("machine:v2:" + m.OwnerID + ":" + m.NodeID + ":" + m.Epoch + ":" + strconv.FormatInt(m.CredentialVersion, 10)))
+	mac.Write([]byte("machine:v2:" + m.OwnerID + ":" + m.NodeID + ":" + strconv.FormatInt(m.CredentialVersion, 10)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 func (s *Server) authenticateMachine(ctx context.Context, node, token string, retired bool) (Machine, error) {
 	if !fingerprintPattern.MatchString(token) {
 		return Machine{}, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 	}
-	rows, e := s.db.QueryContext(ctx, `SELECT node_id,epoch::text,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node)
+	var m Machine
+	e := s.db.QueryRowContext(ctx, `SELECT node_id,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&m.NodeID, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal)
+	if errors.Is(e, sql.ErrNoRows) {
+		return m, problem(404, "machine_not_found", "Machine not found.")
+	}
 	if e != nil {
-		return Machine{}, e
+		return m, e
 	}
-	defer rows.Close()
-	found := false
-	for rows.Next() {
-		var m Machine
-		if e := rows.Scan(&m.NodeID, &m.Epoch, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); e != nil {
-			return m, e
-		}
-		found = true
-		if hmac.Equal([]byte(token), []byte(s.enrollmentToken(m))) && (!m.Terminal || retired) {
-			return m, nil
-		}
+	if !hmac.Equal([]byte(token), []byte(s.enrollmentToken(m))) || m.Terminal && !retired {
+		return m, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 	}
-	if e := rows.Err(); e != nil {
-		return Machine{}, e
-	}
-	if !found {
-		return Machine{}, problem(404, "machine_not_found", "Machine not found.")
-	}
-	return Machine{}, problem(401, "invalid_machine_credential", "Invalid machine credential.")
+	return m, nil
 }
 func boundedInput(r *http.Request, out any, limit int64) error {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
@@ -91,7 +80,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var m Machine
-	e = tx.QueryRowContext(r.Context(), `SELECT node_id,enrollment_epoch::text,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.Epoch, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
+	e = tx.QueryRowContext(r.Context(), `SELECT node_id,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
 	if errors.Is(e, sql.ErrNoRows) {
 		fail(w, 404, "machine not found")
 		return
@@ -105,7 +94,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var expected, result int64
-	e = tx.QueryRowContext(r.Context(), `SELECT expected_version,resulting_version FROM lpcc.credential_refreshes WHERE node_id=$1 AND epoch=$2 AND operation_id=$3`, m.NodeID, m.Epoch, op.String()).Scan(&expected, &result)
+	e = tx.QueryRowContext(r.Context(), `SELECT expected_version,resulting_version FROM lpcc.credential_refreshes WHERE node_id=$1 AND operation_id=$2`, m.NodeID, op.String()).Scan(&expected, &result)
 	if e == nil {
 		if expected != in.ExpectedVersion || result != m.CredentialVersion {
 			fail(w, 409, "refresh operation is conflicting or superseded")
@@ -117,19 +106,19 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		m.CredentialVersion++
-		if _, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.credential_refreshes(node_id,epoch,operation_id,expected_version,resulting_version) VALUES($1,$2,$3,$4,$5)`, m.NodeID, m.Epoch, op.String(), in.ExpectedVersion, m.CredentialVersion); e != nil {
+		if _, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.credential_refreshes(node_id,operation_id,expected_version,resulting_version) VALUES($1,$2,$3,$4)`, m.NodeID, op.String(), in.ExpectedVersion, m.CredentialVersion); e != nil {
 			s.databaseError(w, e)
 			return
 		}
-		if _, e = tx.ExecContext(r.Context(), `UPDATE lpcc.machines SET credential_version=$3,tunnel_eligible=true WHERE node_id=$1 AND enrollment_epoch=$2`, m.NodeID, m.Epoch, m.CredentialVersion); e != nil {
+		if _, e = tx.ExecContext(r.Context(), `UPDATE lpcc.machines SET credential_version=$2,tunnel_eligible=true WHERE node_id=$1`, m.NodeID, m.CredentialVersion); e != nil {
 			s.databaseError(w, e)
 			return
 		}
-		if _, e = tx.ExecContext(r.Context(), `UPDATE lpcc.enrollments SET credential_version=$3 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, m.CredentialVersion); e != nil {
+		if _, e = tx.ExecContext(r.Context(), `UPDATE lpcc.enrollments SET credential_version=$2 WHERE node_id=$1`, m.NodeID, m.CredentialVersion); e != nil {
 			s.databaseError(w, e)
 			return
 		}
-		if e = s.configs.FenceCredentialRefresh(r.Context(), tx, m.NodeID, m.Epoch); e != nil {
+		if e = s.configs.FenceCredentialRefresh(r.Context(), tx, m.NodeID); e != nil {
 			s.databaseError(w, e)
 			return
 		}
@@ -155,7 +144,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "connector delivery is not enabled for this enrollment")
 		return
 	}
-	state, _, e := s.loadTunnel(r.Context(), m.NodeID, m.Epoch)
+	state, _, e := s.loadTunnel(r.Context(), m.NodeID)
 	if e != nil {
 		s.respondError(w, e)
 		return
@@ -191,19 +180,19 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	latest, _, e := s.loadTunnel(r.Context(), m.NodeID, m.Epoch)
+	latest, _, e := s.loadTunnel(r.Context(), m.NodeID)
 	stillRetained, retainErr := s.retainedConnector(r.Context(), m)
 	if e != nil || retainErr != nil || (m.Terminal && (!stillRetained || latest.CompromisedAccess)) || (!stillRetained && latest.Lifecycle != "active") || latest.TunnelID != state.TunnelID || latest.CredentialGeneration != state.CredentialGeneration || latest.RotateTunnel || latest.Compromised || latest.Quarantined || latest.ConnectorRevoked {
 		fail(w, 409, "tunnel changed during credential retrieval")
 		return
 	}
-	respond(w, 200, map[string]any{"token": token, "epoch": m.Epoch, "tunnel_id": state.TunnelID, "generation": state.Generation, "credential_generation": state.CredentialGeneration, "provider_version": state.ProviderVersion})
+	respond(w, 200, map[string]any{"token": token, "node_id": m.NodeID, "tunnel_id": state.TunnelID, "generation": state.Generation, "credential_generation": state.CredentialGeneration, "provider_version": state.ProviderVersion})
 }
 func (s *Server) retainedConnector(ctx context.Context, m Machine) (bool, error) {
 	if !m.Terminal {
 		return false, nil
 	}
-	return machineapps.Pending(ctx, s.db, m.NodeID, m.Epoch)
+	return machineapps.Pending(ctx, s.db, m.NodeID)
 }
 func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 	m, e := s.authenticateMachine(r.Context(), r.PathValue("node_id"), bearer(r), true)
@@ -216,7 +205,7 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	if report.Epoch != m.Epoch || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || (report.Component != "runtime" && report.Component != "connector" && report.Component != "runner" && report.Component != "app-reconciler") {
+	if report.NodeID != m.NodeID || report.CredentialVersion != m.CredentialVersion || report.Generation < 1 || (report.Component != "runtime" && report.Component != "connector" && report.Component != "runner" && report.Component != "app-reconciler") {
 		fail(w, 409, "status does not match enrollment")
 		return
 	}
@@ -247,7 +236,7 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Epoch           string `json:"epoch"`
+		NodeID          string `json:"node_id"`
 		Digest          string `json:"digest"`
 		ConnectorAbsent bool   `json:"connector_absent"`
 	}
@@ -255,11 +244,11 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	if !m.Terminal || in.Epoch != m.Epoch || !in.ConnectorAbsent || !fingerprintPattern.MatchString(in.Digest) {
+	if !m.Terminal || in.NodeID != m.NodeID || !in.ConnectorAbsent || !fingerprintPattern.MatchString(in.Digest) {
 		fail(w, 409, "invalid removal acknowledgement")
 		return
 	}
-	pending, e := machineapps.Pending(r.Context(), s.db, m.NodeID, m.Epoch)
+	pending, e := machineapps.Pending(r.Context(), s.db, m.NodeID)
 	if e != nil {
 		s.respondError(w, e)
 		return
@@ -268,7 +257,7 @@ func (s *Server) removalAck(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "app cleanup is incomplete")
 		return
 	}
-	result, e := s.db.ExecContext(r.Context(), `UPDATE lpcc.enrollments SET removal_ack_at=COALESCE(removal_ack_at,now()) WHERE node_id=$1 AND epoch=$2 AND retired_at IS NOT NULL AND terminal_sha256=$3`, m.NodeID, m.Epoch, in.Digest)
+	result, e := s.db.ExecContext(r.Context(), `UPDATE lpcc.enrollments SET removal_ack_at=COALESCE(removal_ack_at,now()) WHERE node_id=$1 AND retired_at IS NOT NULL AND terminal_sha256=$2`, m.NodeID, in.Digest)
 	if e != nil {
 		s.databaseError(w, e)
 		return

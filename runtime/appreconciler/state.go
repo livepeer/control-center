@@ -95,7 +95,6 @@ type State struct {
 	Instances               map[string]*Instance `json:"instances"`
 	Heads                   map[string]string    `json:"heads"`
 	Identity                Identity             `json:"identity"`
-	OwnerEpoch              string               `json:"owner_epoch"`
 	ReportSequence          uint64               `json:"report_sequence"`
 	MaintenanceID           string               `json:"maintenance_id,omitempty"`
 	MaintenanceWithdrawal   string               `json:"maintenance_withdrawal,omitempty"`

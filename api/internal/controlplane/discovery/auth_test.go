@@ -33,7 +33,7 @@ func TestDiscoveryTransportScopeAndRequestClone(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("[]"))}, nil
 	})}
-	selection := map[string]authorization{source.URL: {source: source, available: true, credential: credential}}
+	selection := map[string]*authorization{source.URL: {source: source, available: true, credential: credential}}
 	transport.install(selection)
 	req, _ := http.NewRequest("GET", source.URL, nil)
 	req.Header["cf-access-client-secret"] = []string{"injected"}

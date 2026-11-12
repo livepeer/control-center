@@ -83,9 +83,8 @@ Cloudflare. See
 
 ## Enrollment, refresh and status
 
-Identity is `(node_id, enrollment_epoch)`, with a separate credential version.
-Idempotent active registration retains both; refresh increments only credential
-version. Deletion and re-enrollment create a new epoch and tunnel UUID.
+Active registration retries and credential refresh retain the node ID.
+Re-enrollment creates a fresh node ID and tunnel UUID.
 Cloudflare Tunnel must be the HTTPS front door, with the API origin reachable
 only through the trusted connector. The API does not infer transport security
 from arbitrary forwarded headers. HTTPS enrollment is eligible even when
@@ -131,16 +130,16 @@ Existing administrator authentication/auditing protects:
 
 ```text
 POST /api/admin/machines/<NODE_ID>/tunnel/rotate
-{"epoch":"<EPOCH>","kind":"connector|access","compromised":false}
+{"kind":"connector|access","compromised":false}
 
 POST /api/admin/machines/<NODE_ID>/drain/retry
-{"epoch":"<EPOCH>","generation":<EXPIRED_GENERATION>}
+{"generation":<EXPIRED_GENERATION>}
 
 DELETE /api/admin/machines/<NODE_ID>
-{"epoch":"<EPOCH>","force":false}
+{"force":false}
 ```
 
-The administrator fleet response supplies the epoch. Connector rotation keeps
+The administrator fleet response supplies the node ID. Connector rotation keeps
 the tunnel UUID, advances token generation and replaces the process. Compromise
 rotation also disconnects existing connectors: rotation alone leaves established
 connections active. Access rotation overlaps versions until successful Collector
@@ -155,8 +154,8 @@ start a fresh drain with `drain/retry`, or deliberately remove with `force:true`
 Deletion denies token delivery, installs deny-only ingress, revokes connector
 authentication before disconnecting, deletes DNS/tunnel resources before Access protection,
 and revokes source tokens.
-Cleanup proceeds even with the machine offline. A new epoch cannot reuse stable
-hostnames until the predecessor's external cleanup is complete.
+Cleanup proceeds even with the machine offline. Retired-node cleanup cannot
+delete a replacement node's routes or certificates.
 
 Forced removal stops Node before app cleanup. Final cleanup removes the connector.
 Retained volumes and bootstrap resources remain; verify provider absence separately

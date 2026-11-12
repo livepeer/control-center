@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -27,9 +26,13 @@ import (
 )
 
 func loadOnchain(ctx context.Context, q rowQuerier, node string) (onchain.Config, error) {
+	return loadInstallationOnchain(ctx, q, `(SELECT fingerprint FROM lpcc.enrollments WHERE node_id=$1)`, node)
+}
+
+func loadInstallationOnchain(ctx context.Context, q rowQuerier, key, identity string) (onchain.Config, error) {
 	c := onchain.Offchain()
 	var b []byte
-	err := q.QueryRowContext(ctx, `SELECT config FROM lpcc.onchain_configs WHERE node_id=$1 ORDER BY generation DESC LIMIT 1`, node).Scan(&b)
+	err := q.QueryRowContext(ctx, `SELECT c.config FROM lpcc.onchain_state b JOIN lpcc.onchain_configs c ON c.fingerprint=b.fingerprint AND c.generation=b.generation WHERE b.fingerprint=`+key, identity).Scan(&b)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, nil
 	}
@@ -129,7 +132,7 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 		c.Controller = strings.ToLower(c.Controller)
 		c.ETHUSDFeed = strings.ToLower(c.ETHUSDFeed)
 		input.Machines[node] = c
-		if !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(node) || c.Generation != 0 {
+		if !fingerprintPattern.MatchString(node) || c.Generation != 0 {
 			return 0, errors.New("invalid onchain machine identity")
 		}
 		if e := c.Validate(); e != nil {
@@ -159,23 +162,36 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 	}
 	defer tx.Rollback()
 	var revision int64
-	if e = tx.QueryRowContext(ctx, `SELECT COALESCE(max(generation),0) FROM lpcc.onchain_configs`).Scan(&revision); e != nil {
+	if e = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.onchain_revision WHERE id=true FOR UPDATE`).Scan(&revision); e != nil {
 		return 0, e
 	}
 
 	// Import is a complete desired snapshot: omission never silently disables onchain service.
-	document, _ := json.Marshal(input.Machines)
-	var omitted bool
-	if e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM (SELECT DISTINCT ON(node_id) node_id,config FROM lpcc.onchain_configs ORDER BY node_id,generation DESC) c WHERE config->>'mode'='onchain' AND NOT ($1::jsonb ? node_id))`, string(document)).Scan(&omitted); e != nil {
+	rows, e := tx.QueryContext(ctx, `SELECT b.fingerprint FROM lpcc.onchain_state b JOIN lpcc.onchain_configs c ON c.fingerprint=b.fingerprint AND c.generation=b.generation WHERE c.config->>'mode'='onchain'`)
+	if e != nil {
 		return 0, e
 	}
-	if omitted {
-		return 0, errors.New("explicit offchain intent is required")
+	for rows.Next() {
+		var n string
+		if e = rows.Scan(&n); e != nil {
+			break
+		}
+		if _, ok := input.Machines[n]; !ok {
+			e = errors.New("explicit offchain intent is required")
+			break
+		}
+	}
+	if e == nil {
+		e = rows.Err()
+	}
+	rows.Close()
+	if e != nil {
+		return 0, e
 	}
 	changed := false
 	for _, node := range nodes {
 		c := input.Machines[node]
-		old, e := loadOnchain(ctx, tx, node)
+		old, e := loadInstallationOnchain(ctx, tx, "$1", node)
 		if e != nil {
 			return 0, e
 		}
@@ -186,13 +202,13 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 			continue
 		}
 		// Same locking order as assignment mutation and configuration publication.
-		var epoch string
-		e = tx.QueryRowContext(ctx, `SELECT enrollment_epoch::text FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&epoch)
+		var activeNode string
+		e = tx.QueryRowContext(ctx, `SELECT node_id FROM lpcc.machines WHERE fingerprint=$1 FOR UPDATE`, node).Scan(&activeNode)
 		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return 0, e
 		}
-		if epoch != "" {
-			a, e := machineapps.Snapshot(ctx, tx, node, epoch)
+		if activeNode != "" {
+			a, e := machineapps.Snapshot(ctx, tx, activeNode)
 			if e != nil {
 				return 0, e
 			}
@@ -208,21 +224,30 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 		}
 		var recipient, controller string
 		var chain uint64
-		e = tx.QueryRowContext(ctx, `SELECT config->>'recipient',(config->>'chain_id')::bigint,config->>'controller' FROM lpcc.onchain_configs WHERE node_id=$1 AND config->>'mode'='onchain' ORDER BY generation LIMIT 1`, node).Scan(&recipient, &chain, &controller)
+		e = tx.QueryRowContext(ctx, `SELECT recipient,chain_id,controller FROM lpcc.onchain_state WHERE fingerprint=$1 FOR UPDATE`, node).Scan(&recipient, &chain, &controller)
 		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return 0, e
 		}
 		if c.Onchain() {
 			if recipient != "" && (!strings.EqualFold(recipient, c.Recipient) || chain != c.ChainID || !strings.EqualFold(controller, c.Controller)) {
-				return 0, errors.New("onchain recipient, chain and controller are immutable")
+				return 0, errors.New("onchain recipient and chain binding are immutable")
 			}
+			recipient = strings.ToLower(c.Recipient)
+			chain = c.ChainID
+			controller = strings.ToLower(c.Controller)
+			c.Recipient = recipient
+			c.Controller = controller
 		}
-		c.Generation = revision + 1
+		c.Generation = old.Generation + 1
 		after, _ = json.Marshal(c)
 		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_configs VALUES($1,$2,$3)`, node, c.Generation, string(after)); e != nil {
 			return 0, e
 		}
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, node); e != nil {
+		_, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_state(fingerprint,recipient,chain_id,controller,generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT(fingerprint) DO UPDATE SET recipient=EXCLUDED.recipient,chain_id=EXCLUDED.chain_id,controller=EXCLUDED.controller,generation=EXCLUDED.generation`, node, recipient, chain, controller, c.Generation)
+		if e != nil {
+			return 0, e
+		}
+		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, activeNode); e != nil {
 			return 0, e
 		}
 		if e = writeAudit(ctx, tx, "system", "deployment:onchain", "onchain.apply", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(c.Generation)}, "success", "changed"); e != nil {
@@ -235,6 +260,9 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 	}
 	if changed {
 		revision++
+		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_revision SET revision=$1 WHERE id=true`, revision); e != nil {
+			return 0, e
+		}
 	}
 	return revision, tx.Commit()
 }

@@ -52,12 +52,11 @@ type AppAssignment struct {
 type AppAssignmentSetV1 struct {
 	SchemaVersion int             `json:"schema_version"`
 	NodeID        string          `json:"node_id"`
-	Epoch         string          `json:"epoch"`
 	Generation    int64           `json:"apps_generation"`
 	Entries       []AppAssignment `json:"entries"`
 }
 
-var assignmentNodePattern = regexp.MustCompile(`^lp-[0-9a-f]{16}$`)
+var assignmentNodePattern = regexp.MustCompile(`^[a-z2-7]{26}$`)
 
 func canonicalUUID(s string) bool {
 	id, err := uuid.Parse(s)
@@ -79,7 +78,7 @@ func (a AppAssignment) Absent() AppAssignment {
 }
 
 func (s AppAssignmentSetV1) Validate() error {
-	if s.SchemaVersion != 1 || !assignmentNodePattern.MatchString(s.NodeID) || !canonicalUUID(s.Epoch) || s.Generation < 1 || s.Entries == nil || len(s.Entries) > MaxAppAssignments {
+	if s.SchemaVersion != 1 || !assignmentNodePattern.MatchString(s.NodeID) || s.Generation < 1 || s.Entries == nil || len(s.Entries) > MaxAppAssignments {
 		return fmt.Errorf("invalid app assignment set envelope")
 	}
 	previous := ""

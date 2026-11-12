@@ -27,7 +27,7 @@ func Assignment(t testing.TB) schema.AppAssignmentSetV1 {
 	a.RevisionID = "11111111-1111-4111-8111-111111111111"
 	a.Revision = &schema.ResolvedRevision{RevisionRef: a.RevisionRef, Name: d.Name, AppVersion: d.AppVersion, Revision: 1, SchemaVersion: 1, CanonicalFormat: schema.CanonicalFormat, Definition: d}
 	Refresh(&a)
-	return schema.AppAssignmentSetV1{SchemaVersion: 1, NodeID: "lp-" + strings.Repeat("a", 16), Epoch: "22222222-2222-4222-8222-222222222222", Generation: 1, Entries: []schema.AppAssignment{a}}
+	return schema.AppAssignmentSetV1{SchemaVersion: 1, NodeID: strings.Repeat("a", 26), Generation: 1, Entries: []schema.AppAssignment{a}}
 }
 func Refresh(a *schema.AppAssignment) {
 	b, err := schema.CanonicalBytes(a.Revision.Definition)

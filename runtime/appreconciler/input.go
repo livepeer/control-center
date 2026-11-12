@@ -70,7 +70,7 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 		return input, errors.New("management_enrollment")
 	}
 	identity, err := transport.ReadIdentity(s.IdentityFile)
-	if err != nil || identity.Epoch != m.Epoch || identity.CredentialVersion != m.CredentialVersion {
+	if err != nil || identity.NodeID != m.NodeID || identity.CredentialVersion != m.CredentialVersion {
 		return input, errors.New("management_enrollment")
 	}
 	if m.Onchain.Onchain() && m.OnchainActive {

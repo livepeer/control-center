@@ -13,7 +13,7 @@ import (
 
 func fixture(t *testing.T) schema.AppAssignmentSetV1 { return testutil.Assignment(t) }
 func metadata(p Payload) contract.Metadata {
-	return contract.Metadata{NodeID: p.Intent.NodeID, Epoch: p.Intent.Epoch, AppsGeneration: p.Intent.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}
+	return contract.Metadata{NodeID: p.Intent.NodeID, AppsGeneration: p.Intent.Generation, AppsDigest: p.Index.IntentDigest, AppsPayloadDigest: p.Digest()}
 }
 func TestRenderedGroupsAndIncarnations(t *testing.T) {
 	set := fixture(t)
@@ -76,7 +76,7 @@ func TestPayloadValidationAndUnsupportedSettings(t *testing.T) {
 		t.Fatal("accepted changed resource")
 	}
 	p, _ = Render(set, Options{})
-	m.Epoch = "33333333-3333-4333-8333-333333333333"
+	m.NodeID = strings.Repeat("c", 26)
 	if _, err := Read(p.Files, m); err == nil {
 		t.Fatal("accepted foreign enrollment")
 	}

@@ -36,7 +36,7 @@ type reportSample struct {
 }
 
 type reportCounter struct {
-	Epoch             string `json:"epoch"`
+	NodeID            string `json:"node_id"`
 	CredentialVersion int64  `json:"credential_version"`
 	Sequence          uint64 `json:"sequence"`
 	Blocked           bool   `json:"blocked,omitempty"`
@@ -51,7 +51,7 @@ func (r *Reports) Request(ctx context.Context, endpoint string, payload any, lim
 		return nil, nil, errors.New("report_payload")
 	}
 	var identity struct {
-		Epoch             string `json:"epoch"`
+		NodeID            string `json:"node_id"`
 		CredentialVersion int64  `json:"credential_version"`
 		Component         string `json:"component"`
 	}
@@ -69,7 +69,7 @@ func (r *Reports) Request(ctx context.Context, endpoint string, payload any, lim
 	if os.MkdirAll(r.Directory, 0700) != nil {
 		return nil, nil, errors.New("report_state_unavailable")
 	}
-	name := reportCounterPath(r.Directory, identity.Component, identity.Epoch)
+	name := reportCounterPath(r.Directory, identity.Component, identity.NodeID)
 	lock, err := os.OpenFile(name+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, nil, errors.New("report_state_unavailable")
@@ -87,11 +87,11 @@ func (r *Reports) Request(ctx context.Context, endpoint string, payload any, lim
 	} else if !os.IsNotExist(readErr) {
 		return nil, nil, errors.New("report_state_unavailable")
 	}
-	if counter.Epoch == identity.Epoch && counter.CredentialVersion > identity.CredentialVersion {
+	if counter.NodeID == identity.NodeID && counter.CredentialVersion > identity.CredentialVersion {
 		return nil, nil, errors.New("report_credential_regression")
 	}
-	if counter.Epoch != identity.Epoch || counter.CredentialVersion != identity.CredentialVersion {
-		counter = reportCounter{Epoch: identity.Epoch, CredentialVersion: identity.CredentialVersion}
+	if counter.NodeID != identity.NodeID || counter.CredentialVersion != identity.CredentialVersion {
+		counter = reportCounter{NodeID: identity.NodeID, CredentialVersion: identity.CredentialVersion}
 	}
 	if counter.Blocked || counter.Sequence == ^uint64(0) {
 		return nil, nil, errors.New("report_order_unavailable")
@@ -156,8 +156,8 @@ func (r *Reports) send(ctx context.Context, body []byte, limit int64, name strin
 	return result, headers, err
 }
 
-func reportCounterPath(directory, component, epoch string) string {
-	return filepath.Join(directory, component+"-"+artifact.Digest([]byte(epoch))[7:]+".json")
+func reportCounterPath(directory, component, node string) string {
+	return filepath.Join(directory, component+"-"+artifact.Digest([]byte(node))[7:]+".json")
 }
 
 // ReportErrorCode permits actionable local failures without remote error text.

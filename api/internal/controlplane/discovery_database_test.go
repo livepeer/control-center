@@ -34,7 +34,7 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 	readyTunnel(t, s, a)
 	readyTunnel(t, s, b)
 	adminA(t, s)
-	s.params.DiscoveryParams = DiscoveryParams{DiscoveryEnabled: true, DiscoveryRefreshInterval: 5 * time.Minute, DiscoveryMaxFailedRefreshes: 6}
+	s.params.DiscoveryParams = DiscoveryParams{DiscoveryEnabled: true, DiscoveryRefreshInterval: time.Second, DiscoveryMaxFailedRefreshes: 6}
 	if err := s.ConfigureDiscovery(); err != nil {
 		t.Fatal(err)
 	}
@@ -127,30 +127,39 @@ func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
 		}
 	}
 	managerBeforeRotation := s.tunnels
-	rotate := request(t, s, "POST", "/api/admin/machines/"+a["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": a["epoch"], "kind": "access"})
+	rotate := request(t, s, "POST", "/api/admin/machines/"+a["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "access"})
 	requireStatus(t, rotate, 202)
 	driveTunnels(t, s)
 	reconcileDiscovery(t, s)
 	var acknowledged bool
-	if err := s.db.QueryRow(`SELECT acknowledged_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=2`, a["node_id"], a["epoch"]).Scan(&acknowledged); err != nil || !acknowledged {
-		t.Fatal("new version not acknowledged by actual collection", err)
+	for deadline := time.Now().Add(3 * time.Second); !acknowledged; {
+		reconcileDiscovery(t, s)
+		if err := s.db.QueryRow(`SELECT acknowledged_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND version=2`, a["node_id"]).Scan(&acknowledged); err != nil {
+			t.Fatal(err)
+		}
+		if !acknowledged && time.Now().After(deadline) {
+			t.Fatal("replacement credential was not acknowledged after periodic collection")
+		}
+		if !acknowledged {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	driveTunnels(t, s)
 	if s.tunnels != managerBeforeRotation {
 		t.Fatal("ordinary reconciliation replaced manager with active discovery readers")
 	}
 	var active int
-	if err := s.db.QueryRow(`SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL`, a["node_id"], a["epoch"]).Scan(&active); err != nil || active != 1 {
+	if err := s.db.QueryRow(`SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND revoked_at IS NULL`, a["node_id"]).Scan(&active); err != nil || active != 1 {
 		t.Fatal("acknowledgement did not release predecessor token", err, active)
 	}
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+a["node_id"], "session-a", map[string]any{"epoch": a["epoch"], "force": true}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+a["node_id"], "session-a", map[string]any{"force": true}), 202)
 	reconcileDiscovery(t, s)
 	if strings.Count(request(t, s, "GET", "/discovery", "", nil).Body.String(), `"app":"test"`) != 1 {
 		t.Fatal("machine removal did not withdraw only that source")
 	}
 	// Missing routing identity must withdraw a previously approved source,
 	// including before the tunnel worker runs again.
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=state-'endpoint_suffix' WHERE node_id=$1`, b["node_id"])
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=state-'service_url' WHERE node_id=$1`, b["node_id"])
 	reconcileDiscovery(t, s)
 	if strings.Contains(request(t, s, "GET", "/discovery", "", nil).Body.String(), `"app":"test"`) {
 		t.Fatal("source without routing identity remained advertised")
@@ -173,7 +182,7 @@ func TestFleetConfigurationAndPublicDisabledRoute(t *testing.T) {
 	}
 	requireStatus(t, request(t, s, "GET", "/discovery", "", nil), 503)
 	requireStatus(t, request(t, s, "GET", "/healthz", "", nil), 200)
-	p.DiscoveryParams = DiscoveryParams{DiscoveryEnabled: true, DiscoveryRefreshInterval: 5 * time.Minute, DiscoveryMaxFailedRefreshes: 6}
+	p.DiscoveryParams = DiscoveryParams{DiscoveryEnabled: true, DiscoveryRefreshInterval: time.Second, DiscoveryMaxFailedRefreshes: 6}
 	s.params = p
 	if s.ConfigureDiscovery() == nil {
 		t.Fatal("discovery started without ingress approval")

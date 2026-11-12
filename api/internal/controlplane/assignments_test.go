@@ -29,7 +29,7 @@ func appPath(c map[string]string, r CatalogRevision) string {
 }
 func putApp(t *testing.T, s *Server, c map[string]string, r CatalogRevision, g int64, n int) *httptest.ResponseRecorder {
 	t.Helper()
-	return request(t, s, "PUT", appPath(c, r), "session-a", map[string]any{"epoch": c["epoch"], "digest": r.Digest, "expected_generation": g, "replicas": n})
+	return request(t, s, "PUT", appPath(c, r), "session-a", map[string]any{"digest": r.Digest, "expected_generation": g, "replicas": n})
 }
 func appBundle(t *testing.T, s *Server, c map[string]string) (schema.AppAssignmentSetV1, string, map[string]string) {
 	t.Helper()
@@ -55,7 +55,7 @@ func appReport(t *testing.T, s *Server, c map[string]string, a schema.AppAssignm
 	if phase == "failed" {
 		reason = "reconcile_failed"
 	}
-	return request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/apps/"+a.RevisionID+"/status", c["token"], assignmentReport{Epoch: c["epoch"], CredentialVersion: 1, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, AppsDigest: digest, Phase: phase, Reason: reason})
+	return request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/apps/"+a.RevisionID+"/status", c["token"], assignmentReport{NodeID: c["node_id"], CredentialVersion: 1, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, AppsDigest: digest, Phase: phase, Reason: reason})
 }
 func findApp(t *testing.T, set schema.AppAssignmentSetV1, id string) schema.AppAssignment {
 	t.Helper()
@@ -101,12 +101,12 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	}
 	beta := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `name = "whoami"`, `name = "beta"`, 1), "")
 	requireStatus(t, putApp(t, s, c, beta, 0, 1), 202)
-	replace := map[string]any{"epoch": c["epoch"], "expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0, "replicas": 3}}
+	replace := map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0, "replicas": 3}}
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", replace), 202)
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", replace), 200)
-	implicitRetry := map[string]any{"epoch": c["epoch"], "expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0}}
+	implicitRetry := map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0}}
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", implicitRetry), 409)
-	currentReplacement := map[string]any{"epoch": c["epoch"], "expected_generation": 2, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 1}}
+	currentReplacement := map[string]any{"expected_generation": 2, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 1}}
 	auditsBeforeNoop := count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events`)
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", currentReplacement), 200)
 	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events`) != auditsBeforeNoop {
@@ -138,7 +138,7 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	requireStatus(t, appReport(t, s, c, source, blockedDigest, "removed"), 200)
 	requireStatus(t, putApp(t, s, c, r, 3, 3), 202)
 	requireStatus(t, putApp(t, s, c, r, 3, 3), 200)
-	head, err := machineapps.Head(t.Context(), s.db, c["node_id"], c["epoch"], r.RevisionID)
+	head, err := machineapps.Head(t.Context(), s.db, c["node_id"], r.RevisionID)
 	if err != nil || head.Generation != 4 || head.ActivationGeneration != 3 {
 		t.Fatal(head, err)
 	}
@@ -157,14 +157,14 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	if err := json.Unmarshal(listing.Body.Bytes(), &page); err != nil || len(page.Assignments) != 1 || page.Next == nil {
 		t.Fatal("assignment pagination", err, listing.Body.String())
 	}
-	requireStatus(t, request(t, s, "GET", appPath(c, r)+"?epoch=bad", "session-a", nil), 400)
+	requireStatus(t, request(t, s, "GET", appPath(c, r)+"?before_generation=bad", "session-a", nil), 400)
 }
 func TestAssignmentAuthorizationPolicyAndInvalidChanges(t *testing.T) {
 	s := newTestServer(t)
 	grant := adminA(t, s)
 	c := enroll(t, s, ownerB, strings.Repeat("c", 64))
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
-	body := map[string]any{"epoch": c["epoch"], "digest": r.Digest, "expected_generation": 0}
+	body := map[string]any{"digest": r.Digest, "expected_generation": 0}
 	for _, token := range []string{"", "invalid", c["token"]} {
 		requireStatus(t, request(t, s, "PUT", appPath(c, r), token, body), 401)
 	}
@@ -179,7 +179,7 @@ func TestAssignmentAuthorizationPolicyAndInvalidChanges(t *testing.T) {
 	requireStatus(t, putApp(t, s, c, r, 1, 2), 202)
 	set, digest, _ := appBundle(t, s, c)
 	a := findApp(t, set, r.RevisionID)
-	requireStatus(t, request(t, s, "DELETE", appPath(c, r), "session-a", map[string]any{"epoch": c["epoch"], "expected_generation": 2}), 202)
+	requireStatus(t, request(t, s, "DELETE", appPath(c, r), "session-a", map[string]any{"expected_generation": 2}), 202)
 	set, digest, _ = appBundle(t, s, c)
 	a = findApp(t, set, r.RevisionID)
 	requireStatus(t, appReport(t, s, c, a, digest, "removed"), 200)
@@ -234,7 +234,7 @@ func TestMachineRemovalWaitsForAppsAndRetainsTerminalCleanup(t *testing.T) {
 			if mode == "owner-delete" {
 				execSQL(t, s.db, `DELETE FROM auth.users WHERE id=$1`, ownerB)
 			} else {
-				requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"epoch": c["epoch"], "force": mode == "forced"}), 202)
+				requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"force": mode == "forced"}), 202)
 			}
 			if mode == "normal" {
 				reportRuntime(t, s, c, "runner", true)
@@ -253,7 +253,7 @@ func TestMachineRemovalWaitsForAppsAndRetainsTerminalCleanup(t *testing.T) {
 				// Cleanup outlasts both the Node deadline and the runner report TTL.
 				execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 				execSQL(t, s.db, `UPDATE lpcc.machine_reports SET received_at=now()-interval '1 hour'`)
-				head, err := machineapps.Head(t.Context(), s.db, c["node_id"], c["epoch"], r.RevisionID)
+				head, err := machineapps.Head(t.Context(), s.db, c["node_id"], r.RevisionID)
 				if err != nil || head.Revision != nil || head.AppName != "whoami" || head.RevisionNumber != 1 {
 					t.Fatal("compact removal lost administrative identity", head, err)
 				}
@@ -324,7 +324,7 @@ func TestAssignmentSizeAdmissionStillAllowsRemoval(t *testing.T) {
 		t.Fatal("oversized intent persisted")
 	}
 	appBundle(t, s, c)
-	requireStatus(t, request(t, s, "DELETE", appPath(c, first), "session-a", map[string]any{"epoch": c["epoch"], "expected_generation": 1}), 202)
+	requireStatus(t, request(t, s, "DELETE", appPath(c, first), "session-a", map[string]any{"expected_generation": 1}), 202)
 	set, _, _ := appBundle(t, s, c)
 	if findApp(t, set, first.RevisionID).Desired != "absent" {
 		t.Fatal("removal failed at boundary")
@@ -338,18 +338,18 @@ func TestAssignmentTerminalCleanupCannotAffectReenrollment(t *testing.T) {
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	requireStatus(t, putApp(t, s, old, r, 0, 1), 202)
 	appBundle(t, s, old)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+old["node_id"], "session-a", map[string]any{"epoch": old["epoch"], "force": true}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+old["node_id"], "session-a", map[string]any{"force": true}), 202)
 	terminal, oldDigest, _ := appBundle(t, s, old)
 	removal := terminal.Entries[0]
 	fresh := enroll(t, s, ownerA, fingerprint)
-	if old["epoch"] == fresh["epoch"] {
-		t.Fatal("epoch reused")
+	if old["node_id"] == fresh["node_id"] {
+		t.Fatal("node reused")
 	}
 	requireStatus(t, putApp(t, s, fresh, r, 0, 1), 202)
 	appBundle(t, s, fresh)
 	requireStatus(t, appReport(t, s, old, removal, oldDigest, "removed"), 200)
 	requireStatus(t, appReport(t, s, old, removal, oldDigest, "removed"), 200)
-	head, err := machineapps.Head(t.Context(), s.db, fresh["node_id"], fresh["epoch"], r.RevisionID)
+	head, err := machineapps.Head(t.Context(), s.db, fresh["node_id"], r.RevisionID)
 	if err != nil || head.CompletedAt != nil || head.Generation != 1 {
 		t.Fatal("old cleanup modified new assignment", head, err)
 	}
@@ -362,7 +362,7 @@ func TestAssignmentsPreserveTunnelReadiness(t *testing.T) {
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	requireStatus(t, putApp(t, s, c, r, 0, 2), 202)
 	_, _, files := appBundle(t, s, c)
-	after, _, err := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	after, _, err := s.loadTunnel(t.Context(), c["node_id"])
 	if err != nil || !after.Ready || after.Generation != ready.Generation || after.SourceGeneration != ready.SourceGeneration {
 		t.Fatal("app assignment invalidated tunnel", after, err)
 	}
@@ -382,22 +382,22 @@ func TestAssignmentBlockedTargetEditsAndCancellation(t *testing.T) {
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	next := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "2"`, 1), r.RevisionID)
 	requireStatus(t, putApp(t, s, c, r, 0, 1), 202)
-	replace := map[string]any{"epoch": c["epoch"], "expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0}}
+	replace := map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0}}
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", replace), 202)
-	requireStatus(t, request(t, s, "PUT", appPath(c, next), "session-a", map[string]any{"epoch": c["epoch"], "digest": next.Digest, "expected_generation": 0}), 409)
+	requireStatus(t, request(t, s, "PUT", appPath(c, next), "session-a", map[string]any{"digest": next.Digest, "expected_generation": 0}), 409)
 	requireStatus(t, putApp(t, s, c, next, 1, 3), 202)
-	impossibleRetry := map[string]any{"epoch": c["epoch"], "expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 1, "replicas": 3}}
+	impossibleRetry := map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 1, "replicas": 3}}
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", impossibleRetry), 409)
-	currentNoop := map[string]any{"epoch": c["epoch"], "expected_generation": 2, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 2}}
+	currentNoop := map[string]any{"expected_generation": 2, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 2}}
 	requireStatus(t, request(t, s, "POST", appPath(c, r)+"/replace", "session-a", currentNoop), 200)
 	set, digest, _ := appBundle(t, s, c)
 	target := findApp(t, set, next.RevisionID)
 	if target.StartAllowed || target.StartAfter == nil || target.Generation != 2 || target.ActivationGeneration != 1 {
 		t.Fatal("replica edit cleared prerequisite")
 	}
-	chain := map[string]any{"epoch": c["epoch"], "expected_generation": 2, "target": map[string]any{"revision_id": r.RevisionID, "digest": r.Digest, "expected_generation": 2}}
+	chain := map[string]any{"expected_generation": 2, "target": map[string]any{"revision_id": r.RevisionID, "digest": r.Digest, "expected_generation": 2}}
 	requireStatus(t, request(t, s, "POST", appPath(c, next)+"/replace", "session-a", chain), 409)
-	requireStatus(t, request(t, s, "DELETE", appPath(c, next), "session-a", map[string]any{"epoch": c["epoch"], "expected_generation": 2}), 202)
+	requireStatus(t, request(t, s, "DELETE", appPath(c, next), "session-a", map[string]any{"expected_generation": 2}), 202)
 	set, digest, _ = appBundle(t, s, c)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, r.RevisionID), digest, "removed"), 200)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, next.RevisionID), digest, "removed"), 200)
@@ -413,7 +413,7 @@ func TestAssignmentOmittedReplicasUseExpectedIntent(t *testing.T) {
 	c := enroll(t, s, ownerA, fmt.Sprintf("%064x", 41))
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	implicit := func(expected int64) *httptest.ResponseRecorder {
-		return request(t, s, "PUT", appPath(c, r), "session-a", map[string]any{"epoch": c["epoch"], "digest": r.Digest, "expected_generation": expected})
+		return request(t, s, "PUT", appPath(c, r), "session-a", map[string]any{"digest": r.Digest, "expected_generation": expected})
 	}
 	requireStatus(t, putApp(t, s, c, r, 0, 3), 202)
 	requireStatus(t, implicit(0), 409) // Creation requested the definition default, two.
@@ -423,7 +423,7 @@ func TestAssignmentOmittedReplicasUseExpectedIntent(t *testing.T) {
 	requireStatus(t, implicit(1), 409) // A stale omission retains the expected version's three.
 	requireStatus(t, putApp(t, s, c, r, 1, 4), 200)
 	requireStatus(t, implicit(2), 200)
-	head, err := machineapps.Head(t.Context(), s.db, c["node_id"], c["epoch"], r.RevisionID)
+	head, err := machineapps.Head(t.Context(), s.db, c["node_id"], r.RevisionID)
 	if err != nil || head.Generation != 2 || head.Replicas != 4 || head.ActivationGeneration != 1 {
 		t.Fatal(head, err)
 	}
@@ -442,7 +442,7 @@ func TestAssignmentCompletionRetriesSurviveRetirementAndDeliveryChanges(t *testi
 	requireStatus(t, putApp(t, s, c, beta, 0, 1), 202)
 	_, secondDigest, _ := appBundle(t, s, c)
 	requireStatus(t, appReport(t, s, c, applied, secondDigest, "applied"), 200)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"epoch": c["epoch"], "force": true}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"force": true}), 202)
 	terminal, terminalDigest, _ := appBundle(t, s, c)
 	for _, digest := range []string{firstDigest, secondDigest} {
 		requireStatus(t, appReport(t, s, c, applied, digest, "applied"), 200)
@@ -473,16 +473,16 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 			reasons[2] = ""
 		}
 		for _, reason := range reasons {
-			report := assignmentReport{Epoch: c["epoch"], CredentialVersion: 1, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, AppsDigest: digest, Phase: phase, Reason: reason}
+			report := assignmentReport{NodeID: c["node_id"], CredentialVersion: 1, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, AppsDigest: digest, Phase: phase, Reason: reason}
 			path := "/v1/nodes/" + c["node_id"] + "/apps/" + r.RevisionID + "/status"
 			requireStatus(t, request(t, s, "POST", path, c["token"], report), 400)
 		}
 	}
-	wrongVersion := assignmentReport{Epoch: c["epoch"], CredentialVersion: 2, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, AppsDigest: digest, Phase: "applied"}
+	wrongVersion := assignmentReport{NodeID: c["node_id"], CredentialVersion: 2, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, AppsDigest: digest, Phase: "applied"}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/apps/"+r.RevisionID+"/status", c["token"], wrongVersion), 409)
 	requireStatus(t, appReport(t, s, c, a, digest, "failed"), 200)
 	requireStatus(t, appReport(t, s, c, a, digest, "applied"), 200)
-	requireStatus(t, request(t, s, "DELETE", appPath(c, r), "session-a", map[string]any{"epoch": c["epoch"], "expected_generation": 1}), 202)
+	requireStatus(t, request(t, s, "DELETE", appPath(c, r), "session-a", map[string]any{"expected_generation": 1}), 202)
 	set, digest, _ = appBundle(t, s, c)
 	// A provider write holds state before checking its enrollment foreign key.
 	// The receipt must not take a conflicting enrollment key lock while waiting.
@@ -503,7 +503,7 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, err := provider.Exec(`INSERT INTO lpcc.access_credentials(node_id,epoch,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,$2,1,'fixture','fixture',decode('00','hex'),now()+interval '1 hour')`, c["node_id"], c["epoch"]); err != nil {
+	if _, err := provider.Exec(`INSERT INTO lpcc.access_credentials(node_id,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,1,'fixture','fixture',decode('00','hex'),now()+interval '1 hour')`, c["node_id"]); err != nil {
 		t.Fatal("receipt blocked credential foreign-key check", err)
 	}
 	if err := provider.Commit(); err != nil {
@@ -541,7 +541,7 @@ func TestReplacementSelectsCleanupPolicyAndPreservesLineage(t *testing.T) {
 			old := publishAssignmentRevision(t, s, registryFixture(t), "")
 			requireStatus(t, putApp(t, s, c, old, 0, counts[0]), 202)
 			next := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "2"`, 1), old.RevisionID)
-			body := map[string]any{"epoch": c["epoch"], "expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0, "replicas": counts[1]}}
+			body := map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": next.RevisionID, "digest": next.Digest, "expected_generation": 0, "replicas": counts[1]}}
 			requireStatus(t, request(t, s, "POST", appPath(c, old)+"/replace", "session-a", body), 202)
 			audits := count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events`)
 			requireStatus(t, request(t, s, "POST", appPath(c, old)+"/replace", "session-a", body), 200)

@@ -117,7 +117,7 @@ func nativeFixture(t *testing.T) (*SDKOwner, *nativeNode, OwnerRequest, OwnerHoo
 	}
 	t.Cleanup(func() { o.Close(context.Background()) })
 	e := Registration{InstanceID: "one", PodUID: "pod", Options: runner.AppOptions{App: "app", RunnerURL: "http://immutable.invalid:8080", Status: "not-ready", Mode: "persistent"}}
-	req := OwnerRequest{Epoch: "epoch", Identity: Identity{RunnerID: "owner"}, Entries: []Registration{e}, Tracked: []Registration{e}}
+	req := OwnerRequest{Identity: Identity{RunnerID: "owner"}, Entries: []Registration{e}, Tracked: []Registration{e}}
 	events := make(chan Observation, 1024)
 	hooks := OwnerHooks{Observe: func(o Observation) error { events <- o; return nil }}
 	return o, n, req, hooks, events
@@ -446,7 +446,7 @@ func TestNativeRestoredMembershipRejectionPreservesSibling(t *testing.T) {
 			controller, _, _, _, _, _ := fixtureController(t)
 			controller.Now = nil
 			if err := controller.Journal.Update(func(s *State) error {
-				s.OwnerEpoch, s.Identity = r.Epoch, r.Identity
+				s.Identity = r.Identity
 				s.Instances["one"] = &Instance{ID: "one", PodUID: "pod"}
 				return nil
 			}); err != nil {
@@ -527,7 +527,7 @@ func TestNativeRestoredMembershipRejectionPreservesSibling(t *testing.T) {
 			if err := restored.Close(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			controller.failed(OwnerFailure{Epoch: r.Epoch, Reason: "node_unavailable"})
+			controller.failed(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: "node_unavailable"})
 			if len(controller.proofs) != 0 {
 				t.Fatal("ordinary failure retained readiness proof")
 			}

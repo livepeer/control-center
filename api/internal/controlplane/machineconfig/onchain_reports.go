@@ -26,12 +26,12 @@ func (s *Manager) acceptOnchainReport(ctx context.Context, tx *sql.Tx, m Machine
 		return err
 	}
 	meta, _, err := ReadApplied(bundle)
-	if err != nil || meta.Epoch != m.Epoch || meta.CredentialVersion != m.CredentialVersion || meta.ConfigDigest != r.ConfigDigest || meta.Onchain.Generation != p.Generation || meta.Onchain.Mode != p.Mode || p.PodUID == "" {
+	if err != nil || meta.NodeID != m.NodeID || meta.CredentialVersion != m.CredentialVersion || meta.ConfigDigest != r.ConfigDigest || meta.Onchain.Generation != p.Generation || meta.Onchain.Mode != p.Mode || p.PodUID == "" {
 		return ErrStaleStatus
 	}
 	trusted := !r.ClockUncertain && time.Since(r.ObservedAt) <= s.config.StatusTTL
 	if p.Mode == "onchain" {
-		result, err := tx.ExecContext(ctx, `UPDATE lpcc.onchain_grants SET ready_at=CASE WHEN $7 AND $8 THEN COALESCE(ready_at,now()) ELSE ready_at END WHERE grant_id::text=$1 AND node_id=$2 AND epoch=$3 AND onchain_generation=$4 AND config_digest=$5 AND pod_uid=$6 AND revoked_at IS NULL`, p.GrantID, m.NodeID, m.Epoch, p.Generation, r.ConfigDigest, p.PodUID, trusted, p.Ready)
+		result, err := tx.ExecContext(ctx, `UPDATE lpcc.onchain_grants SET ready_at=CASE WHEN $6 AND $7 THEN COALESCE(ready_at,now()) ELSE ready_at END WHERE grant_id::text=$1 AND node_id=$2 AND onchain_generation=$3 AND config_digest=$4 AND pod_uid=$5 AND revoked_at IS NULL`, p.GrantID, m.NodeID, p.Generation, r.ConfigDigest, p.PodUID, trusted, p.Ready)
 		if err != nil {
 			return err
 		}
@@ -43,6 +43,9 @@ func (s *Manager) acceptOnchainReport(ctx context.Context, tx *sql.Tx, m Machine
 	if !trusted {
 		return nil
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE lpcc.onchain_grants SET revoked_at=now() WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL AND ($3='offchain' OR issued_sequence<(SELECT issued_sequence FROM lpcc.onchain_grants WHERE grant_id::text=$4))`, m.NodeID, m.Epoch, p.Mode, p.GrantID)
+	_, err = tx.ExecContext(ctx, `UPDATE lpcc.onchain_grants SET revoked_at=now() WHERE node_id=$1 AND revoked_at IS NULL AND ($2='offchain' OR issued_sequence<(SELECT issued_sequence FROM lpcc.onchain_grants WHERE grant_id::text=$3))`, m.NodeID, p.Mode, p.GrantID)
+	if err == nil && p.Mode == "onchain" && p.Ready {
+		_, err = tx.ExecContext(ctx, `UPDATE lpcc.onchain_state SET initialized=true WHERE fingerprint=(SELECT fingerprint FROM lpcc.enrollments WHERE node_id=$1)`, m.NodeID)
+	}
 	return err
 }

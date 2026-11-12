@@ -17,7 +17,7 @@ import (
 	"github.com/livepeer/control-center/runtime/contract"
 )
 
-const template = "https://{proxy}.lp-aaaaaaaaaaaaaaaa.example.invalid"
+const template = "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"
 
 func TestAuthorityAndCredentialBoundary(t *testing.T) {
 	var forwarded *http.Request
@@ -26,12 +26,12 @@ func TestAuthorityAndCredentialBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, host := range []string{
-		"app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid", "APP-VALID.lp-aaaaaaaaaaaaaaaa.example.invalid",
+		"app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "APP-VALID.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid",
 		strings.TrimPrefix(contract.PrivateOrchestrator, "http://"),
-		"api.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery.lp-aaaaaaaaaaaaaaaa.example.invalid",
-		"api-wrong.lp-aaaaaaaaaaaaaaaa.example.invalid:443", "discovery-wrong.lp-aaaaaaaaaaaaaaaa.example.invalid",
-		"app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid:443", "app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid.",
-		"nested.app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid", "-invalid.lp-aaaaaaaaaaaaaaaa.example.invalid", "foreign.invalid",
+		"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid",
+		"api-wrong.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "discovery-wrong.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid",
+		"app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.",
+		"nested.app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "-invalid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "foreign.invalid",
 	} {
 		forwarded = nil
 		req := httptest.NewRequest("GET", "https://"+host+"/apps/app/app/a%2Fb?value=1%202&value=3", nil)
@@ -75,7 +75,7 @@ func TestApplicationCookiesRemainVerbatim(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := httptest.NewRequest("GET", "https://app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid/", nil)
+		req := httptest.NewRequest("GET", "https://app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid/", nil)
 		req.Header["Cookie"] = check.input
 		handler.ServeHTTP(httptest.NewRecorder(), req)
 		if !reflect.DeepEqual(received, check.want) || !reflect.DeepEqual(req.Header.Values("Cookie"), check.input) {
@@ -91,10 +91,10 @@ func TestReverseProxyStreamingAndUpgrade(t *testing.T) {
 			if r.Host != strings.TrimPrefix(contract.PrivateOrchestrator, "http://") {
 				t.Error("identity check used public Host")
 			}
-			_ = json.NewEncoder(w).Encode([]map[string]string{{"address": "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid"}})
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"address": "https://api-aaaaaaa.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"}})
 			return
 		}
-		if r.Host != "app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid" {
+		if r.Host != "app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid" {
 			t.Error("proxy Host was not preserved", r.Host)
 		}
 		switch r.URL.Path {
@@ -128,7 +128,7 @@ func TestReverseProxyStreamingAndUpgrade(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	transport := nodeTransport("https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.example.invalid", func(ctx context.Context, network, address string) (net.Conn, error) {
+	transport := nodeTransport("https://api-aaaaaaa.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", func(ctx context.Context, network, address string) (net.Conn, error) {
 		if address != strings.TrimPrefix(contract.PrivateOrchestrator, "http://") {
 			t.Error("unexpected upstream", address)
 		}
@@ -145,7 +145,7 @@ func TestReverseProxyStreamingAndUpgrade(t *testing.T) {
 	request := func(path string) *http.Response {
 		t.Helper()
 		req, _ := http.NewRequest("GET", server.URL+path, nil)
-		req.Host = "app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid"
+		req.Host = "app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"
 		response, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -171,7 +171,7 @@ func TestReverseProxyStreamingAndUpgrade(t *testing.T) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	_, _ = io.WriteString(conn, "GET /upgrade HTTP/1.1\r\nHost: app-valid.lp-aaaaaaaaaaaaaaaa.example.invalid\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+	_, _ = io.WriteString(conn, "GET /upgrade HTTP/1.1\r\nHost: app-valid.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
 	reader := bufio.NewReader(conn)
 	upgraded, err := http.ReadResponse(reader, &http.Request{Method: "GET"})
 	if err != nil || upgraded.StatusCode != 101 {

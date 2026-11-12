@@ -27,7 +27,7 @@ export function Catalog({ session, authorityFailure }: { session: Session; autho
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [conflict, setConflict] = useState(false)
-  const epoch = useRef(0)
+  const requestGeneration = useRef(0)
   const serial = useRef<Record<string, number>>({})
   const controllers = useRef(new Set<AbortController>())
   const draft = useRef(0)
@@ -35,13 +35,13 @@ export function Catalog({ session, authorityFailure }: { session: Session; autho
   const failure = useRef(authorityFailure)
   failure.current = authorityFailure
 
-  function cancel() { epoch.current++; controllers.current.forEach(c => c.abort()); controllers.current.clear(); changing.current = false }
+  function cancel() { requestGeneration.current++; controllers.current.forEach(c => c.abort()); controllers.current.clear(); changing.current = false }
   // Resource generations are separate from capability polling and draft edits.
   async function run<T>(key: string, operation: (signal: AbortSignal) => Promise<T>, apply: (value: T) => void) {
-    const e = epoch.current, ticket = (serial.current[key] || 0) + 1
+    const e = requestGeneration.current, ticket = (serial.current[key] || 0) + 1
     serial.current[key] = ticket
     const controller = new AbortController(); controllers.current.add(controller)
-    const current = () => e === epoch.current && ticket === serial.current[key] && !controller.signal.aborted
+    const current = () => e === requestGeneration.current && ticket === serial.current[key] && !controller.signal.aborted
     try { const value = await operation(controller.signal); if (current()) apply(value) }
     catch (error) {
       if (!current()) return

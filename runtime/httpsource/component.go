@@ -17,18 +17,18 @@ func (s *Source) componentUnchanged(name, previous, current string) bool {
 	if prefix == "" {
 		return false
 	}
-	read := func(digest string) ([]byte, string, string, error) {
+	read := func(digest string) ([]byte, string, error) {
 		data, err := s.Store.Get(digest)
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", err
 		}
 		files, err := artifact.Read(data)
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", err
 		}
 		m, err := transport.ReadMetadata(files["runtime.json"])
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", err
 		}
 		selected := map[string][]byte{}
 		for path, b := range files {
@@ -37,12 +37,12 @@ func (s *Source) componentUnchanged(name, previous, current string) bool {
 			}
 		}
 		if len(selected) == 0 {
-			return nil, "", "", errors.New("component_input_missing")
+			return nil, "", errors.New("component_input_missing")
 		}
 		b, err := json.Marshal(selected)
-		return b, m.NodeID, m.Epoch, err
+		return b, m.NodeID, err
 	}
-	a, an, ae, errA := read(previous)
-	b, bn, be, errB := read(current)
-	return errA == nil && errB == nil && an == bn && ae == be && bytes.Equal(a, b)
+	a, an, errA := read(previous)
+	b, bn, errB := read(current)
+	return errA == nil && errB == nil && an == bn && bytes.Equal(a, b)
 }

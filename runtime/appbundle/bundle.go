@@ -46,11 +46,11 @@ type Payload struct {
 }
 type Options struct{ StopSignals bool }
 
-func Key(epoch, revision string, activation int64, slot int) string {
-	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%d", epoch, revision, activation, slot)))[7:27]
+func Key(node, revision string, activation int64, slot int) string {
+	return artifact.Digest([]byte(fmt.Sprintf("%s/%s/%d/%d", node, revision, activation, slot)))[7:27]
 }
 func newGroup(set schema.AppAssignmentSetV1, a schema.AppAssignment, slot int) Group {
-	key := Key(set.Epoch, a.RevisionID, a.ActivationGeneration, slot)
+	key := Key(set.NodeID, a.RevisionID, a.ActivationGeneration, slot)
 	base := "app-desired/groups/" + key + "/"
 	return Group{Key: key, RevisionID: a.RevisionID, ActivationGeneration: a.ActivationGeneration, Slot: slot, Name: "lp-app-" + key, Files: []string{base + "pod.json", base + "service.json"}}
 }
@@ -115,7 +115,7 @@ func payloadBytes(files map[string][]byte) int {
 type object = map[string]any
 
 func renderGroup(g Group, set schema.AppAssignmentSetV1, d schema.DefinitionV1) []object {
-	labels := map[string]string{"app": "livepeer-app", "livepeer.io/instance": g.Name, "livepeer.io/epoch": set.Epoch, "livepeer.io/egress": d.Network.Egress}
+	labels := map[string]string{"app": "livepeer-app", "livepeer.io/instance": g.Name, "livepeer.io/node": set.NodeID, "livepeer.io/egress": d.Network.Egress}
 	metadata := func() object {
 		return object{"name": g.Name, "namespace": Namespace, "labels": labels, "annotations": map[string]string{"livepeer.io/revision-id": g.RevisionID}}
 	}
@@ -204,7 +204,7 @@ func Read(files map[string][]byte, m contract.Metadata) (Payload, error) {
 		return p, errors.New("app_digest")
 	}
 	set, err := schema.DecodeAssignmentSet(raw)
-	if err != nil || set.NodeID != m.NodeID || set.Epoch != m.Epoch || set.Generation != m.AppsGeneration {
+	if err != nil || set.NodeID != m.NodeID || set.Generation != m.AppsGeneration {
 		return p, errors.New("app_identity")
 	}
 	expected := map[string]Group{}

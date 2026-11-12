@@ -5,7 +5,7 @@ const a = '11111111-1111-4111-8111-111111111111'
 const b = '22222222-2222-4222-8222-222222222222'
 const grantA = { grant_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'a@example.invalid', current_email: 'renamed@example.invalid', user_id: a, state: 'bound', revision: 2 }
 const grantB = { grant_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', email: 'b@example.invalid', current_email: null, user_id: b, state: 'bound', revision: 1 }
-const fleet = { node_id: 'lp-aaaaaaaaaaaaaaaa', hostname: 'private-fleet-machine', owner_id: b, k3s_version: 'v1.37.2+k3s1', created_at: '2026-11-06T00:00:00Z', last_config_fetch_at: null }
+const fleet = { node_id: 'vkvkvkvkvkvkuaaaaaaaaaaaaa', hostname: 'private-fleet-machine', owner_id: b, k3s_version: 'v1.37.2+k3s1', created_at: '2026-11-06T00:00:00Z', last_config_fetch_at: null }
 const expires = Math.floor(Date.now() / 1000) + 3600
 
 function session(id: string) {

@@ -29,8 +29,8 @@ func onchainSettings(t *testing.T, s *Server) onchain.Config {
 func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
-	node := "lp-aaaaaaaaaaaaaaaa"
-	in := onchainInput{Version: 1, Machines: map[string]onchain.Config{node: c}}
+	fingerprint := strings.Repeat("a", 64)
+	in := onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: c}}
 	if rev, e := s.applyOnchain(t.Context(), in, 0); e != nil || rev != 1 {
 		t.Fatal(rev, e)
 	}
@@ -42,7 +42,7 @@ func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 	}
 	stale := c
 	stale.CredentialRevision++
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: stale}}, 0); e == nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: stale}}, 0); e == nil {
 		t.Fatal("stale edit accepted")
 	}
 	var n int
@@ -51,13 +51,13 @@ func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 	}
 	// Omission and immutable bindings fail without committing another audit event.
 	other := onchain.Offchain()
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{"lp-bbbbbbbbbbbbbbbb": other}}, 1); e == nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{strings.Repeat("b", 64): other}}, 1); e == nil {
 		t.Fatal("omission disabled onchain machine")
 	}
 	for _, mutate := range []func(*onchain.Config){func(c *onchain.Config) { c.Recipient = "0x" + strings.Repeat("3", 40) }, func(c *onchain.Config) { c.ChainID++ }, func(c *onchain.Config) { c.TicketWinProb = "0" }} {
 		next := c
 		mutate(&next)
-		if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: next}}, 1); e == nil {
+		if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: next}}, 1); e == nil {
 			t.Fatal("invalid change accepted")
 		}
 	}
@@ -74,6 +74,11 @@ func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	s, c, machine := onchainMachine(t)
 	node := machine["node_id"]
+	fingerprint := installationFingerprint(t, s, node)
+	cfg, err := loadOnchain(t.Context(), s.db, node)
+	if err != nil {
+		t.Fatal(err)
+	}
 	meta := onchainMetadata(t, s, node)
 	var e error
 	launch := consumer.Launch{PodName: "orchestrator-test", PodUID: "uid-test", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
@@ -133,18 +138,31 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 200 {
 		t.Fatal("refresh revoked retained grant")
 	}
+	if _, e = s.db.Exec(`UPDATE lpcc.onchain_state SET initialized=true WHERE fingerprint=$1`, fingerprint); e != nil {
+		t.Fatal(e)
+	}
 	if e = s.RetireMachine(t.Context(), node); e != nil {
 		t.Fatal(e)
 	}
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
 		t.Fatal("forced retirement did not revoke")
 	}
-	fresh := enroll(t, s, ownerA, strings.Repeat("a", 64))
-	if fresh["epoch"] == machine["epoch"] {
+	fresh := enroll(t, s, ownerA, fingerprint)
+	if fresh["node_id"] == machine["node_id"] {
 		t.Fatal("enrollment not replaced")
 	}
+	inherited, err := loadOnchain(t.Context(), s.db, fresh["node_id"])
+	inheritedJSON, _ := json.Marshal(inherited)
+	configJSON, _ := json.Marshal(cfg)
+	if err != nil || string(inheritedJSON) != string(configJSON) {
+		t.Fatal("re-enrollment lost onchain configuration", inherited, err)
+	}
+	var initialized bool
+	if err = s.db.QueryRow(`SELECT initialized FROM lpcc.onchain_state WHERE fingerprint=$1`, fingerprint).Scan(&initialized); err != nil || !initialized {
+		t.Fatal("re-enrollment lost storage identity", err)
+	}
 	c.Recipient = "0x" + strings.Repeat("3", 40)
-	if _, e = s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: c}}, 1); e == nil {
+	if _, e = s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: c}}, 1); e == nil {
 		t.Fatal("re-enrollment reset pinned recipient")
 	}
 }
@@ -161,7 +179,7 @@ func TestOnchainActivationAndNormalDrain(t *testing.T) {
 	report := func() {
 		t.Helper()
 		m := metadata()
-		r := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
+		r := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
 		requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
 	}
 	report()
@@ -172,7 +190,7 @@ func TestOnchainActivationAndNormalDrain(t *testing.T) {
 		t.Fatal("fresh applied Node did not activate")
 	}
 	adminA(t, s)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+node, "session-a", map[string]any{"epoch": c["epoch"]}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+node, "session-a", map[string]any{}), 202)
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
@@ -197,7 +215,7 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	newer := issue("b")
 	observe := func(p *onchain.Observation, digest string, at ...time.Time) *httptest.ResponseRecorder {
 		t.Helper()
-		r := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Generation: m.Generation, Component: "runtime", ConfigDigest: digest, Onchain: p})
+		r := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Generation: m.Generation, Component: "runtime", ConfigDigest: digest, Onchain: p})
 		if len(at) > 0 {
 			r.ObservedAt = at[0]
 		}
@@ -221,7 +239,7 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	if e := s.db.QueryRow(`SELECT revoked_at IS NOT NULL FROM lpcc.onchain_grants WHERE grant_id=$1`, old.GrantID).Scan(&revoked); e != nil || !revoked {
 		t.Fatal("replacement did not retire predecessor", e)
 	}
-	reset := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Generation: m.Generation, Component: "runtime", ConfigDigest: m.ConfigDigest, Onchain: admission(old)})
+	reset := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Generation: m.Generation, Component: "runtime", ConfigDigest: m.ConfigDigest, Onchain: admission(old)})
 	reset.Sequence = 1
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], reset), 412)
 	third := issue("c")
@@ -230,7 +248,7 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	}
 	off := onchain.Offchain()
 	off.Generation = m.Onchain.Generation + 1
-	desired := machineconfig.Desired{Machine: machineconfig.Machine{NodeID: node, Epoch: c["epoch"], CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: off, RuntimeImage: s.params.RuntimeImage, NodeImage: s.params.RuntimeNodeImage}
+	desired := machineconfig.Desired{Machine: machineconfig.Machine{NodeID: node, CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: off, RuntimeImage: s.params.RuntimeImage, NodeImage: s.params.RuntimeNodeImage}
 	b, digest, e := machineconfig.Build(desired)
 	if e != nil {
 		t.Fatal(e)
@@ -255,11 +273,11 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 func TestOnchainIsolationAndGenericCatalogCompatibility(t *testing.T) {
 	s := newTestServer(t)
 	cfg := onchainSettings(t, s)
-	onchainNode := "lp-aaaaaaaaaaaaaaaa"
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{onchainNode: cfg}}, 0); e != nil {
+	fingerprint := strings.Repeat("a", 64)
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: cfg}}, 0); e != nil {
 		t.Fatal(e)
 	}
-	a := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	a := enroll(t, s, ownerA, fingerprint)
 	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
 	adminA(t, s)
 	freeSource := strings.Replace(registryFixture(t), `amount = "0.001"`, `amount = "0"`, 1)
@@ -288,13 +306,13 @@ func TestOnchainIsolationAndGenericCatalogCompatibility(t *testing.T) {
 func TestConcurrentOnchainApplyCannotCommitTwoDifferentTargets(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
-	node := "lp-aaaaaaaaaaaaaaaa"
+	fingerprint := strings.Repeat("a", 64)
 	errors := make(chan error, 2)
 	for n := range 2 {
 		copy := c
 		copy.CredentialRevision = uint64(n + 1)
 		go func() {
-			_, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: copy}}, 0)
+			_, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: copy}}, 0)
 			errors <- e
 		}()
 	}
@@ -330,7 +348,7 @@ func TestConcurrentReportsNormalizeClocksBeforeRetiringGrants(t *testing.T) {
 	}
 	start := time.Now()
 	post := func(sequence uint64, g consumer.Grant, at time.Time) int {
-		r := machineconfig.Report{ReportVersion: 1, Sequence: sequence, ObservedAt: at, Epoch: c["epoch"], CredentialVersion: 1, Generation: m.Generation, Component: "runtime", ConfigDigest: m.ConfigDigest, Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "pod", GrantID: g.GrantID, Applied: true, Ready: true, Handoff: "unverified"}}
+		r := machineconfig.Report{ReportVersion: 1, Sequence: sequence, ObservedAt: at, NodeID: c["node_id"], CredentialVersion: 1, Generation: m.Generation, Component: "runtime", ConfigDigest: m.ConfigDigest, Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "pod", GrantID: g.GrantID, Applied: true, Ready: true, Handoff: "unverified"}}
 		return request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/status", c["token"], r).Code
 	}
 	done := make(chan int, 2)
@@ -372,7 +390,7 @@ func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T)
 	// A syntactically valid but unusable RPC can prevent Node's listener from
 	// starting. Repair its credentials without asking that failed process to drain.
 	cfg.RPCSecret = rpcSecret(t, s, "https://rpc.example/corrected\n")
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: cfg}}, 1); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{installationFingerprint(t, s, node): cfg}}, 1); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.reconcile(t.Context()); e != nil {
@@ -382,7 +400,7 @@ func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T)
 		t.Fatal("RPC repair stalled or opened admission", fixed)
 	}
 	fixed := read()
-	report := currentReport(t, s, node, machineconfig.Report{Epoch: c["epoch"], CredentialVersion: 1, Component: "runtime", Generation: fixed.Generation, ConfigDigest: fixed.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true})
+	report := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: fixed.Generation, ConfigDigest: fixed.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true})
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], report), 200)
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
@@ -395,7 +413,7 @@ func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T)
 			t.Fatal("rotated or retained RPC input unavailable", err)
 		}
 	}
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{node: onchain.Offchain()}}, 2); e != nil {
+	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{installationFingerprint(t, s, node): onchain.Offchain()}}, 2); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.reconcile(t.Context()); e != nil {
@@ -420,7 +438,7 @@ func onchainMachine(t *testing.T) (*Server, onchain.Config, map[string]string) {
 	t.Helper()
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
-	if _, err := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{"lp-aaaaaaaaaaaaaaaa": c}}, 0); err != nil {
+	if _, err := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{strings.Repeat("a", 64): c}}, 0); err != nil {
 		t.Fatal(err)
 	}
 	return s, c, enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -440,4 +458,16 @@ func onchainGrant(t *testing.T, s *Server, c map[string]string, launch consumer.
 		t.Fatal(err)
 	}
 	return g
+}
+
+func installationFingerprint(t *testing.T, s *Server, node string) string {
+	t.Helper()
+	if fingerprintPattern.MatchString(node) {
+		return node
+	}
+	var fingerprint string
+	if err := s.db.QueryRow(`SELECT fingerprint FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	return fingerprint
 }

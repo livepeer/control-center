@@ -13,7 +13,7 @@ import (
 )
 
 func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
-	m := Desired{Machine: Machine{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "22222222-2222-4222-8222-222222222222", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}, Exposure: &Exposure{TunnelID: "tunnel", ServiceURL: "https://machine.example", IngressDigest: "ingress", CredentialGeneration: 4, ProviderVersion: 8}}
+	m := Desired{Machine: Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}, Exposure: &Exposure{TunnelID: "tunnel", ServiceURL: "https://machine.example", IngressDigest: "ingress", CredentialGeneration: 4, ProviderVersion: 8}}
 	build := func(m Desired) map[string][]byte {
 		data, _, err := Build(m)
 		if err != nil {
@@ -109,7 +109,7 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 
 func TestProxyRoutingFollowsHeldNodeConfiguration(t *testing.T) {
 	{
-		m := Desired{Machine: Machine{NodeID: "lp-aaaaaaaaaaaaaaaa", InstallDir: "/opt/livepeer"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}}
+		m := Desired{Machine: Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", InstallDir: "/opt/livepeer"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}}
 		build := func() map[string][]byte {
 			t.Helper()
 			bundle, _, err := Build(m)
@@ -124,23 +124,23 @@ func TestProxyRoutingFollowsHeldNodeConfiguration(t *testing.T) {
 		}
 		prefix, nodeFile, proxyFile := "system/", "node/orchestrator.yaml", "connector/tunnel.yaml"
 		private := build()
-		m.Exposure = &Exposure{TunnelID: "tunnel", ServiceURL: "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.a.invalid", ProxyURLTemplate: "https://{proxy}.lp-aaaaaaaaaaaaaaaa.a.invalid", IngressDigest: "ingress"}
+		m.Exposure = &Exposure{TunnelID: "tunnel", ServiceURL: "https://api-aaaaaaa.vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid", ProxyURLTemplate: "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid", IngressDigest: "ingress"}
 		a := build()
 		if !strings.Contains(string(a[prefix+nodeFile]), `APIOriginURL = "`+PrivateOrchestrator+`"`) {
 			t.Fatal("public Node routing omitted the private API origin")
 		}
 		m.State.HeldOrchestrator = string(a[prefix+nodeFile])
-		m.Exposure.ServiceURL = "https://api-aaaaaaa.lp-aaaaaaaaaaaaaaaa.b.invalid"
-		m.Exposure.ProxyURLTemplate = "https://{proxy}.lp-aaaaaaaaaaaaaaaa.b.invalid"
+		m.Exposure.ServiceURL = "https://api-aaaaaaa.vkvkvkvkvkvkuaaaaaaaaaaaaa.b.invalid"
+		m.Exposure.ProxyURLTemplate = "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.b.invalid"
 		for _, held := range []string{m.State.HeldOrchestrator, string(private[prefix+nodeFile])} {
 			m.State.HeldOrchestrator = held
 			files := build()
 			manifest := string(files[prefix+proxyFile])
 			_, manifest, _ = strings.Cut(manifest, "- name: node-proxy\n")
-			if strings.Contains(manifest, "lp-aaaaaaaaaaaaaaaa.b.invalid") || !strings.Contains(manifest, "--service-url") {
+			if strings.Contains(manifest, "vkvkvkvkvkvkuaaaaaaaaaaaaa.b.invalid") || !strings.Contains(manifest, "--service-url") {
 				t.Fatal("guard advanced beyond held Node configuration", manifest)
 			}
-			if strings.Contains(held, "lp-aaaaaaaaaaaaaaaa.a.invalid") && !strings.Contains(manifest, "https://{proxy}.lp-aaaaaaaaaaaaaaaa.a.invalid") {
+			if strings.Contains(held, "vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid") && !strings.Contains(manifest, "https://{proxy}.vkvkvkvkvkvkuaaaaaaaaaaaaa.a.invalid") {
 				t.Fatal("guard lost held public proxy template")
 			}
 		}

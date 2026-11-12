@@ -28,7 +28,7 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 	stages := []*contract.StageIdentity{r.Downloaded}
 	if r.Downloaded != nil && r.Downloaded.AppsDigest != "" {
 		var known bool
-		err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 AND apps_digest=$3 AND bundle_sha256=$4)`, m.NodeID, m.Epoch, r.Downloaded.AppsDigest, strings.TrimPrefix(r.Downloaded.ArtifactDigest, "sha256:")).Scan(&known)
+		err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 AND bundle_sha256=$3)`, m.NodeID, r.Downloaded.AppsDigest, strings.TrimPrefix(r.Downloaded.ArtifactDigest, "sha256:")).Scan(&known)
 		if err != nil {
 			return err
 		}
@@ -40,8 +40,8 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 		a := r.Apps
 		if m.Terminal && r.Component == "runner" {
 			var bound bool
-			err := s.store.DB.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 AND terminal)
- OR EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 AND terminal AND apps_generation=$3 AND apps_digest=$4)`, m.NodeID, m.Epoch, a.DesiredGeneration, a.DesiredDigest).Scan(&bound)
+			err := s.store.DB.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND terminal)
+ OR EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND terminal AND apps_generation=$2 AND apps_digest=$3)`, m.NodeID, a.DesiredGeneration, a.DesiredDigest).Scan(&bound)
 			if err != nil {
 				return err
 			}
@@ -84,8 +84,8 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 		}
 		b, _ := json.Marshal(members)
 		var valid bool
-		err := s.store.DB.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT FROM jsonb_to_recordset($3::jsonb) AS i(revision_id text,generation bigint,activation_generation bigint)
- WHERE NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries d WHERE d.node_id=$1 AND d.epoch=$2 AND d.entries @> jsonb_build_array(jsonb_build_object('revision_id',i.revision_id,'generation',i.generation,'activation_generation',i.activation_generation))))`, m.NodeID, m.Epoch, string(b)).Scan(&valid)
+		err := s.store.DB.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT FROM jsonb_to_recordset($2::jsonb) AS i(revision_id text,generation bigint,activation_generation bigint)
+ WHERE NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries d WHERE d.node_id=$1 AND d.entries @> jsonb_build_array(jsonb_build_object('revision_id',i.revision_id,'generation',i.generation,'activation_generation',i.activation_generation))))`, m.NodeID, string(b)).Scan(&valid)
 		if err != nil {
 			return err
 		}
@@ -107,7 +107,7 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 			continue
 		}
 		var known bool
-		err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND epoch=$2 AND apps_digest=$3 AND ($4::bigint=0 OR apps_generation=$4))`, m.NodeID, m.Epoch, stage.AppsDigest, stage.Generation).Scan(&known)
+		err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 AND ($3::bigint=0 OR apps_generation=$3))`, m.NodeID, stage.AppsDigest, stage.Generation).Scan(&known)
 		if err != nil {
 			return err
 		}

@@ -62,7 +62,7 @@ func (s *Source) Desired() (contract.Metadata, bool) {
 
 func (s *Source) installed(m contract.Metadata) bool {
 	i, err := transport.ReadIdentity(s.IdentityFile)
-	return err == nil && i.Epoch == m.Epoch && i.CredentialVersion == m.CredentialVersion
+	return err == nil && i.NodeID == m.NodeID && i.CredentialVersion == m.CredentialVersion
 }
 
 // Report runs independently of downloads, credential requests and consumer observations.
@@ -97,14 +97,14 @@ func (s *Source) sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if m.NodeID != s.Control.NodeID || m.Epoch != headers.Get("X-Livepeer-Epoch") || headers.Get("X-Livepeer-Credential-Version") != formatInt(m.CredentialVersion) {
+	if m.NodeID != s.Control.NodeID || m.NodeID != headers.Get("X-Livepeer-Node-ID") || headers.Get("X-Livepeer-Credential-Version") != formatInt(m.CredentialVersion) {
 		return errors.New("enrollment_mismatch")
 	}
 	i, err := transport.ReadIdentity(s.IdentityFile)
 	if err != nil {
 		return err
 	}
-	if i.Epoch != m.Epoch || i.CredentialVersion != m.CredentialVersion {
+	if i.NodeID != m.NodeID || i.CredentialVersion != m.CredentialVersion {
 		return errors.New("installed_identity_mismatch")
 	}
 	if err = os.MkdirAll(s.Store.Directory, 0700); err != nil {
@@ -118,7 +118,7 @@ func (s *Source) sync(ctx context.Context) error {
 			return errors.New("cache_identity_corrupt")
 		}
 		previous = &old
-		if old.Epoch != m.Epoch || (old.Terminal && !m.Terminal) || (!m.Terminal && old.Generation > m.Generation) {
+		if old.NodeID != m.NodeID || (old.Terminal && !m.Terminal) || (!m.Terminal && old.Generation > m.Generation) {
 			return errors.New("stale_enrollment")
 		}
 	} else if !os.IsNotExist(err) {
@@ -140,7 +140,7 @@ func (s *Source) sync(ctx context.Context) error {
 				}
 			}
 			final, e := transport.ReadMetadata(cleanup["runtime.json"])
-			if e != nil || !final.Terminal || !final.TerminalCleanup || final.NodeID != m.NodeID || final.Epoch != m.Epoch || final.Generation != m.Generation || final.CredentialVersion != m.CredentialVersion || final.AppsDigest != m.AppsDigest || final.AppsGeneration != m.AppsGeneration {
+			if e != nil || !final.Terminal || !final.TerminalCleanup || final.NodeID != m.NodeID || final.Generation != m.Generation || final.CredentialVersion != m.CredentialVersion || final.AppsDigest != m.AppsDigest || final.AppsGeneration != m.AppsGeneration {
 				return errors.New("terminal_cleanup_payload")
 			}
 			data, err = artifact.Pack(cleanup)
@@ -184,10 +184,10 @@ func (s *Source) sync(ctx context.Context) error {
 	if appErr == nil {
 		d.Downloaded = &contract.StageIdentity{Generation: m.AppsGeneration, AppsDigest: m.AppsDigest, ArtifactDigest: inputDigest}
 		d.DownloadedAt = time.Now().UTC()
-		if prior := s.reporting.Load(); prior != nil && prior.Metadata.Epoch == m.Epoch && prior.Downloaded != nil && *prior.Downloaded == *d.Downloaded {
+		if prior := s.reporting.Load(); prior != nil && prior.Metadata.NodeID == m.NodeID && prior.Downloaded != nil && *prior.Downloaded == *d.Downloaded {
 			d.DownloadedAt = prior.DownloadedAt
 		}
-	} else if prior := s.reporting.Load(); prior != nil && prior.Metadata.Epoch == m.Epoch {
+	} else if prior := s.reporting.Load(); prior != nil && prior.Metadata.NodeID == m.NodeID {
 		d.Downloaded, d.DownloadedAt = prior.Downloaded, prior.DownloadedAt
 	}
 	s.reporting.Store(d)
@@ -274,7 +274,7 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 			if m.TerminalInputDigest != "" {
 				ack = m.TerminalInputDigest
 			}
-			_, _, err = s.Control.Request(ctx, "removal-ack", map[string]any{"epoch": m.Epoch, "digest": strings.TrimPrefix(ack, "sha256:"), "connector_absent": true}, 16384)
+			_, _, err = s.Control.Request(ctx, "removal-ack", map[string]any{"node_id": m.NodeID, "digest": strings.TrimPrefix(ack, "sha256:"), "connector_absent": true}, 16384)
 			return err
 		}
 		return nil
@@ -361,7 +361,7 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 	if reporter == nil {
 		reporter = s.Control
 	}
-	payload := map[string]any{"epoch": m.Epoch, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
+	payload := map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
 		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": time.Now().UTC()}
 	if s.Onchain != nil {
 		payload["onchain"] = s.Onchain(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)

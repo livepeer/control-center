@@ -19,7 +19,7 @@ func assignmentFixture(t *testing.T) AppAssignmentSetV1 {
 	}
 	canonical, _ := CanonicalBytes(d)
 	r := ResolvedRevision{RevisionRef: RevisionRef{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Digest(canonical)}, Name: d.Name, AppVersion: d.AppVersion, Revision: 1, SchemaVersion: 1, CanonicalFormat: CanonicalFormat, Definition: d}
-	return AppAssignmentSetV1{SchemaVersion: 1, NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", Generation: 1, Entries: []AppAssignment{{RevisionRef: r.RevisionRef, Generation: 2, ActivationGeneration: 1, Desired: "present", Cleanup: CleanupPolicy(d), Revision: &r, Replicas: 3, StartAllowed: true}}}
+	return AppAssignmentSetV1{SchemaVersion: 1, NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", Generation: 1, Entries: []AppAssignment{{RevisionRef: r.RevisionRef, Generation: 2, ActivationGeneration: 1, Desired: "present", Cleanup: CleanupPolicy(d), Revision: &r, Replicas: 3, StartAllowed: true}}}
 }
 func TestAssignmentContractAndCompactRemoval(t *testing.T) {
 	s := assignmentFixture(t)

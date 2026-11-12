@@ -25,7 +25,7 @@ func templateValues(m Desired) *strings.Replacer {
 	if strings.HasPrefix(m.ControlAPIURL, "http://") {
 		mode = "development-http"
 	}
-	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@ENROLLMENT_EPOCH@", m.Epoch, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
+	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
 }
 func orchestratorConfiguration(m Desired) string {
 	if m.State.HeldOrchestrator != "" {
@@ -93,7 +93,7 @@ func renderMachineTemplate(raw string, m Desired) string {
 type Runtime = contract.Metadata
 
 func DesiredRuntime(m Desired) Runtime {
-	d := Runtime{NodeID: m.NodeID, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
+	d := Runtime{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
 	d.Onchain = effectiveOnchain(m)
 	d.OnchainActive = !m.State.DrainRequested && m.State.ApplyingConfigDigest == "" && (!d.Onchain.Onchain() || (m.OnchainReady && m.State.ApprovedConfigDigest == d.ConfigDigest))
 	if d.Onchain.Onchain() && !m.Terminal {
@@ -108,7 +108,7 @@ func DesiredRuntime(m Desired) Runtime {
 	d.RequestedAppsGeneration = m.RequestedAppsGeneration
 	d.DrainStartedAt = m.State.DrainStartedAt
 	if d.DrainRequested {
-		d.DrainTarget = DrainTarget(m.NodeID, m.Epoch, m.State)
+		d.DrainTarget = DrainTarget(m.NodeID, m.State)
 		if m.DrainTimeout > 0 {
 			d.DrainDeadline = m.State.DrainStartedAt.Add(m.DrainTimeout)
 		}

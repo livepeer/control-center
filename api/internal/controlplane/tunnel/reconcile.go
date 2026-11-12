@@ -48,14 +48,14 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 	if e := s.ReencryptAccessCredentials(ctx); e != nil {
 		return e
 	}
-	rows, e := s.db.QueryContext(ctx, `SELECT e.node_id,e.epoch::text,e.install_dir,e.k3s_version,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL OR EXISTS(SELECT FROM lpcc.machines m WHERE m.node_id=e.node_id AND m.enrollment_epoch=e.epoch)`)
+	rows, e := s.db.QueryContext(ctx, `SELECT e.node_id,e.install_dir,e.k3s_version,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL OR EXISTS(SELECT FROM lpcc.machines m WHERE m.node_id=e.node_id)`)
 	if e != nil {
 		return e
 	}
 	var machines []Machine
 	for rows.Next() {
 		var m Machine
-		if e = rows.Scan(&m.NodeID, &m.Epoch, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); e != nil {
+		if e = rows.Scan(&m.NodeID, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); e != nil {
 			rows.Close()
 			return e
 		}
@@ -77,7 +77,7 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 				return e
 			}
 			if !safe {
-				state, _, err := s.Load(ctx, m.NodeID, m.Epoch)
+				state, _, err := s.Load(ctx, m.NodeID)
 				if err != nil || state.TunnelID == "" && state.Lifecycle != "draining" {
 					continue
 				}
@@ -140,16 +140,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if l.state.AccountID != p.CloudflareAccountID || l.state.ZoneID != p.CloudflareZoneID || l.state.TeamName != p.CloudflareTeamName {
 		return errors.New("retire the previous provider scope before changing account, zone or team")
 	}
-	var predecessor bool
-	if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND epoch<>$2 AND COALESCE((state->>'cleanup_complete')::boolean,false)=false)`, l.Machine.NodeID, l.Machine.Epoch).Scan(&predecessor); e != nil {
-		return e
-	}
-	if predecessor {
-		l.state.Ready = false
-		l.state.Reason = "predecessor_cleanup_pending"
-		return l.save(ctx)
-	}
-	desired := RoutingFor(l.Machine.NodeID, p.CloudflareBaseDomain, l.state.EndpointSuffix)
+	desired := RoutingFor(l.Machine.NodeID, p.CloudflareBaseDomain)
 	if l.state.Target != "" && l.state.Target != desired.ServiceURL {
 		l.state.State.CancelTarget()
 		l.state.Ready = false
@@ -273,7 +264,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 			return e
 		}
 	}
-	credential, e := l.s.ResolveAccessCredential(ctx, credentialRef(l.Machine.NodeID, l.Machine.Epoch, l.state.AccessVersion))
+	credential, e := l.s.ResolveAccessCredential(ctx, credentialRef(l.Machine.NodeID, l.state.AccessVersion))
 	if e != nil {
 		return e
 	}
@@ -401,7 +392,7 @@ func (l *tunnelLease) rotateConnector(ctx context.Context) error {
 func (l *tunnelLease) prepareAccessRotation(ctx context.Context) error {
 	var expires time.Time
 	var revoked bool
-	e := l.s.db.QueryRowContext(ctx, `SELECT expires_at,revoked_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3`, l.Machine.NodeID, l.Machine.Epoch, l.state.AccessVersion).Scan(&expires, &revoked)
+	e := l.s.db.QueryRowContext(ctx, `SELECT expires_at,revoked_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND version=$2`, l.Machine.NodeID, l.state.AccessVersion).Scan(&expires, &revoked)
 	missing := errors.Is(e, sql.ErrNoRows)
 	if e != nil && !missing {
 		return e
@@ -433,7 +424,7 @@ func (l *tunnelLease) prepareAccessRotation(ctx context.Context) error {
 		return nil
 	}
 	var count int
-	if e = l.s.db.QueryRowContext(ctx, `SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL AND expires_at>now()`, l.Machine.NodeID, l.Machine.Epoch).Scan(&count); e != nil {
+	if e = l.s.db.QueryRowContext(ctx, `SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND revoked_at IS NULL AND expires_at>now()`, l.Machine.NodeID).Scan(&count); e != nil {
 		return e
 	}
 	if count > 1 {
@@ -462,7 +453,7 @@ func (l *tunnelLease) retireAccessTokens(ctx context.Context, expiredOnly bool) 
 		}
 		if expiredOnly {
 			var expired bool
-			if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND version=$3 AND (expires_at<=now() OR revoked_at IS NOT NULL))`, l.Machine.NodeID, l.Machine.Epoch, r.CredentialVersion).Scan(&expired); e != nil {
+			if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND version=$2 AND (expires_at<=now() OR revoked_at IS NOT NULL))`, l.Machine.NodeID, r.CredentialVersion).Scan(&expired); e != nil {
 				return e
 			}
 			if !expired {
@@ -476,7 +467,7 @@ func (l *tunnelLease) retireAccessTokens(ctx context.Context, expiredOnly bool) 
 	return nil
 }
 func (s *Manager) activeAccessIDs(ctx context.Context, m Machine) ([]string, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND epoch=$2 AND revoked_at IS NULL AND expires_at>now() ORDER BY version`, m.NodeID, m.Epoch)
+	rows, e := s.db.QueryContext(ctx, `SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY version`, m.NodeID)
 	if e != nil {
 		return nil, e
 	}
@@ -532,7 +523,7 @@ func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
 }
 func (l *tunnelLease) cleanup(ctx context.Context) error {
 	if !l.state.Compromised && !l.state.CompromisedAccess && !l.state.ConnectorRevoked {
-		pending, err := machineapps.Pending(ctx, l.s.db, l.Machine.NodeID, l.Machine.Epoch)
+		pending, err := machineapps.Pending(ctx, l.s.db, l.Machine.NodeID)
 		if err != nil {
 			return err
 		}
@@ -606,7 +597,7 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 			}
 		}
 	}
-	if _, e := l.s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1 AND epoch=$2`, l.Machine.NodeID, l.Machine.Epoch); e != nil {
+	if _, e := l.s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1`, l.Machine.NodeID); e != nil {
 		return e
 	}
 	if err := l.releaseCertificates(ctx, ""); err != nil {

@@ -78,7 +78,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 }
 
 func TestReadinessAuthenticatesBothOriginsAndIsolation(t *testing.T) {
-	state := RoutingFor("lp-aaaaaaaaaaaaaaaa", "example.invalid", "aaaaaaa").RoutingState
+	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
 	creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
 	node := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != endpointHost(PrivateOrchestrator) {
@@ -167,7 +167,7 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 	if binary == "" {
 		t.Skip("set NODE_BINARY to a compatible livepeer-orchestrator binary")
 	}
-	state := RoutingFor("lp-aaaaaaaaaaaaaaaa", "example.invalid", "aaaaaaa").RoutingState
+	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/echo" {
 			_ = json.NewEncoder(w).Encode(r.Header)
@@ -250,7 +250,7 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 	if response.StatusCode != 200 || string(body) != "application response" {
 		t.Fatal("Host-preserving public proxy failed", response.StatusCode, string(body))
 	}
-	for _, host := range []string{"api.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery.lp-aaaaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.lp-aaaaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.lp-aaaaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.lp-aaaaaaaaaaaaaaaa.example.invalid:443", "valid-app.lp-aaaaaaaaaaaaaaaa.example.invalid:443", "valid-app.lp-aaaaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.lp-aaaaaaaaaaaaaaaa.example.invalid"} {
+	for _, host := range []string{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid"} {
 		response, err = client.Post("https://"+host+"/apps/app-fixture/session", "application/json", nil)
 		if err != nil {
 			t.Fatal(err)

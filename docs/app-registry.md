@@ -172,10 +172,10 @@ bootstrap JWTs and machine service credentials cannot mutate assignments. Let
 | Method and route | Body or query |
 | --- | --- |
 | `GET M` | `limit` (50 default, 100 maximum), exclusive `after_revision_id` |
-| `GET M/{revision_id}` | Optional retained `epoch`; history `limit`, exclusive `before_generation` |
-| `PUT M/{revision_id}` | `epoch`, `digest`, `expected_generation`, optional `replicas` |
-| `DELETE M/{revision_id}` | `epoch`, `expected_generation` |
-| `POST M/{revision_id}/replace` | `epoch`, `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
+| `GET M/{revision_id}` | History `limit`, exclusive `before_generation` |
+| `PUT M/{revision_id}` | `digest`, `expected_generation`, optional `replicas` |
+| `DELETE M/{revision_id}` | `expected_generation` |
+| `POST M/{revision_id}/replace` | `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
 
 Writes require a current active enrollment. `expected_generation: 0` means never
 assigned. Replicas range from 1 to 100; omitting them uses the definition default

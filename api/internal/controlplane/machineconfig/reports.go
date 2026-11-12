@@ -20,7 +20,7 @@ var ErrReportOrder = errors.New("report ordering state must be restored")
 // rejects observations ahead of the persisted machine rollout. It returns
 // whether the observation can advance an outstanding drain.
 func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (bool, error) {
-	record, err := s.store.Load(ctx, m.NodeID, m.Epoch)
+	record, err := s.store.Load(ctx, m.NodeID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
@@ -40,12 +40,12 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 		return false, err
 	}
 	defer tx.Rollback()
-	query := `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`
+	query := `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND credential_version=$2 FOR UPDATE`
 	if m.Terminal {
-		query = `SELECT 1 FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$3 AND retired_at IS NOT NULL FOR UPDATE`
+		query = `SELECT 1 FROM lpcc.enrollments WHERE node_id=$1 AND credential_version=$2 AND retired_at IS NOT NULL FOR UPDATE`
 	}
 	var locked int
-	if err = tx.QueryRowContext(ctx, query, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&locked); errors.Is(err, sql.ErrNoRows) {
+	if err = tx.QueryRowContext(ctx, query, m.NodeID, m.CredentialVersion).Scan(&locked); errors.Is(err, sql.ErrNoRows) {
 		return false, ErrStaleStatus
 	} else if err != nil {
 		return false, err
@@ -82,16 +82,16 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 		}
 	}
 	raw, _ := json.Marshal(report)
-	result, err := tx.ExecContext(ctx, `INSERT INTO lpcc.machine_reports(node_id,epoch,component,generation,credential_version,report)
- SELECT $1,$2,$3,$4,$5,$6 WHERE EXISTS(SELECT FROM lpcc.enrollments e WHERE e.node_id=$1 AND e.epoch=$2 AND e.credential_version=$5
- AND ((NOT $7 AND e.retired_at IS NULL) OR ($7 AND e.retired_at IS NOT NULL AND e.terminal_sha256 IS NOT NULL)))
- ON CONFLICT(node_id,epoch,component) DO UPDATE SET generation=EXCLUDED.generation,credential_version=EXCLUDED.credential_version,report=EXCLUDED.report,received_at=now()
+	result, err := tx.ExecContext(ctx, `INSERT INTO lpcc.machine_reports(node_id,component,generation,credential_version,report)
+ SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT FROM lpcc.enrollments e WHERE e.node_id=$1 AND e.credential_version=$4
+ AND ((NOT $6 AND e.retired_at IS NULL) OR ($6 AND e.retired_at IS NOT NULL AND e.terminal_sha256 IS NOT NULL)))
+ ON CONFLICT(node_id,component) DO UPDATE SET generation=EXCLUDED.generation,credential_version=EXCLUDED.credential_version,report=EXCLUDED.report,received_at=now()
  WHERE lpcc.machine_reports.generation<=EXCLUDED.generation AND lpcc.machine_reports.credential_version<=EXCLUDED.credential_version
- AND ($3<>'runner' OR
+ AND ($2<>'runner' OR
  (COALESCE((lpcc.machine_reports.report#>>'{apps,desired_generation}')::bigint,0)<=COALESCE((EXCLUDED.report#>>'{apps,desired_generation}')::bigint,0)
  AND (COALESCE((lpcc.machine_reports.report#>>'{apps,desired_generation}')::bigint,0)<>COALESCE((EXCLUDED.report#>>'{apps,desired_generation}')::bigint,0)
  OR COALESCE(lpcc.machine_reports.report#>>'{apps,desired_digest}','')=COALESCE(EXCLUDED.report#>>'{apps,desired_digest}',''))))
- AND (lpcc.machine_reports.credential_version<EXCLUDED.credential_version OR COALESCE((lpcc.machine_reports.report->>'sequence')::numeric,0)<COALESCE((EXCLUDED.report->>'sequence')::numeric,0))`, m.NodeID, m.Epoch, report.Component, report.Generation, m.CredentialVersion, string(raw), m.Terminal)
+ AND (lpcc.machine_reports.credential_version<EXCLUDED.credential_version OR COALESCE((lpcc.machine_reports.report->>'sequence')::numeric,0)<COALESCE((EXCLUDED.report->>'sequence')::numeric,0))`, m.NodeID, report.Component, report.Generation, m.CredentialVersion, string(raw), m.Terminal)
 	if err != nil {
 		return false, err
 	}
@@ -121,7 +121,7 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 
 func validDrainEvidence(m Machine, state State, report Report, now time.Time) bool {
 	e := report.Evidence
-	if e == nil || !report.Drained || !state.DrainRequested || report.Generation != state.Generation || e.Target != DrainTarget(m.NodeID, m.Epoch, state) || e.WithdrawalID == "" || len(e.WithdrawalID) > 64 || e.Kind != "no_owner" {
+	if e == nil || !report.Drained || !state.DrainRequested || report.Generation != state.Generation || e.Target != DrainTarget(m.NodeID, state) || e.WithdrawalID == "" || len(e.WithdrawalID) > 64 || e.Kind != "no_owner" {
 		return false
 	}
 	if e.ObservedAt.Before(state.DrainStartedAt) || e.ObservedAt.After(now.Add(5*time.Second)) || !now.Before(e.ExpiresAt) || !e.ExpiresAt.After(e.ObservedAt) || e.ExpiresAt.Sub(e.ObservedAt) > time.Minute {

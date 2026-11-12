@@ -154,7 +154,7 @@ func TestRollingUsesCurrentSuccessorStateBeforeWithdrawal(t *testing.T) {
 			}
 			s := c.Journal.View()
 			c.Probes.values[successor.ID] = &health{uid: successor.PodUID, ready: true, started: true, next: now.Add(time.Minute)}
-			c.proofs[successor.ID] = proof{PodUID: successor.PodUID, Observation: Observation{Epoch: s.OwnerEpoch, Credential: s.Identity.Credential, Accepted: true, At: *now, TTL: time.Minute}, App: AppObservation{ID: successor.AppID, Status: "ready", SessionIDs: []string{}}}
+			c.proofs[successor.ID] = proof{PodUID: successor.PodUID, Observation: Observation{RunnerID: s.Identity.RunnerID, Credential: s.Identity.Credential, Accepted: true, At: *now, TTL: time.Minute}, App: AppObservation{ID: successor.AppID, Status: "ready", SessionIDs: []string{}}}
 			if failure == "process" {
 				pod := k.view.Pods[successor.Name]
 				pod.Phase = "Failed"

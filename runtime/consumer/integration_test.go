@@ -155,7 +155,7 @@ type integrationFixture struct {
 
 func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 	t.Helper()
-	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "epoch", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/tunnel/connector-token"}}
+	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/tunnel/connector-token"}}
 	profile := Connector
 	if len(profiles) > 0 {
 		profile = profiles[0]
@@ -177,10 +177,10 @@ func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 			if profile == Orchestrator {
 				var request Request
 				json.NewDecoder(r.Body).Decode(&request)
-				json.NewEncoder(w).Encode(Grant{Association: Association{Launch: request.Launch, Epoch: old.Epoch, CredentialVersion: old.CredentialVersion, OnchainGeneration: old.Onchain.Generation, ConfigDigest: old.ConfigDigest, GrantID: "grant-" + request.LaunchID}, RPCURL: "https://rpc.example/private", Headers: "Authorization: Bearer submission-secret"})
+				json.NewEncoder(w).Encode(Grant{Association: Association{Launch: request.Launch, NodeID: old.NodeID, CredentialVersion: old.CredentialVersion, OnchainGeneration: old.Onchain.Generation, ConfigDigest: old.ConfigDigest, GrantID: "grant-" + request.LaunchID}, RPCURL: "https://rpc.example/private", Headers: "Authorization: Bearer submission-secret"})
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"token": strings.Repeat("x", 63) + string(rune('a'+f.fetched)), "epoch": old.Epoch, "tunnel_id": old.TunnelID, "credential_generation": old.TokenGeneration})
+			json.NewEncoder(w).Encode(map[string]any{"token": strings.Repeat("x", 63) + string(rune('a'+f.fetched)), "node_id": old.NodeID, "tunnel_id": old.TunnelID, "credential_generation": old.TokenGeneration})
 			return
 		}
 		var report map[string]any
@@ -295,13 +295,13 @@ func TestGrantAssociationSurvivesAgentRestartButRequiresFreshEvidence(t *testing
 func TestGrantFetchFencesConcurrentSecurityAndProcessChanges(t *testing.T) {
 	for _, profile := range []Profile{Connector, Orchestrator} {
 		for _, checkpoint := range []string{"fetch", "final-pod-lookup"} {
-			for _, change := range []string{"epoch", "generation", "credential", "terminal_cleanup"} {
+			for _, change := range []string{"node_id", "generation", "credential", "terminal_cleanup"} {
 				t.Run(fmt.Sprintf("%d/%s/%s", profile, checkpoint, change), func(t *testing.T) {
 					f := fixture(t, profile)
 					mutate := func() {
 						switch change {
-						case "epoch":
-							f.m.Epoch = "new-epoch"
+						case "node_id":
+							f.m.NodeID = "new-node_id"
 						case "generation":
 							f.m.TokenGeneration++
 							f.m.Onchain.Generation++

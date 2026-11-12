@@ -13,7 +13,6 @@ type Metadata struct {
 	OnchainCredentialsRef   string         `json:"onchain_credentials_ref,omitempty"`
 	OnchainActive           bool           `json:"onchain_active"`
 	NodeID                  string         `json:"node_id"`
-	Epoch                   string         `json:"epoch"`
 	CredentialVersion       int64          `json:"credential_version"`
 	Generation              int64          `json:"generation"`
 	Terminal                bool           `json:"terminal"`

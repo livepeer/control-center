@@ -3,17 +3,16 @@ import type { Page, Route } from '@playwright/test'
 import type { MachineObservation } from '../src/machine-status'
 
 const user = '11111111-1111-4111-8111-111111111111'
-const epoch = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-const node = 'lp-aaaaaaaaaaaaaaaa'
+const node = 'vkvkvkvkvkvkuaaaaaaaaaaaaa'
 const revision = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const digest = `sha256:${'a'.repeat(64)}`
 const session = { access_token: `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ sub: user, exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.fixture`, refresh_token: 'fixture', token_type: 'bearer', expires_at: Math.floor(Date.now() / 1000) + 3600, expires_in: 3600, user: { id: user, email: 'owner@example.invalid', aud: 'authenticated', role: 'authenticated', app_metadata: {}, user_metadata: {}, created_at: '2026-11-09T00:00:00Z' } }
-const machine = { node_id: node, epoch, hostname: 'worker-status', k3s_version: 'v1.37.2+k3s1', owner_id: user, created_at: '2026-11-09T00:00:00Z', last_config_fetch_at: null, report_state: 'observed', terminal: false }
+const machine = { node_id: node, hostname: 'worker-status', k3s_version: 'v1.37.2+k3s1', owner_id: user, created_at: '2026-11-09T00:00:00Z', last_config_fetch_at: null, report_state: 'observed', terminal: false }
 
 function evidence(): MachineObservation {
   const stamp = new Date().toISOString(), expires = new Date(Date.now() + 120000).toISOString()
   const stage = { generation: 1, apps_digest: digest, artifact_digest: digest }
-  return { node_id: node, epoch, hostname: machine.hostname, lifecycle: 'active', rollout_generation: 1, requested: { generation: 2 }, delivered: stage, delivered_at: stamp, assignments_omitted: false, server_time: stamp,
+  return { node_id: node, hostname: machine.hostname, lifecycle: 'active', rollout_generation: 1, requested: { generation: 2 }, delivered: stage, delivered_at: stamp, assignments_omitted: false, server_time: stamp,
     components: [
       { component: 'runtime', generation: 1, observed_at: stamp, received_at: stamp, expires_at: expires, fresh: true, current: true, ready: true, reason: 'ready', clock_uncertain: false, downloaded: stage, downloaded_at: stamp },
       { component: 'runner', generation: 1, observed_at: stamp, received_at: stamp, expires_at: expires, fresh: true, current: true, ready: true, reason: 'ready', clock_uncertain: false, apps: { owner_recreated_at: '0001-01-01T00:00:00Z', desired_generation: 1, desired_digest: digest, staged: stage, published: stage, applied: stage, instances_total: 1, instances_omitted: 0, assignments: [{ revision_id: revision, generation: 1, activation_generation: 1, instances: 1, ready: 1, registered: 1, cleanup_pending: 0, node_expires_at: expires, probe_expires_at: expires }], instances: [{ revision_id: revision, generation: 1, activation_generation: 1, instance_id: 'instance-preserved', pod_uid: 'pod-preserved', runner_id: 'runner-preserved', app_id: 'app-preserved', phase: 'running', ready: true, registered: true, capacity: 4, sessions: 2, node_observed_at: stamp, node_expires_at: expires, startup_deadline: expires, probe: { observed_at: stamp, due_at: expires, expires_at: expires, success: true, failures: 0, started: true } }] } },
@@ -22,17 +21,17 @@ function evidence(): MachineObservation {
     ],
     assignments: [{ revision_id: revision, digest, name: 'whoami', version: '1', revision: 1, generation: 1, activation_generation: 1, desired: 'present', replicas: 1, start_allowed: true, completed_at: stamp, health: { type: 'http', interval: '5s', timeout: '2s', failure_threshold: 3 } }],
     tunnel: { enabled: true, ready: true, reason: 'ready', verified_at: stamp, expires_at: expires, cleanup_complete: false }, discovery_enabled: true, discovery_initialized: true, discovery_selection_stale: false, discovery_selection_expires_at: expires,
-    discovery_source: { state: 'fresh', selection_reason: 'selected', stale: false, expires_at: expires, failures: 0, last_success: stamp, transport_outcome: 'response_received', publication_blocked: false }, membership: { 'instance-preserved': { state: 'present', provenance_current: true, queried_at: stamp, observed_at: stamp, expires_at: expires } }, external_reachability: 'unverified' }
+    discovery_source: { state: 'fresh', selection_reason: 'selected', stale: false, expires_at: expires, failures: 0, last_success: stamp, transport_outcome: 'response_received', publication_blocked: false }, membership: { 'instance-preserved': { state: 'present', queried_at: stamp, observed_at: stamp, expires_at: expires } }, external_reachability: 'unverified' }
 }
 
 async function setup(page: Page, admin = false, reportState = 'observed', terminal = false) {
   const listedMachine = { ...machine, report_state: reportState, terminal }
-  const state = { view: evidence(), fail: false, hold: false, held: [] as Route[], reads: 0, statusEpochs: [] as string[], admin }
+  const state = { view: evidence(), fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], admin }
   if (terminal) { state.view.lifecycle = 'cleanup_pending'; state.view.assignments[0].desired = 'absent'; state.view.assignments[0].completed_at = null }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
     const fetch = window.fetch.bind(window)
-    window.fetch = (input, options) => fetch(input, String(input).includes('/status?') ? { ...options, signal: undefined } : options)
+    window.fetch = (input, options) => fetch(input, String(input).includes('/status') ? { ...options, signal: undefined } : options)
   }, session)
   await page.route('http://auth.test/**', route => route.fulfill({ json: session.user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', async route => {
@@ -43,14 +42,14 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
     if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], onchain_mode: 'offchain', next_after_name: null } })
     if (path === '/api/admin/machines') return route.fulfill({ json: { machines: [listedMachine] } })
-    if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [listedMachine, { ...machine, node_id: 'lp-bbbbbbbbbbbbbbbb', hostname: 'second-worker', epoch: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }] } })
-    if (path.startsWith('/api/admin/machines/') && path.endsWith('/apps')) return route.fulfill({ json: { epoch, assignments: [], apps_generation: 2, published_generation: 1, next_after_revision_id: null, last_config_fetch_at: null } })
+    if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [listedMachine, { ...machine, node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker', }] } })
+    if (path.startsWith('/api/admin/machines/') && path.endsWith('/apps')) return route.fulfill({ json: { assignments: [], apps_generation: 2, published_generation: 1, next_after_revision_id: null, last_config_fetch_at: null } })
     if (path.endsWith('/status')) {
       state.reads++
-      state.statusEpochs.push(new URL(route.request().url()).searchParams.get('epoch') || '')
+      state.statusNodes.push(path.split('/').at(-2) || '')
       if (state.hold) { state.held.push(route); return }
       if (state.fail) return route.fulfill({ status: 503, json: { error: 'Status refresh unavailable.' } })
-      const identity = path.includes('lp-bbbbbbbbbbbbbbbb') ? { node_id: 'lp-bbbbbbbbbbbbbbbb', epoch: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', hostname: 'second-worker' } : {}
+      const identity = path.includes('xo53xo53xo53waaaaaaaaaaaaa') ? { node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker' } : {}
       return route.fulfill({ json: { ...state.view, ...identity } })
     }
     return route.fulfill({ status: 404, json: { error: 'Not found' } })
@@ -205,27 +204,11 @@ test('fresh failing probe evidence expires on its configured schedule and recove
 
 for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} can inspect the original retired enrollment without app mutations`, async ({ page }) => {
   const state = await setup(page, admin, 'stale', true)
-  await expect.poll(() => state.statusEpochs[0]).toBe(epoch)
+  await expect.poll(() => state.statusNodes[0]).toBe(node)
   await expect(page.getByText('Desired removal', { exact: false })).toBeVisible()
   if (admin) await expect(page.getByRole('button', { name: 'Manage apps for worker-status' })).toHaveText('Inspect cleanup')
   else await expect(page.getByText('Cleanup pending', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Assign selected revision', exact: true })).toHaveCount(0)
-})
-
-test('expired inventory preserves its unverified source-version explanation', async ({ page }) => {
-  await page.clock.install()
-  const state = await setup(page)
-  const membership = state.view.membership['instance-preserved']
-  membership.state = 'unverified_provenance'; membership.provenance_current = false
-  membership.expires_at = new Date(Date.parse(state.view.server_time) + 1000).toISOString()
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await page.getByText('Instance evidence and correlation (1)').click()
-  await expect(page.getByText('Retained inventory has no confirmation for the current source version', { exact: false })).toBeVisible()
-  state.fail = true
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(page.getByText('Status refresh unavailable.', { exact: true })).toBeVisible()
-  await page.clock.fastForward(2000)
-  await expect(page.getByText('Retained inventory has no confirmation for the current source version', { exact: false })).toBeVisible()
 })
 
 test('onchain readiness stays separate from remote handoff', async ({ page }) => {

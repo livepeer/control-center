@@ -20,7 +20,7 @@ func TestPinnedCloudflaredIngress(t *testing.T) {
 	if e != nil || !strings.Contains(string(v), "version 2026.10.7 ") {
 		t.Fatal("requires pinned cloudflared", e)
 	}
-	rules := ingressFor(RoutingFor("lp-aaaaaaaaaaaaaaaa", "example.invalid", "aaaaaaa").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "audience")
+	rules := ingressFor(RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "audience")
 	data, _ := json.Marshal(map[string]any{"ingress": rules})
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if e := os.WriteFile(path, data, 0600); e != nil {
@@ -30,29 +30,28 @@ func TestPinnedCloudflaredIngress(t *testing.T) {
 		t.Fatalf("invalid pinned ingress: %s (%v)", out, err)
 	}
 	for _, fixture := range []struct{ host, path, service string }{
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/discovery", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/prefix/discovery", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/runners/heartbeat", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/runner/a/session/b/channels", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/session", ConnectorOrigin},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/session/b/payment", ConnectorOrigin},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/app/v1", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/session/b/app", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/session/b/app/ws", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/run/a/x", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/proxy/a", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/refresh-payment", ConnectorOrigin},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/ai/trickle/a/0", "http_status:404"},
-		{"api-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/unknown", "http_status:404"},
-		{"api.lp-aaaaaaaaaaaaaaaa", "/apps/a/session", "http_status:404"},
-		{"discovery.lp-aaaaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
-		{"p.lp-aaaaaaaaaaaaaaaa", "/discovery", "http_status:404"},
-		{"p.lp-aaaaaaaaaaaaaaaa", "/app/discovery", "http_status:404"},
-		{"p.lp-aaaaaaaaaaaaaaaa", "/readyz", "http_status:404"},
-		{"p.lp-aaaaaaaaaaaaaaaa", "/v1/completions", ConnectorOrigin},
-		{"discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/discovery", ConnectorOrigin},
-		{"discovery-aaaaaaa.lp-aaaaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/discovery", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/prefix/discovery", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/runners/heartbeat", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/runner/a/session/b/channels", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session", ConnectorOrigin},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/payment", ConnectorOrigin},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app/v1", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/app", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/app/ws", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/run/a/x", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/proxy/a", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/refresh-payment", ConnectorOrigin},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/ai/trickle/a/0", "http_status:404"},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/unknown", "http_status:404"},
+		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
+		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/discovery", "http_status:404"},
+		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/app/discovery", "http_status:404"},
+		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/readyz", "http_status:404"},
+		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/v1/completions", ConnectorOrigin},
+		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/discovery", ConnectorOrigin},
+		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
 		{"alias", "/discovery", "http_status:404"},
 	} {
 		t.Run(fixture.host+fixture.path, func(t *testing.T) {

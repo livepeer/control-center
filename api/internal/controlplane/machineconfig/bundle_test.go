@@ -11,7 +11,7 @@ import (
 )
 
 func TestConfigurationBundle(t *testing.T) {
-	m := Desired{Machine: Machine{NodeID: "lp-" + strings.Repeat("a", 16), Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64)}
+	m := Desired{Machine: Machine{NodeID: strings.Repeat("a", 26), CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64)}
 	first, digest, err := Build(m)
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +37,17 @@ func TestConfigurationBundle(t *testing.T) {
 	}
 	if strings.Contains(files["system/node/orchestrator.yaml"], "@INSTALL_DIR@") || strings.Contains(files["system/node/orchestrator.yaml"], "@NODE_ID@") || !strings.Contains(files["system/node/orchestrator.yaml"], "/srv/livepeer/volumes/orchestrator") {
 		t.Fatal("incorrect machine rendering")
+	}
+	reenrolled := m
+	reenrolled.NodeID = strings.Repeat("b", 26)
+	fresh, _, err := Build(reenrolled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPV := strings.Split(files["system/node/orchestrator.yaml"], "---")[1]
+	newPV := strings.Split(archiveFiles(t, fresh)["system/node/orchestrator.yaml"], "---")[1]
+	if oldPV != newPV {
+		t.Fatal("re-enrollment changed the retained local volume")
 	}
 	if !strings.Contains(files["upgrade-plan/plan.yaml"], m.K3sVersion) {
 		t.Fatal("upgrade plan version missing")

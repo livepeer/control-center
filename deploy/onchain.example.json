@@ -1,7 +1,7 @@
 {
   "version": 1,
   "machines": {
-    "lp-aaaaaaaaaaaaaaaa": {
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
       "version": 1,
       "credential_revision": 1,
       "mode": "onchain",
@@ -18,6 +18,6 @@
       "max_pending_tickets": 100000,
       "max_tickets_per_recipient": 10000
     },
-    "lp-bbbbbbbbbbbbbbbb": {"version": 1, "mode": "offchain"}
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"version": 1, "mode": "offchain"}
   }
 }

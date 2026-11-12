@@ -39,13 +39,13 @@ func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var bundle []byte
-	e = tx.QueryRowContext(r.Context(), `SELECT c.bundle FROM lpcc.machines m JOIN lpcc.machine_configs c USING(node_id) WHERE m.node_id=$1 AND m.enrollment_epoch=$2 AND m.credential_version=$3 FOR UPDATE OF m`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&bundle)
+	e = tx.QueryRowContext(r.Context(), `SELECT c.bundle FROM lpcc.machines m JOIN lpcc.machine_configs c USING(node_id) WHERE m.node_id=$1 AND m.credential_version=$2 FOR UPDATE OF m`, m.NodeID, m.CredentialVersion).Scan(&bundle)
 	if e != nil {
 		fail(w, 409, "configuration or enrollment changed")
 		return
 	}
 	metadata, _, e := machineconfig.ReadApplied(bundle)
-	if e != nil || metadata.Epoch != m.Epoch || metadata.CredentialVersion != m.CredentialVersion || !metadata.Onchain.Onchain() || metadata.Onchain.Generation != in.OnchainGeneration || metadata.ConfigDigest != in.ConfigDigest {
+	if e != nil || metadata.NodeID != m.NodeID || metadata.CredentialVersion != m.CredentialVersion || !metadata.Onchain.Onchain() || metadata.Onchain.Generation != in.OnchainGeneration || metadata.ConfigDigest != in.ConfigDigest {
 		fail(w, 409, "onchain configuration changed")
 		return
 	}
@@ -55,13 +55,13 @@ func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var initialized bool
-	if e = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT FROM lpcc.onchain_grants WHERE node_id=$1 AND ready_at IS NOT NULL)`, m.NodeID).Scan(&initialized); e != nil {
+	if e = tx.QueryRowContext(r.Context(), `SELECT initialized FROM lpcc.onchain_state WHERE fingerprint=(SELECT fingerprint FROM lpcc.enrollments WHERE node_id=$1)`, m.NodeID).Scan(&initialized); e != nil {
 		s.databaseError(w, e)
 		return
 	}
 	id := uuid.New().String()
 	var revoked sql.NullTime
-	e = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.onchain_grants(grant_id,node_id,epoch,onchain_generation,config_digest,pod_uid,launch_id,process_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(node_id,epoch,onchain_generation,pod_uid,launch_id,process_id) DO UPDATE SET grant_id=lpcc.onchain_grants.grant_id RETURNING grant_id::text,revoked_at`, id, m.NodeID, m.Epoch, in.OnchainGeneration, in.ConfigDigest, in.PodUID, in.LaunchID, in.ProcessID).Scan(&id, &revoked)
+	e = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.onchain_grants(grant_id,node_id,onchain_generation,config_digest,pod_uid,launch_id,process_id) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,onchain_generation,pod_uid,launch_id,process_id) DO UPDATE SET grant_id=lpcc.onchain_grants.grant_id RETURNING grant_id::text,revoked_at`, id, m.NodeID, in.OnchainGeneration, in.ConfigDigest, in.PodUID, in.LaunchID, in.ProcessID).Scan(&id, &revoked)
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -74,7 +74,7 @@ func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	respond(w, 200, consumer.Grant{Association: consumer.Association{Launch: in.Launch, Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, OnchainGeneration: in.OnchainGeneration, ConfigDigest: in.ConfigDigest, GrantID: id}, RequireState: initialized, RPCURL: string(rpc), Headers: "Authorization: Bearer " + s.submissionToken(id)})
+	respond(w, 200, consumer.Grant{Association: consumer.Association{Launch: in.Launch, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, OnchainGeneration: in.OnchainGeneration, ConfigDigest: in.ConfigDigest, GrantID: id}, RequireState: initialized, RPCURL: string(rpc), Headers: "Authorization: Bearer " + s.submissionToken(id)})
 }
 
 func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +111,7 @@ func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
 	allowed := count == 1 && ok && appID(id) && len(s.params.MachineTokenSecret) >= 32 && hmac.Equal([]byte(token), []byte(s.submissionToken(id))) && json.Unmarshal(in.Ticket, &ticket) == nil && onchain.Address.MatchString(ticket.Recipient)
 	if allowed {
 		var recipient string
-		e := s.db.QueryRowContext(r.Context(), `SELECT v.config->>'recipient' FROM lpcc.onchain_grants g JOIN lpcc.onchain_configs v ON v.node_id=g.node_id AND v.generation=g.onchain_generation JOIN lpcc.machines m ON m.node_id=g.node_id AND m.enrollment_epoch=g.epoch WHERE g.grant_id=$1 AND g.revoked_at IS NULL`, id).Scan(&recipient)
+		e := s.db.QueryRowContext(r.Context(), `SELECT v.config->>'recipient' FROM lpcc.onchain_grants g JOIN lpcc.enrollments e ON e.node_id=g.node_id JOIN lpcc.onchain_configs v ON v.fingerprint=e.fingerprint AND v.generation=g.onchain_generation JOIN lpcc.machines m ON m.node_id=g.node_id WHERE g.grant_id=$1 AND g.revoked_at IS NULL`, id).Scan(&recipient)
 		allowed = e == nil && strings.EqualFold(recipient, ticket.Recipient)
 	}
 	status := 403

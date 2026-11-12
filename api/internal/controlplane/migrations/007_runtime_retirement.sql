@@ -8,7 +8,7 @@ CREATE FUNCTION lpcc.capture_runtime_retirement() RETURNS trigger LANGUAGE plpgs
 BEGIN
  UPDATE lpcc.enrollments e SET retained_bundle=c.bundle
  FROM lpcc.machine_configs c
- WHERE e.node_id=OLD.node_id AND e.epoch=OLD.enrollment_epoch AND c.node_id=OLD.node_id
+ WHERE e.node_id=OLD.node_id AND c.node_id=OLD.node_id
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;

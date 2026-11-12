@@ -1,12 +1,9 @@
 package tunnel
 
 import (
-	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"regexp"
 	"slices"
 	"testing"
 	"time"
@@ -75,37 +72,6 @@ func certificateTestLease(t *testing.T) (*Manager, *certificateFixture, *tunnelL
 	}
 	t.Cleanup(func() { l.Lease.Release(context.Background()) })
 	return s, f, l
-}
-func TestEndpointSuffixPersistenceAndRandomFailure(t *testing.T) {
-	s, _, l := claimTestTunnel(t)
-	if !regexp.MustCompile(`^[a-z2-7]{7}$`).MatchString(l.state.EndpointSuffix) {
-		t.Fatal("invalid base32 suffix")
-	}
-	first := l.state.EndpointSuffix
-	s.endpointRandom = bytes.NewReader(nil)
-	if _, err := s.claimTunnel(t.Context(), l.Machine); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatal("concurrent worker acquired enrollment", err)
-	}
-	l.Lease.Release(t.Context())
-	next, err := s.claimTunnel(t.Context(), l.Machine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer next.Lease.Release(t.Context())
-	if next.state.EndpointSuffix != first || next.state.ServiceURL != l.state.ServiceURL {
-		t.Fatal("retry changed endpoint identity")
-	}
-	m := l.Machine
-	m.Epoch = uuid.New().String()
-	if _, err = s.newEndpointSuffix(t.Context(), m); err == nil {
-		t.Fatal("randomness failure ignored")
-	}
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{endpoint_suffix}','"aaaaaaa"') WHERE node_id=$1`, m.NodeID)
-	s.endpointRandom = bytes.NewReader([]byte{0, 0, 0, 0, 255, 255, 255, 255})
-	suffix, err := s.newEndpointSuffix(t.Context(), m)
-	if err != nil || suffix != "777777y" {
-		t.Fatal("previous enrollment suffix was not resampled", suffix, err)
-	}
 }
 func TestCertificateLostOrderPendingValidationAndCoverage(t *testing.T) {
 	s, f, l := certificateTestLease(t)

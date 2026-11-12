@@ -16,6 +16,9 @@ func (s *Server) newConfigurationManager() *machineconfig.Manager {
 	p := s.params
 	return machineconfig.New(machineconfig.Config{APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
 		Onchain: func(ctx context.Context, m machineconfig.Machine) (onchain.Config, error) {
+			if m.Fingerprint != "" {
+				return loadInstallationOnchain(ctx, s.db, "$1", m.Fingerprint)
+			}
 			return loadOnchain(ctx, s.db, m.NodeID)
 		},
 		Exposure: func(raw json.RawMessage) (*machineconfig.Exposure, error) {
@@ -28,5 +31,5 @@ func (s *Server) newConfigurationManager() *machineconfig.Manager {
 }
 
 func configurationMachine(m Machine) machineconfig.Machine {
-	return machineconfig.Machine{NodeID: m.NodeID, Epoch: m.Epoch, InstallDir: m.InstallDir, K3sVersion: m.K3sVersion, CredentialVersion: m.CredentialVersion, Terminal: m.Terminal}
+	return machineconfig.Machine{NodeID: m.NodeID, Fingerprint: m.Fingerprint, InstallDir: m.InstallDir, K3sVersion: m.K3sVersion, CredentialVersion: m.CredentialVersion, Terminal: m.Terminal}
 }

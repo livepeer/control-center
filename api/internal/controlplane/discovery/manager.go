@@ -32,11 +32,8 @@ type Manager struct {
 	configured          []Source
 	reconciledAt        time.Time
 	reconcileFailed     bool
-	acknowledged        map[string]bool
 	refreshes, failures uint64
 	refreshDuration     time.Duration
-	pendingRefresh      map[string]uint64
-	provenance          map[string]snapshotProvenance
 }
 
 func New(config Config, deps Dependencies) (*Manager, error) {
@@ -60,7 +57,7 @@ func New(config Config, deps Dependencies) (*Manager, error) {
 	}
 	t := &transport{base: base}
 	f := &Manager{transport: t, backend: deps.Store, logger: logger, interval: config.RefreshInterval,
-		selectionInterval: config.ReconcileInterval, instanceID: uuid.New().String(), acknowledged: map[string]bool{}, pendingRefresh: map[string]uint64{}}
+		selectionInterval: config.ReconcileInterval, instanceID: uuid.New().String()}
 	if own, err := url.Parse(config.OwnURL); err == nil && own.Host != "" {
 		own.Path = "/discovery"
 		own.RawPath = ""
@@ -80,32 +77,12 @@ func New(config Config, deps Dependencies) (*Manager, error) {
 				f.failures++
 			}
 		}}
-	t.before = f.observation
 	return f, nil
 }
 
 // Run owns the polling worker. Run once, then Close/join before discarding it.
 func (f *Manager) Run(ctx context.Context) { f.collector.Run(ctx, f.interval) }
 func (f *Manager) Close()                  { f.collector.Close() }
-func (f *Manager) observation(endpoint string) time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.transport.mu.Lock()
-	defer f.transport.mu.Unlock()
-	for _, snapshot := range f.collector.Snapshots() {
-		if snapshot.URL == endpoint {
-			// Preserve the previous decode's provenance before a new attempt
-			// replaces its transport marker, even if nobody has read status.
-			for _, source := range f.selected {
-				if source.URL == endpoint {
-					f.snapshotCurrent(source, snapshot, f.transport.attempts[endpoint])
-				}
-			}
-			return snapshot.QueriedAt
-		}
-	}
-	return time.Time{}
-}
 
 // A raw runner preserves extension fields and the original numeric/timestamp
 // tokens. Node's shared codec alone validates and merges inventory records.
@@ -166,7 +143,7 @@ func (r runner) DiscoveryIdentity() (string, string, string) {
 
 type publishedRunner struct {
 	runner
-	sourceID  string
+	nodeID    string
 	queriedAt time.Time
 }
 
@@ -190,7 +167,7 @@ func (f *Manager) publicInventory(snapshots []shared.Snapshot[runner]) []shared.
 			published := shared.Entry[publishedRunner]{Address: entry.Address, Runners: []publishedRunner{}}
 			for _, candidate := range entry.Runners {
 				if publicRunnerURL(source, candidate.URL) {
-					published.Runners = append(published.Runners, publishedRunner{candidate, source.ID, snapshot.QueriedAt})
+					published.Runners = append(published.Runners, publishedRunner{candidate, source.NodeID, snapshot.QueriedAt})
 				}
 			}
 			entries = append(entries, published)

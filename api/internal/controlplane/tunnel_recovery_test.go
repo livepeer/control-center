@@ -27,10 +27,10 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			old := tunnel.RoutingFor(m.NodeID, "example.invalid", "aaaaaaa")
+			old := tunnel.RoutingFor(m.NodeID, "example.invalid")
 			raw, _ := json.Marshal(old.RoutingState)
 			rollout, _ := json.Marshal(old.State)
-			execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,epoch,state,rollout) VALUES($1,$2,$3,$4)`, m.NodeID, m.Epoch, string(raw), string(rollout))
+			execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,state,rollout) VALUES($1,$2,$3)`, m.NodeID, string(raw), string(rollout))
 			if e = s.reconcile(t.Context()); e != nil {
 				t.Fatal(e)
 			}
@@ -56,13 +56,13 @@ func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
 				if _, e = tx.Exec(`UPDATE lpcc.machines SET credential_version=$2 WHERE node_id=$1`, m.NodeID, m.CredentialVersion); e != nil {
 					t.Fatal(e)
 				}
-				if _, e = tx.Exec(`UPDATE lpcc.enrollments SET credential_version=$3 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, m.CredentialVersion); e != nil {
+				if _, e = tx.Exec(`UPDATE lpcc.enrollments SET credential_version=$2 WHERE node_id=$1`, m.NodeID, m.CredentialVersion); e != nil {
 					t.Fatal(e)
 				}
 			} else {
 				raw, _ = json.Marshal(newer.RoutingState)
 				rollout, _ = json.Marshal(newer.State)
-				if _, e = tx.Exec(`UPDATE lpcc.machine_states SET state=$3,rollout=$4,revision=revision+1 WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch, string(raw), string(rollout)); e != nil {
+				if _, e = tx.Exec(`UPDATE lpcc.machine_states SET state=$2,rollout=$3,revision=revision+1 WHERE node_id=$1`, m.NodeID, string(raw), string(rollout)); e != nil {
 					t.Fatal(e)
 				}
 			}
@@ -144,19 +144,19 @@ func TestOfflineSecurityMaintenanceAndRotationRecovery(t *testing.T) {
 			adminA(t, s)
 			path := "/api/admin/machines/" + c["node_id"] + "/tunnel/rotate"
 			for _, kind := range []string{"connector", "access"} {
-				requireStatus(t, request(t, s, "POST", path, "session-a", map[string]any{"epoch": c["epoch"], "kind": kind, "compromised": true}), 202)
+				requireStatus(t, request(t, s, "POST", path, "session-a", map[string]any{"kind": kind, "compromised": true}), 202)
 			}
 			execSQL(t, s.db, `UPDATE lpcc.machine_reports SET received_at=now()-interval '1 hour'`)
 			driveTunnels(t, s)
 			driveTunnels(t, s)
-			current, _, e := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			current, _, e := s.loadTunnel(t.Context(), c["node_id"])
 			if e != nil || current.CredentialGeneration != initial.CredentialGeneration+1 || current.AccessVersion != initial.AccessVersion+1 || current.Ready || base.disconnected != 1 {
 				t.Fatal(current, base.disconnected, e)
 			}
 			if f.calls != map[bool]int{false: 2, true: 1}[lose] {
 				t.Fatal("rotation replayed after success", f.calls)
 			}
-			if _, e = s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], c["epoch"], initial.AccessVersion)); e == nil {
+			if _, e = s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], initial.AccessVersion)); e == nil {
 				t.Fatal("compromised credential still resolves")
 			}
 			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/tunnel/connector-token", c["token"], map[string]any{}), 409)
@@ -169,18 +169,18 @@ func TestExpiredUnacknowledgedAccessVersionsRecover(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("5", 64))
 	initial := readyTunnel(t, s, c)
 	adminA(t, s)
-	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": c["epoch"], "kind": "access"}), 202)
+	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "access"}), 202)
 	driveTunnels(t, s)
 	if n := count(t, s, `SELECT count(*) FROM lpcc.access_credentials WHERE revoked_at IS NULL`); n != 2 {
 		t.Fatal(n)
 	}
 	execSQL(t, s.db, `UPDATE lpcc.access_credentials SET expires_at=now()-interval '1 minute'`)
 	driveTunnels(t, s)
-	current, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	current, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if current.AccessVersion != initial.AccessVersion+2 {
 		t.Fatal(current)
 	}
-	if _, e := s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], c["epoch"], current.AccessVersion)); e != nil {
+	if _, e := s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], current.AccessVersion)); e != nil {
 		t.Fatal(e)
 	}
 	sources, e := s.tunnels.DiscoverySources(t.Context())
@@ -219,7 +219,7 @@ func TestEndpointFailurePreservesConnectorAndRollbackReusesOwnership(t *testing.
 	if _, exists := f.certificatePacks[initial.CertificatePackID]; !exists {
 		t.Fatal("failed replacement deleted predecessor certificate coverage")
 	}
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	bundle := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
 	files := archiveFiles(t, bundle.Body.Bytes())
 	if !strings.Contains(files["system/connector/tunnel.yaml"], initial.ProxyURLTemplate) || !strings.Contains(files["system/connector/tunnel.yaml"], initial.ServiceURL) {
@@ -256,16 +256,16 @@ func TestLateDrainReportNeedsAuditedRetry(t *testing.T) {
 	readyTunnel(t, s, c)
 	adminA(t, s)
 	path := "/api/admin/machines/" + c["node_id"]
-	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"epoch": c["epoch"]}), 202)
+	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
 	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if state.Reason != "drain_timeout" || count(t, s, `SELECT count(*) FROM lpcc.machines`) != 1 {
 		t.Fatal("late report crossed drain deadline", state)
 	}
-	requireStatus(t, request(t, s, "POST", path+"/drain/retry", "session-a", map[string]any{"epoch": c["epoch"], "generation": state.Generation - 1}), 409)
-	requireStatus(t, request(t, s, "POST", path+"/drain/retry", "session-a", map[string]any{"epoch": c["epoch"], "generation": state.Generation}), 202)
+	requireStatus(t, request(t, s, "POST", path+"/drain/retry", "session-a", map[string]any{"generation": state.Generation - 1}), 409)
+	requireStatus(t, request(t, s, "POST", path+"/drain/retry", "session-a", map[string]any{"generation": state.Generation}), 202)
 	driveTunnels(t, s)
 	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 1 {
 		t.Fatal("old drain report satisfied new generation")
@@ -328,11 +328,11 @@ func TestOfflineAccessReplacementStatusSurvivesFailure(t *testing.T) {
 				reason, recovered = "access_credential_expired", ""
 			} else {
 				adminA(t, s)
-				requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": c["epoch"], "kind": "access"}), 202)
+				requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "access"}), 202)
 			}
 			for i := 0; i < 2; i++ {
 				driveTunnels(t, s)
-				state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+				state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 				if state.AccessVersion != initial.AccessVersion+1 || state.Reason != "runtime_offline" || state.RotationReason != reason {
 					t.Fatal("lost credential failure cause", state)
 				}
@@ -341,7 +341,7 @@ func TestOfflineAccessReplacementStatusSurvivesFailure(t *testing.T) {
 			// Allow the persisted retry deadline without waiting in the test.
 			execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,token-2,attempt_at}',to_jsonb($1::text))`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 			driveTunnels(t, s)
-			state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 			if state.Reason != "runtime_offline" || state.RotationReason != recovered || state.Ready {
 				t.Fatal("recovery lost independent Runtime state", state)
 			}
@@ -357,7 +357,7 @@ func (f *dnsDeleteFailure) Delete(ctx context.Context, r tunnel.CFResource, targ
 	}
 	return f.simulatedCloudflare.Delete(ctx, r, target)
 }
-func TestLateRetiredResultWithdrawsSuccessorReadiness(t *testing.T) {
+func TestLateRetiredResultCannotAffectReplacementReadiness(t *testing.T) {
 	s, base := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("c", 64))
 	old := readyTunnel(t, s, c)
@@ -372,7 +372,7 @@ func TestLateRetiredResultWithdrawsSuccessorReadiness(t *testing.T) {
 	readyTunnel(t, s, newC)
 	late.ID = "late-old-dns"
 	base.resources[late.ID] = late
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,g1-dns-0,audit_after}',to_jsonb($1::text)) WHERE epoch=$2`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano), c["epoch"])
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,g1-dns-0,audit_after}',to_jsonb($1::text)) WHERE node_id=$2`, time.Now().Add(-time.Hour).Format(time.RFC3339Nano), c["node_id"])
 	testTunnelDeps(s).Provider = &dnsDeleteFailure{base}
 	configureTestTunnels(t, s)
 	// Two passes remove dependence on enrollment row enumeration order.
@@ -382,10 +382,17 @@ func TestLateRetiredResultWithdrawsSuccessorReadiness(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	found := false
 	for _, source := range sources {
-		if source.Epoch == newC["epoch"] && (source.Ready || source.Reason != "predecessor_cleanup_pending") {
-			t.Fatal("advertised successor with unresolved predecessor", source)
+		if source.NodeID == newC["node_id"] {
+			found = true
+			if !source.Ready {
+				t.Fatal("retired node cleanup changed replacement readiness", source)
+			}
 		}
+	}
+	if !found {
+		t.Fatal("replacement source was removed by old cleanup")
 	}
 	testTunnelDeps(s).Provider = base
 	configureTestTunnels(t, s)
@@ -415,7 +422,7 @@ func TestOfflineAcknowledgementRetiresOverlapAndPermitsNextRotation(t *testing.T
 	readyTunnel(t, s, c)
 	adminA(t, s)
 	path := "/api/admin/machines/" + c["node_id"] + "/tunnel/rotate"
-	rotate := map[string]any{"epoch": c["epoch"], "kind": "access"}
+	rotate := map[string]any{"kind": "access"}
 	requireStatus(t, request(t, s, "POST", path, "session-a", rotate), 202)
 	driveTunnels(t, s)
 	sources, e := s.tunnels.DiscoverySources(t.Context())
@@ -427,7 +434,7 @@ func TestOfflineAcknowledgementRetiresOverlapAndPermitsNextRotation(t *testing.T
 	}
 	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET received_at=now()-interval '1 hour'`)
 	driveTunnels(t, s)
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	current := state.Resources["token-2"].ID
 	if count(t, s, `SELECT count(*) FROM lpcc.access_credentials WHERE revoked_at IS NULL`) != 1 {
 		t.Fatal("acknowledged predecessor retained offline")
@@ -439,7 +446,7 @@ func TestOfflineAcknowledgementRetiresOverlapAndPermitsNextRotation(t *testing.T
 	}
 	requireStatus(t, request(t, s, "POST", path, "session-a", rotate), 202)
 	driveTunnels(t, s)
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 	if state.AccessVersion != 3 {
 		t.Fatal("acknowledged overlap blocked next rotation", state)
 	}
@@ -465,7 +472,7 @@ func TestEndpointDrainCancellationAndFailedStageRollback(t *testing.T) {
 			testTunnelDeps(s).Provider = f
 			configureTestTunnels(t, s)
 			driveTunnels(t, s)
-			current, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			current, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 			if current.DrainRequested || current.Target != "" || current.ServiceURL != initial.ServiceURL {
 				t.Fatal("obsolete endpoint drain survived rollback", current)
 			}
@@ -473,7 +480,7 @@ func TestEndpointDrainCancellationAndFailedStageRollback(t *testing.T) {
 			reportRuntime(t, s, c, "runtime", true)
 			reportRuntime(t, s, c, "connector", true)
 			driveTunnels(t, s)
-			current, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			current, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 			if !current.Ready {
 				t.Fatal("rollback to applied workload imposed another drain", current)
 			}
@@ -491,15 +498,15 @@ func TestUnfinishedEndpointDrainCannotResetItsDeadline(t *testing.T) {
 	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, old.Format(time.RFC3339Nano))
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if state.Reason != "drain_timeout" || state.ServiceURL != initial.ServiceURL || !state.DrainStartedAt.Equal(old) {
 		t.Fatal("same-target retry revived expired drain", state)
 	}
 	adminA(t, s)
-	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/drain/retry", "session-a", map[string]any{"epoch": c["epoch"], "generation": state.Generation}), 202)
+	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/drain/retry", "session-a", map[string]any{"generation": state.Generation}), 202)
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 	if state.ServiceURL == initial.ServiceURL {
 		t.Fatal("audited endpoint retry did not proceed", state)
 	}
@@ -533,13 +540,13 @@ func TestProtectionFailuresPreserveOrRestoreAppliedIngressOffline(t *testing.T) 
 	}
 	f.failure = tunnel.ErrUnsafeProtection
 	driveTunnels(t, s)
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if !state.Quarantined || len(base.configurations[initial.TunnelID]) != 1 {
 		t.Fatal("unsafe policy left routes exposed", state)
 	}
 	f.failure = nil
 	driveTunnels(t, s)
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 	if state.Quarantined || state.Reason != "runtime_offline" || ingressHash(base.configurations[initial.TunnelID]) != initial.IngressDigest {
 		t.Fatal("verified offline protection did not restore applied ingress", state)
 	}
@@ -576,7 +583,7 @@ func TestRemovalRevokesReconnectingConnectorAndResumesLostResponse(t *testing.T)
 			}
 			driveTunnels(t, s)
 			driveTunnels(t, s)
-			state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 			if !state.CleanupComplete || len(base.resources) != 0 {
 				t.Fatal("connector could reauthenticate during deletion", state, base.resources)
 			}
@@ -594,7 +601,7 @@ func TestModernIneligibleMachineCanCompleteRemoval(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("e", 64))
 	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false`)
 	adminA(t, s)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"epoch": c["epoch"]}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{}), 202)
 	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
 	driveTunnels(t, s)
@@ -618,24 +625,24 @@ func TestAcknowledgedRetirementCheckpointCanResumeReplacement(t *testing.T) {
 			}
 			if compromised {
 				adminA(t, s)
-				requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": c["epoch"], "kind": "access", "compromised": true}), 202)
+				requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "access", "compromised": true}), 202)
 			} else {
 				execSQL(t, s.db, `UPDATE lpcc.access_credentials SET expires_at=now()-interval '1 minute'`)
 			}
 			testTunnelDeps(s).Provider = &lostTokenCheckpoint{simulatedCloudflare: base, lostDelete: true}
 			configureTestTunnels(t, s)
 			driveTunnels(t, s)
-			checkpoint, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			checkpoint, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 			if checkpoint.AccessVersion != initial.AccessVersion || !checkpoint.Resources["token-1"].Absent || count(t, s, `SELECT count(*) FROM lpcc.access_credentials WHERE revoked_at IS NOT NULL AND acknowledged_at IS NOT NULL`) != 1 {
 				t.Fatal("retirement checkpoint was not reached", checkpoint)
 			}
 			// driveTunnels reloads the lease and JSON, including the retained old ack.
 			driveTunnels(t, s)
-			recovered, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+			recovered, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 			if recovered.AccessVersion != initial.AccessVersion+1 {
 				t.Fatal("old acknowledgement blocked replacement", recovered)
 			}
-			if _, e = s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], c["epoch"], recovered.AccessVersion)); e != nil {
+			if _, e = s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], recovered.AccessVersion)); e != nil {
 				t.Fatal(e)
 			}
 		})
@@ -678,7 +685,7 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 		t.Fatal(e)
 	}
 	driveTunnels(t, s)
-	state, revision, e := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, revision, e := s.loadTunnel(t.Context(), c["node_id"])
 	if e != nil || !state.CleanupComplete {
 		t.Fatal(state, e)
 	}
@@ -686,7 +693,7 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 	testTunnelDeps(s).Provider = f
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
-	_, after, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	_, after, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if f.inventories != 0 || after != revision {
 		t.Fatal("completed retirement ignored audit interval", f.inventories, revision, after)
 	}
@@ -696,7 +703,7 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 	if f.inventories == 0 {
 		t.Fatal("due watch was never inventoried")
 	}
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 	if !state.CleanupComplete || !time.Now().Before(state.Resources["tunnel"].AuditAfter) {
 		t.Fatal("empty audit did not reschedule", state)
 	}
@@ -708,12 +715,12 @@ func TestCompletedCleanupAuditsDueWatchesBeforeDeletingLateTunnel(t *testing.T) 
 	f.failDelete = true
 	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=jsonb_set(state,'{resources,tunnel,audit_after}',to_jsonb($1::text))`, overdue)
 	driveTunnels(t, s)
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 	if state.CleanupComplete || !state.ConnectorRevoked || f.rotations != 1 {
 		t.Fatal("late tunnel bypassed revocation", state, f.rotations)
 	}
 	driveTunnels(t, s)
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
 	if !state.CleanupComplete || len(base.resources) != 0 || f.rotations != 1 {
 		t.Fatal("reopened cleanup did not resume", state, f.rotations)
 	}

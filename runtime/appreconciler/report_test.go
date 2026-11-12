@@ -114,11 +114,10 @@ func TestRetainedHeartbeatCountsDoNotBecomeWithdrawalProof(t *testing.T) {
 	c, _, _, _, r, now := fixtureController(t)
 	c.Journal.Update(func(s *State) error {
 		s.Identity = Identity{RunnerID: "owner", Credential: "issued", Confirmed: true}
-		s.OwnerEpoch = "epoch"
 		s.Instances["retained"] = &Instance{ID: "retained", AppID: "app", PodUID: "uid", WithdrawalID: "withdrawal", Phase: "removed"}
 		return nil
 	})
-	obs := Observation{RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, Sequence: 1, Epoch: "epoch", At: *now, TTL: time.Minute, Apps: []AppObservation{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}}}
+	obs := Observation{RunnerID: "owner", Credential: "issued", PreviousCredential: "issued", Accepted: true, Sequence: 1, At: *now, TTL: time.Minute, Apps: []AppObservation{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}}}
 	if err := c.observe(obs); err != nil {
 		t.Fatal(err)
 	}

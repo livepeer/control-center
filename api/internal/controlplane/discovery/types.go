@@ -53,9 +53,7 @@ type Credential struct {
 }
 
 type Source struct {
-	ID                 string `json:"id"`
 	NodeID             string `json:"node_id"`
-	Epoch              string `json:"epoch"`
 	URL                string `json:"url"`
 	ServiceURL         string `json:"service_url"`
 	ProxyURLTemplate   string `json:"proxy_url_template"`

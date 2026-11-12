@@ -144,7 +144,7 @@ LIVEPEER_RUNTIME_IMAGE=$RUNTIME_IMAGE
 curl() {
   local digest
   digest=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
-  printf '{"node_id":"lp-%s","token":"%s","config_url":"%s","epoch":"11111111-1111-4111-8111-111111111111","credential_version":1}' "${digest:0:16}" "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/lp-${digest:0:16}/config}"
+  printf '{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","token":"%s","config_url":"%s","credential_version":1}' "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/config}"
   printf '\\n200'
 }
 '''
@@ -237,7 +237,7 @@ authenticate_node; prepare_installation
                  for p in (target / 'credentials').iterdir()}
         result = self.shell(enroll, str(target))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex((target / 'credentials/node-id').read_text(), r'^lp-[a-f0-9]{16}$')
+        self.assertRegex((target / 'credentials/node-id').read_text(), r'^[a-z2-7]{26}$')
         self.assertRegex((target / 'credentials/service-token').read_text(), r'^[a-f0-9]{64}$')
         for path, original in saved.items():
             self.assertEqual((path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns), original)
@@ -372,9 +372,9 @@ class EnrollmentHTTPTests(TempTest):
                 received['authorization'] = self.headers.get('Authorization')
                 received['body'] = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 fingerprint = received['body']['fingerprint']
-                response = {'node_id': 'lp-' + fingerprint[:16], 'token': 'c' * 64,
-                            'config_url': 'https://api.example/v1/nodes/lp-' + fingerprint[:16] + '/config',
-                            'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}
+                response = {'node_id': 'a' * 26, 'token': 'c' * 64,
+                            'config_url': 'https://api.example/v1/nodes/' + 'a' * 26 + '/config',
+                            'credential_version': 1}
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(json.dumps(response).encode())
@@ -430,7 +430,7 @@ authenticate_node
                 pass
             def do_POST(self):
                 metadata = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                node_id = 'lp-' + metadata['fingerprint'][:16]
+                node_id = 'a' * 26
                 self.send_response(307)
                 self.send_header('Location', destination + '/capture')
                 self.end_headers()

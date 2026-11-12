@@ -3,11 +3,9 @@ package tunnel
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -23,7 +21,6 @@ type Dependencies struct {
 	Configurations  *machineconfig.Manager
 	Provider        TunnelProvider
 	VerifyEndpoints func(context.Context, RoutingState, AccessCredential) error
-	EndpointRandom  io.Reader
 }
 
 type Manager struct {
@@ -34,18 +31,14 @@ type Manager struct {
 	provider         TunnelProvider
 	keys             *accessKeyring
 	endpointVerifier func(context.Context, RoutingState, AccessCredential) error
-	endpointRandom   io.Reader
 }
 
 // New also supports reading persisted state while provisioning is disabled.
 // Configure enables provisioning; ConfigureCredentials enables credential reads.
 // Both are startup operations and must finish before workers start.
 func New(config Config, deps Dependencies) *Manager {
-	if deps.EndpointRandom == nil {
-		deps.EndpointRandom = rand.Reader
-	}
 	return &Manager{db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
-		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints, endpointRandom: deps.EndpointRandom}
+		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints}
 }
 
 func (s *Manager) Configure(publicAPIURL string) error {

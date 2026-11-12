@@ -76,17 +76,18 @@ parse_args() {
 # Enrollment credentials are separate from the short-lived bootstrap JWT.
 # Reruns reuse the saved machine credential and never require another JWT.
 authenticate_node() {
-  local credentials="$INSTALL_DIR/credentials" key fingerprint request response api status
-  NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; ENROLLMENT_EPOCH=''; CREDENTIAL_VERSION=0
+  local credentials="$INSTALL_DIR/credentials" key request response api status
+  NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; IDENTITY_NODE_ID=''; INSTALLATION_FINGERPRINT=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
     ENROLLMENT_TOKEN=''
-    for key in node-id service-token config-url; do
+    for key in node-id service-token config-url fingerprint; do
       [[ -f "$credentials/$key" && -s "$credentials/$key" ]] || die "saved credential is missing or invalid: $key; restore it from backup"
     done
     if [[ -f "$INSTALL_DIR/state/enrolled" || -e "$credentials/runner-bootstrap.secret" ]]; then
       [[ -f "$credentials/runner-bootstrap.secret" && -s "$credentials/runner-bootstrap.secret" ]] || die 'runner bootstrap credential is missing or invalid; restore it from backup'
     fi
     NODE_ID=$(cat "$credentials/node-id")
+    INSTALLATION_FINGERPRINT=$(cat "$credentials/fingerprint")
     SERVICE_TOKEN=$(cat "$credentials/service-token")
     CONFIG_URL=$(cat "$credentials/config-url")
     if [[ ! -s "$credentials/identity.json" ]] || ! read_identity "$(cat "$credentials/identity.json")"; then
@@ -98,9 +99,9 @@ authenticate_node() {
     api=$(api_url)
     [[ "$api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS; development HTTP must be explicit'
     [[ -s /etc/machine-id ]] || die '/etc/machine-id must be initialized'
-    fingerprint=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
-    fingerprint=${fingerprint:0:64}
-    request=$(jq -nc --arg fingerprint "$fingerprint" --arg hostname "$(hostname)" \
+    INSTALLATION_FINGERPRINT=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
+    INSTALLATION_FINGERPRINT=${INSTALLATION_FINGERPRINT:0:64}
+    request=$(jq -nc --arg fingerprint "$INSTALLATION_FINGERPRINT" --arg hostname "$(hostname)" \
       --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" --argjson development_http "${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0}" \
       '{fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$k3s_version,development_http:($development_http==1)}')
     log 'Registering machine with the Livepeer API.'
@@ -125,9 +126,10 @@ authenticate_node() {
     if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} != 1 ]]; then
       [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" ]] || die 'enrollment returned invalid HTTPS configuration URL'
     fi
-    [[ "$NODE_ID" == "lp-${fingerprint:0:16}" ]] || die 'enrollment returned an unexpected node identity'
   fi
-  [[ "$NODE_ID" =~ ^lp-[a-f0-9]{16}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
+  [[ "$INSTALLATION_FINGERPRINT" =~ ^[a-f0-9]{64}$ ]] || die 'invalid installation fingerprint'
+  [[ "$IDENTITY_NODE_ID" == "$NODE_ID" ]] || die 'saved identity does not match the node'
+  [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
   [[ "$CONFIG_URL" =~ ^https?://[a-zA-Z0-9/_.:-]+$ ]] || die 'invalid configuration URL'
   [[ "$CONFIG_URL" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'saved HTTP credential requires --refresh-credentials over HTTPS'
   [[ ! "${CONFIG_URL,,}" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]] ||
@@ -177,6 +179,7 @@ prepare_installation() {
     "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   chmod 0700 "$INSTALL_DIR/k3s" "$INSTALL_DIR/kubelet"
+  write_once "$INSTALL_DIR/credentials/fingerprint" "$INSTALLATION_FINGERPRINT"
   write_once "$INSTALL_DIR/credentials/node-id" "$NODE_ID"
   write_once "$INSTALL_DIR/credentials/service-token" "$SERVICE_TOKEN"
   write_once "$INSTALL_DIR/credentials/config-url" "$CONFIG_URL"

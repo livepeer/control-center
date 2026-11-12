@@ -202,8 +202,8 @@ func ingressHash(r []tunnel.IngressRule) string {
 	return hex.EncodeToString(h[:])
 }
 
-func credentialRef(node, epoch string, version int64) string {
-	return "access/" + node + "/" + epoch + "/" + strconv.FormatInt(version, 10)
+func credentialRef(node string, version int64) string {
+	return "access/" + node + "/" + strconv.FormatInt(version, 10)
 }
 
 func driveTunnels(t *testing.T, s *Server) {
@@ -227,12 +227,12 @@ func reportRuntime(t *testing.T, s *Server, c map[string]string, component strin
 	if e != nil {
 		t.Fatal(e)
 	}
-	state, _, e := s.loadTunnel(t.Context(), m.NodeID, m.Epoch)
+	state, _, e := s.loadTunnel(t.Context(), m.NodeID)
 	gen := int64(1)
 	if e == nil {
 		gen = state.Generation
 	}
-	r := tunnel.MachineReport{Epoch: m.Epoch, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, K3sVersion: m.K3sVersion, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
+	r := tunnel.MachineReport{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, K3sVersion: m.K3sVersion, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
 	if component == "connector" {
 		r.ConnectorObservedAt = time.Now().UTC()
 		r.ConnectorExpiresAt = r.ConnectorObservedAt.Add(time.Minute)
@@ -240,14 +240,14 @@ func reportRuntime(t *testing.T, s *Server, c map[string]string, component strin
 	if component == "runner" {
 		r.BundleFormat = contract.BundleFormat
 		r.Apps = &contract.AppStatus{Instances: []contract.InstanceStatus{}}
-		rollout, err := (machineconfig.Store{DB: s.db}).Load(t.Context(), m.NodeID, m.Epoch)
+		rollout, err := (machineconfig.Store{DB: s.db}).Load(t.Context(), m.NodeID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if ready && rollout.DrainRequested {
 			now := time.Now().UTC()
 			r.Drained = true
-			r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, m.Epoch, rollout.State), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}
+			r.Evidence = &contract.Evidence{Kind: "no_owner", Target: machineconfig.DrainTarget(m.NodeID, rollout.State), WithdrawalID: "withdrawal", ObservedAt: now, ExpiresAt: now.Add(30 * time.Second)}
 		}
 	}
 	r = currentReport(t, s, m.NodeID, r)
@@ -264,7 +264,7 @@ func readyTunnel(t *testing.T, s *Server, c map[string]string) tunnel.Snapshot {
 	reportRuntime(t, s, c, "runtime", true)
 	reportRuntime(t, s, c, "connector", true)
 	driveTunnels(t, s)
-	state, _, e := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, e := s.loadTunnel(t.Context(), c["node_id"])
 	if e != nil || !state.Ready {
 		m, _ := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
 		report, at, err := (machineconfig.Store{DB: s.db}).Report(t.Context(), configurationMachine(m), "runtime")
@@ -280,7 +280,7 @@ func TestTunnelDurabilityPartialFailureAndIsolation(t *testing.T) {
 	f.lostKind = "tunnel"
 	reportRuntime(t, s, a, "runtime", false)
 	driveTunnels(t, s)
-	first, _, e := s.loadTunnel(t.Context(), a["node_id"], a["epoch"])
+	first, _, e := s.loadTunnel(t.Context(), a["node_id"])
 	if e != nil || !first.Resources["tunnel"].Pending {
 		t.Fatal("create intent not retained", e)
 	}
@@ -293,7 +293,7 @@ func TestTunnelDurabilityPartialFailureAndIsolation(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		driveTunnels(t, s)
 	}
-	current, _, _ := s.loadTunnel(t.Context(), a["node_id"], a["epoch"])
+	current, _, _ := s.loadTunnel(t.Context(), a["node_id"])
 	if current.TunnelID != oldID || f.creates["tunnel"] != 2 {
 		t.Fatal("restart/retry replaced tunnel")
 	}
@@ -354,7 +354,7 @@ func TestLostAccessSecretIsReplacedWithoutOrphan(t *testing.T) {
 		t.Fatal("stranded Access token", count, f.creates)
 	}
 }
-func TestEpochRetirementAndRefresh(t *testing.T) {
+func TestNodeIdentityRetirementAndRefresh(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
 	state := readyTunnel(t, s, c)
@@ -371,8 +371,8 @@ func TestEpochRetirementAndRefresh(t *testing.T) {
 	if repeated.Code != 200 || repeated.Body.String() != w.Body.String() {
 		t.Fatal("refresh retry changed credential")
 	}
-	if fresh["epoch"] != c["epoch"] || fresh["token"] == c["token"] {
-		t.Fatal("refresh changed epoch or reused credential")
+	if fresh["node_id"] != c["node_id"] || fresh["token"] == c["token"] {
+		t.Fatal("refresh changed node or reused credential")
 	}
 	if w = request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil); w.Code != 401 {
 		t.Fatal("old credential still works")
@@ -395,22 +395,22 @@ func TestEpochRetirementAndRefresh(t *testing.T) {
 		t.Fatal("terminal cleanup storage/upgrade inventory")
 	}
 	newer := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	if newer["epoch"] == fresh["epoch"] || newer["token"] == fresh["token"] {
+	if newer["node_id"] == fresh["node_id"] || newer["token"] == fresh["token"] {
 		t.Fatal("new enrollment reused identity")
 	}
 	old := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", fresh["token"], nil)
-	active := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", newer["token"], nil)
+	active := request(t, s, "GET", "/v1/nodes/"+newer["node_id"]+"/config", newer["token"], nil)
 	if old.Header().Get("X-Livepeer-Terminal") != "true" || active.Header().Get("X-Livepeer-Terminal") != "false" {
-		t.Fatal("epoch artifacts crossed")
+		t.Fatal("node artifacts crossed")
 	}
 	if w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/tunnel/connector-token", fresh["token"], map[string]any{}); w.Code != 401 {
 		t.Fatal("retired credential got new tunnel token")
 	}
-	if _, e := s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], c["epoch"], state.AccessVersion)); e == nil {
+	if _, e := s.tunnels.ResolveAccessCredential(t.Context(), credentialRef(c["node_id"], state.AccessVersion)); e == nil {
 		t.Fatal("retired source secret resolved")
 	}
 	digest := sha256.Sum256(terminal.Body.Bytes())
-	ack := request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/removal-ack", fresh["token"], map[string]any{"epoch": c["epoch"], "digest": hex.EncodeToString(digest[:]), "connector_absent": true})
+	ack := request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/removal-ack", fresh["token"], map[string]any{"node_id": c["node_id"], "digest": hex.EncodeToString(digest[:]), "connector_absent": true})
 	if ack.Code != 200 {
 		t.Fatal(ack.Code, ack.Body.String())
 	}
@@ -423,7 +423,7 @@ func TestTunnelRotationNeedsConsumerAcknowledgement(t *testing.T) {
 		t.Fatal(e)
 	}
 	driveTunnels(t, s)
-	next, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	next, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if next.AccessVersion != 2 || next.SourceGeneration != 2 || next.TunnelID != initial.TunnelID {
 		t.Fatal("incorrect Access rotation", next)
 	}
@@ -442,9 +442,9 @@ func TestTunnelRotationNeedsConsumerAcknowledgement(t *testing.T) {
 		t.Fatal("old Access token not retired")
 	}
 	adminA(t, s)
-	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"epoch": c["epoch"], "kind": "connector"}), 202)
+	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "connector"}), 202)
 	driveTunnels(t, s)
-	rotated, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	rotated, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if rotated.TunnelID != initial.TunnelID || rotated.CredentialGeneration != 2 || f.creates["tunnel"] != 1 {
 		t.Fatal("connector rotation replaced tunnel")
 	}
@@ -459,7 +459,7 @@ func TestSupabaseCascadeRetiresTunnels(t *testing.T) {
 	}
 	driveTunnels(t, s)
 	var retired, complete bool
-	e := s.db.QueryRow(`SELECT e.retired_at IS NOT NULL,(t.state->>'cleanup_complete')::boolean FROM lpcc.enrollments e JOIN lpcc.machine_states t USING(node_id,epoch) WHERE e.node_id=$1`, c["node_id"]).Scan(&retired, &complete)
+	e := s.db.QueryRow(`SELECT e.retired_at IS NOT NULL,(t.state->>'cleanup_complete')::boolean FROM lpcc.enrollments e JOIN lpcc.machine_states t USING(node_id) WHERE e.node_id=$1`, c["node_id"]).Scan(&retired, &complete)
 	if e != nil || !retired || !complete || len(f.resources) != 0 {
 		t.Fatal("cascade lost cleanup", retired, complete, e, len(f.resources))
 	}
@@ -474,11 +474,11 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	stateBefore := tunnel.RoutingFor(m.NodeID, s.params.CloudflareBaseDomain, "aaaaaaa")
+	stateBefore := tunnel.RoutingFor(m.NodeID, s.params.CloudflareBaseDomain)
 	stateBefore.IngressDigest = "configured-before-drain-intent"
 	raw, _ := json.Marshal(stateBefore.RoutingState)
 	rollout, _ := json.Marshal(stateBefore.State)
-	execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,epoch,state,rollout) VALUES($1,$2,$3,$4)`, m.NodeID, m.Epoch, string(raw), string(rollout))
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,state,rollout) VALUES($1,$2,$3)`, m.NodeID, string(raw), string(rollout))
 	if e = s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
@@ -487,7 +487,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	}
 	reportRuntime(t, s, c, "runtime", false)
 	driveTunnels(t, s)
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if !state.DrainRequested || state.HeldOrchestrator != old {
 		t.Fatal("Node replacement not drain gated")
 	}
@@ -524,17 +524,17 @@ func TestTunnelAdministrativeDrainAndRotation(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("8", 64))
 	state := readyTunnel(t, s, c)
 	path := "/api/admin/machines/" + c["node_id"]
-	in := map[string]any{"epoch": c["epoch"], "kind": "connector", "compromised": true}
+	in := map[string]any{"kind": "connector", "compromised": true}
 	requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", in), 403)
 	adminA(t, s)
 	requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", in), 202)
 	driveTunnels(t, s)
-	rotated, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	rotated, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if rotated.TunnelID != state.TunnelID || rotated.CredentialGeneration != 2 || f.disconnected != 1 {
 		t.Fatal("compromise rotation failed", rotated, f.disconnected)
 	}
-	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"epoch": uuid.New().String()}), 409)
-	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{"epoch": c["epoch"]}), 202)
+	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+strings.Repeat("z", 26), "session-a", map[string]any{}), 404)
+	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
 	driveTunnels(t, s)
 	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 1 {
 		t.Fatal("removal skipped drain")
@@ -566,7 +566,7 @@ func TestEndpointReplacementRequiresCurrentSourceAcknowledgement(t *testing.T) {
 	reportRuntime(t, s, c, "runtime", true)
 	reportRuntime(t, s, c, "connector", true)
 	driveTunnels(t, s)
-	current, _, _ := s.loadTunnel(t.Context(), c["node_id"], c["epoch"])
+	current, _, _ := s.loadTunnel(t.Context(), c["node_id"])
 	if current.TunnelID != initial.TunnelID || current.SourceGeneration != 2 || current.AccessVersion != initial.AccessVersion {
 		t.Fatal("endpoint update changed identity", current)
 	}
@@ -638,7 +638,7 @@ func TestAccessCredentialReencryption(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("5", 64))
 	readyTunnel(t, s, c)
-	ref := credentialRef(c["node_id"], c["epoch"], 1)
+	ref := credentialRef(c["node_id"], 1)
 	before, e := s.tunnels.ResolveAccessCredential(t.Context(), ref)
 	if e != nil {
 		t.Fatal(e)

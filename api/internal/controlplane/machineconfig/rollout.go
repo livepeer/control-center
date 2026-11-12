@@ -193,7 +193,7 @@ func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) 
 		// A timely Node drain remains complete while slower app cleanup runs.
 		state.DrainedGeneration = state.Generation
 	}
-	pending, err := machineapps.Pending(ctx, s.store.DB, m.NodeID, m.Epoch)
+	pending, err := machineapps.Pending(ctx, s.store.DB, m.NodeID)
 	if err != nil || pending {
 		state.RolloutReason = "app_cleanup_pending"
 		return false, err
@@ -207,7 +207,7 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 	if err != nil || !done {
 		return false, err
 	}
-	result, err := s.store.DB.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$5 AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 AND lease_id=$3 AND revision=$4 AND lease_until>now())`, l.Machine.NodeID, l.Machine.Epoch, l.ID, l.Revision, l.Machine.CredentialVersion)
+	result, err := s.store.DB.ExecContext(ctx, `DELETE FROM lpcc.machines WHERE node_id=$1 AND credential_version=$4 AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND lease_id=$2 AND revision=$3 AND lease_until>now())`, l.Machine.NodeID, l.ID, l.Revision, l.Machine.CredentialVersion)
 	if err != nil {
 		return false, err
 	}

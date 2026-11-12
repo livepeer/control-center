@@ -25,7 +25,7 @@ func (s *reportSink) Request(_ context.Context, _ string, p any, _ int64) ([]byt
 	return nil, nil, s.Err
 }
 func sample(at time.Time) map[string]any {
-	return map[string]any{"epoch": "epoch", "credential_version": 1, "component": "runtime", "generation": 1, "observed_at": at, "ready": true}
+	return map[string]any{"node_id": "node_id", "credential_version": 1, "component": "runtime", "generation": 1, "observed_at": at, "ready": true}
 }
 func sequence(t *testing.T, b []byte) uint64 {
 	t.Helper()
@@ -45,7 +45,7 @@ func TestReportsReserveBeforeSendRetryExactlyAndRecover(t *testing.T) {
 	at := time.Now().UTC()
 	value := sample(at)
 	_, _, _ = r.Request(t.Context(), "status", value, 100)
-	stored, err := os.ReadFile(reportCounterPath(directory, "runtime", "epoch"))
+	stored, err := os.ReadFile(reportCounterPath(directory, "runtime", "node_id"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,13 +85,13 @@ func TestReportsReserveBeforeSendRetryExactlyAndRecover(t *testing.T) {
 	if _, _, err := r.Request(t.Context(), "status", old, 100); err == nil {
 		t.Fatal("stale sample rewound a credential counter")
 	}
-	value["epoch"] = "replacement"
+	value["node_id"] = "replacement"
 	value["credential_version"] = 1
 	if _, _, err = r.Request(t.Context(), "status", value, 100); err != nil {
 		t.Fatal(err)
 	}
 	if sequence(t, sink.Bodies[len(sink.Bodies)-1]) != 1 {
-		t.Fatal("new epoch inherited old ordering")
+		t.Fatal("new node inherited old ordering")
 	}
 	old["credential_version"] = 2
 	if _, _, err = r.Request(t.Context(), "status", old, 100); err != nil {
@@ -102,7 +102,7 @@ func TestReportsReserveBeforeSendRetryExactlyAndRecover(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sequence(t, sink.Bodies[len(sink.Bodies)-1]) != 2 {
-		t.Fatal("retained epoch corrupted replacement ordering")
+		t.Fatal("retained node corrupted replacement ordering")
 	}
 }
 
@@ -118,7 +118,7 @@ func TestReportsFailClosedAfterOrderingLossOrCorruption(t *testing.T) {
 	if _, _, err := r.Request(t.Context(), "status", sample(time.Now()), 100); ReportErrorCode(err) != "report_order_unavailable" || len(sink.Bodies) != 1 {
 		t.Fatal("counted upward after server rejected ordering")
 	}
-	if err := os.WriteFile(reportCounterPath(directory, "runtime", "epoch"), []byte("broken"), 0600); err != nil {
+	if err := os.WriteFile(reportCounterPath(directory, "runtime", "node_id"), []byte("broken"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := r.Request(t.Context(), "status", sample(time.Now()), 100); ReportErrorCode(err) != "report_state_corrupt" || len(sink.Bodies) != 1 {
@@ -174,7 +174,7 @@ func TestReportsRetryOrderingRejectionBlocksNewSamples(t *testing.T) {
 			r := &Reports{Client: sink, Directory: directory}
 			value := sample(time.Now().UTC())
 			_, _, _ = r.Request(t.Context(), "status", value, 100)
-			name := reportCounterPath(directory, "runtime", "epoch")
+			name := reportCounterPath(directory, "runtime", "node_id")
 			stored, err := os.ReadFile(name)
 			if err != nil {
 				t.Fatal(err)

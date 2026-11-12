@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +14,6 @@ import (
 )
 
 var proxyIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-
-func sameVersion(a, b Source) bool {
-	return a.ID == b.ID && a.Epoch == b.Epoch && a.Generation == b.Generation && a.CredentialVersion == b.CredentialVersion && a.CredentialRef == b.CredentialRef && a.URL == b.URL
-}
 
 func (f *Manager) Reconcile(ctx context.Context) error {
 	f.reconcileMu.Lock()
@@ -28,22 +23,22 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 		f.reconciliationFailed()
 		return errors.New("discovery source reconciliation failed")
 	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].ID < sources[j].ID })
+	sort.Slice(sources, func(i, j int) bool { return sources[i].NodeID < sources[j].NodeID })
 	f.mu.Lock()
 	old := map[string]Source{}
 	for _, source := range f.selected {
-		old[source.ID] = source
+		old[source.NodeID] = source
 	}
 	f.mu.Unlock()
 	next := []Source{}
 	seenIDs, seenURLs := map[string]bool{}, map[string]bool{}
 	for _, source := range sources {
-		if source.ID == "" || seenIDs[source.ID] {
+		if source.NodeID == "" || seenIDs[source.NodeID] {
 			f.reconciliationFailed()
 			return errors.New("ambiguous discovery source identity")
 		}
-		seenIDs[source.ID] = true
-		if previous, ok := old[source.ID]; ok && previous.Epoch == source.Epoch && source.Generation < previous.Generation {
+		seenIDs[source.NodeID] = true
+		if previous, ok := old[source.NodeID]; ok && source.Generation < previous.Generation {
 			f.reconciliationFailed()
 			return errors.New("stale discovery source generation")
 		}
@@ -54,8 +49,8 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 		// must not disable polling/recovery, including after an API restart.
 		approved := source.Generation > 0 && source.VerifiedGeneration == source.Generation
 		if !source.Ready && !approved {
-			previous, ok := old[source.ID]
-			if !ok || previous.Epoch != source.Epoch || previous.Generation != source.VerifiedGeneration {
+			previous, ok := old[source.NodeID]
+			if !ok || previous.Generation != source.VerifiedGeneration {
 				continue
 			}
 			previous.Lifecycle = source.Lifecycle
@@ -78,14 +73,22 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 		seenURLs[source.URL] = true
 		next = append(next, source)
 	}
-	authorizations := map[string]authorization{}
+	authorizations := map[string]*authorization{}
+	prior := f.transport.selection.Load()
 	for _, source := range next {
-		auth := authorization{source: source, available: source.AuthMode == AuthNone}
+		auth := &authorization{source: source, available: source.AuthMode == AuthNone}
 		if source.AuthMode == AuthCloudflare {
 			credential, e := f.backend.Resolve(ctx, source.CredentialRef)
 			if e == nil && validCredential(credential) {
 				auth.credential = credential
 				auth.available = true
+			}
+		}
+		// Reuse confirmation only for the same immutable source authorization.
+		if prior != nil {
+			old := prior.sources[source.URL]
+			if old != nil && old.source.NodeID == source.NodeID && old.source.Generation == source.Generation && old.source.CredentialRef == source.CredentialRef && old.source.CredentialVersion == source.CredentialVersion && old.source.ServiceURL == source.ServiceURL && old.source.AuthMode == source.AuthMode && old.credential == auth.credential && old.available == auth.available {
+				auth = old
 			}
 		}
 		authorizations[source.URL] = auth
@@ -95,34 +98,7 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 		return ctx.Err()
 	}
 	f.mu.Lock()
-	previousAuth := f.transport.selection.Load()
-	changedCredentials := []string{}
-	survivors := []*url.URL{}
-	for _, source := range f.selected {
-		// SetSources keys on URL. Explicitly remove a reused URL when its
-		// enrollment identity changes, fencing an obsolete in-flight result.
-		auth, ok := authorizations[source.URL]
-		if ok && auth.source.ID == source.ID && auth.source.Epoch == source.Epoch {
-			u, _ := url.Parse(source.URL)
-			survivors = append(survivors, u)
-			if previousAuth != nil {
-				prior := previousAuth.sources[source.URL]
-				if !sameVersion(prior.source, auth.source) || prior.source.AuthMode != auth.source.AuthMode || prior.available != auth.available || prior.credential != auth.credential {
-					changedCredentials = append(changedCredentials, source.URL)
-				}
-			}
-		}
-	}
-	f.collector.SetSources(survivors)
-	revision := f.transport.install(authorizations)
-	for _, endpoint := range changedCredentials {
-		f.pendingRefresh[endpoint] = revision
-	}
-	for endpoint := range f.pendingRefresh {
-		if !seenURLs[endpoint] {
-			delete(f.pendingRefresh, endpoint)
-		}
-	}
+	f.transport.install(authorizations)
 	urls := make([]*url.URL, 0, len(next))
 	for _, source := range next {
 		u, _ := url.Parse(source.URL)
@@ -134,105 +110,36 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 	}
 	f.selected = next
 	f.configured = sources
-	for id := range f.provenance {
-		if !seenIDs[id] {
-			delete(f.provenance, id)
-		}
-	}
 	f.reconciledAt = time.Now().UTC()
 	f.reconcileFailed = false
-	f.transport.mu.Lock()
-	for endpoint := range f.transport.attempts {
-		if !seenURLs[endpoint] {
-			delete(f.transport.attempts, endpoint)
-		}
-	}
-	f.transport.mu.Unlock()
-	ackKeys := map[string]bool{}
-	for _, source := range next {
-		ackKeys[ackKey(source)] = true
-	}
-	for key := range f.acknowledged {
-		if !ackKeys[key] {
-			delete(f.acknowledged, key)
-		}
-	}
 	f.mu.Unlock()
-	if len(f.pendingRefresh) > 0 {
-		f.collector.Refresh(ctx, false)
-		// Refresh may have joined a predecessor batch. A bounded follow-up
-		// starts with the installed selection; no second poller/cache is added.
-		f.clearAttemptedRefreshes()
-		if len(f.pendingRefresh) > 0 && ctx.Err() == nil {
-			f.collector.Refresh(ctx, false)
-			f.clearAttemptedRefreshes()
-		}
-	}
 	f.acknowledge(ctx)
 	return nil
 }
 
-// Pending configuration refreshes survive a canceled reconciliation wait. Any
-// completed attempt with this or a later immutable selection fulfills the wakeup;
-// a failed collection then follows the Collector's ordinary retry/failure policy.
-func (f *Manager) clearAttemptedRefreshes() {
-	f.transport.mu.Lock()
-	defer f.transport.mu.Unlock()
-	for endpoint, revision := range f.pendingRefresh {
-		if f.transport.attempts[endpoint].revision >= revision {
-			delete(f.pendingRefresh, endpoint)
-		}
-	}
-}
-
 func (f *Manager) reconciliationFailed() { f.mu.Lock(); f.reconcileFailed = true; f.mu.Unlock() }
 
+// Acknowledgement asserts that this source authorization decoded successfully.
+// The backend rechecks the current credential and deployment generation atomically.
 func (f *Manager) acknowledge(ctx context.Context) {
 	f.mu.Lock()
+	selection := f.transport.selection.Load()
 	sources := append([]Source(nil), f.selected...)
-	attempts := map[string]attempt{}
-	f.transport.mu.Lock()
-	for endpoint, attempt := range f.transport.attempts {
-		attempts[endpoint] = attempt
-	}
-	// Capture attempts before snapshots under the same lock. A later attempt
-	// must not be compared with an older already-copied observation marker.
-	snapshots := f.collector.Snapshots()
-	f.transport.mu.Unlock()
 	f.mu.Unlock()
+	if selection == nil {
+		return
+	}
 	for _, source := range sources {
-		if source.AuthMode != AuthCloudflare || source.Lifecycle != "active" {
-			continue
-		}
-		f.mu.Lock()
-		acked := f.acknowledged[ackKey(source)]
-		f.mu.Unlock()
-		if acked {
-			continue
-		}
-		attempt, ok := attempts[source.URL]
-		if !ok || attempt.status != 200 || !sameVersion(attempt.source, source) {
-			continue
-		}
-		for _, snapshot := range snapshots {
-			if snapshot.URL != source.URL || snapshot.QueriedAt.IsZero() || snapshot.QueriedAt.Equal(attempt.before) {
-				continue
-			}
-			valid := true
-			for _, entry := range snapshot.Entries {
-				valid = valid && publicAddress(source, entry.Address)
-			}
-			if valid && f.backend.Acknowledge(ctx, source) == nil {
-				f.mu.Lock()
-				f.acknowledged[ackKey(source)] = true
-				f.mu.Unlock()
-			}
+		auth := selection.sources[source.URL]
+		f.transport.mu.Lock()
+		ready := auth.confirmed && !auth.acknowledged
+		f.transport.mu.Unlock()
+		if ready && source.AuthMode == AuthCloudflare && source.Lifecycle == "active" && f.backend.Acknowledge(ctx, source) == nil {
+			f.transport.mu.Lock()
+			auth.acknowledged = true
+			f.transport.mu.Unlock()
 		}
 	}
-}
-
-func ackKey(source Source) string {
-	return source.ID + "\x00" + source.Epoch + "\x00" + source.URL + "\x00" + source.CredentialRef + "\x00" + strconv.FormatInt(source.Generation, 10) + "/" + strconv.FormatInt(source.CredentialVersion, 10)
 }
 
 // Public routing comes from the same managed state as source selection. Do not

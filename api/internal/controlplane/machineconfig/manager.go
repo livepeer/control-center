@@ -80,14 +80,14 @@ func (s *Manager) drainTimeout() time.Duration {
 }
 
 func (s *Manager) Reconcile(ctx context.Context) error {
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT node_id,epoch::text,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments ORDER BY node_id,epoch`)
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT node_id,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments ORDER BY node_id`)
 	if err != nil {
 		return err
 	}
 	var machines []Machine
 	for rows.Next() {
 		var m Machine
-		if err = rows.Scan(&m.NodeID, &m.Epoch, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); err != nil {
+		if err = rows.Scan(&m.NodeID, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal); err != nil {
 			rows.Close()
 			return err
 		}
@@ -107,7 +107,7 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 }
 
 func (s *Manager) reconcile(ctx context.Context, m Machine) error {
-	record, err := s.store.Load(ctx, m.NodeID, m.Epoch)
+	record, err := s.store.Load(ctx, m.NodeID)
 	var lease *Lease
 	defer func() {
 		if lease != nil {
@@ -160,7 +160,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 			}
 			if removed {
 				m.Terminal = true
-				lease.Record, e = s.store.Load(ctx, m.NodeID, m.Epoch)
+				lease.Record, e = s.store.Load(ctx, m.NodeID)
 				if e != nil {
 					return e
 				}
@@ -180,7 +180,7 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 	// An enrolled machine with no assignments still needs an authoritative empty intent.
 	// Reserve its first generation before delivery, so the first edit advances beyond it.
 	var revision int64
-	err = s.store.DB.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET apps_generation=1,revision=revision+1 WHERE node_id=$1 AND epoch=$2 AND revision=$3 AND apps_generation=0 AND EXISTS(SELECT FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$4) RETURNING revision`, m.NodeID, m.Epoch, record.Revision, m.CredentialVersion).Scan(&revision)
+	err = s.store.DB.QueryRowContext(ctx, `UPDATE lpcc.machine_states SET apps_generation=1,revision=revision+1 WHERE node_id=$1 AND revision=$2 AND apps_generation=0 AND EXISTS(SELECT FROM lpcc.enrollments WHERE node_id=$1 AND credential_version=$3) RETURNING revision`, m.NodeID, record.Revision, m.CredentialVersion).Scan(&revision)
 	if err == nil {
 		record.Revision = revision
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -189,16 +189,16 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 	desired := s.Desired(m, record.State, exposure)
 	if m.Terminal {
 		var prior []byte
-		if s.store.DB.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2`, m.NodeID, m.Epoch).Scan(&prior) == nil {
+		if s.store.DB.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1`, m.NodeID).Scan(&prior) == nil {
 			desired.RetainedFiles, _ = artifact.Read(prior)
 		}
 	}
-	desired.Apps, err = machineapps.Snapshot(ctx, s.store.DB, m.NodeID, m.Epoch)
+	desired.Apps, err = machineapps.Snapshot(ctx, s.store.DB, m.NodeID)
 	s.prepareApps(ctx, &desired, err)
 	data, digest, err := s.deps.Build(desired)
 	if err != nil {
 		s.deps.Logger.Error("keeping previous configuration", "node_id", m.NodeID, "reason", "generation_failed")
-		_, _ = s.store.DB.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error='generation_failed' WHERE node_id=$1 AND epoch=$2 AND revision=$3`, m.NodeID, m.Epoch, record.Revision)
+		_, _ = s.store.DB.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error='generation_failed' WHERE node_id=$1 AND revision=$2`, m.NodeID, record.Revision)
 		return nil
 	}
 	return s.publish(ctx, m, record.Revision, data, digest, desired.Apps, desired.AppsError)
@@ -270,9 +270,9 @@ func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data [
 	defer tx.Rollback()
 	var present int
 	if m.Terminal {
-		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.enrollments WHERE node_id=$1 AND epoch=$2 AND credential_version=$3 AND retired_at IS NOT NULL FOR UPDATE`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&present)
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.enrollments WHERE node_id=$1 AND credential_version=$2 AND retired_at IS NOT NULL FOR UPDATE`, m.NodeID, m.CredentialVersion).Scan(&present)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND enrollment_epoch=$2 AND credential_version=$3 FOR UPDATE`, m.NodeID, m.Epoch, m.CredentialVersion).Scan(&present)
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 AND credential_version=$2 FOR UPDATE`, m.NodeID, m.CredentialVersion).Scan(&present)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -287,7 +287,7 @@ func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data [
 		}
 	}
 	var current int64
-	err = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1 AND epoch=$2 FOR SHARE`, m.NodeID, m.Epoch).Scan(&current)
+	err = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1 FOR SHARE`, m.NodeID).Scan(&current)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -295,7 +295,7 @@ func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data [
 		return nil
 	}
 	if m.Terminal {
-		result, e := tx.ExecContext(ctx, `UPDATE lpcc.enrollments SET terminal_bundle=$3,terminal_sha256=$4 WHERE node_id=$1 AND epoch=$2 AND terminal_bundle IS NULL`, m.NodeID, m.Epoch, data, digest)
+		result, e := tx.ExecContext(ctx, `UPDATE lpcc.enrollments SET terminal_bundle=$2,terminal_sha256=$3 WHERE node_id=$1 AND terminal_bundle IS NULL`, m.NodeID, data, digest)
 		if e != nil {
 			return e
 		}
@@ -309,7 +309,7 @@ func (s *Manager) publish(ctx context.Context, m Machine, revision int64, data [
 	if err = machineapps.RecordDelivery(ctx, tx, apps, digest, m.Terminal); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error=NULLIF($3,'') WHERE node_id=$1 AND epoch=$2 AND apps_error IS DISTINCT FROM NULLIF($3,'')`, m.NodeID, m.Epoch, appsError); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET apps_error=NULLIF($2,'') WHERE node_id=$1 AND apps_error IS DISTINCT FROM NULLIF($2,'')`, m.NodeID, appsError); err != nil {
 		return err
 	}
 	return tx.Commit()

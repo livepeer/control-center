@@ -38,8 +38,8 @@ func (s *Server) RunTunnels(ctx context.Context) {
 	s.tunnels.Run(ctx, s.params.ConfigReconcileInterval, s.requestReconcile)
 }
 
-func (s *Server) loadTunnel(ctx context.Context, node, epoch string) (tunnel.Snapshot, int64, error) {
-	state, revision, err := s.tunnels.Load(ctx, node, epoch)
+func (s *Server) loadTunnel(ctx context.Context, node string) (tunnel.Snapshot, int64, error) {
+	state, revision, err := s.tunnels.Load(ctx, node)
 	if errors.Is(err, tunnel.ErrPending) {
 		err = problem(409, "tunnel_pending", "Tunnel is not provisioned.")
 	}

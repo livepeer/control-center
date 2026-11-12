@@ -19,7 +19,7 @@ import (
 
 func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
 	c := onchain.Config{Version: 1, Generation: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 1, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: strings.Repeat("c", 64), RedeemerURL: "https://redeemer.example", RPCGrants: []string{"10.0.0.2:443"}, RedeemerGrants: []string{"10.0.0.3:443"}, WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
-	m := Desired{Machine: Machine{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: c, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
+	m := Desired{Machine: Machine{NodeID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: c, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
 	b, d, e := Build(m)
 	if e != nil {
 		t.Fatal(e)
@@ -82,7 +82,7 @@ func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T)
 		t.Fatal("management refresh did not schedule Node drain and replacement")
 	}
 	refreshed = m
-	refreshed.Epoch = "22222222-2222-4222-8222-222222222222"
+	refreshed.NodeID = strings.Repeat("b", 26)
 	if Digest(refreshed) == original {
 		t.Fatal("re-enrollment reused a previous lifetime's Node workload")
 	}

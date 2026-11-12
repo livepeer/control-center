@@ -16,16 +16,17 @@ class CredentialTransitions(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ('credentials', 'state', 'volumes/http-source'):
+        for name in ('credentials', 'state', 'config', 'volumes/http-source'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        (self.root / 'credentials/node-id').write_text('lp-' + 'a' * 16)
+        (self.root / 'credentials/node-id').write_text('a' * 26)
+        (self.root / 'credentials/fingerprint').write_text('a' * 64)
         (self.root / 'credentials/service-token').write_text('b' * 64)
         (self.root / 'credentials/runner-bootstrap.secret').write_text('runner-bootstrap')
-        (self.root / 'credentials/config-url').write_text('https://control.example.invalid/v1/nodes/lp-' + 'a' * 16 + '/config')
-        (self.root / 'credentials/identity.json').write_text(json.dumps({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}))
+        (self.root / 'credentials/config-url').write_text('https://control.example.invalid/v1/nodes/' + 'a' * 26 + '/config')
+        (self.root / 'credentials/identity.json').write_text(json.dumps({'node_id': 'a' * 26, 'credential_version': 1}))
         (self.root / 'state/k3s-version').write_text('v1.37.10+k3s1')
 
-    def transition(self, fail='', mode='refresh', epoch='22222222-2222-4222-8222-222222222222', api='https://control.example.invalid'):
+    def transition(self, fail='', mode='refresh', node='c' * 26, nodes='node/worker', api='https://control.example.invalid'):
         script = r'''
 set -Eeuo pipefail
 source "$1"
@@ -47,6 +48,7 @@ cat() {
 sha256sum() { command cat >/dev/null; printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; }
 kube() {
   printf 'kube %s\n' "$*" >> "$INSTALL_DIR/steps"
+  if [[ "$*" == 'get nodes -o name' ]]; then printf '%s' "$TEST_NODES"; fi
   if [[ "$*" == *'get deployment/kustomize-controller'* ]]; then printf '1'; fi
   if [[ "$FAIL_AT" == stop && "$*" == *'wait pod'* ]]; then return 1; fi
   if [[ "$FAIL_AT" == artifact && "$*" == *'wait externalartifact/livepeer-service'* ]]; then return 1; fi
@@ -76,14 +78,14 @@ curl() {
     previous=$arg
   done
   [[ "$FAIL_AT" != request ]] || return 1
-  printf '{"node_id":"lp-aaaaaaaaaaaaaaaa","token":"%s","epoch":"%s","credential_version":1,"config_url":"%s/v1/nodes/lp-aaaaaaaaaaaaaaaa/config"}\n200' \
-    cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "$TEST_EPOCH" "${TEST_API:-https://controlcenter-api.livepeer.live}"
+  printf '{"node_id":"%s","token":"%s","credential_version":1,"config_url":"%s/v1/nodes/%s/config"}\n200' \
+    "$TEST_NODE" cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "${TEST_API:-https://controlcenter-api.livepeer.live}" "$TEST_NODE"
 }
 transition_credentials
 '''
         return subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY.parent.parent / 'bootstrap-livepeer.sh'), str(self.root)],
                               env={**os.environ, 'LIVEPEER_ENROLLMENT_TOKEN': 'header.payload.signature',
-                                   'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_EPOCH': epoch, 'TEST_API': api or ''},
+                                   'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_NODE': ('a' * 26 if mode == 'refresh' else node), 'TEST_NODES': nodes, 'TEST_API': api or ''},
                               text=True, capture_output=True)
 
     def test_custom_origin_omission_fails_before_state_or_consumers_change(self):
@@ -94,22 +96,22 @@ transition_credentials
         self.assertFalse((self.root / 'steps').exists())
         self.assertEqual((self.root / 'credentials/service-token').read_text(), 'b' * 64)
         # The correct explicit endpoint still works, including HTTP-to-HTTPS refresh.
-        (self.root / 'credentials/config-url').write_text('http://control.example.invalid/v1/nodes/lp-' + 'a' * 16 + '/config')
+        (self.root / 'credentials/config-url').write_text('http://control.example.invalid/v1/nodes/' + 'a' * 26 + '/config')
         result = self.transition()
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_standard_origin_refresh_can_omit_api_override(self):
-        (self.root / 'credentials/config-url').write_text('https://controlcenter-api.livepeer.live/v1/nodes/lp-' + 'a' * 16 + '/config')
+        (self.root / 'credentials/config-url').write_text('https://controlcenter-api.livepeer.live/v1/nodes/' + 'a' * 26 + '/config')
         result = self.transition(api=None)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_identity_requires_uuid_and_positive_numeric_version(self):
+    def test_identity_requires_base32_node_and_positive_numeric_version(self):
         for identity, valid in [
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1}, True),
-            ({'epoch': 'a' * 36, 'credential_version': 1}, False),
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': '1'}, False),
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 0}, False),
-            ({'epoch': '11111111-1111-4111-8111-111111111111', 'credential_version': 1.5}, False),
+            ({'node_id': 'a' * 26, 'credential_version': 1}, True),
+            ({'node_id': 'a' * 36, 'credential_version': 1}, False),
+            ({'node_id': 'a' * 26, 'credential_version': '1'}, False),
+            ({'node_id': 'a' * 26, 'credential_version': 0}, False),
+            ({'node_id': 'a' * 26, 'credential_version': 1.5}, False),
         ]:
             result = subprocess.run(['bash', '-c', 'source "$1"; read_identity "$2"',
                                      'fixture', str(LIBRARY), json.dumps(identity)], capture_output=True)
@@ -137,7 +139,7 @@ transition_credentials
         self.assertLess(writer_stop, writer_gone)
         self.assertLess(writer_gone, steps.index('refresh'))
         self.assertGreater(next(i for i, x in enumerate(steps) if 'scale deployment/kustomize-controller --replicas=1' in x), secret)
-        self.assertLess(steps.index('https-code'), steps.index('refresh'))
+        self.assertLess(steps.index('refresh'), steps.index('https-code'))
         self.assertGreater(next(i for i, x in enumerate(steps) if 'rollout status' in x), secret)
         self.assertTrue(any('create secret generic livepeer-runner-bootstrap' in x for x in steps[:next(i for i,x in enumerate(steps) if 'rollout status' in x)]))
 
@@ -154,19 +156,19 @@ transition_credentials
         (state / 'journal').write_text('previous owner')
         result = self.transition('artifact', mode='reenroll')
         self.assertNotEqual(result.returncode, 0)
-        archived = state.parent / 'state.11111111-1111-4111-8111-111111111111/journal'
+        archived = state.parent / 'state.aaaaaaaaaaaaaaaaaaaaaaaaaa/journal'
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertTrue((self.root / 'state/credential-transition.json').exists())
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertFalse((self.root / 'state/credential-transition.json').exists())
-        self.assertTrue((state.parent / 'reenrolled-22222222-2222-4222-8222-222222222222').exists())
+        self.assertTrue((state.parent / 'reenrolled-cccccccccccccccccccccccccc').exists())
 
     def test_reenrollment_resume_rejects_a_different_issued_identity(self):
         self.assertNotEqual(self.transition('artifact', mode='reenroll').returncode, 0)
         identity = (self.root / 'credentials/identity.json').read_bytes()
-        result = self.transition(mode='reenroll', epoch='33333333-3333-4333-8333-333333333333')
+        result = self.transition(mode='reenroll', node='d' * 26)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('different identity', result.stderr)
         self.assertEqual((self.root / 'credentials/identity.json').read_bytes(), identity)
@@ -176,8 +178,19 @@ transition_credentials
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
         steps = (self.root / 'steps').read_text().splitlines()
+        self.assertIn('livepeer.io/node-id=' + 'c' * 26, (self.root / 'config/k3s.yaml').read_text())
+        relabel = steps.index('kube label node/worker livepeer.io/node-id=' + 'c' * 26 + ' --overwrite')
+        self.assertLess(relabel, steps.index('https-code'))
         stopped = next(i for i, x in enumerate(steps) if 'wait pod -l app=orchestrator' in x)
         self.assertLess(stopped, steps.index('refresh'))
+
+    def test_reenrollment_rejects_empty_or_multinode_clusters_before_issuance(self):
+        for nodes in ('', 'node/one\nnode/two'):
+            result = self.transition(mode='reenroll', nodes=nodes)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('exactly one', result.stderr)
+            self.assertFalse((self.root / 'requests').exists())
+            self.assertEqual((self.root / 'credentials/node-id').read_text(), 'a' * 26)
 
     def test_refresh_keeps_node_for_authoritative_managed_drain(self):
         result = self.transition()

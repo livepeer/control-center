@@ -30,7 +30,7 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := contract.Metadata{Epoch: "epoch", CredentialVersion: 1}
+	m := contract.Metadata{NodeID: "node_id", CredentialVersion: 1}
 	control := &recorder{}
 	apps := AppReports{Control: control, Desired: func() (contract.Metadata, bool) { return m, true }}
 	connector := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +63,7 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 		}
 	}
 	client := transport.NewLocal(filepath.Join(root, "apps", "control.sock"))
-	payload := map[string]any{"epoch": "epoch", "credential_version": 1, "component": "runner", "generation": 1}
+	payload := map[string]any{"node_id": "node_id", "credential_version": 1, "component": "runner", "generation": 1}
 	if _, _, err = client.Request(t.Context(), "status", payload, 1024); err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +80,11 @@ func TestScopedSocketsAndEnrollmentFencedAppReporting(t *testing.T) {
 		t.Fatal("app consumer impersonated connector")
 	}
 	payload["component"] = "runner"
-	payload["epoch"] = "old"
+	payload["node_id"] = "old"
 	if _, _, err = client.Request(t.Context(), "status", payload, 1024); !transport.IsStatus(err, 403) {
 		t.Fatal("cross-enrollment report passed")
 	}
-	payload["epoch"] = "epoch"
+	payload["node_id"] = "node_id"
 	payload["padding"] = strings.Repeat("x", contract.MaxStatusBytes)
 	if _, _, err = client.Request(t.Context(), "status", payload, 1024); !transport.IsStatus(err, 403) {
 		t.Fatal("oversized status crossed app socket", err)
