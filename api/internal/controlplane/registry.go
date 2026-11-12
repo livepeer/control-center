@@ -3,10 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
-	"encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"uuid"
@@ -25,11 +22,7 @@ func definitionProblem(err error) error {
 	return err
 }
 func registryInput(r *http.Request, out any) error {
-	b, err := io.ReadAll(io.LimitReader(r.Body, (512<<10)+1))
-	if err != nil || len(b) > 512<<10 || jsonv2.Unmarshal(b, out, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil {
-		return problem(400, "invalid_request", "Provide one bounded JSON request with the documented fields.")
-	}
-	return nil
+	return boundedInput(r, out, 512<<10)
 }
 func (s *Server) validateApp(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
 	var input struct {

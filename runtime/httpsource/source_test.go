@@ -98,9 +98,9 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 		case path == fluxPath+"livepeer-node":
 			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 		case strings.Contains(path, "/deployments/orchestrator"):
-			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
 		case strings.Contains(path, "/pods?"):
-			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
+			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
 		default:
 			return nil
 		}
@@ -164,6 +164,10 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 		current = cache(formatInt(int64(n)), 0)
 	}
 	applied, attempted, orphan := cache("applied", 3*time.Hour), cache("attempted", 3*time.Hour), cache("orphan", 4*time.Hour)
+	republished := cache("republished", 4*time.Hour)
+	if err := artifact.AtomicWrite(filepath.Join(f.source.Store.Directory, republished[7:]+".seen"), []byte(republished), 0600); err != nil {
+		t.Fatal(err)
+	}
 	f.kube.reply = func(path string) any {
 		if path == fluxPath+"livepeer-node" {
 			return map[string]any{"status": map[string]any{"lastAppliedRevision": applied, "lastAttemptedRevision": attempted}}
@@ -177,7 +181,7 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 	}
 	f.kube.err = nil
 	f.source.gc(t.Context(), current)
-	for _, digest := range []string{applied, attempted} {
+	for _, digest := range []string{applied, attempted, republished} {
 		if _, err := f.source.Store.Get(digest); err != nil {
 			t.Fatal("peer input collected", err)
 		}
@@ -413,10 +417,10 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 		}
 		if strings.Contains(path, "/deployments/orchestrator") {
-			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
+			return map[string]any{"metadata": map[string]any{"generation": 1}, "spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}}}, "status": map[string]any{"observedGeneration": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1}}
 		}
 		if strings.Contains(path, "/pods?") {
-			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
+			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]any{"livepeer.io/config-sha256": m.ConfigDigest}}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}}
 		}
 		return nil
 	}

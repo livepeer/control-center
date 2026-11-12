@@ -3,10 +3,8 @@ package machineconfig
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"github.com/livepeer/control-center/runtime/contract"
-	"github.com/livepeer/control-center/runtime/onchain"
 	"regexp"
 	"strings"
 	"time"
@@ -97,11 +95,8 @@ type Runtime = contract.Metadata
 func DesiredRuntime(m Desired) Runtime {
 	d := Runtime{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
 	d.Onchain = effectiveOnchain(m)
-	if d.Onchain.Version == 0 {
-		d.Onchain = onchain.Offchain()
-	}
 	d.OnchainActive = !m.State.DrainRequested && m.State.ApplyingConfigDigest == "" && (!d.Onchain.Onchain() || (m.OnchainReady && m.State.ApprovedConfigDigest == d.ConfigDigest))
-	if d.Onchain.Onchain() {
+	if d.Onchain.Onchain() && !m.Terminal {
 		d.OnchainCredentialsRef = "/v1/nodes/" + m.NodeID + "/onchain/credentials"
 	}
 	d.RunnerServiceURL = PrivateOrchestrator
@@ -138,12 +133,6 @@ func addRoutingBundle(files map[string][]byte, m Desired) error {
 	if !m.Terminal && m.State.HeldUpgradePlan != "" {
 		files["upgrade-plan/plan.yaml"] = []byte(m.State.HeldUpgradePlan)
 	}
-	d := DesiredRuntime(m)
-	b, e := json.Marshal(d)
-	if e != nil {
-		return e
-	}
-	files["runtime.json"] = b
 	if m.Terminal {
 		docs := strings.Split(string(files["system/node/orchestrator.yaml"]), "\n---\n")
 		if len(docs) < 3 {

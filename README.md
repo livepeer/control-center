@@ -4,21 +4,17 @@ Control Center manages onboarding and configuration for Livepeer orchestrators.
 
 ## Connect a node
 
-Sign in to Control Center and copy your enrollment token. On a Debian or Ubuntu
-amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB free, run from the
-repository checkout:
+Sign in to Control Center and copy your enrollment command. Prepare the
+[prerequisite packages](runtime/README.md#prerequisites) on a Debian or Ubuntu
+amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB free. Run as root:
 
 ```sh
-cd runtime
-export LIVEPEER_API_URL=https://your-control-center-api.example
-export LIVEPEER_RUNTIME_IMAGE=your-registry/livepeer-runtime@sha256:<published-digest>
-sudo --preserve-env=LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE ./bootstrap-livepeer.sh --token <TOKEN>
+# Disable shell tracing before entering the token.
+set +x
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sh -
 ```
 
-Use the Runtime image published by your deployment. The Control Center API's
-`PublicAPIURL` must match `LIVEPEER_API_URL` and be reachable by the host and its
-Kubernetes pods. See the [Runtime guide](runtime/README.md) for prerequisites,
-installation options, and upgrades.
+The loader downloads and verifies a complete release bundle. See the [Runtime guide](runtime/README.md) for more details.
 
 ## Architecture
 

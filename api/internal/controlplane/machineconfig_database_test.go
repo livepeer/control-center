@@ -38,15 +38,15 @@ func TestUnchangedRenderingAllowsProviderProgress(t *testing.T) {
 	}
 }
 
-func waitForStateLock(t *testing.T, s *Server, query string) {
+func waitForStateLock(t *testing.T, s *Server, query string, minimum int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		var blocked bool
-		if err := s.db.QueryRow(`SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1)`, query).Scan(&blocked); err != nil {
+		var blocked int
+		if err := s.db.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1`, query).Scan(&blocked); err != nil {
 			t.Fatal(err)
 		}
-		if blocked {
+		if blocked >= minimum {
 			return
 		}
 		time.Sleep(time.Millisecond)
@@ -79,13 +79,13 @@ func TestCredentialRefreshSerializesWithBlockedStateWrite(t *testing.T) {
 	lease.State.ApprovedConfigDigest = "approval"
 	written := make(chan error, 1)
 	go func() { written <- lease.Save(t.Context()) }()
-	waitForStateLock(t, s, "UPDATE lpcc.machine_states SET state=%")
+	waitForStateLock(t, s, "UPDATE lpcc.machine_states SET state=%", 1)
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
 	refreshed := make(chan int, 1)
 	go func() {
 		refreshed <- request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}).Code
 	}()
-	waitForStateLock(t, s, "UPDATE lpcc.machine_states SET revision=revision+1%")
+	waitForStateLock(t, s, "UPDATE lpcc.machine_states SET revision=revision+1%", 1)
 	if err = blocking.Rollback(); err != nil {
 		t.Fatal(err)
 	}

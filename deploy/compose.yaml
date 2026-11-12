@@ -43,6 +43,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
       target: web
+    volumes:
+      - type: bind
+        source: ./bootstrap
+        target: /srv/bootstrap
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - 127.0.0.1:33812:8080
       - 127.0.0.1:43812:8081

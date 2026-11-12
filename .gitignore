@@ -13,3 +13,4 @@ ui/playwright-report/
 /tools/tests/__pycache__/
 /deploy/config.toml
 /deploy/secrets/
+/deploy/bootstrap/

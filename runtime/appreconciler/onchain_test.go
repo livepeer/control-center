@@ -20,56 +20,51 @@ type onchainTransport func(*http.Request) (*http.Response, error)
 
 func (f onchainTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestOnchainEmptyOwnerStillRequiresNodeDrainAcknowledgement(t *testing.T) {
-	c, input, _, owner, reporter, _ := fixtureController(t)
-	input.value.Metadata.Onchain = onchain.Config{Version: 1, Mode: "onchain"}
-	input.value.Metadata.DrainRequested = true
-	input.value.Metadata.DrainTarget = "drain-target"
+func TestForcedRetirementRequiresAuthoritativeNodeAbsence(t *testing.T) {
+	c, input, cluster, owner, reporter, _ := fixtureController(t)
+	input.value.Metadata.Onchain = onchain.Config{Mode: "onchain"}
+	input.value.Metadata.OnchainActive = true
+	registerApps(t, c, cluster)
+	input.value.Metadata.Terminal = true
 	owner.unregisterFail = true
-	tick(t, c)
-	if reporter.reports[len(reporter.reports)-1].Drained || owner.unregisters == 0 {
-		t.Fatal("empty owner bypassed Node's durable handoff drain")
+	owner.down = true
+	if c.Tick(t.Context()) == nil {
+		t.Fatal("missing Node was silently accepted")
 	}
-	owner.unregisterFail = false
+	for _, i := range c.Journal.View().Instances {
+		if i.RegistrationGone {
+			t.Fatal("unknown Node state established registration absence")
+		}
+	}
+	input.value.NodeAbsent = true
 	tick(t, c)
-	if !reporter.reports[len(reporter.reports)-1].Drained {
-		t.Fatal("Node's normal drain acknowledgement did not release maintenance")
+	for _, i := range c.Journal.View().Instances {
+		if !i.RegistrationGone || i.RegistrationPending {
+			t.Fatal("authoritative Node absence did not release forced cleanup")
+		}
+	}
+	if reporter.reports[len(reporter.reports)-1].Drained {
+		t.Fatal("forced retirement claimed ordinary app drain")
 	}
 }
 
-func TestEmptySDKOwnerUnregisterChecksNodeInsteadOfSkippingRequest(t *testing.T) {
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/unregister") || r.Header.Get("Authorization") != "bootstrap" {
-			t.Error("invalid normal unregister request")
-		}
-		if calls == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-	owner, err := NewSDKOwner(server.URL, "bootstrap", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner.Unregister(t.Context(), Identity{}) == nil {
-		t.Fatal("pending handoff was acknowledged")
-	}
-	if err := owner.Unregister(t.Context(), Identity{}); err != nil || calls != 2 {
-		t.Fatal("Node acknowledgement was not observed", err, calls)
-	}
-}
 func TestOnchainAdmissionRequiresLiveMatchingNode(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	pods := 1
 	ready := 200
+	deployment, lookup := 200, 200
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/deployments/") {
+			w.WriteHeader(deployment)
+			return
+		}
+		if lookup != 200 {
+			w.WriteHeader(lookup)
+			return
+		}
 		items := []any{}
 		for range pods {
-			items = append(items, map[string]any{"metadata": map[string]any{"annotations": map[string]string{"livepeer.io/config-sha256": digest}}})
+			items = append(items, map[string]any{"metadata": map[string]any{"uid": "node-pod", "annotations": map[string]string{"livepeer.io/config-sha256": digest}}})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": items})
 	}))
@@ -96,6 +91,15 @@ func TestOnchainAdmissionRequiresLiveMatchingNode(t *testing.T) {
 	pods = 2
 	if source.onchainActive(context.Background(), m) {
 		t.Fatal("ambiguous Node incarnation admitted")
+	}
+	for _, test := range []struct {
+		deployment, lookup, pods int
+		absent                   bool
+	}{{404, 200, 0, true}, {200, 200, 0, false}, {404, 200, 1, false}, {404, 503, 0, false}, {503, 200, 0, false}} {
+		deployment, lookup, pods = test.deployment, test.lookup, test.pods
+		if source.nodeAbsent(t.Context()) != test.absent {
+			t.Fatal("Node absence inferred without authoritative workload removal", test)
+		}
 	}
 }
 func TestPendingOnchainTargetDoesNotAllocateOrAdmit(t *testing.T) {

@@ -54,7 +54,6 @@ metadata:
   namespace: livepeer
 data:
   orchestrator.toml: |
-    Network = "offchain"
     DataDir = "/data"
     Listen = "unsafe@0.0.0.0:8935"
     MetricsListen = "unsafe@0.0.0.0:8936"
@@ -69,6 +68,7 @@ data:
     RunnerGrants = ["10.43.0.0/16"]
     HealthGrants = []
     SessionProxyGrants = []
+    Network = "offchain"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -167,6 +167,7 @@ metadata:
   name: orchestrator
   namespace: livepeer
 spec:
+  publishNotReadyAddresses: true
   selector:
     app: orchestrator
   ports:

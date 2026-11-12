@@ -83,8 +83,8 @@ func TestTerminalConnectorSurvivesOnlyPendingAppCleanup(t *testing.T) {
 			terminal := request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil)
 			requireStatus(t, terminal, 200)
 			files := archiveFiles(t, terminal.Body.Bytes())
-			if terminal.Header().Get("X-Livepeer-App-Cleanup-Ready") == "true" || !strings.Contains(files["system/node/orchestrator.yaml"], "kind: Deployment") {
-				t.Fatal("retained phase removed Node before pending app receipts")
+			if terminal.Header().Get("X-Livepeer-App-Cleanup-Ready") == "true" || strings.Contains(files["system/node/orchestrator.yaml"], "kind: Deployment") {
+				t.Fatal("forced retirement retained Node or skipped pending app receipts")
 			}
 			raw := []byte(files[appbundle.IntentFile])
 			set, err := schema.DecodeAssignmentSet(raw)

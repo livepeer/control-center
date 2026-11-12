@@ -118,10 +118,18 @@ func (l *Lease) Finish(ctx context.Context, failed bool) {
 }
 
 func (s Store) Report(ctx context.Context, m Machine, component string) (Report, time.Time, error) {
+	return readReport(ctx, s.DB, m, component)
+}
+
+type reportReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func readReport(ctx context.Context, q reportReader, m Machine, component string) (Report, time.Time, error) {
 	var r Report
 	var raw []byte
 	var at time.Time
-	err := s.DB.QueryRowContext(ctx, `SELECT report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND component=$2 AND credential_version=$3`, m.NodeID, component, m.CredentialVersion).Scan(&raw, &at)
+	err := q.QueryRowContext(ctx, `SELECT report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND component=$2 AND credential_version=$3`, m.NodeID, component, m.CredentialVersion).Scan(&raw, &at)
 	if err == nil {
 		err = json.Unmarshal(raw, &r)
 		at = ObservationTime(r, at)

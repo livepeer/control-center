@@ -36,7 +36,11 @@ func (s Store) files() ([]storedFile, int64, error) {
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		files = append(files, storedFile{entry.Name(), digest, info.Size(), info.ModTime()})
+		modified := info.ModTime()
+		if seen, err := os.Stat(filepath.Join(s.Directory, strings.TrimSuffix(entry.Name(), ".tar.gz")+".seen")); err == nil {
+			modified = seen.ModTime()
+		}
+		files = append(files, storedFile{entry.Name(), digest, info.Size(), modified})
 		total += info.Size()
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].modified.Before(files[j].modified) })
@@ -61,6 +65,7 @@ func (s Store) Collect(pinned map[string]bool, budget int64, now time.Time) erro
 		if err := os.Remove(filepath.Join(s.Directory, file.name)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		_ = os.Remove(filepath.Join(s.Directory, strings.TrimSuffix(file.name, ".tar.gz")+".seen"))
 		total -= file.size
 	}
 	return nil

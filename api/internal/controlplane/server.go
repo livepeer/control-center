@@ -8,7 +8,6 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -189,13 +188,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var m Machine
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&m); err != nil {
+	if appInput(r, &m) != nil {
 		fail(w, 400, "invalid machine registration")
 		return
 	}
-	if decoder.Decode(new(any)) != io.EOF || !validMachine(m) {
+	if !validMachine(m) {
 		fail(w, 400, "invalid machine metadata")
 		return
 	}

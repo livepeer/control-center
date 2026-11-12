@@ -91,32 +91,17 @@ from arbitrary forwarded headers. HTTPS enrollment is eligible even when
 provisioning is disabled; development credentials cannot enable live tunnels.
 Use the Runtime commands in [its README](../runtime/README.md#protected-machine-ingress).
 
-Refresh uses a durable operation ID so retries do not increment the credential
-version twice. Interrupted transitions resume with the saved operation. HTTP
-development mode cannot enable live provisioning.
-
-Machine endpoints provide configuration, connector tokens, component status
-and terminal removal acknowledgement. They are origin-bound, reject redirects
-and return `Cache-Control: no-store`. Retired credentials can fetch their terminal
-artifact, acknowledge its node ID and digest, and send scoped cleanup diagnostics.
-See [machine and app status](machine-status.md) for evidence and recovery rules.
-
-Reports retain their observation time and expiry across delivery retries. The
-agent checks Node's applied revision, readiness, private discovery address and
-installed K3s version, and probes cloudflared and the proxy. Source readiness
-expires with `TunnelStatusTTL`.
+Machine endpoints are origin-bound and reject redirects. Retired credentials can
+fetch terminal cleanup instructions and send scoped diagnostics. Reports expire
+according to `TunnelStatusTTL`; see [machine status](machine-status.md) for
+diagnosis and recovery.
 
 ## Reconciliation and recovery
 
-Retirement is recorded even when machine deletion cascades from Supabase Auth.
-Enrollment commits a private-only bundle without contacting Cloudflare. The
-worker creates or recovers a tunnel, source token, an Access application covering
-both hostnames and a Service Auth-only policy. It installs audience-validating
-ingress before publishing routing. Managed Node configuration changes drain the
-existing workload before replacement; an expired deadline requires intervention.
-Token-generation changes replace the connector; remote-only ingress changes do
-not unnecessarily restart it. Cancelling an endpoint change releases its drain;
-retrying the same unfinished target preserves the original deadline.
+The worker provisions the tunnel, Access application and Service Auth policy,
+then installs audience-validating ingress before publishing routes. Node
+configuration changes drain before replacement; an expired deadline requires
+intervention. Connector token changes replace its Deployment.
 
 After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
 `api-<suffix>.<node>.<domain>`, `discovery-<suffix>.<node>.<domain>` and `*.<node>.<domain>`.
@@ -132,24 +117,12 @@ reserved paths and forward the rest; Node checks HTTP methods.
 Services remain ClusterIP. Never add public Ingress, NodePort, LoadBalancer,
 hostPort or hostNetwork to generated workloads.
 
-On a lost create response, inventory scoped ownership before retrying. If no
-result is found, retry with bounded backoff and the same durable operation
-marker. Select a provider ID once and delete proven-owned duplicates; late
-results cannot replace the selected tunnel or immutable credential version.
-A found Access token without a stored secret is revoked and replaced. The
-selected ID and encrypted Access secret are committed together. Continue watching
-uncertain operations after observed absence and retirement to clean up late
-results. Foreign ownership conflicts and externally deleted selected resources block
-reconciliation. Resolve these conflicts through an operator inventory; never
-adopt by a similar name or discard retirement records.
-
-The last valid artifact and verified ingress survive transient provider failures.
-Confirmed unsafe Access protection disables routes until verified protection is restored.
-A rollback uses a new
-generation and the prior restrictive settings; it never restores a revoked
-credential. Account/zone/team changes require retiring the previous scope first.
-Domain replacements drain and retain predecessor discovery protection until
-the new source is acknowledged.
+If provisioning has an uncertain outcome or an ownership conflict, inventory
+provider resources before retrying. Delete only proven-owned duplicates; do not
+adopt resources by name or discard retirement records. Restore externally deleted
+or unsafe Access protection before publishing routes. The last valid artifact and
+verified ingress survive transient provider failures. Account, zone or team changes
+require retiring the previous scope first.
 
 ## Rotation and removal
 
@@ -184,21 +157,17 @@ and revokes source tokens.
 Cleanup proceeds even with the machine offline. Retired-node cleanup cannot
 delete a replacement node's routes or certificates.
 
-The terminal artifact prunes the connector and orchestrator and delivers app-removal
-intents; Runtime cleans up assigned apps.
-Bootstrap namespaces/Secrets, retained PV/PVC and shared upgrade controller/CRDs
-remain, with no active upgrade Plan. Terminal delivery persists through local
-acknowledgement; authentication/fetch errors never mean removal. Verify provider
-absence separately from local cleanup.
+Forced removal stops Node before app cleanup. Final cleanup removes the connector.
+Retained volumes and bootstrap resources remain; verify provider absence separately
+from local cleanup.
+See [app removal](app-registry.md#runtime-delivery-and-completion-contract) for
+normal and forced removal behavior.
 
 ## Integration checks
 
 App assignments follow the [delivery and cleanup contract](app-registry.md#runtime-delivery-and-completion-contract).
 Run the [end-to-end harness](development.md#end-to-end-tests) for routing and isolation checks.
 
-Cloudflared normalization affects matching and can differ from the forwarded
-path; configuration inspection is not isolation evidence. Review Cloudflare
-[origin parameters](https://developers.cloudflare.com/tunnel/reference/origin-parameters/),
+When upgrading cloudflared, review its [origin parameters](https://developers.cloudflare.com/tunnel/reference/origin-parameters/),
 [ingress matching](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/)
-and [DNS lifecycle](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/)
-when upgrading the pinned image.
+and [DNS lifecycle](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/).

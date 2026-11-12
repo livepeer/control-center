@@ -5,9 +5,22 @@ control_transport() {
   if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]]; then printf 'development-http'; else printf 'https'; fi
 }
 
+api_url() {
+  local api=${LIVEPEER_API_URL:-https://controlcenter-api.livepeer.live}
+  api=${api%/}
+  [[ "$api" =~ ^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*$ ]] || die 'invalid LIVEPEER_API_URL: expected an API base URL'
+  printf '%s' "$api"
+}
+
 runtime_image() {
-  RUNTIME_IMAGE=${LIVEPEER_RUNTIME_IMAGE:-}
-  if [[ -z "$RUNTIME_IMAGE" && -f "$INSTALL_DIR/state/runtime-image" ]]; then RUNTIME_IMAGE=$(cat "$INSTALL_DIR/state/runtime-image"); fi
+  RUNTIME_IMAGE=''
+  if [[ ${LIVEPEER_RUNTIME_IMAGE+x} ]]; then
+    RUNTIME_IMAGE=$LIVEPEER_RUNTIME_IMAGE
+  elif [[ -f "$INSTALL_DIR/state/runtime-image" ]]; then
+    RUNTIME_IMAGE=$(cat "$INSTALL_DIR/state/runtime-image")
+  elif [[ -n ${SCRIPT_DIR:-} && -f "$SCRIPT_DIR/release-runtime-image" ]]; then
+    RUNTIME_IMAGE=$(cat "$SCRIPT_DIR/release-runtime-image")
+  fi
   [[ "$RUNTIME_IMAGE" =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || die 'set LIVEPEER_RUNTIME_IMAGE to a built Go Runtime image pinned by digest'
 }
 
@@ -71,8 +84,7 @@ stop_credential_consumers() {
   fi
   kube -n flux-system delete deployment/livepeer-tunnel --ignore-not-found --wait=true
   if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
-    # Prior app cleanup was verified before this transition. Do not let a
-    # retained Node from that lifetime survive issuance of its replacement.
+    # Old app cleanup is already confirmed; stop its Node before issuing credentials.
     if kube -n livepeer get deployment/orchestrator >/dev/null 2>&1; then
       kube -n livepeer scale deployment/orchestrator --replicas=0
     fi
@@ -89,12 +101,16 @@ transition_credentials() {
   managed_installation || die 'credential transition requires an initialized installation'
   [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]] || die 'restore the runner bootstrap credential before changing credentials'
   runtime_image
-  [[ -n "$ENROLLMENT_TOKEN" ]] || die 'credential transition requires a fresh owner enrollment JWT'
+  [[ -n "$ENROLLMENT_TOKEN" ]] || die 'credential transition requires LIVEPEER_ENROLLMENT_TOKEN with a fresh owner enrollment JWT'
   [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment JWT'
-  api=${LIVEPEER_API_URL:-}; api=${api%/}
-  [[ "$api" =~ ^https://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*$ ]] || die 'set LIVEPEER_API_URL to the verified HTTPS API'
+  api=$(api_url)
+  [[ "$api" == https://* ]] || die 'set LIVEPEER_API_URL to the verified HTTPS API'
   NODE_ID=$(cat "$INSTALL_DIR/credentials/node-id")
   [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ ]] || die 'invalid saved machine ID'
+  if [[ -z ${LIVEPEER_API_URL:-} ]]; then
+    [[ -s "$INSTALL_DIR/credentials/config-url" && $(< "$INSTALL_DIR/credentials/config-url") == "$api/v1/nodes/$NODE_ID/config" ]] ||
+      die 'set LIVEPEER_API_URL to the original verified HTTPS API before changing credentials'
+  fi
   fingerprint=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum); fingerprint=${fingerprint:0:64}
   [[ $(cat "$INSTALL_DIR/credentials/fingerprint") == "$fingerprint" ]] || die 'installation fingerprint changed'
   if [[ -f "$INSTALL_DIR/state/credential-transition.json" ]]; then
@@ -145,6 +161,7 @@ transition_credentials() {
       --config <(printf 'header = "Authorization: Bearer %s"\n' "$ENROLLMENT_TOKEN") \
       --data-binary "$request" "$api/v1/nodes/register") || die 'HTTPS re-enrollment failed; transition remains suspended'
   fi
+  ENROLLMENT_TOKEN=''
   status=${response##*$'\n'}; [[ "$status" == 200 ]] || die 'credential transition did not return HTTP 200; resume with the same operation'
   response=${response%$'\n'*}
   if [[ "$CREDENTIAL_TRANSITION" == refresh ]]; then

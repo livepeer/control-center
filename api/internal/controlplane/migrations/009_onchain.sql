@@ -13,12 +13,11 @@ CREATE TABLE lpcc.onchain_state (
  initialized BOOLEAN NOT NULL DEFAULT false,
  FOREIGN KEY(fingerprint,generation) REFERENCES lpcc.onchain_configs(fingerprint,generation)
 );
-CREATE TABLE lpcc.onchain_secrets (reference TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
 CREATE TABLE lpcc.onchain_grants (
  grant_id UUID PRIMARY KEY, issued_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE, node_id TEXT NOT NULL,
  onchain_generation BIGINT NOT NULL, config_digest TEXT NOT NULL,
  pod_uid TEXT NOT NULL, launch_id TEXT NOT NULL, process_id TEXT NOT NULL,
- observed_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ,
+ ready_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ,
  UNIQUE(node_id,onchain_generation,pod_uid,launch_id,process_id)
 );
 CREATE INDEX onchain_grants_machine ON lpcc.onchain_grants(node_id);
@@ -36,15 +35,14 @@ END $$;
 ALTER TABLE lpcc.onchain_revision ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.onchain_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.onchain_configs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE lpcc.onchain_secrets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.onchain_grants ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_secrets,lpcc.onchain_grants FROM PUBLIC;
+REVOKE ALL ON lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants FROM PUBLIC;
 REVOKE ALL ON SEQUENCE lpcc.onchain_grants_issued_sequence_seq FROM PUBLIC;
 DO $$ DECLARE r TEXT;
 BEGIN
  FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
   IF EXISTS(SELECT FROM pg_roles WHERE rolname=r) THEN
-   EXECUTE format('REVOKE ALL ON lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_secrets,lpcc.onchain_grants FROM %I',r);
+   EXECUTE format('REVOKE ALL ON lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants FROM %I',r);
    EXECUTE format('REVOKE ALL ON SEQUENCE lpcc.onchain_grants_issued_sequence_seq FROM %I',r);
   END IF;
  END LOOP;
@@ -52,7 +50,7 @@ END $$;
 -- DOWN
 DO $$ BEGIN
  IF EXISTS(SELECT FROM lpcc.onchain_state) OR EXISTS(SELECT FROM lpcc.onchain_configs)
-    OR EXISTS(SELECT FROM lpcc.onchain_secrets) OR EXISTS(SELECT FROM lpcc.onchain_grants) THEN
+    OR EXISTS(SELECT FROM lpcc.onchain_grants) THEN
   RAISE EXCEPTION 'retain onchain schema while onchain history exists';
  END IF;
 END $$;
@@ -65,4 +63,4 @@ BEGIN
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;
-DROP TABLE lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_secrets,lpcc.onchain_grants;
+DROP TABLE lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants;

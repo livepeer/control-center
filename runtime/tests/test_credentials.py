@@ -26,13 +26,12 @@ class CredentialTransitions(unittest.TestCase):
         (self.root / 'credentials/identity.json').write_text(json.dumps({'node_id': 'a' * 26, 'credential_version': 1}))
         (self.root / 'state/k3s-version').write_text('v1.37.10+k3s1')
 
-    def transition(self, fail='', mode='refresh', node='c' * 26, nodes='node/worker'):
+    def transition(self, fail='', mode='refresh', node='c' * 26, nodes='node/worker', api='https://control.example.invalid'):
         script = r'''
 set -Eeuo pipefail
 source "$1"
 INSTALL_DIR=$2; export INSTALL_DIR
-ENROLLMENT_TOKEN=header.payload.signature
-LIVEPEER_API_URL=https://control.example.invalid
+if [[ -n $TEST_API ]]; then LIVEPEER_API_URL=$TEST_API; else unset LIVEPEER_API_URL; fi
 CREDENTIAL_TRANSITION=$TEST_MODE
 LIVEPEER_RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 chown() { :; }
@@ -54,6 +53,7 @@ kube() {
   if [[ "$FAIL_AT" == stop && "$*" == *'wait pod'* ]]; then return 1; fi
   if [[ "$FAIL_AT" == artifact && "$*" == *'wait externalartifact/livepeer-service'* ]]; then return 1; fi
   if [[ "$*" == *'create secret generic livepeer-service-auth'* ]]; then
+    [[ -z "$ENROLLMENT_TOKEN" ]]
     [[ $(cat "$INSTALL_DIR/credentials/config-url") == https://* ]]
     [[ $(cat "$INSTALL_DIR/credentials/service-token") == cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ]]
     printf 'new-secret\n' >> "$INSTALL_DIR/steps"
@@ -79,13 +79,31 @@ curl() {
   done
   [[ "$FAIL_AT" != request ]] || return 1
   printf '{"node_id":"%s","token":"%s","credential_version":1,"config_url":"%s/v1/nodes/%s/config"}\n200' \
-    "$TEST_NODE" cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc https://control.example.invalid "$TEST_NODE"
+    "$TEST_NODE" cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "${TEST_API:-https://controlcenter-api.livepeer.live}" "$TEST_NODE"
 }
 transition_credentials
 '''
         return subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY.parent.parent / 'bootstrap-livepeer.sh'), str(self.root)],
-                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_NODE': ('a' * 26 if mode == 'refresh' else node), 'TEST_NODES': nodes},
+                              env={**os.environ, 'LIVEPEER_ENROLLMENT_TOKEN': 'header.payload.signature',
+                                   'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_NODE': ('a' * 26 if mode == 'refresh' else node), 'TEST_NODES': nodes, 'TEST_API': api or ''},
                               text=True, capture_output=True)
+
+    def test_custom_origin_omission_fails_before_state_or_consumers_change(self):
+        result = self.transition(api=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('LIVEPEER_API_URL', result.stderr)
+        self.assertFalse((self.root / 'state/credential-transition.json').exists())
+        self.assertFalse((self.root / 'steps').exists())
+        self.assertEqual((self.root / 'credentials/service-token').read_text(), 'b' * 64)
+        # The correct explicit endpoint still works, including HTTP-to-HTTPS refresh.
+        (self.root / 'credentials/config-url').write_text('http://control.example.invalid/v1/nodes/' + 'a' * 26 + '/config')
+        result = self.transition()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_standard_origin_refresh_can_omit_api_override(self):
+        (self.root / 'credentials/config-url').write_text('https://controlcenter-api.livepeer.live/v1/nodes/' + 'a' * 26 + '/config')
+        result = self.transition(api=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_identity_requires_base32_node_and_positive_numeric_version(self):
         for identity, valid in [

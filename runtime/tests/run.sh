@@ -17,7 +17,7 @@ outcome=setup_failed
 image=-
 
 # Invoked indirectly by the EXIT trap.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 finish() {
   local code=$? cid present owner cleanup=0
   trap - EXIT
