@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run ONLY inside a disposable Docker container, with its own network namespace.
-set -euo pipefail
-trap 'echo "Firewall fixture failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+set -Eeuo pipefail
+trap 'printf "Firewall fixture failed at line %s: %s (args: %s)\n" "$LINENO" "$BASH_COMMAND" "$*" >&2' ERR
 [[ -f /.dockerenv && "${LIVEPEER_FIREWALL_CONTAINER_TEST:-}" == 1 ]] || {
   echo 'Run this test in the disposable container documented in README.md.' >&2
   exit 2
