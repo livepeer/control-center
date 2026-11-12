@@ -84,7 +84,9 @@ docker push <registry/managed-node:build>
 Copy `redeemer.example.toml` to `redeemer.toml`. Create owner-only files readable
 by UID 65532:
 
-- `secrets/onchain-rpc/<version>`: HTTPS RPC URL.
+- `secrets/onchain-rpc/<sha256>`: HTTPS RPC URL; name the file with its raw-byte
+  SHA-256 (`shasum -a 256 <rpc-file>`) and use that hash as `rpc_secret`.
+  Preserve the exact bytes, including any final newline.
 - `secrets/onchain-webhook-auth`: random secret of at least 32 bytes.
 - `secrets/redeemer/keystore.json`, `password`, and `rpc`: redeemer wallet inputs.
 - `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.

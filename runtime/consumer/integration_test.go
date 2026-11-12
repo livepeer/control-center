@@ -1,8 +1,9 @@
-package connector
+package consumer
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,13 +13,36 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
 type podFixture struct {
+	profile   Profile
+	metadata  *contract.Metadata
 	container string
 	calls     int
 	onLookup  func(int)
+}
+
+func TestDeliveryKeepsSecretsOutOfStateAndRejectsInsecureTransport(t *testing.T) {
+	for _, profile := range []Profile{Connector, Orchestrator} {
+		f := fixture(t, profile)
+		grant := f.launch(t, "a")
+		state, err := os.ReadFile(f.i.StateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{grant.Token, grant.RPCURL, grant.Headers, strings.Repeat("b", 64)} {
+			if secret != "" && strings.Contains(string(state), secret) {
+				t.Fatal("credential persisted in consumer state")
+			}
+		}
+		f.i.Control.AllowHTTP = true
+		if _, err := f.i.fetch(t.Context(), grant.Launch); err == nil {
+			t.Fatal("insecure credential delivery allowed")
+		}
+	}
 }
 
 func (p *podFixture) Request(_ context.Context, method, path string, _ any, result any) error {
@@ -26,68 +50,76 @@ func (p *podFixture) Request(_ context.Context, method, path string, _ any, resu
 	if p.onLookup != nil {
 		p.onLookup(p.calls)
 	}
-	if method != http.MethodGet || path != "/api/v1/namespaces/flux-system/pods/tunnel-pod" {
+	if method != http.MethodGet || path != "/api/v1/namespaces/"+map[Profile]string{Connector: "flux-system", Orchestrator: "livepeer"}[p.profile]+"/pods/tunnel-pod" {
 		return &transport.HTTPError{Status: 404}
 	}
-	b, _ := json.Marshal(map[string]any{"metadata": map[string]any{"uid": "pod-uid", "labels": map[string]string{"app": "livepeer-tunnel"}}, "status": map[string]any{"containerStatuses": []any{map[string]any{"name": "connector", "containerID": p.container, "state": map[string]any{"running": map[string]string{"startedAt": "2026-11-08T00:00:00Z"}}}}}})
+	b, _ := json.Marshal(map[string]any{"metadata": map[string]any{"uid": "pod-uid", "labels": map[string]string{"app": map[Profile]string{Connector: "livepeer-tunnel", Orchestrator: "orchestrator"}[p.profile]}, "annotations": map[string]string{"livepeer.io/config-sha256": p.metadata.ConfigDigest}}, "status": map[string]any{"containerStatuses": []any{map[string]any{"name": "connector", "containerID": p.container, "state": map[string]any{"running": map[string]string{"startedAt": "2026-11-08T00:00:00Z"}}}}}})
 	return transport.Decode(b, result)
 }
 
 func TestOverlappingStartsCannotOverwriteTheNewerLaunch(t *testing.T) {
-	f := fixture(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	f.mutate = func() {
-		if f.fetched == 1 {
-			close(entered)
-			<-release
-		}
-	}
-	oldDone, newDone := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
-	oldLaunch := Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("a", 64)}
-	newLaunch := oldLaunch
-	newLaunch.LaunchID = strings.Repeat("c", 32)
-	newLaunch.ProcessID = strings.Repeat("c", 64)
-	go func() { oldDone <- operation(t, f.i, "tunnel/connector-token", oldLaunch) }()
-	<-entered
-	go func() { newDone <- operation(t, f.i, "tunnel/connector-token", newLaunch) }()
-	var newer *httptest.ResponseRecorder
-	select {
-	case newer = <-newDone:
-	case <-time.After(5 * time.Second):
-		close(release)
-		<-oldDone
-		t.Fatal("new launch blocked behind its predecessor's fetch")
-	}
-	close(release)
-	<-oldDone // An older request may finish before validation or be superseded.
-	var grant Grant
-	if newer.Code != 200 || transport.Decode(newer.Body.Bytes(), &grant) != nil {
-		t.Fatal("new start failed")
-	}
-	if operation(t, f.i, "tunnel/observation", Observation{Association: grant.Association, Ready: true, ProviderVersion: 10}).Code != 200 {
-		t.Fatal("old fetch displaced the new process grant")
-	}
-	f.i.Restore()
-	if f.i.grant == nil || f.i.grant.Launch != newLaunch {
-		t.Fatal("new launch was not durable")
+	for _, profile := range []Profile{Connector, Orchestrator} {
+		t.Run(fmt.Sprint(profile), func(t *testing.T) {
+			f := fixture(t, profile)
+			entered, release := make(chan struct{}), make(chan struct{})
+			f.mutate = func() {
+				if f.fetched == 1 {
+					close(entered)
+					<-release
+				}
+			}
+			oldDone, newDone := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+			oldLaunch := Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("a", 64)}
+			newLaunch := oldLaunch
+			newLaunch.LaunchID = strings.Repeat("c", 32)
+			newLaunch.ProcessID = strings.Repeat("c", 64)
+			go func() { oldDone <- operation(t, f.i, "tunnel/connector-token", oldLaunch) }()
+			<-entered
+			go func() { newDone <- operation(t, f.i, "tunnel/connector-token", newLaunch) }()
+			var newer *httptest.ResponseRecorder
+			select {
+			case newer = <-newDone:
+			case <-time.After(5 * time.Second):
+				close(release)
+				<-oldDone
+				t.Fatal("new launch blocked behind its predecessor's fetch")
+			}
+			close(release)
+			<-oldDone // An older request may finish before validation or be superseded.
+			var grant Grant
+			if newer.Code != 200 || transport.Decode(newer.Body.Bytes(), &grant) != nil {
+				t.Fatal("new start failed")
+			}
+			if operation(t, f.i, "tunnel/observation", Observation{Association: grant.Association, Ready: true, ProviderVersion: 10}).Code != 200 {
+				t.Fatal("old fetch displaced the new process grant")
+			}
+			f.i.Restore()
+			if f.i.grant == nil || f.i.grant.Launch != newLaunch {
+				t.Fatal("new launch was not durable")
+			}
+		})
 	}
 }
 
 func TestFailedNewLaunchDurablyInvalidatesTheOldAssociation(t *testing.T) {
-	f := fixture(t)
-	first := f.launch(t, "a")
-	bad := first.Launch
-	bad.PodUID = "unrelated-pod"
-	if _, err := f.i.fetch(t.Context(), bad); err == nil || f.i.grant == nil || f.i.grant.Launch != first.Launch {
-		t.Fatal("unverified Pod invalidated the current grant")
-	}
-	f.mutate = func() { f.m.TokenGeneration++ }
-	if w := operation(t, f.i, "tunnel/connector-token", Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("c", 32), ProcessID: strings.Repeat("c", 64)}); w.Code == 200 {
-		t.Fatal("changed grant accepted")
-	}
-	f.i.Restore()
-	if f.i.grant != nil {
-		t.Fatal("restart restored the previous process association")
+	for _, profile := range []Profile{Connector, Orchestrator} {
+		t.Run(fmt.Sprint(profile), func(t *testing.T) {
+			f := fixture(t, profile)
+			first := f.launch(t, "a")
+			bad := first.Launch
+			bad.PodUID = "unrelated-pod"
+			if _, err := f.i.fetch(t.Context(), bad); err == nil || f.i.grant == nil || f.i.grant.Launch != first.Launch {
+				t.Fatal("unverified Pod invalidated the current grant")
+			}
+			f.mutate = func() { f.m.TokenGeneration++; f.m.Onchain.Generation++ }
+			if w := operation(t, f.i, "tunnel/connector-token", Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("c", 32), ProcessID: strings.Repeat("c", 64)}); w.Code == 200 {
+				t.Fatal("changed grant accepted")
+			}
+			f.i.Restore()
+			if f.i.grant != nil {
+				t.Fatal("restart restored the previous process association")
+			}
+		})
 	}
 }
 
@@ -112,31 +144,6 @@ func TestReportRechecksGrantAndObservationAfterPodLookup(t *testing.T) {
 	}
 }
 
-func TestGrantRevalidatesAuthorityAfterFinalKubernetesLookup(t *testing.T) {
-	for _, change := range []string{"generation", "credential", "terminal"} {
-		t.Run(change, func(t *testing.T) {
-			f := fixture(t)
-			f.pod.onLookup = func(call int) {
-				if call != 2 {
-					return
-				}
-				switch change {
-				case "generation":
-					f.m.TokenGeneration++
-				case "credential":
-					os.WriteFile(f.i.Control.TokenFile, []byte(strings.Repeat("c", 64)), 0600)
-				case "terminal":
-					f.m.TerminalCleanup = true
-				}
-			}
-			w := operation(t, f.i, "tunnel/connector-token", Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("a", 32)})
-			if w.Code == 200 {
-				t.Fatal("released a grant after its authority changed during lookup")
-			}
-		})
-	}
-}
-
 type integrationFixture struct {
 	i       *Integration
 	m       contract.Metadata
@@ -146,18 +153,32 @@ type integrationFixture struct {
 	reports []map[string]any
 }
 
-func fixture(t *testing.T) *integrationFixture {
+func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 	t.Helper()
 	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "epoch", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/lp-aaaaaaaaaaaaaaaa/tunnel/connector-token"}}
+	profile := Connector
+	if len(profiles) > 0 {
+		profile = profiles[0]
+	}
+	f.m.Onchain = onchain.Config{Mode: "onchain", Generation: 2}
+	f.m.ConfigDigest = strings.Repeat("a", 64)
+	f.m.OnchainCredentialsRef = "/v1/nodes/" + f.m.NodeID + "/onchain/credentials"
+	f.pod.profile, f.pod.metadata = profile, &f.m
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("b", 64) {
 			t.Error("wrong machine credential")
 		}
-		if strings.HasSuffix(r.URL.Path, "/connector-token") {
+		if strings.HasSuffix(r.URL.Path, "/"+profile.endpoint()) {
 			f.fetched++
 			old := f.m
 			if f.mutate != nil {
 				f.mutate()
+			}
+			if profile == Orchestrator {
+				var request Request
+				json.NewDecoder(r.Body).Decode(&request)
+				json.NewEncoder(w).Encode(Grant{Association: Association{Launch: request.Launch, Epoch: old.Epoch, CredentialVersion: old.CredentialVersion, OnchainGeneration: old.Onchain.Generation, ConfigDigest: old.ConfigDigest, GrantID: "grant-" + request.LaunchID}, RPCURL: "https://rpc.example/private", Headers: "Authorization: Bearer submission-secret"})
+				return
 			}
 			json.NewEncoder(w).Encode(map[string]any{"token": strings.Repeat("x", 63) + string(rune('a'+f.fetched)), "epoch": old.Epoch, "tunnel_id": old.TunnelID, "credential_generation": old.TokenGeneration})
 			return
@@ -180,7 +201,7 @@ func fixture(t *testing.T) *integrationFixture {
 		t.Fatal(err)
 	}
 	control.Client.Transport = server.Client().Transport
-	f.i = &Integration{Control: control, Kube: f.pod, Desired: func() (contract.Metadata, bool) { return f.m, true }, StateFile: filepath.Join(root, "grant.json")}
+	f.i = &Integration{Profile: profile, Control: control, Kube: f.pod, Desired: func() (contract.Metadata, bool) { return f.m, true }, StateFile: filepath.Join(root, "grant.json")}
 	return f
 }
 
@@ -190,10 +211,16 @@ func operation(t *testing.T, i *Integration, path string, value any) *httptest.R
 		launch.ProcessID = strings.Repeat("d", 64)
 		value = launch
 	}
+	if o, ok := value.(Observation); ok && o.ObservedAt.IsZero() {
+		o.ObservedAt = time.Now()
+		value = o
+	}
 	b, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
+	path = strings.ReplaceAll(path, "tunnel/connector-token", i.Profile.endpoint())
+	path = strings.ReplaceAll(path, "tunnel/observation", strings.TrimPrefix(i.Profile.observationPath(), "/"))
 	r := httptest.NewRequest(http.MethodPost, "http://management/"+path, strings.NewReader(string(b)))
 	w := httptest.NewRecorder()
 	i.ServeHTTP(w, r)
@@ -266,29 +293,43 @@ func TestGrantAssociationSurvivesAgentRestartButRequiresFreshEvidence(t *testing
 }
 
 func TestGrantFetchFencesConcurrentSecurityAndProcessChanges(t *testing.T) {
-	for _, change := range []string{"epoch", "generation", "credential", "terminal_cleanup"} {
-		t.Run(change, func(t *testing.T) {
-			f := fixture(t)
-			f.mutate = func() {
-				switch change {
-				case "epoch":
-					f.m.Epoch = "new-epoch"
-				case "generation":
-					f.m.TokenGeneration++
-				case "credential":
-					os.WriteFile(f.i.Control.TokenFile, []byte(strings.Repeat("c", 64)), 0600)
-				case "terminal_cleanup":
-					f.m.TerminalCleanup = true
-				}
+	for _, profile := range []Profile{Connector, Orchestrator} {
+		for _, checkpoint := range []string{"fetch", "final-pod-lookup"} {
+			for _, change := range []string{"epoch", "generation", "credential", "terminal_cleanup"} {
+				t.Run(fmt.Sprintf("%d/%s/%s", profile, checkpoint, change), func(t *testing.T) {
+					f := fixture(t, profile)
+					mutate := func() {
+						switch change {
+						case "epoch":
+							f.m.Epoch = "new-epoch"
+						case "generation":
+							f.m.TokenGeneration++
+							f.m.Onchain.Generation++
+						case "credential":
+							os.WriteFile(f.i.Control.TokenFile, []byte(strings.Repeat("c", 64)), 0600)
+						case "terminal_cleanup":
+							f.m.TerminalCleanup = true
+						}
+					}
+					if checkpoint == "fetch" {
+						f.mutate = mutate
+					} else {
+						f.pod.onLookup = func(call int) {
+							if call == 2 {
+								mutate()
+							}
+						}
+					}
+					w := operation(t, f.i, "tunnel/connector-token", Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("a", 32)})
+					if w.Code == 200 {
+						t.Fatal("changed grant escaped fencing")
+					}
+					if _, err := os.Stat(f.i.StateFile); !os.IsNotExist(err) {
+						t.Fatal("unaccepted grant association committed")
+					}
+				})
 			}
-			w := operation(t, f.i, "tunnel/connector-token", Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("a", 32)})
-			if w.Code == 200 {
-				t.Fatal("changed grant escaped fencing")
-			}
-			if _, err := os.Stat(f.i.StateFile); !os.IsNotExist(err) {
-				t.Fatal("unaccepted grant association committed")
-			}
-		})
+		}
 	}
 }
 

@@ -133,7 +133,7 @@ curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
 ```
 
 If interrupted, repeat with a fresh JWT. Refresh retains the enrollment, tunnel
-UUID, local runner credential and installed K3s version.
+UUID, local runner credential and installed K3s version. Management refresh immediately fences management access; the loaded submission grant remains valid until its replacement is observed.
 
 After the backend removes an enrollment and confirms app cleanup, use
 `--reenroll` with a fresh owner JWT, the original API override for custom
@@ -145,6 +145,10 @@ set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
   LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --reenroll --install-dir /opt/livepeer
 ```
+
+Forced enrollment removal stops Node and preserves its database. Routes and
+connector access remain available while app cleanup is pending, unless
+credentials are compromised. Public Trickle is unsupported.
 
 ## Host operation and recovery
 

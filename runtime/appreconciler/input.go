@@ -16,9 +16,10 @@ import (
 )
 
 type Input struct {
-	Metadata contract.Metadata
-	Payload  appbundle.Payload
-	Digest   string
+	NodeAbsent bool
+	Metadata   contract.Metadata
+	Payload    appbundle.Payload
+	Digest     string
 }
 type Inputs interface {
 	Read(context.Context) (Input, error)
@@ -75,14 +76,26 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 	if m.Onchain.Onchain() && m.OnchainActive {
 		m.OnchainActive = s.onchainActive(ctx, m)
 	}
+	absent := m.Terminal && s.nodeAbsent(ctx)
 	p, err := appbundle.Read(files, m)
 	if err != nil {
 		// Whole-archive/enrollment checks already succeeded. An invalid app payload
 		// cannot suppress a safe machine withdrawal or erase the accepted app intent.
 		m.AppsError = "invalid_app_payload"
-		return Input{Metadata: m, Payload: appbundle.Unavailable(), Digest: a.Digest}, nil
+		return Input{Metadata: m, Payload: appbundle.Unavailable(), Digest: a.Digest, NodeAbsent: absent}, nil
 	}
-	return Input{Metadata: m, Payload: p, Digest: a.Digest}, nil
+	return Input{Metadata: m, Payload: p, Digest: a.Digest, NodeAbsent: absent}, nil
+}
+
+// Forced retirement removes the Node workload, preserving its local volume.
+// Both reads must succeed: a missing process endpoint cannot prove absence.
+func (s Source) nodeAbsent(ctx context.Context) bool {
+	var deployment any
+	if !transport.IsStatus(s.Kube.Request(ctx, "GET", "/apis/apps/v1/namespaces/livepeer/deployments/orchestrator", nil, &deployment), 404) {
+		return false
+	}
+	pod, err := transport.ObserveNode(ctx, s.Kube)
+	return err == nil && pod.Absent
 }
 
 // Onchain eligibility is checked against the live process, even when an offline
@@ -90,27 +103,8 @@ func (s Source) Read(ctx context.Context) (Input, error) {
 func (s Source) onchainActive(ctx context.Context, m contract.Metadata) bool {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	var pods struct {
-		Items []struct {
-			Metadata struct {
-				DeletionTimestamp *string           `json:"deletionTimestamp"`
-				Annotations       map[string]string `json:"annotations"`
-			} `json:"metadata"`
-		} `json:"items"`
-	}
-	if s.Kube.Request(ctx, "GET", "/api/v1/namespaces/livepeer/pods?labelSelector=app%3Dorchestrator", nil, &pods) != nil {
-		return false
-	}
-	live := 0
-	for _, p := range pods.Items {
-		if p.Metadata.DeletionTimestamp == nil {
-			if p.Metadata.Annotations["livepeer.io/config-sha256"] != m.ConfigDigest {
-				return false
-			}
-			live++
-		}
-	}
-	if live != 1 {
+	pod, err := transport.ObserveNode(ctx, s.Kube)
+	if err != nil || pod.UID == "" || pod.ConfigDigest != m.ConfigDigest {
 		return false
 	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", "http://orchestrator.livepeer.svc.cluster.local:8936/readyz", nil)

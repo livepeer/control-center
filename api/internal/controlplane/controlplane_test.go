@@ -1,12 +1,11 @@
 package controlplane
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/livepeer/control-center/runtime/artifact"
 	"io"
 	"log/slog"
 	"net/http"
@@ -66,32 +65,13 @@ func TestEnrollmentAuthorization(t *testing.T) {
 
 func archiveFiles(t *testing.T, data []byte) map[string]string {
 	t.Helper()
-	z, err := gzip.NewReader(bytes.NewReader(data))
+	members, err := artifact.Read(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer z.Close()
-	tarReader := tar.NewReader(io.LimitReader(z, 64<<20))
-	files := map[string]string{}
-	for {
-		h, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if h.Typeflag != tar.TypeReg || strings.HasPrefix(h.Name, "/") || strings.Contains(h.Name, "..") {
-			t.Fatal("unsafe archive member")
-		}
-		if _, ok := files[h.Name]; ok {
-			t.Fatal("duplicate archive member")
-		}
-		contents, err := io.ReadAll(tarReader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files[h.Name] = string(contents)
+	files := make(map[string]string, len(members))
+	for name, contents := range members {
+		files[name] = string(contents)
 	}
 	return files
 }

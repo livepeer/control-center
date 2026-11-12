@@ -425,7 +425,21 @@ func (c *Controller) Tick(ctx context.Context) error {
 		return err
 	}
 	s = c.Journal.View()
-	ownerErr := c.syncOwner(ctx, s, ready, view)
+	var ownerErr error
+	if inputErr == nil && input.Metadata.Terminal && input.NodeAbsent {
+		ownerErr = c.Owner.Close(ctx)
+		if ownerErr == nil {
+			ownerErr = c.Journal.Update(func(s *State) error {
+				s.Identity, s.OwnerEpoch, s.OwnerReason = Identity{}, "", ""
+				for _, i := range s.Instances {
+					i.RegistrationGone, i.RegistrationPending = true, false
+				}
+				return nil
+			})
+		}
+	} else {
+		ownerErr = c.syncOwner(ctx, s, ready, view)
+	}
 	// Owner requests are bounded; a failed safety withdrawal cannot prevent
 	// deadline removal publication, and artifact failure cannot keep old readiness.
 	s = c.Journal.View()

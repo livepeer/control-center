@@ -66,7 +66,9 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		r, at, e := s.store.Report(ctx, m, "runtime")
 		cancel()
-		d.OnchainReady = e == nil && !r.ClockUncertain && time.Since(ObservationTime(r, at)) <= s.config.StatusTTL && r.Ready && r.Onchain != nil && r.Onchain.Ready && r.Onchain.Applied && r.Onchain.Generation == p.Generation && r.ConfigDigest == Digest(d)
+		target := d
+		target.State.HeldOrchestrator, target.State.HeldUpgradePlan = "", ""
+		d.OnchainReady = e == nil && !r.ClockUncertain && time.Since(ObservationTime(r, at)) <= s.config.StatusTTL && r.Ready && r.Onchain != nil && r.Onchain.Ready && r.Onchain.Applied && r.Onchain.Generation == p.Generation && r.ConfigDigest == Digest(target)
 	}
 	return d
 }

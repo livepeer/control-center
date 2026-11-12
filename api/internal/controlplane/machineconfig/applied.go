@@ -1,51 +1,27 @@
 package machineconfig
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"errors"
-	"io"
+
+	"github.com/livepeer/control-center/runtime/artifact"
 )
 
 func ReadApplied(data []byte) (Runtime, string, error) {
 	var d Runtime
-	z, e := gzip.NewReader(bytes.NewReader(data))
-	if e != nil {
-		return d, "", e
+	files, err := artifact.Read(data)
+	if err != nil {
+		return d, "", err
 	}
-	defer z.Close()
-	t := tar.NewReader(z)
-	var manifest string
-	for {
-		h, e := t.Next()
-		if e == io.EOF {
-			break
-		}
-		if e != nil {
-			return d, "", e
-		}
-		if h.Name != "runtime.json" && h.Name != "system/node/orchestrator.yaml" {
-			continue
-		}
-		if h.Size > 1<<20 || h.Typeflag != tar.TypeReg {
-			return d, "", errors.New("invalid stored Node configuration")
-		}
-		b, e := io.ReadAll(t)
-		if e != nil {
-			return d, "", e
-		}
-		if h.Name == "runtime.json" {
-			if e = json.Unmarshal(b, &d); e != nil {
-				return d, "", e
-			}
-		} else {
-			manifest = string(b)
-		}
+	metadata, manifest := files["runtime.json"], files["system/node/orchestrator.yaml"]
+	if len(metadata) > 1<<20 || len(manifest) > 1<<20 {
+		return d, "", errors.New("invalid stored Node configuration")
 	}
-	if manifest == "" || d.ConfigDigest == "" {
+	if err = json.Unmarshal(metadata, &d); err != nil {
+		return d, "", err
+	}
+	if len(manifest) == 0 || d.ConfigDigest == "" {
 		return d, "", errors.New("stored bundle has no Node workload or digest")
 	}
-	return d, manifest, nil
+	return d, string(manifest), nil
 }

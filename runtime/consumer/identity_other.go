@@ -1,6 +1,6 @@
 //go:build !linux
 
-package connector
+package consumer
 
 import "errors"
 

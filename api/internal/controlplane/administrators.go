@@ -1,12 +1,9 @@
 package controlplane
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 	"uuid"
@@ -146,13 +143,7 @@ func (s *Server) prepareGrant(r *http.Request, _ UserIdentity) (AdminApply, erro
 	var input struct {
 		Email string `json:"email"`
 	}
-	data, readErr := io.ReadAll(io.LimitReader(r.Body, 4097))
-	if readErr != nil || len(data) > 4096 {
-		return nil, problem(400, "invalid_email", "Provide one email address.")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF {
+	if boundedInput(r, &input, 4096) != nil {
 		return nil, problem(400, "invalid_email", "Provide one email address.")
 	}
 	email, err := normalizeEmail(input.Email)

@@ -4,10 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"errors"
-	"io"
 	"math"
 	"net/http"
 	"reflect"
@@ -21,11 +18,7 @@ import (
 )
 
 func appInput(r *http.Request, out any) error {
-	b, err := io.ReadAll(io.LimitReader(r.Body, 16385))
-	if err != nil || len(b) > 16384 || jsonv2.Unmarshal(b, out, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil {
-		return problem(400, "invalid_request", "Provide one bounded JSON request with the documented fields.")
-	}
-	return nil
+	return boundedInput(r, out, 16384)
 }
 func appID(id string) bool {
 	v, e := uuid.Parse(id)

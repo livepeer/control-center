@@ -39,10 +39,11 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	digest := Digest(desired)
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
-	// retaining the exact onchain/storage binding and the admission freeze.
-	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested
+	// retaining storage identity, redemption destination and the admission freeze.
+	frozen := state.ApplyingConfigDigest == old.ConfigDigest
 	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
-	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && onchainJSON(old.Onchain) == onchainJSON(desired.Onchain) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient && old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller && old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL
+	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 		state.ApplyingConfigDigest = digest
 		state.ApplyingUpgradeVersion = upgradeVersion(desired)
@@ -56,7 +57,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return false, e
 			}
-			if !report.Ready || report.Generation != state.Generation || report.ConfigDigest != digest || report.K3sVersion != state.ApplyingUpgradeVersion || time.Since(at) > s.config.StatusTTL {
+			if (desired.Onchain.Onchain() && !desired.OnchainReady) || !report.Ready || report.Generation != state.Generation || report.ConfigDigest != digest || report.K3sVersion != state.ApplyingUpgradeVersion || time.Since(at) > s.config.StatusTTL {
 				state.RolloutReason = "rollout_pending"
 				return false, nil
 			}

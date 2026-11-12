@@ -1,4 +1,4 @@
-package orchestrator
+package consumer
 
 import (
 	"context"
@@ -22,7 +22,7 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 	a := i.grant
 	proof := i.observation
 	i.mu.Unlock()
-	if !applied || a == nil || proof == nil || proof.Association != *a || time.Since(proof.ObservedAt) > 30*time.Second || a.PodUID != podUID || a.Epoch != m.Epoch || a.OnchainGeneration != m.Onchain.Generation || a.ConfigDigest != m.ConfigDigest || i.checkPod(ctx, a.Launch, m) != nil {
+	if !applied || a == nil || proof == nil || proof.Association != *a || time.Since(proof.ObservedAt) > 30*time.Second || a.PodUID != podUID || a.Epoch != m.Epoch || a.OnchainGeneration != m.Onchain.Generation || a.ConfigDigest != m.ConfigDigest || i.checkPod(ctx, a.Launch) != nil {
 		o.Applied = false
 		o.Ready = false
 		return o
@@ -53,27 +53,21 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 		return o
 	}
 	var ack, fail float64
-	for name, f := range families {
-		for _, v := range f.Metric {
-			labels := map[string]string{}
-			for _, l := range v.Label {
-				labels[l.GetName()] = l.GetValue()
-			}
-			if labels["component"] != "orchestrator" {
-				continue
-			}
-			switch name {
-			case "livepeer_redemption_transitions_total":
-				if labels["event"] == "acknowledged" {
-					ack += v.GetCounter().GetValue()
-				}
-				if labels["event"] == "retryable" || labels["event"] == "rejected" {
-					fail += v.GetCounter().GetValue()
-				}
+	for _, v := range families["livepeer_redemption_transitions_total"].GetMetric() {
+		labels := map[string]string{}
+		for _, label := range v.Label {
+			labels[label.GetName()] = label.GetValue()
+		}
+		if labels["component"] == "orchestrator" {
+			switch labels["event"] {
+			case "acknowledged":
+				ack += v.GetCounter().GetValue()
+			case "retryable", "rejected":
+				fail += v.GetCounter().GetValue()
 			}
 		}
 	}
-	if i.checkPod(ctx, a.Launch, m) != nil {
+	if i.checkPod(ctx, a.Launch) != nil {
 		return o
 	}
 	i.mu.Lock()
@@ -86,25 +80,19 @@ func (i *Integration) Observe(ctx context.Context, m contract.Metadata, applied,
 		return o
 	}
 	if i.metricsGrant != a.GrantID {
-		i.metricsGrant = a.GrantID
-		i.lastAck = ack
-		i.lastErr = fail
-		i.ackAt = time.Time{}
-		i.errAt = time.Time{}
+		i.metricsGrant, i.lastAck, i.lastErr = a.GrantID, ack, fail
+		i.handoffAt = time.Time{}
 		return o // A counter baseline cannot date an earlier handoff after restart.
 	}
-	if ack > i.lastAck {
-		i.ackAt = now
+	if ack > i.lastAck || fail > i.lastErr {
+		i.handoff, i.handoffAt = "healthy", now
+		if fail > i.lastErr {
+			i.handoff = "degraded"
+		}
 	}
-	if fail > i.lastErr {
-		i.errAt = now
-	}
-	i.lastAck = ack
-	i.lastErr = fail
-	if !i.errAt.IsZero() && !i.ackAt.After(i.errAt) && now.Sub(i.errAt) < 2*time.Minute {
-		o.Handoff = "degraded"
-	} else if !i.ackAt.IsZero() && now.Sub(i.ackAt) < 2*time.Minute {
-		o.Handoff = "healthy"
+	i.lastAck, i.lastErr = ack, fail
+	if now.Sub(i.handoffAt) < 2*time.Minute {
+		o.Handoff = i.handoff
 	}
 	return o
 }
