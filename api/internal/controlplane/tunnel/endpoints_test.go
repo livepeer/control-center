@@ -183,7 +183,7 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 	if err := os.WriteFile(runners, []byte(fmt.Sprintf("[[Runners]]\nID = \"app-fixture\"\nApp = \"fixture\"\nRunnerURL = %q\nMode = \"persistent\"\nProxy = true\nCapacity = 2\n\n[[Runners]]\nID = \"app-echo\"\nApp = \"echo\"\nRunnerURL = %q\nMode = \"single-shot\"\nProxy = true\nCapacity = 2\n", app.URL, app.URL)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, state.ServiceURL, "http://"+address, state.ProxyURLTemplate, runners, strings.TrimPrefix(app.URL, "http://"))
+	config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, state.ServiceURL, PrivateOrchestrator, "http://"+address, state.ProxyURLTemplate, runners, strings.TrimPrefix(app.URL, "http://"))
 	configPath := filepath.Join(directory, "config.toml")
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)

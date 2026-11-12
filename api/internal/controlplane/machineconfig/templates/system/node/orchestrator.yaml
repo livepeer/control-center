@@ -61,6 +61,7 @@ data:
     Listen = "unsafe@0.0.0.0:8935"
     MetricsListen = "unsafe@0.0.0.0:8936"
     ServiceURL = "@SERVICE_URL@"
+    APIOriginURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     RunnerServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     ProxyURLTemplate = "@PROXY_URL_TEMPLATE@"
     BootstrapSecretFile = "/credentials/secret"
@@ -100,7 +101,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: orchestrator
-        image: ghcr.io/livepeer/node:sha-4100e8dbc0aa7b1e23cfe9d1b38578176557edd2@sha256:0a5cbbb9c1b46d9f9221af969b13aac06a2020e042cc3fb6f73decbccba1a7e8
+        image: ghcr.io/livepeer/node:sha-5babcc7a5858c98bd05f988a5b66e587e3ebbae1@sha256:2dd61b17ec75ac5a01586edd4724a182e9fadc54927c6d54efead5b92fe50db9
         args:
         - orchestrator
         - --config
