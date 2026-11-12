@@ -59,6 +59,9 @@ docker compose config --quiet
 docker compose up -d --build --wait
 ```
 
+The connector build argument `RUNTIME_IMAGE` selects the build input; the backend
+`RuntimeImage` configuration selects the image used for system services.
+
 Enable managed tunnels and discovery after configuring the `livepeer.vip`
 account/zone, Zero Trust team, certificate permissions, keyring, image digests,
 and node address exclusions. Update `TunnelNodeAddresses` with the public and

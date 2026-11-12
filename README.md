@@ -6,18 +6,15 @@ Control Center manages onboarding and configuration for Livepeer orchestrators.
 
 Sign in to Control Center and copy your enrollment command. Prepare the
 [prerequisite packages](runtime/README.md#prerequisites) on a Debian or Ubuntu
-amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB free. Disable shell
-tracing before entering the token, then run as root:
+amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB free. Run as root:
 
 ```sh
+# Disable shell tracing before entering the token.
+set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sh -
 ```
 
-The loader downloads and verifies a complete release bundle. Its defaults select
-the public API and a published Runtime image by immutable digest. No checkout is
-needed. See the [Runtime guide](runtime/README.md) for sudo, optional API/image
-overrides, credential handling, and upgrades. Environment input can still be
-inspected or saved in history.
+The loader downloads and verifies a complete release bundle. See the [Runtime guide](runtime/README.md) for more details.
 
 ## Architecture
 

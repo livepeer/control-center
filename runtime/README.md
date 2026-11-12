@@ -5,36 +5,37 @@ Debian/Ubuntu amd64, systemd** host. It installs K3s, gVisor, Flux, an API-backe
 HTTP configuration adapter, system-upgrade-controller, and the standalone
 [`livepeer/node`](https://github.com/livepeer/node) orchestrator in offchain mode.
 Control Center assigns CPU reusable apps to isolated Pods; Node handles new
-requests, sessions, capacity and private proxying. GPU setup and single-session lifetimes
-remain separate work. Managed Cloudflare ingress is optional.
+requests, sessions, capacity and private proxying. Managed Cloudflare ingress
+provides external access.
 
 The public loader runs under POSIX `sh` (including Debian/Ubuntu's `dash`). It
 downloads a versioned bundle, verifies its embedded SHA-256, and invokes the Bash
-installer with all required helpers and templates. The target host needs no
-repository checkout or Python. Prepare the [packages below](#prerequisites)
-and disable shell tracing (`set +x`) before entering credentials, then run as root:
+installer with all required helpers and templates. Prepare the
+[packages below](#prerequisites), then run as root:
 
 ```sh
+set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sh -
 ```
 
 For a non-root shell, put the token assignment on the sudo side of the pipe:
 
 ```sh
+set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
   LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sudo --preserve-env=LIVEPEER_ENROLLMENT_TOKEN sh -s --
 ```
 
-Do not export the enrollment token in the parent shell: the download-side curl would
-inherit it too. The inline assignment passes it through the execution environment,
-without placing it in sudo, Bash, installer or curl arguments. Environment input
-is not a secret store: it can be inspected, and entering a token can save it in
-shell history. The loader and installer disable their own tracing, remove the
-token from unrelated child environments, and never persist it.
+Use an inline token assignment on the installer side of the pipe. The loader
+and installer disable tracing and remove the token from unrelated child
+environments.
 
-Read-only checks, local status, and reruns need no enrollment token:
+`--check-only` runs eligibility checks; `--status` reports local installation
+progress. These checks and reruns need no enrollment token; reruns use saved
+credentials:
 
 ```sh
+set +x
 # Run these as root, or place sudo before sh.
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sh -s -- --check-only
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sh -s -- --status
@@ -59,8 +60,8 @@ The API must match the deployment's `PublicAPIURL` and be reachable from both
 the host and its Pods. With sudo, add any exported override names to
 `--preserve-env=LIVEPEER_ENROLLMENT_TOKEN,LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE`.
 Image selection is explicit override, then saved image, then bundle default.
-A new loader does not upgrade a saved selection. An invalid explicit or saved
-image fails instead of silently selecting a different one.
+Reruns retain the saved image selection. An invalid explicit or saved image
+causes the installer to fail.
 
 For automation that must detect failure of the initial loader download, download
 it successfully before running it. An ordinary POSIX pipeline reports the last
@@ -70,6 +71,7 @@ installer's exit status is preserved. This root-shell example checks both stages
 
 ```sh
 (
+  set +x
   set -eu
   umask 077
   loader_dir=$(mktemp -d)
@@ -109,10 +111,8 @@ The loader requires `setsid` from `util-linux` before it starts.
 
 Installer eligibility checks run before authentication, component downloads,
 installation-directory creation, or service changes. The hosted loader downloads
-and verifies its temporary bundle before those checks, including for
-`--check-only` and `--status`, then cleans up. These modes do not enroll, install
-packages, or change installation state. Checks include available kernel
-modules, reserved TCP ports 2379/2380/6443/6444/8935/8936/10010/10249/10250/10256/10257/10259/20241,
+and verifies its temporary bundle before running the installer. Checks include
+available kernel modules, reserved TCP ports 2379/2380/6443/6444/8935/8936/10010/10249/10250/10256/10257/10259/20241,
 UDP 8472, and routes overlapping
 the fixed `10.42.0.0/16` Pod, `10.43.0.0/16` Service and `10.44.0.0/16` gVisor
 networks. Once K3s has been downloaded, its own `check-config` performs additional
@@ -145,9 +145,11 @@ the installer trusts the upstream HTTPS release endpoints.
 
 Build the Go Runtime image from the repository root with
 `docker build -f runtime/Dockerfile -t <registry>/livepeer-runtime:<tag> .`, push
-it, and use its published digest for an explicit `LIVEPEER_RUNTIME_IMAGE` override
-and backend `RUNTIME_IMAGE`. Release operators select the hosted bundle's default
-using the [bootstrap publication steps](../deploy/README.md#bootstrap-releases).
+it, and use its published digest for an explicit `LIVEPEER_RUNTIME_IMAGE`
+override. The backend separately selects its Runtime image through `RuntimeImage`
+in its configuration (or the `RUNTIME_IMAGE` environment variable). Release
+operators select the hosted bundle's default using the
+[bootstrap publication steps](../deploy/README.md#bootstrap-releases).
 The existing anonymous deployment registry is supported; moving image hosts is a
 separate operation. The installer saves its selected image for reruns.
 
@@ -211,6 +213,7 @@ fails before changing anything:
 
 ```sh
 # Run as root. For a custom deployment, export its original LIVEPEER_API_URL first.
+set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
   LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --refresh-credentials --install-dir /opt/livepeer
 ```
@@ -227,6 +230,7 @@ same original API override for a custom deployment; without it, re-enrollment
 fails before changing anything:
 
 ```sh
+set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
   LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --reenroll --install-dir /opt/livepeer
 ```
