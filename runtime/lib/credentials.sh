@@ -85,7 +85,7 @@ stop_credential_consumers() {
 }
 
 transition_credentials() {
-  local api fingerprint operation expected response status request metadata previous_node issued_node apps replicas
+  local api fingerprint operation expected response status request metadata previous_node issued_node apps replicas cluster_node
   managed_installation || die 'credential transition requires an initialized installation'
   [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]] || die 'restore the runner bootstrap credential before changing credentials'
   runtime_image
@@ -115,6 +115,10 @@ transition_credentials() {
   previous_node=$(jq -er '.previous_node' <<< "$metadata")
   [[ "$previous_node" =~ ^[a-z2-7]{26}$ ]] || die 'invalid previous enrollment identity'
   jq -e '.expected | type == "number" and . >= 1' <<< "$metadata" >/dev/null || die 'invalid credential transition version'
+  if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    cluster_node=$(kube get nodes -o name)
+    [[ "$cluster_node" == node/* && "$cluster_node" != *$'\n'* ]] || die 're-enrollment requires exactly one Kubernetes node'
+  fi
   stop_credential_consumers
   install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/app-reconciler"
@@ -168,6 +172,10 @@ transition_credentials() {
   [[ "$IDENTITY_NODE_ID" == "$NODE_ID" ]] || die 'credential identity does not match the node'
   printf '%s' "$NODE_ID" | atomic_write "$INSTALL_DIR/credentials/node-id"
   save_identity
+  if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
+    render_template "$SCRIPT_DIR/config/k3s.yaml" "$INSTALL_DIR/config/k3s.yaml"
+    kube label "$cluster_node" "livepeer.io/node-id=$NODE_ID" --overwrite
+  fi
   stage_manifests
   install_machine_secret
   if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then

@@ -82,7 +82,7 @@ func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T)
 		t.Fatal("management refresh did not schedule Node drain and replacement")
 	}
 	refreshed = m
-	refreshed.NodeID = "22222222-2222-4222-8222-222222222222"
+	refreshed.NodeID = strings.Repeat("b", 26)
 	if Digest(refreshed) == original {
 		t.Fatal("re-enrollment reused a previous lifetime's Node workload")
 	}

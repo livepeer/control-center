@@ -2,6 +2,9 @@ package machineconfig
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/livepeer/control-center/api/internal/testdb"
+	"github.com/livepeer/control-center/schema"
 	"strings"
 	"testing"
 	"time"
@@ -85,5 +88,26 @@ func TestDrainProofDoesNotGainFreshnessFromDeliveryRetry(t *testing.T) {
 	r.Evidence.Target = "different"
 	if validDrainEvidence(m, state, r, now) {
 		t.Fatal("wrong target accepted")
+	}
+}
+
+func TestTerminalAppFallbackRetainsAvailableIntent(t *testing.T) {
+	db := testdb.Open(t)
+	if _, err := db.Exec(`CREATE SCHEMA lpcc; CREATE TABLE lpcc.enrollments(node_id TEXT PRIMARY KEY, retained_bundle BYTEA)`); err != nil {
+		t.Fatal(err)
+	}
+	intent := schema.AppAssignmentSetV1{SchemaVersion: 1, NodeID: strings.Repeat("a", 26), Generation: 3, Entries: []schema.AppAssignment{}}
+	m := Desired{Machine: Machine{NodeID: intent.NodeID, CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, Apps: &intent, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64)}
+	bundle, _, err := Build(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO lpcc.enrollments VALUES($1,$2)`, m.NodeID, bundle); err != nil {
+		t.Fatal(err)
+	}
+	m.Terminal = true
+	New(Config{}, Dependencies{DB: db}).prepareApps(t.Context(), &m, errors.New("lookup unavailable"))
+	if m.AppsError != "generation_failed" || !m.AppPayload.Index.Available || m.Apps == nil || m.Apps.Generation != intent.Generation {
+		t.Fatal("lost retained cleanup intent", m.AppsError, m.AppPayload)
 	}
 }

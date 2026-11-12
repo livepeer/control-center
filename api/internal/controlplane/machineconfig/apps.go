@@ -50,12 +50,10 @@ func (s *Manager) prepareApps(ctx context.Context, m *Desired, lookupErr error) 
 		}
 		var prior []byte
 		query := `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`
-		args := []any{m.NodeID}
 		if m.Terminal {
 			query = `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1`
-			args = append(args, m.NodeID)
 		}
-		if s.store.DB.QueryRowContext(ctx, query, args...).Scan(&prior) == nil {
+		if s.store.DB.QueryRowContext(ctx, query, m.NodeID).Scan(&prior) == nil {
 			if files, e := artifact.Read(prior); e == nil {
 				if metadata, e := transport.ReadMetadata(files["runtime.json"]); e == nil && metadata.NodeID == m.NodeID {
 					if old, e := appbundle.Read(files, metadata); e == nil {

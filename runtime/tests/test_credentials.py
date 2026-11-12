@@ -16,7 +16,7 @@ class CredentialTransitions(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ('credentials', 'state', 'volumes/http-source'):
+        for name in ('credentials', 'state', 'config', 'volumes/http-source'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / 'credentials/node-id').write_text('a' * 26)
         (self.root / 'credentials/fingerprint').write_text('a' * 64)
@@ -26,7 +26,7 @@ class CredentialTransitions(unittest.TestCase):
         (self.root / 'credentials/identity.json').write_text(json.dumps({'node_id': 'a' * 26, 'credential_version': 1}))
         (self.root / 'state/k3s-version').write_text('v1.37.10+k3s1')
 
-    def transition(self, fail='', mode='refresh', node='c' * 26):
+    def transition(self, fail='', mode='refresh', node='c' * 26, nodes='node/worker'):
         script = r'''
 set -Eeuo pipefail
 source "$1"
@@ -49,6 +49,7 @@ cat() {
 sha256sum() { command cat >/dev/null; printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; }
 kube() {
   printf 'kube %s\n' "$*" >> "$INSTALL_DIR/steps"
+  if [[ "$*" == 'get nodes -o name' ]]; then printf '%s' "$TEST_NODES"; fi
   if [[ "$*" == *'get deployment/kustomize-controller'* ]]; then printf '1'; fi
   if [[ "$FAIL_AT" == stop && "$*" == *'wait pod'* ]]; then return 1; fi
   if [[ "$FAIL_AT" == artifact && "$*" == *'wait externalartifact/livepeer-service'* ]]; then return 1; fi
@@ -82,8 +83,8 @@ curl() {
 }
 transition_credentials
 '''
-        return subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY), str(self.root)],
-                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_NODE': ('a' * 26 if mode == 'refresh' else node)},
+        return subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY.parent.parent / 'bootstrap-livepeer.sh'), str(self.root)],
+                              env={**os.environ, 'FAIL_AT': fail, 'TEST_MODE': mode, 'TEST_NODE': ('a' * 26 if mode == 'refresh' else node), 'TEST_NODES': nodes},
                               text=True, capture_output=True)
 
     def test_identity_requires_base32_node_and_positive_numeric_version(self):
@@ -159,8 +160,19 @@ transition_credentials
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
         steps = (self.root / 'steps').read_text().splitlines()
+        self.assertIn('livepeer.io/node-id=' + 'c' * 26, (self.root / 'config/k3s.yaml').read_text())
+        relabel = steps.index('kube label node/worker livepeer.io/node-id=' + 'c' * 26 + ' --overwrite')
+        self.assertLess(relabel, steps.index('https-code'))
         stopped = next(i for i, x in enumerate(steps) if 'wait pod -l app=orchestrator' in x)
         self.assertLess(stopped, steps.index('refresh'))
+
+    def test_reenrollment_rejects_empty_or_multinode_clusters_before_issuance(self):
+        for nodes in ('', 'node/one\nnode/two'):
+            result = self.transition(mode='reenroll', nodes=nodes)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('exactly one', result.stderr)
+            self.assertFalse((self.root / 'requests').exists())
+            self.assertEqual((self.root / 'credentials/node-id').read_text(), 'a' * 26)
 
     def test_refresh_keeps_node_for_authoritative_managed_drain(self):
         result = self.transition()

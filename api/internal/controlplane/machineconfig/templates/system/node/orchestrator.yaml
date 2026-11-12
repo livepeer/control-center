@@ -29,9 +29,7 @@ spec:
       nodeSelectorTerms:
       - matchExpressions:
         - key: livepeer.io/node-id
-          operator: In
-          values:
-          - '@NODE_ID@'
+          operator: Exists
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -92,6 +90,7 @@ spec:
       labels:
         app: orchestrator
     spec:
+      nodeSelector: {livepeer.io/node-id: '@NODE_ID@'}
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
