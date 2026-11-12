@@ -6,12 +6,6 @@ configuration owns Node payment infrastructure; the machine UI inspects its stat
 Offchain Node advertises free service even if a catalog revision has a positive quote.
 Onchain Node requires positive USD prices with `hour` or `fixed` units for every app.
 
-Payment persistence is introduced by additive migration `009_onchain_payments.sql`;
-historical migrations remain unchanged. Applying it preserves existing machine
-records and stored bundles, and unconfigured machines stay offchain. The funded
-acceptance below covers fresh installations; it does not establish Runtime or
-payment-storage upgrade compatibility for existing onchain installations.
-
 ## Fresh setup
 
 Build Node with the redeemer authorization webhook and `RedeemerHeadersFile` support.

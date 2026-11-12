@@ -144,10 +144,8 @@ func ReadMetadata(b []byte) (contract.Metadata, error) {
 	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^lp-[0-9a-f]{16}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 1 || !epochPattern.MatchString(m.Epoch) || m.BundleFormat != contract.BundleFormat {
 		return m, errors.New("metadata_invalid")
 	}
-	if m.Payment.Version != 0 {
-		if m.Payment.Validate() != nil {
-			return m, errors.New("metadata_payment_invalid")
-		}
+	if m.Payment.Validate() != nil {
+		return m, errors.New("metadata_payment_invalid")
 	}
 	return m, nil
 }
