@@ -114,8 +114,8 @@ private `path`, `capacity`, and `price`; paths must be unique and nonnested.
 
 Catalog prices remain generic and immutable. Assignment and registration compatibility
 is evaluated against the target machine's desired and observed Node payment settings.
-See [managed paid operation](paid-operation.md) for deployment configuration and
-activation. Publishing a price does not activate paid operation on a Node.
+See [managed onchain operation](onchain-operation.md) for deployment configuration and
+activation. Publishing a price does not activate onchain operation on a Node.
 
 ## Catalog API
 

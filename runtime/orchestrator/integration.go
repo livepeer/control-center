@@ -144,7 +144,7 @@ func (i *Integration) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (i *Integration) fetch(ctx context.Context, l Launch) (Grant, error) {
 	bad := errors.New("payment_credential_unavailable")
 	m, ok := i.Desired()
-	if !ok || i.AllowHTTP || !m.Payment.Paid() || m.TerminalCleanup || m.PaymentCredentialsRef != "/v1/nodes/"+m.NodeID+"/payment/credentials" {
+	if !ok || i.AllowHTTP || !m.Payment.Onchain() || m.TerminalCleanup || m.PaymentCredentialsRef != "/v1/nodes/"+m.NodeID+"/payment/credentials" {
 		return Grant{}, bad
 	}
 	before, e := os.ReadFile(i.TokenFile)

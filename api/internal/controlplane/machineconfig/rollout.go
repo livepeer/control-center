@@ -29,7 +29,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	if desired.PaymentError != nil {
 		return false, desired.PaymentError
 	}
-	if desired.Payment.Paid() {
+	if desired.Payment.Onchain() {
 		state.PaymentSettled = false
 	}
 	old, manifest, err := s.applied(ctx, m)
@@ -40,12 +40,12 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
-	// Admission has never opened for this paid target. Its image or rendering
+	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining the exact payment/storage binding and the admission freeze.
 	frozen := state.ApplyingConfigDigest == old.ConfigDigest && state.DrainRequested && !state.PaymentDrainAfter.IsZero()
 	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
-	if old.ConfigDigest != digest && old.Payment.Paid() && !old.PaymentActive && state.ApprovedConfigDigest != old.ConfigDigest && paymentJSON(old.Payment) == paymentJSON(desired.Payment) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+	if old.ConfigDigest != digest && old.Payment.Onchain() && !old.PaymentActive && state.ApprovedConfigDigest != old.ConfigDigest && paymentJSON(old.Payment) == paymentJSON(desired.Payment) && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 		state.ApplyingConfigDigest = digest
 		state.ApplyingUpgradeVersion = upgradeVersion(desired)
@@ -76,7 +76,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.ApplyingUpgradeVersion = ""
 	}
 	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
-		if desired.Payment.Paid() && state.ApprovedConfigDigest != digest {
+		if desired.Payment.Onchain() && state.ApprovedConfigDigest != digest {
 			if !desired.PaymentReady {
 				state.RolloutReason = "payment_startup_pending"
 				return false, nil
@@ -103,12 +103,12 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 			return true, err
 		}
 	}
-	if old.Payment.Paid() && (!desired.Payment.Paid() || desired.Payment.RedeemerURL != old.Payment.RedeemerURL) {
+	if old.Payment.Onchain() && (!desired.Payment.Onchain() || desired.Payment.RedeemerURL != old.Payment.RedeemerURL) {
 		if !s.paymentDrained(ctx, m, old, state.PaymentDrainAfter) {
 			state.RolloutReason = "payment_drain_pending"
 			return true, nil
 		}
-		if !desired.Payment.Paid() {
+		if !desired.Payment.Onchain() {
 			state.PaymentSettled = true
 		}
 	}
@@ -258,7 +258,7 @@ func (s *Manager) finishRemoval(ctx context.Context, l *Lease) (bool, error) {
 
 func paymentJSON(c payment.Config) string { b, _ := json.Marshal(c); return string(b) }
 func (s *Manager) paymentDrained(ctx context.Context, m Machine, old Runtime, after time.Time) bool {
-	if !old.Payment.Paid() {
+	if !old.Payment.Onchain() {
 		return true
 	}
 	r, at, e := s.store.Report(ctx, m, "runtime")

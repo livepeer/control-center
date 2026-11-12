@@ -80,7 +80,7 @@ func addSystemWorkloads(files map[string][]byte, m Desired) error {
 			continue
 		}
 		files[prefix+"system/node/network.yaml"] = []byte(nodeNetwork())
-		if effectivePayment(m).Paid() {
+		if effectivePayment(m).Onchain() {
 			files[prefix+"management/app-reconciler.yaml"] = append(files[prefix+"management/app-reconciler.yaml"], []byte("\n---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: {name: orchestrator-payment-egress, namespace: livepeer}\nspec:\n  podSelector: {matchLabels: {app: orchestrator}}\n  policyTypes: [Egress]\n  egress:\n"+paymentNetwork(effectivePayment(m)))...)
 		}
 		files[prefix+"system/node/kustomization.yaml"] = kustomize("orchestrator.yaml", "network.yaml")

@@ -1,4 +1,4 @@
-# Managed paid operation: fresh-install evidence
+# Managed onchain operation: fresh-install evidence
 
 Date: 2026-11-12. Run: `cc-e2e-1112071043-bcbd`.
 
@@ -6,6 +6,11 @@ This records payment/configuration integration for #119. The broader #93/#118
 acceptance gate remains open: #90's versioned responder, trusted verifier and
 collection/report contract are still open work. The nonce-echo fixture used here
 checks transport and execution correctness; it is not that benchmark verifier.
+
+This is historical evidence for the recorded source hashes, before the branch
+was rebased and its configuration terminology standardized to `onchain`. It is
+not a funded rerun of the revised branch. Catalog revision IDs and digests retain
+their original values; nonessential fixture names are omitted from the JSON.
 
 ## Environment and provenance
 
@@ -40,9 +45,9 @@ before registry teardown.
   on each worker, including kubectl manifest validation. The later Cloudflare
   tombstone regression passed the tunnel race suite.
 - Both workers applied payment generation 1 and registered the same catalog
-  revisions. Actual Node parsed the rendered paid TOML. Failed paid configuration
-  remained paid/failed and retained the last valid configuration.
-- Paid persistent/hourly and single-shot/fixed calls executed ordinary sandboxed
+  revisions. Actual Node parsed the rendered onchain TOML. Failed onchain configuration
+  remained onchain/failed and retained the last valid configuration.
+- Onchain persistent/hourly and single-shot/fixed calls executed ordinary sandboxed
   HTTP requests. A verifier-generated nonce was checked in the response. Origin
   access headers were absent from application requests.
 - During private RPC loss, the same live Pod became unready while its funded
@@ -55,9 +60,9 @@ before registry teardown.
 - RPC/submission rotation and explicit rollback produced new generations and
   grants and retained owner-only SQLite state. The disable/rollback cycle left
   the sibling unchanged. A real
-  unsettled ticket blocked paid disable; the live paid workload/grant remained.
+  unsettled ticket blocked onchain disable; the live onchain workload/grant remained.
 - A queue limit of two with two actual unsettled tickets closed local admission
-  while preserving paid mode. Restoring capacity restored readiness.
+  while preserving onchain mode. Restoring capacity restored readiness.
 - The redeemer durably accepted three ticket identities while six successful
   acknowledgements were deliberately lost. Retries produced nine HTTP
   acceptances, three unique stored tickets and degraded-then-healthy remote

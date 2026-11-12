@@ -17,8 +17,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-func TestPaidBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
-	c := payment.Config{Version: 1, Generation: 1, CredentialRevision: 1, Mode: "paid", Network: "custom", ChainID: 1, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: "rpc-v1", RedeemerURL: "https://redeemer.example", RPCGrants: []string{"10.0.0.2:443"}, RedeemerGrants: []string{"10.0.0.3:443"}, WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
+func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
+	c := payment.Config{Version: 1, Generation: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 1, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: "rpc-v1", RedeemerURL: "https://redeemer.example", RPCGrants: []string{"10.0.0.2:443"}, RedeemerGrants: []string{"10.0.0.3:443"}, WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
 	m := Desired{Machine: Machine{NodeID: "lp-aaaaaaaaaaaaaaaa", Epoch: "11111111-1111-4111-8111-111111111111", CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Payment: c, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
 	b, d, e := Build(m)
 	if e != nil {
@@ -42,7 +42,7 @@ func TestPaidBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
 			if e := decoder.Decode(&document); e == io.EOF {
 				break
 			} else if e != nil {
-				t.Fatal("invalid paid manifest", name, e)
+				t.Fatal("invalid onchain manifest", name, e)
 			}
 		}
 	}
@@ -61,7 +61,7 @@ func TestPaidBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
 		path := filepath.Join(dir, "orchestrator.toml")
 		os.WriteFile(path, []byte(config), 0600)
 		if output, e := exec.Command(binary, "--config", path, "--print-config").CombinedOutput(); e != nil {
-			t.Fatal("actual Node rejected paid configuration", e, string(output))
+			t.Fatal("actual Node rejected onchain configuration", e, string(output))
 		}
 	}
 	for _, want := range []string{"orchestrator-start", "orchestrator-probe", "publishNotReadyAddresses: true", "fsGroupChangePolicy: OnRootMismatch", "RPCURLFile", "RedeemerHeadersFile", "/data/payments.sqlite", "medium: Memory"} {
@@ -102,7 +102,7 @@ func TestPaidBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
 		t.Fatal("payment metadata absent")
 	}
 	// Fields omitted by a held offchain identity must not survive from the
-	// desired paid configuration while the existing workload drains.
+	// desired onchain configuration while the existing workload drains.
 	free := m
 	free.State.HeldOrchestrator, free.State.HeldPayment = "", ""
 	free.Payment = payment.Offchain()
@@ -119,8 +119,8 @@ func TestPaidBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
 	}
 	files, _ = artifact.Read(b)
 	parsed, e = transport.ReadMetadata(files["runtime.json"])
-	if e != nil || parsed.Payment.Paid() || parsed.Payment.Recipient != "" || parsed.Payment.RPCSecret != "" {
-		t.Fatal("held offchain workload inherited desired paid inputs", parsed.Payment, e)
+	if e != nil || parsed.Payment.Onchain() || parsed.Payment.Recipient != "" || parsed.Payment.RPCSecret != "" {
+		t.Fatal("held offchain workload inherited desired onchain inputs", parsed.Payment, e)
 	}
 }
 

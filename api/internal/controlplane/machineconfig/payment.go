@@ -30,7 +30,7 @@ func specializePayment(raw string, m Desired) string {
 	// The Service remains a private route to a live process during dependency loss.
 	raw = strings.Replace(raw, "spec:\n  selector:\n    app: orchestrator", "spec:\n  publishNotReadyAddresses: true\n  selector:\n    app: orchestrator", 1)
 	c := m.Payment
-	if !c.Paid() {
+	if !c.Onchain() {
 		return raw
 	}
 	endpoint, _ := url.Parse(c.RedeemerURL)

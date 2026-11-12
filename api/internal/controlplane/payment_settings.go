@@ -118,12 +118,12 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 			return 0, e
 		}
 		nodes = append(nodes, node)
-		if c.Paid() {
+		if c.Onchain() {
 			if len(s.params.PaymentWebhookSecret) < 32 {
-				return 0, errors.New("paid operation requires a webhook service credential")
+				return 0, errors.New("onchain operation requires a webhook service credential")
 			}
 			if !machineconfigImage(s.params.RuntimeNodeImage) {
-				return 0, errors.New("paid operation requires a pinned wrapper/Node image")
+				return 0, errors.New("onchain operation requires a pinned wrapper/Node image")
 			}
 			b, e := s.readPaymentRPC(c.RPCSecret)
 			if e != nil {
@@ -147,8 +147,8 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 		return 0, e
 	}
 
-	// Import is a complete desired snapshot: omission never silently disables paid service.
-	rows, e := tx.QueryContext(ctx, `SELECT node_id FROM lpcc.payment_machines WHERE config->>'mode'='paid'`)
+	// Import is a complete desired snapshot: omission never silently disables onchain service.
+	rows, e := tx.QueryContext(ctx, `SELECT node_id FROM lpcc.payment_machines WHERE config->>'mode'='onchain'`)
 	if e != nil {
 		return 0, e
 	}
@@ -222,7 +222,7 @@ func (s *Server) applyPayments(ctx context.Context, input paymentInput, expected
 		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return 0, e
 		}
-		if c.Paid() {
+		if c.Onchain() {
 			if recipient != "" && (!strings.EqualFold(recipient, c.Recipient) || chain != c.ChainID || !strings.EqualFold(controller, c.Controller)) {
 				return 0, errors.New("payment recipient and chain binding are immutable")
 			}

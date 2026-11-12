@@ -28,7 +28,6 @@
   },
   "catalog": [
     {
-      "name": "paid-echo-persistent",
       "revision_id": "9a96a95f-ff0d-42b3-8ebb-5c6893ba4adb",
       "digest": "sha256:2253e9cf61444a3da745db4ca77d3c973378b88f43d50bebfaa357ef79597d05",
       "price": {
@@ -38,7 +37,6 @@
       }
     },
     {
-      "name": "paid-echo-fixed",
       "revision_id": "e3b5ceb6-cb7f-4e40-b1c6-469f06d2901f",
       "digest": "sha256:c8482a7f32e1cd6bd56e7a48e5ffc6fc612dc660a34226a5ec51a789d6fa4668",
       "price": {
@@ -116,14 +114,14 @@
       }
     ],
     "retained-outage-evidence": {
-      "paid_session_survived_rpc_readiness_loss": true,
+      "onchain_session_survived_rpc_readiness_loss": true,
       "protected_diagnostics_reachable": true,
       "retained_session_stop_succeeded_while_unready": true
     },
     "disable-rollback-evidence": [
       {
         "check": "disable_blocked_by_real_queued_ticket",
-        "paid_workload_retained": true,
+        "onchain_workload_retained": true,
         "submission_grant_retained": true,
         "sibling_unchanged": true
       },
@@ -162,7 +160,7 @@
     "backpressure-evidence": {
       "queue_limit": 2,
       "actual_unsettled": 2,
-      "paid_mode_retained": true,
+      "onchain_mode_retained": true,
       "local_admission_not_ready": true
     },
     "lost-ack-evidence": {
@@ -172,7 +170,7 @@
     },
     "ordinary-retirement-evidence": {
       "ordinary_removal_blocked_by_actual_unsettled_tickets": true,
-      "paid_workload_retained": true,
+      "onchain_workload_retained": true,
       "submission_grants_retained": true,
       "completion_not_acknowledged": true
     },
@@ -284,5 +282,19 @@
     },
     "unsettled_small_tickets": 5,
     "payment_drain_complete": false
+  },
+  "evidence_kind": "historical funded run before rebase and onchain terminology revision",
+  "post_rebase_validation": {
+    "base_revision": "b45110364d0a9c187c4497f524e3b0b93b4707be",
+    "mode": "onchain",
+    "schema_migration": "009_onchain_payments.sql",
+    "historical_migrations_unchanged": true,
+    "existing_offchain_bundle_preserved": true,
+    "postgresql_race_suite": "passed",
+    "go_vet": "passed",
+    "ui_browser_tests": 41,
+    "ui_build": "passed",
+    "funded_rerun": false,
+    "existing_onchain_runtime_upgrade_validated": false
   }
 }

@@ -95,7 +95,7 @@ func (s *Manager) RecordReport(ctx context.Context, m Machine, report Report) (b
 	if previous.Drained && previous.Generation == report.Generation && previous.Evidence != nil && report.Evidence != nil && previous.Evidence.Target == report.Evidence.Target && time.Now().Before(previous.Evidence.ExpiresAt) {
 		drainWake = false
 	}
-	paymentWake := report.Component == "runtime" && report.Payment != nil && (record.RolloutReason == "payment_drain_pending" || (report.Payment.Mode == "paid" && record.ApprovedConfigDigest != report.ConfigDigest))
+	paymentWake := report.Component == "runtime" && report.Payment != nil && (record.RolloutReason == "payment_drain_pending" || (report.Payment.Mode == "onchain" && record.ApprovedConfigDigest != report.ConfigDigest))
 	return paymentWake || drainWake || (report.Component == "runtime" && (report.Ready && record.ApplyingConfigDigest != "" && report.ConfigDigest == record.ApplyingConfigDigest && report.Generation == record.Generation)), nil
 }
 
