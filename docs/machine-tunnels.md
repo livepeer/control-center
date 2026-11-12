@@ -83,11 +83,8 @@ Cloudflare. See
 
 ## Enrollment, refresh and status
 
-Node IDs are lowercase, unpadded base32 encodings of 128 random bits. Active
-registration retries retain the node ID; credential refresh changes only its
-credential version. Re-enrollment creates a fresh node ID and tunnel UUID.
-The full installation fingerprint associates persistent payment infrastructure
-with the installation; cleanup and credentials remain scoped to the node ID.
+Active registration retries and credential refresh retain the node ID.
+Re-enrollment creates a fresh node ID and tunnel UUID.
 Cloudflare Tunnel must be the HTTPS front door, with the API origin reachable
 only through the trusted connector. The API does not infer transport security
 from arbitrary forwarded headers. HTTPS enrollment is eligible even when
@@ -184,8 +181,8 @@ start a fresh drain with `drain/retry`, or deliberately remove with `force:true`
 Deletion denies token delivery, installs deny-only ingress, revokes connector
 authentication before disconnecting, deletes DNS/tunnel resources before Access protection,
 and revokes source tokens.
-Cleanup proceeds even with the machine offline. Each enrollment has its own hostname namespace, so late cleanup of a retired
-node cannot delete a replacement node's routes or certificates.
+Cleanup proceeds even with the machine offline. Retired-node cleanup cannot
+delete a replacement node's routes or certificates.
 
 The terminal artifact prunes the connector and orchestrator and delivers app-removal
 intents; Runtime cleans up assigned apps.

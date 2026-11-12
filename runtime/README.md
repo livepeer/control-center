@@ -122,10 +122,6 @@ environment variable as shown in Quick start. Backend `PUBLIC_API_URL` must use
 the same reachable base URL. The installer rejects literal loopback configuration
 URLs because pods cannot use host loopback.
 
-Each enrollment receives a fresh random base32 node ID. Registration retries
-and credential refresh preserve that ID. Re-enrollment keeps payment continuity
-through the full installation fingerprint and gives cleanup a separate node ID.
-
 The one-hour bootstrap JWT can enroll multiple machines. The installer saves
 long-lived service credentials in owner-only files and reuses them on reruns,
 even after the JWT expires. A fresh registration retry requires the original

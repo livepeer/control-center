@@ -72,8 +72,8 @@ cleanup contract.
 ## Onchain operation
 
 Configure the redeemer and secret mounts using [deployment setup](../deploy/README.md#onchain-setup).
-Edit [onchain.example.json](../deploy/onchain.example.json) and apply it from the
-API deployment environment:
+Key [onchain.example.json](../deploy/onchain.example.json) with `credentials/fingerprint`.
+Apply from the API deployment:
 
 ```sh
 controlcenter onchain apply --config /etc/controlcenter/config.toml \
