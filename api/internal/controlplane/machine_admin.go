@@ -16,7 +16,7 @@ func (s *Server) prepareMachineRemoval(r *http.Request, _ UserIdentity) (AdminAp
 	var in struct {
 		Force bool `json:"force"`
 	}
-	if err := machineInput(r, &in); err != nil {
+	if err := appInput(r, &in); err != nil {
 		return nil, err
 	}
 	node := r.PathValue("node_id")
@@ -42,7 +42,7 @@ func (s *Server) prepareDrainRetry(r *http.Request, _ UserIdentity) (AdminApply,
 	var in struct {
 		Generation int64 `json:"generation"`
 	}
-	if err := machineInput(r, &in); err != nil {
+	if err := appInput(r, &in); err != nil {
 		return nil, err
 	}
 	node := r.PathValue("node_id")
@@ -73,7 +73,7 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 		Kind        string `json:"kind"`
 		Compromised bool   `json:"compromised"`
 	}
-	if e := machineInput(r, &in); e != nil {
+	if e := appInput(r, &in); e != nil {
 		return nil, e
 	}
 	if in.Kind != "connector" && in.Kind != "access" {

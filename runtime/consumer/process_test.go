@@ -1,4 +1,4 @@
-package connector
+package consumer
 
 import (
 	"context"
@@ -52,14 +52,14 @@ func TestStartExecsWithFreshMemoryFileAndNeverFallsBack(t *testing.T) {
 		return errors.New("exec fixture")
 	}
 	for n := 0; n < 2; n++ {
-		if start(t.Context(), client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), exec) == nil {
+		if start(t.Context(), Connector, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, exec) == nil {
 			t.Fatal("exec did not run")
 		}
 	}
 	os.WriteFile(path, []byte("stale secret"), 0600)
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	if start(ctx, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), exec) == nil {
+	if start(ctx, Connector, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, exec) == nil {
 		t.Fatal("offline start succeeded")
 	}
 	if executed != 2 || issued != 3 {
@@ -70,49 +70,69 @@ func TestStartExecsWithFreshMemoryFileAndNeverFallsBack(t *testing.T) {
 	}
 }
 
-func TestProbeReadinessDoesNotDependOnConfigOrSocketDelivery(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/ready" {
-			w.Write([]byte("ready"))
-			return
-		}
-		w.Write([]byte("invalid config"))
-	}))
-	defer server.Close()
-	marker := filepath.Join(t.TempDir(), "launch.json")
-	b, _ := json.Marshal(Association{Launch: Launch{PodName: "tunnel-pod", PodUID: "pod-uid", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("e", 64)}})
-	os.WriteFile(marker, b, 0600)
-	delivered := false
-	client := requestFunc(func(ctx context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
-		delivered = true
-		observation := value.(Observation)
-		if endpoint != "tunnel/observation" || !observation.Ready || observation.ProviderVersion != 0 {
-			t.Fatal("configuration failure overrode local readiness")
-		}
-		<-ctx.Done()
-		return nil, nil, ctx.Err()
-	})
-	start := time.Now()
-	if !probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("e", 64), nil }) || !delivered {
-		t.Fatal("report outage changed local readiness")
-	}
-	if time.Since(start) > 2*time.Second {
-		t.Fatal("reporting consumed readiness deadline")
-	}
-	delivered = false
-	if !probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("f", 64), nil }) || delivered {
-		t.Fatal("replacement PID 1 reused its predecessor's marker or lost local readiness")
-	}
-	server.Close()
-	client = requestFunc(func(_ context.Context, _ string, value any, _ int64) ([]byte, http.Header, error) {
-		delivered = true
-		if value.(Observation).Ready {
-			t.Fatal("unavailable connector reported ready")
-		}
-		return nil, nil, nil
-	})
-	if probe(t.Context(), client, marker, server.URL, func() (string, error) { return strings.Repeat("e", 64), nil }) || !delivered {
-		t.Fatal("connector readiness was not enforced and reported")
+func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		profile           Profile
+		mismatch, healthy bool
+		delay             time.Duration
+		deliveryErr       error
+		ready, delivered  bool
+	}{
+		{name: "connector-report-outage", profile: Connector, healthy: true, delay: 10 * time.Second, ready: true, delivered: true},
+		{name: "connector-replaced-process", profile: Connector, mismatch: true, healthy: true, ready: true},
+		{name: "connector-unavailable", profile: Connector, delivered: true},
+		{name: "node-delayed-proof", profile: Orchestrator, healthy: true, delay: 600 * time.Millisecond, ready: true, delivered: true},
+		{name: "node-replaced-process", profile: Orchestrator, mismatch: true, healthy: true},
+		{name: "node-report-outage", profile: Orchestrator, healthy: true, deliveryErr: errors.New("offline"), delivered: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case map[Profile]string{Connector: "/ready", Orchestrator: "/readyz"}[test.profile]:
+					if !test.healthy {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					w.Write([]byte("ready"))
+				case "/config":
+					w.Write([]byte("invalid config"))
+				default:
+					t.Error("unexpected probe path", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			marker := filepath.Join(t.TempDir(), "launch.json")
+			process := strings.Repeat("e", 64)
+			b, _ := json.Marshal(Association{Launch: Launch{PodName: "test-pod", PodUID: "uid", LaunchID: strings.Repeat("a", 32), ProcessID: process}})
+			if err := os.WriteFile(marker, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+			delivered := false
+			client := requestFunc(func(ctx context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
+				delivered = true
+				observation := value.(Observation)
+				if endpoint != map[Profile]string{Connector: "tunnel/observation", Orchestrator: "onchain/observation"}[test.profile] || observation.Ready != test.healthy || observation.ProviderVersion != 0 {
+					t.Fatal("invalid process evidence", endpoint, observation)
+				}
+				select {
+				case <-time.After(test.delay):
+					return nil, nil, test.deliveryErr
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+			})
+			if test.mismatch {
+				process = strings.Repeat("f", 64)
+			}
+			started := time.Now()
+			if ready := probe(t.Context(), test.profile, client, marker, server.URL, func() (string, error) { return process, nil }); ready != test.ready || delivered != test.delivered {
+				t.Fatal("unexpected readiness or evidence delivery", ready, delivered)
+			}
+			if test.profile == Connector && time.Since(started) > 2*time.Second {
+				t.Fatal("reporting consumed readiness deadline")
+			}
+		})
 	}
 }
 
@@ -149,7 +169,7 @@ func TestStartupRetriesTransientFailureBeforeExec(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	executed := false
-	start(ctx, client, filepath.Join(t.TempDir(), "token"), "tunnel-pod", "pod-uid", strings.Repeat("e", 64), func(string, []string, []string) error { executed = true; return errors.New("exec fixture") })
+	start(ctx, Connector, client, filepath.Join(t.TempDir(), "token"), "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, func(string, []string, []string) error { executed = true; return errors.New("exec fixture") })
 	if !executed || calls != 2 {
 		t.Fatal("transient startup failure caused a premature container exit")
 	}

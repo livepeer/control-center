@@ -177,97 +177,34 @@ bootstrap JWTs and machine service credentials cannot mutate assignments. Let
 | `DELETE M/{revision_id}` | `expected_generation` |
 | `POST M/{revision_id}/replace` | `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
 
-Writes require a current active enrollment with modern credentials.
-`expected_generation: 0` means never assigned. Replicas range from 1 to 100;
-omitting them uses the definition default on creation and preserves the count on
-scaling. Changed operations return 202 and `{changed, node_id, assignments}`;
-identical completed retries return 200 without advancing generations. Concurrent
-edits return 409. A lost-response retry must match the immediately resulting
-version and complete desired result; an intervening edit conflicts even if values
-return to their earlier state. Audit and desired writes commit together.
-
-At most 100 assignments may be pending, including present, queued and
-unacknowledged removals. Admission reserves room for removal within the 900 KiB
-ConfigMap limit; completed history does not count. Invalid or oversized changes
-leave desired state and the last valid bundle intact.
+Writes require a current active enrollment. `expected_generation: 0` means never
+assigned. Replicas range from 1 to 100; omitting them uses the definition default
+on creation and preserves the count on scaling. Changed operations return 202;
+identical completed retries return 200. Concurrent edits return 409; refresh before
+retrying. At most 100 assignments may be pending, including unacknowledged
+removals. Oversized changes leave the last valid bundle intact.
 
 ### Runtime delivery and completion contract
 
-Management resources and app workloads are delivered separately. If app
-rendering fails, management can still update while Runtime retains the last valid
-app configuration.
-
-Each assignment identifies a pinned revision, desired `present`/`absent` state,
-`generation`, stable `activation_generation` and cleanup policy. Present entries
-include the definition, effective replicas and `start_allowed`; queued targets
-also carry `start_after: {source_revision_id, source_removal_generation}`.
-`replacement` identifies rolling targets without bypassing `start_after`.
-Activation survives scaling and removal; reassignment after cleanup creates a
-new activation. Absent entries retain identity and stop policy.
-The desired configuration digest is independent of the rendered payload and
-bundle digests. App-only edits preserve the Node and tunnel rollout generation.
-
 Runtime supports CPU reusable instances in persistent and single-shot protocol
-modes. Single-session lifetimes are unsupported. Each instance has a gVisor Pod
-and private Service. Runtime reports each instance’s readiness to Node. Node
-lists ready instances in its discovery response and checks readiness and capacity
-before accepting new sessions or single-shot requests. Control Center collects
-these responses into its cached fleet listing.
+modes. Single-session lifetimes are unsupported. Each instance runs in a gVisor
+Pod with a private Service. Node advertises ready instances and checks capacity
+before accepting work; Control Center collects Node's discovery responses.
 
-Unhealthy instances stop receiving new work but retain their registration.
-Removal withdraws an instance from discovery while existing work drains.
-`RuntimeNodeDrainTimeout` sets Node's drain deadline: it defaults to 12 hours,
-accepts 0–12 hours, and zero ends work immediately.
+Removal withdraws an instance from discovery and drains existing work. Set
+`RuntimeNodeDrainTimeout` from 0 to 12 hours (default 12 hours); zero ends work
+immediately. Normally Runtime waits for Node to confirm registration removal,
+then removes the Pod and Service and reports cleanup. `TunnelDrainTimeout` is a
+separate machine-maintenance fallback: expiry may force workload removal without
+Node confirmation, but replacement remains blocked until an audited retry.
+Node restart or owner expiry can lose sessions.
 
-Normally, the Pod and Service remain available until a fresh, accepted complete
-Node snapshot confirms registration removal. Runtime then removes their workload
-definitions so Flux and Kubernetes can delete them. Runtime reports completion
-after registration and resource cleanup.
-
-`TunnelDrainTimeout` is a separate machine-maintenance fallback. Expiry may force
-physical removal without Node confirmation; ordinary replacement stays blocked
-until an audited retry, even if Node completes later. Draining continues across
-Runtime restart, but SDK sequencing cannot fence higher-sequence requests still
-in flight at a crash. Node restart or owner expiry can lose sessions.
-
-Runtime reports with the machine service credential to
-`POST /v1/nodes/{node_id}/apps/{revision_id}/status`. The strict JSON body is limited
-to 16 KiB:
-
-```json
-{"node_id":"<NODE_ID>","credential_version":1,"generation":2,
- "activation_generation":1,"apps_digest":"sha256:<HEX>",
- "phase":"removed","reason":""}
-```
-
-`applied` records reconciliation completion for a present, start-permitted version.
-`removed` records cleanup of the entire activation, including owned instances,
-private routes and registration. Completion reports require an empty reason.
-`failed` records a diagnostic while incomplete and cannot undo completion. Its
-reasons are `reconcile_failed`, `invalid_definition`, `image_pull_failed`,
-`startup_failed`, `isolation_refused`, `resource_refused`,
-`cleanup_failed`, or `registration_cleanup_failed`; do not send credentials,
-payloads or arbitrary error text.
-
-Reports must match published membership, desired state and start permission. An
-older published digest remains valid while that assignment version is current.
-Immutable completion receipts allow exact retries after removal-entry compaction
-or reassignment without changing a newer activation. Unknown, future,
-cross-enrollment and stale transitions are rejected. Completion is monotonic; no
-report sequence is required, and changing health is separate.
-
-Unacknowledged removals remain in snapshots while offline. Fetch or authentication
-failure preserves the last valid artifact; on reconnection, Runtime receives the
-latest snapshot without running every intermediate version. Cleanup acknowledgement
-removes the tombstone from future active snapshots and releases prerequisites,
-advancing `apps_generation` while preserving the Node/tunnel generation.
-
-Normal machine removal withdraws all assignments, including queued targets, and
-waits for app cleanup and machine drain completion. Force removal and owner
-deletion retain terminal instructions and history. Terminal removal acknowledgement
-also requires app cleanup. A retired enrollment can fetch its terminal bundle and
-acknowledge exact terminal app cleanup, but cannot report active state or
-administer apps. Terminal snapshots are write-once, and retired-node cleanup cannot
-affect reenrollment. Node, routes, the Reconciler and connector credentials
-remain available until app cleanup receipts complete; credential compromise
-overrides that hold.
+Normal machine removal withdraws assignments and waits for app cleanup and
+machine drain. Forced removal stops Node early without a graceful drain. It
+retains volumes, routes and the connector for app cleanup until the final phase,
+unless credentials are compromised. Registration cleanup requires the Node
+Deployment to be absent and no Node Pods to remain. A retired enrollment can
+receive terminal cleanup instructions and acknowledge cleanup; re-enrollment
+requires that acknowledgement. See [machine status](machine-status.md) for
+diagnosis and [machine tunnels](machine-tunnels.md#rotation-and-removal) for
+removal commands.

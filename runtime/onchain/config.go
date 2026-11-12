@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/schema"
+	"github.com/livepeer/node/destination"
 )
 
 type Config struct {
@@ -40,7 +41,7 @@ func Offchain() Config         { return Config{Version: 1, Mode: "offchain"} }
 func (c Config) Onchain() bool { return c.Mode == "onchain" }
 
 var Address = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
-var SecretRef = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$`)
+var SecretRef = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func validAddress(s string) bool { return Address.MatchString(s) && strings.Trim(s[2:], "0") != "" }
 
@@ -112,18 +113,14 @@ func (c Config) Validate() error {
 // silently expand the Kubernetes exception for a private destination.
 func Grant(s string) (netip.Addr, uint16, error) {
 	a, e := netip.ParseAddrPort(s)
-	if e != nil || a.Port() == 0 || a.Addr().IsUnspecified() || a.Addr().IsMulticast() || a.Addr().IsLoopback() || a.Addr().Zone() != "" {
+	if e != nil || a.Port() == 0 || !a.Addr().IsGlobalUnicast() || a.Addr().Zone() != "" {
 		return netip.Addr{}, 0, errors.New("onchain grants require IP:port")
 	}
 	return a.Addr().Unmap(), a.Port(), nil
 }
 
 func (c Config) Compatible(d schema.DefinitionV1) error {
-	mode := schema.Offchain
-	if c.Onchain() {
-		mode = schema.Onchain
-	}
-	return schema.ValidatePolicy(d, mode)
+	return schema.ValidatePolicy(d, schema.PaymentMode(c.Mode))
 }
 
 // Observation never contains credentials or individual ticket data.
@@ -155,10 +152,10 @@ func ValidateEndpoint(raw string, grants []string) error {
 	ip, e := netip.ParseAddr(u.Hostname())
 	if e == nil {
 		ip = ip.Unmap()
-		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
+		if !ip.IsGlobalUnicast() {
 			return bad
 		}
-		if !ip.IsPrivate() && port == 443 {
+		if destination.Public(ip) && port == 443 {
 			return nil
 		}
 	} else if port == 443 {

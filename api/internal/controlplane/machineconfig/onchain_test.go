@@ -18,7 +18,7 @@ import (
 )
 
 func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T) {
-	c := onchain.Config{Version: 1, Generation: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 1, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: "rpc-v1", RedeemerURL: "https://redeemer.example", RPCGrants: []string{"10.0.0.2:443"}, RedeemerGrants: []string{"10.0.0.3:443"}, WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
+	c := onchain.Config{Version: 1, Generation: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 1, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: strings.Repeat("c", 64), RedeemerURL: "https://redeemer.example", RPCGrants: []string{"10.0.0.2:443"}, RedeemerGrants: []string{"10.0.0.3:443"}, WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
 	m := Desired{Machine: Machine{NodeID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, Onchain: c, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64)}
 	b, d, e := Build(m)
 	if e != nil {
@@ -70,7 +70,7 @@ func TestOnchainBundleDeterminismCredentialRotationAndHeldIdentity(t *testing.T)
 			t.Fatal("missing", want)
 		}
 	}
-	if strings.Contains(node, "rpc-v1") || strings.Contains(node, "KeystorePassword") {
+	if strings.Contains(node, c.RPCSecret) || strings.Contains(node, "KeystorePassword") {
 		t.Fatal("credential value/reference in Node config")
 	}
 	if !strings.Contains(string(files["management/app-reconciler.yaml"]), "10.0.0.3/32") {

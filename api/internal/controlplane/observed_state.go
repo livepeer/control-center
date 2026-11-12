@@ -15,7 +15,6 @@ import (
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
-	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/schema"
@@ -450,12 +449,8 @@ func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error
 		err = s.db.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&b)
 	}
 	if err == nil {
-		files, e := artifact.Read(b)
-		if e == nil {
-			var meta contract.Metadata
-			if json.Unmarshal(files["runtime.json"], &meta) == nil {
-				v.DeliveredGeneration = meta.Onchain.Generation
-			}
+		if meta, _, e := machineconfig.ReadApplied(b); e == nil {
+			v.DeliveredGeneration = meta.Onchain.Generation
 		}
 	}
 	if errors.Is(err, sql.ErrNoRows) {

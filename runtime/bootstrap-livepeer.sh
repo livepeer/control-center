@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Bash host bootstrap; services and Kubernetes resources live alongside this file.
+set +ax
+# Clear inherited export attributes before retaining the short-lived JWT locally.
+unset ENROLLMENT_TOKEN
+ENROLLMENT_TOKEN=${LIVEPEER_ENROLLMENT_TOKEN:-}
+unset LIVEPEER_ENROLLMENT_TOKEN
 set -Eeuo pipefail
 
 K3S_VERSION='v1.37.2+k3s1'
@@ -8,7 +13,6 @@ GVISOR_VERSION='release-20261102.0'
 INSTALL_DIR='/opt/livepeer'
 CHECK_ONLY=0
 STATUS_ONLY=0
-ENROLLMENT_TOKEN=''
 CREDENTIAL_TRANSITION=''
 UNIT='livepeer-k3s.service'
 case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR=${BASH_SOURCE[0]%/*} ;; *) SCRIPT_DIR=. ;; esac
@@ -27,13 +31,14 @@ die() { log "error: $*"; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: ./bootstrap-livepeer.sh --token TOKEN [--install-dir /opt/livepeer] [--check-only]
+Usage: bootstrap-livepeer.sh [--install-dir /opt/livepeer] [--check-only]
 
 Enroll with the configured Livepeer API and install K3s, gVisor, Flux,
 system-upgrade-controller, and the offchain Livepeer Node orchestrator.
-Set LIVEPEER_API_URL to an API address reachable from this host and its pods.
+Set LIVEPEER_ENROLLMENT_TOKEN to a one-hour JWT for enrollment or credential changes.
+LIVEPEER_API_URL defaults to https://controlcenter-api.livepeer.live.
+The API must be reachable from this host and its pods.
 
-  --token TOKEN      One-hour enrollment JWT; required for a new installation.
   --install-dir PATH  Absolute installation root (default /opt/livepeer).
                       Use letters, digits, underscores, hyphens, dots, slashes.
   --check-only        Read-only eligibility checks; no authentication or install.
@@ -50,11 +55,6 @@ EOF
 parse_args() {
   while (( $# )); do
     case "$1" in
-      --token)
-        if (( $# < 2 )) || [[ -z "$2" ]]; then
-          die '--token requires an enrollment JWT'
-        fi
-        ENROLLMENT_TOKEN="$2"; shift 2 ;;
       --install-dir)
         (( $# >= 2 )) || die '--install-dir requires a path'
         INSTALL_DIR="$2"; shift 2 ;;
@@ -79,6 +79,7 @@ authenticate_node() {
   local credentials="$INSTALL_DIR/credentials" key request response api status
   NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; IDENTITY_NODE_ID=''; INSTALLATION_FINGERPRINT=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
+    ENROLLMENT_TOKEN=''
     for key in node-id service-token config-url fingerprint; do
       [[ -f "$credentials/$key" && -s "$credentials/$key" ]] || die "saved credential is missing or invalid: $key; restore it from backup"
     done
@@ -93,11 +94,9 @@ authenticate_node() {
       die 'invalid saved enrollment identity; restore it from backup'
     fi
   else
-    [[ -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires --token TOKEN'
+    [[ -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires LIVEPEER_ENROLLMENT_TOKEN'
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
-    api="${LIVEPEER_API_URL:-}"
-    api="${api%/}"
-    [[ "$api" =~ ^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*$ ]] || die 'set LIVEPEER_API_URL to the enrollment API base URL'
+    api=$(api_url)
     [[ "$api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS; development HTTP must be explicit'
     [[ -s /etc/machine-id ]] || die '/etc/machine-id must be initialized'
     INSTALLATION_FINGERPRINT=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
@@ -111,6 +110,7 @@ authenticate_node() {
       --proto '=http,https' --write-out '\n%{http_code}' --request POST --header 'Content-Type: application/json' \
       --config <(printf 'header = "Authorization: Bearer %s"\n' "$ENROLLMENT_TOKEN") \
       --data-binary "$request" "$api/v1/nodes/register") || die 'registration request failed; check LIVEPEER_API_URL and API availability'
+    ENROLLMENT_TOKEN=''
     status=${response##*$'\n'}
     case "$status" in
       200) ;;

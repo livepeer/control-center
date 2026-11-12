@@ -83,7 +83,7 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 	var retained, final contract.Metadata
 	json.Unmarshal(terminal["runtime.json"], &retained)
 	json.Unmarshal(terminal["terminal-cleanup/runtime.json"], &final)
-	if !strings.Contains(string(terminal["system/node/orchestrator.yaml"]), "kind: Deployment") || terminal["system/connector/tunnel.yaml"] == nil || retained.ConnectorTokenRef == "" || retained.TokenGeneration != 4 {
+	if strings.Contains(string(terminal["system/node/orchestrator.yaml"]), "kind: Deployment") || terminal["system/connector/tunnel.yaml"] == nil || retained.ConnectorTokenRef == "" || retained.TokenGeneration != 4 {
 		t.Fatal("terminal pruning removed pending cleanup dependencies")
 	}
 	if strings.Contains(string(terminal["terminal-cleanup/system/node/orchestrator.yaml"]), "kind: Deployment") || terminal["terminal-cleanup/system/connector/tunnel.yaml"] != nil || !final.TerminalCleanup || final.ConnectorTokenRef != "" {

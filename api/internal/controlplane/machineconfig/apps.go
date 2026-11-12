@@ -86,10 +86,7 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 	for name, data := range p.Files {
 		files[name] = data
 	}
-	var metadata Runtime
-	if err := json.Unmarshal(files["runtime.json"], &metadata); err != nil {
-		return err
-	}
+	metadata := DesiredRuntime(m)
 	metadata.BundleFormat = contract.BundleFormat
 	metadata.AppsGeneration = 0
 	metadata.AppsDigest = ""
@@ -113,7 +110,7 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		for name, data := range cleanup {
 			files["terminal-cleanup/"+name] = data
 		}
-		for _, name := range []string{"system/node/orchestrator.yaml", "system/connector/tunnel.yaml", "system/connector/network.yaml"} {
+		for _, name := range []string{"system/connector/tunnel.yaml", "system/connector/network.yaml"} {
 			if data := m.RetainedFiles[name]; data != nil {
 				files[name] = data
 			}
@@ -121,7 +118,6 @@ func addManagedApps(files map[string][]byte, m Desired) error {
 		if prior, e := transport.ReadMetadata(m.RetainedFiles["runtime.json"]); e == nil {
 			metadata.ConfigDigest = prior.ConfigDigest
 			metadata.Onchain = prior.Onchain
-			metadata.OnchainCredentialsRef = prior.OnchainCredentialsRef
 			metadata.OnchainActive = false
 			// Retained connectors may restart while the backend still authorizes app cleanup.
 			metadata.TunnelID, metadata.TokenGeneration, metadata.ProviderVersion, metadata.ConnectorTokenRef = prior.TunnelID, prior.TokenGeneration, prior.ProviderVersion, prior.ConnectorTokenRef

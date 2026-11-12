@@ -15,12 +15,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/spf13/cobra"
 )
@@ -110,6 +110,10 @@ func (s *Server) readOnchainRPC(ref string) ([]byte, error) {
 	if e != nil || len(b) > 4096 {
 		return nil, bad
 	}
+	hash := sha256.Sum256(b)
+	if hex.EncodeToString(hash[:]) != ref {
+		return nil, bad
+	}
 	b = []byte(strings.TrimSpace(string(b)))
 	u, e := url.Parse(string(b))
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.Fragment != "" {
@@ -123,7 +127,6 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 		return 0, errors.New("invalid onchain document")
 	}
 	nodes := make([]string, 0, len(input.Machines))
-	fingerprints := map[string]string{}
 	for node, c := range input.Machines {
 		c.Recipient = strings.ToLower(c.Recipient)
 		c.Controller = strings.ToLower(c.Controller)
@@ -140,7 +143,7 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 			if len(s.params.OnchainWebhookSecret) < 32 {
 				return 0, errors.New("onchain operation requires a webhook service credential")
 			}
-			if !machineconfigImage(s.params.RuntimeNodeImage) {
+			if !machineconfig.ValidConnectorImage(s.params.RuntimeNodeImage) {
 				return 0, errors.New("onchain operation requires a pinned wrapper/Node image")
 			}
 			b, e := s.readOnchainRPC(c.RPCSecret)
@@ -150,8 +153,6 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 			if e := onchain.ValidateEndpoint(string(b), c.RPCGrants); e != nil {
 				return 0, e
 			}
-			h := sha256.Sum256(b)
-			fingerprints[c.RPCSecret] = hex.EncodeToString(h[:])
 		}
 	}
 	sort.Strings(nodes)
@@ -186,19 +187,6 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 	rows.Close()
 	if e != nil {
 		return 0, e
-	}
-	for ref, digest := range fingerprints {
-		var old string
-		e = tx.QueryRowContext(ctx, `SELECT fingerprint FROM lpcc.onchain_secrets WHERE reference=$1`, ref).Scan(&old)
-		if e == nil && old != digest {
-			return 0, errors.New("referenced onchain secret versions are immutable")
-		}
-		if e != nil && !errors.Is(e, sql.ErrNoRows) {
-			return 0, e
-		}
-		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_secrets(reference,fingerprint) VALUES($1,$2) ON CONFLICT DO NOTHING`, ref, digest); e != nil {
-			return 0, e
-		}
 	}
 	changed := false
 	for _, node := range nodes {
@@ -277,8 +265,4 @@ func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected 
 		}
 	}
 	return revision, tx.Commit()
-}
-
-func machineconfigImage(s string) bool {
-	return regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`).MatchString(s)
 }

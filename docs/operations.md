@@ -59,15 +59,10 @@ COMMIT;
 Verify that one row was inserted. Correct `DefaultAdminEmail` and restart; a new
 grant is seeded only if no active grants remain.
 
-## App catalog
+## Apps
 
-Use **Administration → App catalog** to validate and publish TOML, inspect
-revision history, and retire definitions. See the [app registry guide](app-registry.md)
-for definition settings and pricing policy. Catalog changes alone do not assign
-or deploy applications. In the fleet, use **Manage apps** for revision-pinned
-assignments, replica edits and sequential replacement/removal. Runtime completion
-is separate from current health; see the registry guide for the delivery and
-cleanup contract.
+Use **Administration → App catalog** to publish definitions and **Manage apps**
+in the fleet to assign them. See the [app registry guide](app-registry.md).
 
 ## Onchain operation
 
@@ -85,34 +80,27 @@ retain enabled machines or explicitly set `{"version":1,"mode":"offchain"}` to
 disable one. Unconfigured machines default to offchain. App catalog prices remain
 authoritative; every advertised onchain app needs a positive USD `hour` or `fixed` price.
 
-Provision a new immutable `rpc_secret` file for RPC rotation. Increment
-`credential_revision` to rotate submission credentials. Retain referenced RPC
-versions for held workloads and rollback. Reapply previous settings at the current
-revision to roll back. Configuration changes use the normal withdrawal/drain flow.
-Inspect configuration, local admission and remote handoff in **Runtime status**.
+Provision a new immutable `rpc_secret` file for RPC rotation; the configured
+reference is the SHA-256 of its exact bytes, including a final newline. The API
+rehashes the owner-only file on every read. Increment `credential_revision` to
+rotate process-scoped submission grants; the successor replaces the prior grant.
+Retain referenced RPC versions for held workloads and rollback. Reapply previous
+settings at the current revision to roll back. Configuration changes use the
+normal app and session drain flow. Inspect configuration, local admission and
+handoff health separately in **Runtime status**. Redeemer owns confirmation.
 
-Node's normal drain waits for durable redeemer handoff before acknowledging
-retirement. Onchain confirmation continues independently at the redeemer. Forced
-removal revokes submission grants immediately; preserve Node's database and
-re-enroll with the same storage to resume any unfinished handoff.
+Disabling onchain operation or removing a machine can leave pending tickets
+unredeemed. Forced removal revokes submission grants and stops Node early. Keep
+Node's durable data, including a consistent backup of `/data/onchain.sqlite`
+and its sidecars, and back up the redeemer database and wallet separately. The
+recipient, chain and controller remain immutable for a stable machine even after
+re-enrollment. Private endpoints require exact IP:port `rpc_grants` and
+`redeemer_grants`; these allow orchestrator access only. Apps receive neither
+these grants nor Node's RPC or redemption credentials. If onchain readiness is lost,
+the private Node Service remains reachable for management and cleanup.
 
-Back up Node's `/data/onchain.sqlite` and sidecars consistently, and back up the
-redeemer database and wallet separately. Keep the recipient/chain binding and
-redemption routing/trust inputs while handoff remains incomplete. Private endpoints
-require exact IP:port `rpc_grants` / `redeemer_grants`; these allow orchestrator
-access only.
+## Machine ingress and discovery
 
-## Machine ingress
-
-Per-enrollment Cloudflare tunnels and protected Collector discovery are opt-in.
-Follow [the machine tunnel runbook](machine-tunnels.md) for infrastructure
-prerequisites, credential delivery, refresh, rotation, removal, integration
-contracts and release evidence. Keep `CloudflareEnabled` and
-`CloudflareIngressApproved` false until their respective gates are satisfied.
-
-## Fleet discovery
-
-Fleet discovery shares the API process and its TLS proxy. Enable it separately
-after protected ingress approval, using the existing encrypted Access credential
-store and protected keyring. See [fleet discovery](fleet-discovery.md) for
-configuration, source lifecycle, rotation, freshness diagnosis and release gates.
+Machine tunnels and fleet discovery are opt-in. Follow the [tunnel runbook](machine-tunnels.md)
+for setup and removal, then [fleet discovery](fleet-discovery.md) to expose the
+aggregate inventory.

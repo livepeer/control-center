@@ -5,6 +5,7 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { ArrowDown, ArrowRight, Check, CheckCheck, ChevronRight, Copy, Cpu, LogOut, Plus, RefreshCw, Server, Terminal, X } from 'lucide-react'
 import './style.css'
 import { api } from './api'
+import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { MachineStatus, machineStatusSummary } from './machine-status'
 
@@ -123,7 +124,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
   }, [session.access_token])
   useEffect(() => { const interval = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(interval) }, [])
   const seconds = enrollment ? Math.max(0, Math.floor((Date.parse(enrollment.expires_at) - now) / 1000)) : 0
-  const command = enrollment ? `./bootstrap-livepeer.sh --token ${enrollment.token}` : ''
+  const command = enrollment ? bootstrapCommand(window.location.origin, config.public_api_url, enrollment.token) : ''
   async function copy() {
     try { await navigator.clipboard.writeText(command); setCopied(true); window.setTimeout(() => setCopied(false), 2500) }
     catch { setTokenProblem('Clipboard access is unavailable. Select and copy the command below.') }
@@ -142,12 +143,12 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
         <section className="connect-card" aria-labelledby="connect-title">
           <div className="connect-heading"><span className="terminal-badge"><Terminal size={19} /></span><span>CONNECT A MACHINE</span><span className="step-pill">01 / 02</span></div>
           <h2 id="connect-title">One command. You’re connected.</h2><p>Run this on your machine to enroll it in your workspace.</p>
-          <div className="command-window"><div className="command-bar"><div className="window-dots"><i /><i /><i /></div><span>root@your-machine ~</span><span>BASH</span></div><div className="command-body"><span className="prompt">$</span><code aria-label="Bootstrap command">{command || (busy ? 'Generating your command…' : 'Generate a command to get started.')}</code></div></div>
+          <div className="command-window"><div className="command-bar"><div className="window-dots"><i /><i /><i /></div><span>root@your-machine ~</span><span>POSIX SH</span></div><div className="command-body"><span className="prompt">$</span><code aria-label="Bootstrap command">{command || (busy ? 'Generating your command…' : 'Generate a command to get started.')}</code></div></div>
           {tokenProblem && <Notice>{tokenProblem}</Notice>}
           <div className="command-actions"><button className="button lime" onClick={copy} disabled={!enrollment || seconds === 0 || busy}>{copied ? <CheckCheck size={16} /> : <Copy size={16} />}{copied ? 'Command copied' : 'Copy command'}</button><button className="regenerate" onClick={generate} disabled={busy}><RefreshCw size={14} className={busy ? 'spin' : ''} />{seconds === 0 && enrollment ? 'Generate new token' : 'Refresh token'}</button><span className="expiry"><span className={`status-dot ${seconds > 0 ? 'active' : ''}`} />{enrollment ? seconds > 0 ? `Expires in ${Math.ceil(seconds / 60)} min` : 'Token expired' : 'One-hour enrollment window'}</span></div>
           <div className="connect-footer"><Check size={14} /><span>Use the same command on multiple machines before it expires.</span></div>
         </section>
-        <aside className="before-card"><span className="eyebrow">BEFORE YOU RUN</span><h3>A quick preflight.</h3><ol className="preflight-list"><li><span>1</span><div><strong>Start with a Linux machine</strong><p>Debian or Ubuntu · amd64<br />2 CPUs · 4 GB RAM · 10 GB free</p></div></li><li><span>2</span><div><strong>Set your API address</strong><p>On the target host, export:</p><code className="env-command">export LIVEPEER_API_URL='{config.public_api_url}'</code><p className="small-muted">This address must be reachable from the host and its pods.</p></div></li><li><span>3</span><div><strong>Open the runtime directory</strong><p>Run the command as root from the checkout containing the bootstrap script.</p></div></li></ol><div className="preflight-note"><Terminal size={15} /><span>Your machine handles the setup.<br />Keep the terminal open until it finishes.</span></div></aside>
+        <aside className="before-card"><span className="eyebrow">BEFORE YOU RUN</span><h3>A quick preflight.</h3><ol className="preflight-list"><li><span>1</span><div><strong>Start with a Linux machine</strong><p>Debian or Ubuntu · amd64<br />2 CPUs · 4 GB RAM · 10 GB free</p></div></li><li><span>2</span><div><strong>Prepare the host tools</strong><p>Install curl, jq, nftables and the other <a href="https://github.com/livepeer/control-center/blob/main/runtime/README.md#prerequisites">prerequisite packages</a>. The API and image registries must be reachable from the host and its pods.</p></div></li><li><span>3</span><div><strong>Run as root</strong><p>Run the command on the target host. See the <a href="https://github.com/livepeer/control-center/blob/main/runtime/README.md">sudo instructions</a> if needed.</p></div></li></ol><div className="preflight-note"><Terminal size={15} /><span>Your machine handles the setup.<br />Keep the terminal open until it finishes.</span></div></aside>
       </div>
       <section id="machines" className="machines-section" aria-labelledby="machines-title"><div className="section-heading"><div><h2 id="machines-title">Your machines<span className="count">{machines?.length ?? '—'}</span></h2><p className="muted">Every connected machine, in one place.</p></div><span className="auto-refresh"><span className="status-dot active" />Updates automatically</span></div>
         {machineProblem && <Notice>{machineProblem}</Notice>}

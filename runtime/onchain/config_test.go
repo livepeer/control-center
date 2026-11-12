@@ -1,12 +1,13 @@
 package onchain
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
 
 func validConfig() Config {
-	return Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 123, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: "rpc-v1", RedeemerURL: "https://redeemer.example", WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
+	return Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 123, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: strings.Repeat("c", 64), RedeemerURL: "https://redeemer.example", WeiPerUSD: "100", TicketFaceValue: "100", TicketWinProb: "1", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
 }
 func TestCompleteOnchainConfigurationAndExplicitOffchain(t *testing.T) {
 	if e := validConfig().Validate(); e != nil {
@@ -23,5 +24,19 @@ func TestCompleteOnchainConfigurationAndExplicitOffchain(t *testing.T) {
 				t.Fatal("accepted invalid onchain configuration")
 			}
 		})
+	}
+}
+
+func TestEndpointPolicyMatchesNodeAndKeepsMetadataPrivate(t *testing.T) {
+	for _, ip := range []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "240.0.0.1", "2001:db8::1"} {
+		endpoint := "https://" + net.JoinHostPort(ip, "443")
+		if ValidateEndpoint(endpoint, nil) == nil || ValidateEndpoint(endpoint, []string{net.JoinHostPort(ip, "443")}) != nil {
+			t.Fatal("reserved destination did not require an exact grant", ip)
+		}
+	}
+	for _, ip := range []string{"169.254.169.254", "fe80::1", "127.0.0.1", "0.0.0.0", "ff02::1"} {
+		if _, _, err := Grant(net.JoinHostPort(ip, "443")); err == nil {
+			t.Fatal("unsafe network exception accepted", ip)
+		}
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -267,13 +266,10 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		}
 		var deployment any
 		err := s.Kube.Request(ctx, http.MethodGet, "/apis/apps/v1/namespaces/flux-system/deployments/livepeer-tunnel", nil, &deployment)
-		var nodePods struct {
-			Items []json.RawMessage `json:"items"`
-		}
-		nodeErr := s.Kube.Request(ctx, http.MethodGet, "/api/v1/namespaces/livepeer/pods?labelSelector=app%3Dorchestrator", nil, &nodePods)
+		nodePod, nodeErr := transport.ObserveNode(ctx, s.Kube)
 		var nodeDeployment any
 		nodeDeploymentErr := s.Kube.Request(ctx, http.MethodGet, "/apis/apps/v1/namespaces/livepeer/deployments/orchestrator", nil, &nodeDeployment)
-		if applied && len(pods.Items) == 0 && transport.IsStatus(err, 404) && nodeErr == nil && len(nodePods.Items) == 0 && transport.IsStatus(nodeDeploymentErr, 404) {
+		if applied && len(pods.Items) == 0 && transport.IsStatus(err, 404) && nodeErr == nil && nodePod.Absent && transport.IsStatus(nodeDeploymentErr, 404) {
 			ack := digest
 			if m.TerminalInputDigest != "" {
 				ack = m.TerminalInputDigest
@@ -307,38 +303,9 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 	if s.Kube.Request(ctx, http.MethodGet, "/apis/apps/v1/namespaces/livepeer/deployments/orchestrator", nil, &deployment) == nil {
 		actual = deployment.Spec.Template.Metadata.Annotations["livepeer.io/config-sha256"]
 		ready = applied && deployment.Status.ObservedGeneration == deployment.Metadata.Generation && deployment.Status.UpdatedReplicas == 1 && deployment.Status.ReadyReplicas == 1 && deployment.Status.AvailableReplicas == 1 && actual == m.ConfigDigest
-		var pods struct {
-			Items []struct {
-				Metadata struct {
-					UID               string            `json:"uid"`
-					DeletionTimestamp *string           `json:"deletionTimestamp"`
-					Annotations       map[string]string `json:"annotations"`
-				} `json:"metadata"`
-				Status struct {
-					Conditions []transport.Condition `json:"conditions"`
-				} `json:"status"`
-			} `json:"items"`
-		}
-		if s.Kube.Request(ctx, http.MethodGet, "/api/v1/namespaces/livepeer/pods?labelSelector=app%3Dorchestrator", nil, &pods) != nil {
-			ready = false
-		} else {
-			count := 0
-			podReady := false
-			for _, p := range pods.Items {
-				if p.Metadata.DeletionTimestamp == nil {
-					count++
-					podUID = p.Metadata.UID
-					actual = p.Metadata.Annotations["livepeer.io/config-sha256"]
-					for _, c := range p.Status.Conditions {
-						podReady = podReady || (c.Type == "Ready" && c.Status == "True")
-					}
-				}
-			}
-			ready = ready && count == 1 && podReady && actual == m.ConfigDigest
-			if count != 1 {
-				actual = ""
-			}
-		}
+		pod, err := transport.ObserveNode(ctx, s.Kube)
+		podUID, actual = pod.UID, pod.ConfigDigest
+		ready = ready && err == nil && pod.UID != "" && pod.Ready && actual == m.ConfigDigest
 	}
 	if ready {
 		for _, endpoint := range []string{"http://orchestrator.livepeer.svc.cluster.local:8936/readyz", "http://orchestrator.livepeer.svc.cluster.local:8935/discovery"} {
@@ -432,30 +399,7 @@ func (s *Source) gc(ctx context.Context, current string) {
 		}
 		pins[k.Status.LastAppliedRevision], pins[k.Status.LastAttemptedRevision] = true, true
 	}
-	entries, _ := os.ReadDir(s.Store.Directory)
-	type file struct {
-		name string
-		mod  time.Time
-	}
-	var files []file
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tar.gz") {
-			if info, err := e.Info(); err == nil {
-				mod := info.ModTime()
-				if seen, err := os.Stat(filepath.Join(s.Store.Directory, strings.TrimSuffix(e.Name(), ".tar.gz")+".seen")); err == nil {
-					mod = seen.ModTime()
-				}
-				files = append(files, file{e.Name(), mod})
-			}
-		}
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
-	for i, f := range files {
-		if i >= 10 && !pins["sha256:"+strings.TrimSuffix(f.name, ".tar.gz")] && time.Since(f.mod) > time.Hour {
-			_ = os.Remove(filepath.Join(s.Store.Directory, f.name))
-			_ = os.Remove(filepath.Join(s.Store.Directory, strings.TrimSuffix(f.name, ".tar.gz")+".seen"))
-		}
-	}
+	_ = s.Store.Collect(pins, 1<<63-1, time.Now())
 }
 
 // Validation errors may contain field paths or payload excerpts. Only bounded
