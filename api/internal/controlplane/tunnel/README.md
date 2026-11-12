@@ -2,10 +2,8 @@
 
 This package manages Cloudflare resources, credentials, ingress protection, and
 external readiness for machine tunnels. On the machine, `cloudflared` opens an
-outbound connection to Cloudflare. A loopback proxy validates application Hosts
-and strips Access credentials before forwarding to the private orchestrator at
-`orchestrator.livepeer.svc.cluster.local:8935`. Application workloads remain
-behind Kubernetes services.
+outbound connection to Cloudflare and forwards directly to the private Node
+service. Node routes application traffic to private workloads.
 
 Each tunnel belongs to a machine enrollment. Credential refresh preserves the
 enrollment and tunnel; deletion and re-enrollment create a new enrollment.
@@ -15,13 +13,14 @@ stable hostnames.
 | Host | Purpose |
 | --- | --- |
 | `api-<suffix>.<node>.<domain>` | Allowed orchestrator client API routes, protected by Access |
-| `<proxy>.<node>.<domain>` | Application traffic |
+| `*.<node>.<domain>` | Application traffic |
 | `discovery-<suffix>.<node>.<domain>/discovery` | Discovery, protected by the same Access application |
 
-Ingress rules deny discovery, runner, metrics, health, and Trickle paths on the
-public API and application hosts. Unknown hosts and unmatched API paths return
-404. API and discovery require the same expected Access audience. Their origin
-Host is the private orchestrator; application requests preserve their original Host.
+The API host allows only reserve, stop/payment and payment refresh controls.
+API and discovery require Cloudflare Access and forward with the private Node Host;
+application hosts preserve the original Host. Discovery, runner, metrics, health
+and Trickle paths are denied on API and app hosts; unknown hosts and unmatched
+API paths return 404.
 
 ## Cloudflare API token permissions
 

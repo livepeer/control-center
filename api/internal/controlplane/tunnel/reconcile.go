@@ -222,7 +222,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 					path = clientPath
 					previous = append(previous, IngressRule{Hostname: host, Path: reservedPath, Service: "http_status:404"})
 				}
-				previous = append(previous, IngressRule{Hostname: host, Path: path, Service: ConnectorOrigin, OriginRequest: protectedOrigin(p, r.Audience)}, IngressRule{Hostname: host, Service: "http_status:404"})
+				previous = append(previous, IngressRule{Hostname: host, Path: path, Service: PrivateOrchestrator, OriginRequest: protectedOrigin(p, r.Audience)}, IngressRule{Hostname: host, Service: "http_status:404"})
 			}
 			rules = append(previous, rules...)
 		}

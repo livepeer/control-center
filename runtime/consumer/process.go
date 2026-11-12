@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/livepeer/control-center/runtime/artifact"
-	"github.com/livepeer/control-center/runtime/nodeproxy"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -108,16 +107,16 @@ func start(ctx context.Context, profile Profile, client transport.Requester, tok
 	return exec(command, append([]string{command}, args...), []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent"})
 }
 
-// Probe reports best effort; local connector and Node proxy health determine its result.
+// Probe reports local process health and scoped observations.
 func Probe(ctx context.Context, profile Profile, socket, marker string) bool {
 	base := "http://127.0.0.1:20241"
 	if profile == Orchestrator {
 		base = "http://127.0.0.1:8936"
 	}
-	return probe(ctx, profile, transport.NewLocal(socket), marker, base, processIdentity, profile == Orchestrator || nodeproxy.Ready(ctx))
+	return probe(ctx, profile, transport.NewLocal(socket), marker, base, processIdentity)
 }
 
-func probe(ctx context.Context, profile Profile, client transport.Requester, marker, base string, identity func() (string, error), proxyReady bool) bool {
+func probe(ctx context.Context, profile Profile, client transport.Requester, marker, base string, identity func() (string, error)) bool {
 	budget := time.Second
 	if profile == Orchestrator {
 		budget = 3 * time.Second
@@ -142,7 +141,6 @@ func probe(ctx context.Context, profile Profile, client transport.Requester, mar
 		readyPath = "/readyz"
 	}
 	_, ready := read(readyPath, 1024)
-	ready = ready && proxyReady
 	var b []byte
 	configOK := false
 	if profile == Connector {

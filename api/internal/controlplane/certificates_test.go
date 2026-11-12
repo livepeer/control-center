@@ -91,7 +91,7 @@ func TestDomainCertificatePrecedesDrainAndReleasesAbandonedCandidates(t *testing
 		t.Fatal("certificate issuance changed endpoints or started a drain", pending, err)
 	}
 	files := archiveFiles(t, request(t, s, "GET", "/v1/nodes/"+c["node_id"]+"/config", c["token"], nil).Body.Bytes())
-	if !strings.Contains(files["system/connector/tunnel.yaml"], initial.ProxyURLTemplate) {
+	if !strings.Contains(files["system/node/orchestrator.yaml"], initial.ProxyURLTemplate) {
 		t.Fatal("pending certificate changed the proxy template")
 	}
 	pack := f.certificatePacks[pending.CertificatePackID]

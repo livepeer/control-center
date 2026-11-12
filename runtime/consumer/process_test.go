@@ -72,24 +72,28 @@ func TestStartExecsWithFreshMemoryFileAndNeverFallsBack(t *testing.T) {
 
 func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
 	for _, test := range []struct {
-		name                 string
-		profile              Profile
-		mismatch, proxyReady bool
-		delay                time.Duration
-		deliveryErr          error
-		ready, delivered     bool
+		name              string
+		profile           Profile
+		mismatch, healthy bool
+		delay             time.Duration
+		deliveryErr       error
+		ready, delivered  bool
 	}{
-		{name: "connector-report-outage", profile: Connector, proxyReady: true, delay: 10 * time.Second, ready: true, delivered: true},
-		{name: "connector-replaced-process", profile: Connector, mismatch: true, proxyReady: true, ready: true},
-		{name: "connector-proxy-unavailable", profile: Connector, delivered: true},
-		{name: "node-delayed-proof", profile: Orchestrator, proxyReady: true, delay: 600 * time.Millisecond, ready: true, delivered: true},
-		{name: "node-replaced-process", profile: Orchestrator, mismatch: true, proxyReady: true},
-		{name: "node-report-outage", profile: Orchestrator, proxyReady: true, deliveryErr: errors.New("offline"), delivered: true},
+		{name: "connector-report-outage", profile: Connector, healthy: true, delay: 10 * time.Second, ready: true, delivered: true},
+		{name: "connector-replaced-process", profile: Connector, mismatch: true, healthy: true, ready: true},
+		{name: "connector-unavailable", profile: Connector, delivered: true},
+		{name: "node-delayed-proof", profile: Orchestrator, healthy: true, delay: 600 * time.Millisecond, ready: true, delivered: true},
+		{name: "node-replaced-process", profile: Orchestrator, mismatch: true, healthy: true},
+		{name: "node-report-outage", profile: Orchestrator, healthy: true, deliveryErr: errors.New("offline"), delivered: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case map[Profile]string{Connector: "/ready", Orchestrator: "/readyz"}[test.profile]:
+					if !test.healthy {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
 					w.Write([]byte("ready"))
 				case "/config":
 					w.Write([]byte("invalid config"))
@@ -108,7 +112,7 @@ func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
 			client := requestFunc(func(ctx context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
 				delivered = true
 				observation := value.(Observation)
-				if endpoint != map[Profile]string{Connector: "tunnel/observation", Orchestrator: "onchain/observation"}[test.profile] || observation.Ready != test.proxyReady || observation.ProviderVersion != 0 {
+				if endpoint != map[Profile]string{Connector: "tunnel/observation", Orchestrator: "onchain/observation"}[test.profile] || observation.Ready != test.healthy || observation.ProviderVersion != 0 {
 					t.Fatal("invalid process evidence", endpoint, observation)
 				}
 				select {
@@ -122,7 +126,7 @@ func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
 				process = strings.Repeat("f", 64)
 			}
 			started := time.Now()
-			if ready := probe(t.Context(), test.profile, client, marker, server.URL, func() (string, error) { return process, nil }, test.proxyReady); ready != test.ready || delivered != test.delivered {
+			if ready := probe(t.Context(), test.profile, client, marker, server.URL, func() (string, error) { return process, nil }); ready != test.ready || delivered != test.delivered {
 				t.Fatal("unexpected readiness or evidence delivery", ready, delivered)
 			}
 			if test.profile == Connector && time.Since(started) > 2*time.Second {
