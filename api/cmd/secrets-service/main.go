@@ -117,7 +117,7 @@ func run(ctx context.Context) error {
 }
 func command() *cobra.Command {
 	var path string
-	migrate := migrations.CommandFor(secretservice.MigrationRunner, boa.Cmd[boa.NoParams]{}, &path, secretservice.MigrationFiles,
+	migrate := migrations.CommandFor(secretservice.Migrator, boa.Cmd[boa.NoParams]{}, &path, secretservice.MigrationFiles,
 		func(ctx context.Context, _ string, _ bool) (*sql.DB, error) {
 			pg, err := file("SECRETS_DATABASE_URL_FILE")
 			if err != nil {

@@ -17,7 +17,7 @@ func Command[P any](config boa.Cmd[P], path *string, files fs.FS, open func(cont
 	return CommandFor(controlplane, config, path, files, open)
 }
 
-func CommandFor[P any](runner Runner, config boa.Cmd[P], path *string, files fs.FS, open func(context.Context, string, bool) (*sql.DB, error)) *cobra.Command {
+func CommandFor[P any](migrator Migrator, config boa.Cmd[P], path *string, files fs.FS, open func(context.Context, string, bool) (*sql.DB, error)) *cobra.Command {
 	run := func(_ *boa.NoParams, cmd *cobra.Command, _ []string) error {
 		catalog, err := fs.Sub(files, "migrations")
 		if err != nil {
@@ -31,14 +31,14 @@ func CommandFor[P any](runner Runner, config boa.Cmd[P], path *string, files fs.
 		defer db.Close()
 		switch cmd.Name() {
 		case "up":
-			err = runner.Up(ctx, db, catalog)
+			err = migrator.Up(ctx, db, catalog)
 		case "down":
-			err = runner.Down(ctx, db, catalog)
+			err = migrator.Down(ctx, db, catalog)
 		}
 		if err != nil {
 			return err
 		}
-		status, err := runner.List(ctx, db, catalog)
+		status, err := migrator.List(ctx, db, catalog)
 		if err != nil {
 			return err
 		}

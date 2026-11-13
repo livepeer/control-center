@@ -17,12 +17,12 @@ type querier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// Runner keeps a migration catalog and its history isolated in the given schema.
-type Runner struct{ schema string }
+// Migrator keeps a migration catalog and its history isolated in the given schema.
+type Migrator struct{ schema string }
 
-func ForSchema(schema string) Runner { return Runner{schema: schema} }
+func ForSchema(schema string) Migrator { return Migrator{schema: schema} }
 
-func (r Runner) names() (string, string, error) {
+func (r Migrator) names() (string, string, error) {
 	if len(r.schema) == 0 || len(r.schema) > 63 || strings.ContainsRune(r.schema, '\x00') {
 		return "", "", fmt.Errorf("invalid migration schema")
 	}
@@ -36,7 +36,7 @@ func List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
 	return controlplane.List(ctx, db, files)
 }
 
-func (r Runner) List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
+func (r Migrator) List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
 	specs, err := catalog(files)
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func (r Runner) List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, er
 	return r.list(ctx, tx, specs)
 }
 
-func (r Runner) list(ctx context.Context, q querier, specs []migration) ([]Status, error) {
+func (r Migrator) list(ctx context.Context, q querier, specs []migration) ([]Status, error) {
 	_, tableName, err := r.names()
 	if err != nil {
 		return nil, err
@@ -102,7 +102,7 @@ func Up(ctx context.Context, db *sql.DB, files fs.FS) error {
 	return controlplane.Up(ctx, db, files)
 }
 
-func (r Runner) Up(ctx context.Context, db *sql.DB, files fs.FS) error {
+func (r Migrator) Up(ctx context.Context, db *sql.DB, files fs.FS) error {
 	specs, err := catalog(files)
 	if err != nil {
 		return err
@@ -120,7 +120,7 @@ func Down(ctx context.Context, db *sql.DB, files fs.FS) error {
 	return controlplane.Down(ctx, db, files)
 }
 
-func (r Runner) Down(ctx context.Context, db *sql.DB, files fs.FS) error {
+func (r Migrator) Down(ctx context.Context, db *sql.DB, files fs.FS) error {
 	specs, err := catalog(files)
 	if err != nil {
 		return err
@@ -129,7 +129,7 @@ func (r Runner) Down(ctx context.Context, db *sql.DB, files fs.FS) error {
 	return err
 }
 
-func (r Runner) applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (bool, error) {
+func (r Migrator) applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (bool, error) {
 	schema, tableName, err := r.names()
 	if err != nil {
 		return false, err
