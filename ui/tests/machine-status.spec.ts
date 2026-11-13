@@ -26,7 +26,7 @@ function evidence(): MachineObservation {
 
 async function setup(page: Page, admin = false, reportState = 'observed', terminal = false) {
   const listedMachine = { ...machine, report_state: reportState, terminal }
-  const state = { view: evidence(), fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], admin }
+  const state = { view: evidence(), fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], writes: [] as string[], admin }
   if (terminal) { state.view.lifecycle = 'cleanup_pending'; state.view.assignments[0].desired = 'absent'; state.view.assignments[0].completed_at = null }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
@@ -36,6 +36,7 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
   await page.route('http://auth.test/**', route => route.fulfill({ json: session.user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
+    if (route.request().method() !== 'GET') state.writes.push(path)
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture', public_api_url: 'https://api.example' } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/me') return route.fulfill({ json: { user_id: user, is_admin: state.admin } })
@@ -74,6 +75,111 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   await expect(panel.getByText('Node registration was recreated at', { exact: false })).toHaveCount(0)
   if (!admin) await expect(page.getByRole('button', { name: 'Assign selected revision', exact: true })).toHaveCount(0)
   await page.screenshot({ path: info.outputPath('runtime-status.png'), fullPage: true })
+})
+
+for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees work blockers before rollout details`, async ({ page }, info) => {
+  const state = await setup(page, admin)
+  state.view.components[0].ready = false
+  state.view.components[0].reason = 'applying'
+  state.view.assignments = []
+  state.view.components[1].apps!.instances = []
+  state.view.components[1].apps!.assignments = []
+  state.view.components[1].apps!.instances_total = 0
+  state.view.tunnel = { enabled: true, ready: false, reason: 'runtime_pending', cleanup_complete: false }
+  state.view.discovery_source = { state: 'excluded', selection_reason: 'unverified', stale: true, failures: 0, publication_blocked: false }
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+
+  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
+  await expect(summary.getByRole('heading', { name: 'Not ready to receive work', exact: true })).toBeVisible()
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Node deployment' }).first()).toContainText('Resource reconciliation is pending')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Tunnel provisioning' })).toContainText('Waiting for Node deployment to become ready. Provisioning has not been observed.')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()).toContainText('No apps assigned')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Discovery inventory' })).toContainText('Excluded')
+  const row = page.getByRole('row').filter({ hasText: 'worker-status' })
+  await expect(row.getByText('Readiness unverified', { exact: true })).toBeVisible()
+  await expect(row.getByText('Runtime reporting', { exact: true })).toBeVisible()
+  await expect(row.locator('.machine-status.delivered, .status-dot.active')).toHaveCount(0)
+  const summaryBox = await summary.boundingBox()
+  const artifactBox = await page.getByText('Requested', { exact: true }).boundingBox()
+  expect(summaryBox!.y + summaryBox!.height).toBeLessThan(artifactBox!.y)
+  await summary.screenshot({ path: info.outputPath('work-readiness.png') })
+  if (!admin) {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await summary.screenshot({ path: info.outputPath('work-readiness-mobile.png') })
+    expect(await summary.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+  }
+  expect(state.writes.filter(path => path !== '/api/bootstrap-token')).toEqual([])
+})
+
+test('app readiness requires current healthy and registered assignments and expires with evidence', async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page)
+  state.view.requested.generation = 1
+  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
+  const apps = summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(apps).toContainText('Healthy and registered')
+  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
+  await expect(summary).toContainText('External app reachability remains unverified.')
+
+  const observed = state.view.components[1].apps!.assignments![0]
+  observed.instances = 0; observed.ready = 0; observed.registered = 0
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(apps).toContainText('no app instances loaded')
+  await expect(summary.getByRole('heading')).toHaveText('Not ready to receive work')
+
+  observed.instances = 1; observed.ready = 1; observed.registered = 0
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(apps).toContainText('1 healthy and 0 registered')
+  observed.registered = 1; observed.activation_generation++
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(apps).toContainText('no fresh observation for the current assignment')
+
+  observed.activation_generation--
+  const at = await page.evaluate(() => Date.now())
+  state.view.server_time = new Date(at).toISOString()
+  observed.probe_expires_at = new Date(at + 3000).toISOString()
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(apps).toContainText('Healthy and registered')
+  state.fail = true
+  await page.clock.fastForward(4000)
+  await expect(apps).toContainText('health or Node registration evidence is missing or expired')
+  await expect(apps).not.toContainText('Healthy and registered')
+})
+
+test('disabled ingress and discovery do not become blockers, and old reports cannot prove readiness', async ({ page }) => {
+  const state = await setup(page)
+  state.view.requested.generation = 1
+  state.view.tunnel.enabled = false
+  state.view.discovery_enabled = false
+  state.view.components[0].current = false
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
+  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Node deployment' })).toContainText('earlier rollout')
+  await expect(summary.getByText('Disabled', { exact: true })).toHaveCount(2)
+  state.view.assignments_omitted = true
+  state.view.components[0].current = true
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(summary).toContainText('Additional app assignments were omitted')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()).not.toContainText('Healthy and registered')
+})
+
+test('one failing assignment does not hide healthy apps, and draining stops new work', async ({ page }) => {
+  const state = await setup(page)
+  state.view.requested.generation = 1
+  state.view.assignments.push({ ...state.view.assignments[0], revision_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'second-app' })
+  state.view.components[1].apps!.assignments!.push({ ...state.view.components[1].apps!.assignments![0], revision_id: state.view.assignments[1].revision_id, instances: 0, ready: 0, registered: 0, reason: 'resource_refused' })
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
+  await expect(summary.getByRole('heading')).toHaveText('Not fully ready to receive work')
+  await expect(summary).toContainText('1 of 2 app assignments')
+  await expect(summary).toContainText('second-app: no app instances loaded — Insufficient resources for this assignment')
+
+  state.view.lifecycle = 'draining'
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(summary.getByRole('heading')).toHaveText('Not accepting work')
+  await expect(summary).toContainText('draining for removal')
 })
 
 test('stale evidence expires when status refresh fails', async ({ page }) => {
@@ -146,7 +252,7 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(page.getByText('Status refresh unavailable.', { exact: true })).toBeVisible()
   await page.clock.fastForward(11000)
-  await expect(page.getByText('No fresh connector readiness observation', { exact: true })).toBeVisible()
+  await expect(page.getByRole('cell', { name: 'No fresh connector readiness observation', exact: true })).toBeVisible()
   await expect(page.getByText('Present in published inventory', { exact: false })).toBeVisible()
   await page.clock.fastForward(10000)
   await expect(page.getByText('Source selection stale', { exact: false })).toHaveCount(2)
