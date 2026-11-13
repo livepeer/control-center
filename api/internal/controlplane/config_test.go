@@ -35,8 +35,6 @@ func TestPublicConfig(t *testing.T) {
 			want := map[string]string{
 				"supabase_url":             p.SupabaseURL,
 				"supabase_publishable_key": p.SupabasePublishableKey,
-				"public_api_url":           p.PublicAPIURL,
-				"secrets_url":              p.SecretsURL,
 				"runtime_node_image":       image,
 			}
 			if !maps.Equal(got, want) {

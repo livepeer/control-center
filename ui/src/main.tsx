@@ -10,7 +10,8 @@ import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { MachineStatus, MachineReadinessBadge } from './machine-status'
 
-type Config = { supabase_url: string; supabase_publishable_key: string; public_api_url: string; secrets_url?: string }
+type AuthConfig = { supabase_url: string; supabase_publishable_key: string }
+type OperatorConfig = { public_api_url: string; secrets_url?: string }
 type Machine = { node_id: string; terminal?: boolean; lifecycle?: string; report_state?: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
 type Enrollment = { token: string; expires_at: string }
 
@@ -89,8 +90,9 @@ function Login({ client }: { client: SupabaseClient }) {
   </div>
 }
 
-function Dashboard({ client, session, config }: { client: SupabaseClient; session: Session; config: Config }) {
-  const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
+function Dashboard({ client, session }: { client: SupabaseClient; session: Session }) {
+  const [config, setConfig] = useState<OperatorConfig | null>(null)
+  const [enrollment, setEnrollment] = useState<(Enrollment & OperatorConfig) | null>(null)
   const [machines, setMachines] = useState<Machine[] | null>(null)
   const [tokenProblem, setTokenProblem] = useState('')
   const [machineProblem, setMachineProblem] = useState('')
@@ -102,10 +104,16 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
   const generate = useCallback(async () => {
     setBusy(true); setTokenProblem(''); setCopied(false)
     try {
- const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST' })
- if (config.secrets_url) {const setup = await enrollSecretsService<Enrollment>(session,config.secrets_url);control.token=enrollmentEnvelope(control.token,setup.token);control.expires_at=new Date(Math.min(Date.parse(control.expires_at),Date.parse(setup.expires_at))).toISOString()}
- setEnrollment(control)
- }
+      const settings = await api<OperatorConfig>(session, '/api/operator/config')
+      setConfig(settings)
+      const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST' })
+      if (settings.secrets_url) {
+        const setup = await enrollSecretsService<Enrollment>(session, settings.secrets_url)
+        control.token = enrollmentEnvelope(control.token, setup.token)
+        control.expires_at = new Date(Math.min(Date.parse(control.expires_at), Date.parse(setup.expires_at))).toISOString()
+      }
+      setEnrollment({ ...control, ...settings })
+    }
     catch (error) { setTokenProblem(error instanceof Error ? error.message : 'Could not generate a command.') }
     finally { setBusy(false) }
   }, [session.access_token])
@@ -129,7 +137,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
   }, [session.access_token])
   useEffect(() => { const interval = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(interval) }, [])
   const seconds = enrollment ? Math.max(0, Math.floor((Date.parse(enrollment.expires_at) - now) / 1000)) : 0
-  const command = enrollment ? bootstrapCommand(window.location.origin, config.public_api_url, enrollment.token, config.secrets_url) : ''
+  const command = enrollment ? bootstrapCommand(window.location.origin, enrollment.public_api_url, enrollment.token, enrollment.secrets_url) : ''
   async function copy() {
     try { await navigator.clipboard.writeText(command); setCopied(true); window.setTimeout(() => setCopied(false), 2500) }
     catch { setTokenProblem('Clipboard access is unavailable. Select and copy the command below.') }
@@ -161,7 +169,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
         <p className="table-note">Open View status to check work readiness, deployment, apps, tunnel provisioning and discovery. Runtime reporting alone does not mean a node can receive work.</p>
       </section>
       {machines?.filter(m => m.node_id === selectedMachine).map(m => <MachineStatus key={`${session.user.id}:${m.node_id}`} session={session} machine={m} />)}
-      {config.secrets_url && <OperatorSecrets session={session} origin={config.secrets_url} />}
+      {config?.secrets_url && <OperatorSecrets session={session} origin={config.secrets_url} />}
       <Administration key={session.user.id} session={session} />
       <footer className="dashboard-footer"><span>LIVEPEER / CONTROL CENTER</span><span>YOUR MACHINES. OPEN POSSIBILITIES.</span></footer>
     </main>
@@ -169,7 +177,6 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
 }
 
 function App() {
-  const [config, setConfig] = useState<Config | null>(null)
   const [client, setClient] = useState<SupabaseClient | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [ready, setReady] = useState(false)
@@ -181,13 +188,13 @@ function App() {
       try {
         const response = await fetch('/api/config')
         if (!response.ok) throw new Error('The console could not reach the API. Check that the backend is running.')
-        const settings = await response.json() as Config
+        const settings = await response.json() as AuthConfig
         if (!active) return
         const callbackURL = new URL(window.location.href)
         const callbackError = [callbackURL.searchParams, new URLSearchParams(callbackURL.hash.slice(1))]
           .map(params => params.get('error_description') || params.get('error')).find(Boolean)
         const auth = createClient(settings.supabase_url, settings.supabase_publishable_key, { auth: { flowType: 'pkce', detectSessionInUrl: true } })
-        setConfig(settings); setClient(auth)
+        setClient(auth)
         const { data: { subscription } } = auth.auth.onAuthStateChange((_event, next) => { if (active) setSession(next) })
         dispose = () => subscription.unsubscribe()
         const initialized = await auth.auth.initialize()
@@ -203,8 +210,8 @@ function App() {
     return () => { active = false; dispose?.() }
   }, [])
   if (!ready) return <div className="loading-screen"><Brand /><RefreshCw size={22} className="spin" /><p>Opening your workspace…</p></div>
-  if (!client || !config) return <div className="loading-screen"><Brand /><Notice>{problem || 'Configuration unavailable.'}</Notice><button className="button primary" onClick={() => window.location.reload()}>Try again<RefreshCw size={16} /></button></div>
-  return <>{problem && <div className="callback-error"><span>{problem}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setProblem('')}><X size={16} /></button></div>}{session ? <Dashboard key={session.user.id} client={client} session={session} config={config} /> : <Login client={client} />}</>
+  if (!client) return <div className="loading-screen"><Brand /><Notice>{problem || 'Configuration unavailable.'}</Notice><button className="button primary" onClick={() => window.location.reload()}>Try again<RefreshCw size={16} /></button></div>
+  return <>{problem && <div className="callback-error"><span>{problem}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setProblem('')}><X size={16} /></button></div>}{session ? <Dashboard key={session.user.id} client={client} session={session} /> : <Login client={client} />}</>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<App />)

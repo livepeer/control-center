@@ -18,7 +18,10 @@ async function onboard(page: Page, apiURL: string, token = 'header.payload.signa
   await page.route('http://auth.test/**', route => route.fulfill({ json: session.user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', route => {
     switch (new URL(route.request().url()).pathname) {
-      case '/api/config': return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture', public_api_url: apiURL } })
+      case '/api/config': return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
+      case '/api/operator/config':
+        expect(route.request().headers().authorization).toBe(`Bearer ${session.access_token}`)
+        return route.fulfill({ json: { public_api_url: apiURL } })
       case '/api/bootstrap-token': return route.fulfill({ json: { token, expires_at: new Date(expires * 1000).toISOString() } })
       case '/api/machines': return route.fulfill({ json: { machines: [] } })
       case '/api/me': return route.fulfill({ json: { user_id: session.user.id, is_admin: false } })
@@ -49,4 +52,27 @@ test('custom deployment includes its API override on the execution side and quot
   )
   await expect(page.getByLabel('Bootstrap command')).not.toContainText('LIVEPEER_RUNTIME_IMAGE')
   await expect(page.getByLabel('Bootstrap command')).not.toContainText('--token')
+})
+
+
+test('failed refresh preserves the previous enrollment command and its URLs', async ({ page }) => {
+  await onboard(page, 'https://custom.example/api/')
+  const command = page.getByLabel('Bootstrap command'), previous = await command.innerText()
+  await page.route('**/api/operator/config', route => route.fulfill({ json: { public_api_url: 'https://changed.example/api/' } }))
+  await page.route('**/api/bootstrap-token', route => route.fulfill({ status: 503, json: { error: 'Enrollment unavailable.' } }))
+  await page.getByRole('button', { name: 'Refresh token' }).click()
+  await expect(page.getByRole('alert')).toHaveText('Enrollment unavailable.')
+  await expect(command).toHaveText(previous)
+  await expect(page.getByRole('button', { name: 'Copy command' })).toBeEnabled()
+})
+
+test('signed-out console requests only public authentication settings', async ({ page }) => {
+  const requests: string[] = []
+  await page.route('**/api/**', route => {
+    requests.push(new URL(route.request().url()).pathname)
+    return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
+  })
+  await page.goto('/')
+  await expect(page.getByLabel('Email address')).toBeVisible()
+  expect(requests).toEqual(['/api/config'])
 })

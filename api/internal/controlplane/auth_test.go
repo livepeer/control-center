@@ -2,14 +2,17 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 func TestTrustedIdentityAndAuthenticationFailures(t *testing.T) {
+	requireStatus(t, request(t, New(nil, testParams(), nil), "GET", "/api/operator/config", "", nil), http.StatusUnauthorized)
 	for _, tc := range []struct {
 		name, body       string
 		upstream, status int
@@ -38,7 +41,7 @@ func TestTrustedIdentityAndAuthenticationFailures(t *testing.T) {
 			}))
 			defer auth.Close()
 			p := testParams()
-			p.SupabaseURL = auth.URL
+			p.SupabaseURL, p.SecretsURL = auth.URL, "https://secrets.example"
 			s := New(nil, p, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			user, err := s.user(t.Context(), "session")
 			if tc.status != 200 {
@@ -48,8 +51,15 @@ func TestTrustedIdentityAndAuthenticationFailures(t *testing.T) {
 			} else if err != nil || user.EmailConfirmed != tc.confirmed || user.Email != tc.email {
 				t.Fatalf("identity %+v: %v", user, err)
 			}
-			if tc.status != 200 {
-				for _, path := range []string{"/api/bootstrap-token", "/api/machines", "/api/me", "/api/admin/machines"} {
+			if tc.status == 200 {
+				w := request(t, s, "GET", "/api/operator/config", "session", nil)
+				requireStatus(t, w, http.StatusOK)
+				var settings map[string]string
+				if err := json.Unmarshal(w.Body.Bytes(), &settings); err != nil || !maps.Equal(settings, map[string]string{"public_api_url": p.PublicAPIURL, "secrets_url": p.SecretsURL}) {
+					t.Fatal("operator config", w.Body.String(), err)
+				}
+			} else {
+				for _, path := range []string{"/api/bootstrap-token", "/api/machines", "/api/me", "/api/operator/config", "/api/admin/machines"} {
 					method := "GET"
 					if path == "/api/bootstrap-token" {
 						method = "POST"
