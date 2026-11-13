@@ -24,17 +24,20 @@ type Pod struct {
 		NodeName string `json:"nodeName"`
 	} `json:"spec"`
 	Status struct {
-		PodIP             string      `json:"podIP"`
-		Conditions        []Condition `json:"conditions"`
-		ContainerStatuses []struct {
-			Name        string `json:"name"`
-			ImageID     string `json:"imageID"`
-			ContainerID string `json:"containerID"`
-			State       struct {
-				Running *struct{} `json:"running"`
-			} `json:"state"`
-		} `json:"containerStatuses"`
+		PodIP                 string            `json:"podIP"`
+		Conditions            []Condition       `json:"conditions"`
+		ContainerStatuses     []ContainerStatus `json:"containerStatuses"`
+		InitContainerStatuses []ContainerStatus `json:"initContainerStatuses"`
 	} `json:"status"`
+}
+
+type ContainerStatus struct {
+	Name        string `json:"name"`
+	ImageID     string `json:"imageID"`
+	ContainerID string `json:"containerID"`
+	State       struct {
+		Running *struct{} `json:"running"`
+	} `json:"state"`
 }
 
 type PodList struct {

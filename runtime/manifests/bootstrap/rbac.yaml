@@ -101,3 +101,20 @@ subjects:
 - kind: ServiceAccount
   name: livepeer-http-source
   namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: livepeer-runtime-pods}
+rules: [{apiGroups: [''], resources: [pods], verbs: [list]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: livepeer-runtime-pods, namespace: kube-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: livepeer-runtime-pods}
+subjects: [{kind: ServiceAccount, name: livepeer-http-source, namespace: flux-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: livepeer-runtime-pods, namespace: system-upgrade}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: livepeer-runtime-pods}
+subjects: [{kind: ServiceAccount, name: livepeer-http-source, namespace: flux-system}]

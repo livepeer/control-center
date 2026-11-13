@@ -524,10 +524,18 @@ func TestSoftwareObservations(t *testing.T) {
 	node := `{"metadata":{"uid":"pod","labels":{"app":"orchestrator"}},"spec":{"nodeName":"host","containers":[{"name":"orchestrator","image":"desired:unobserved"}]},"status":{"podIP":"10.42.0.2","containerStatuses":[{"name":"orchestrator","containerID":"containerd://old","imageID":"containerd://sha256:actual","state":{"running":{}}}]}}`
 	reads, restart := 0, false
 	f.kube.reply = func(path string) any {
-		if !strings.Contains(path, "/livepeer/pods?") {
-			return json.RawMessage(`{"items":[]}`)
-		}
 		pod := node
+		if !strings.Contains(path, "/livepeer/pods?") {
+			labels := `"app":"source-controller"`
+			if strings.Contains(path, "/kube-system/") {
+				labels = `"k8s-app":"kube-dns"`
+			}
+			if strings.Contains(path, "/system-upgrade/") {
+				labels = `"upgrade.cattle.io/plan":"livepeer-k3s"`
+				pod = strings.Replace(pod, `"containerStatuses":`, `"initContainerStatuses":[{"name":"drain","containerID":"containerd://drain","imageID":"containerd://sha256:drain","state":{"running":{}}}],"containerStatuses":`, 1)
+			}
+			pod = strings.Replace(pod, `"app":"orchestrator"`, labels, 1)
+		}
 		if strings.Contains(path, "labelSelector=") {
 			reads++
 			if restart && reads%2 == 0 {
@@ -557,10 +565,10 @@ func TestSoftwareObservations(t *testing.T) {
 		return nil
 	}
 	o := f.source.software(t.Context(), "host")
-	if n, i := find(o, "livepeer-node"), find(o, "gvisor"); n == nil || n.Commit != "abcdef123" || i == nil || i.Scope != "installed" || !i.RecordedAt.Equal(installed.RecordedAt) || len(o) != 5 {
+	if n, i := find(o, "livepeer-node"), find(o, "gvisor"); n == nil || n.Commit != "abcdef123" || i == nil || i.Scope != "installed" || !i.RecordedAt.Equal(installed.RecordedAt) || len(o) != 9 {
 		t.Fatalf("lost observations: %+v", o)
 	}
-	if c := find(o, "livepeer/orchestrator/orchestrator"); c == nil || c.ImageID != "containerd://sha256:actual" {
+	if c := find(o, "livepeer/orchestrator/orchestrator"); c == nil || c.ImageID != "containerd://sha256:actual" || find(o, "kube-system/coredns/orchestrator") == nil || find(o, "system-upgrade/livepeer-k3s-upgrade/drain") == nil {
 		t.Fatal("invented image identity")
 	}
 	restart = true

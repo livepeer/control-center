@@ -28,9 +28,8 @@ type installedRecord struct {
 func (s *Source) software(ctx context.Context, node string) []contract.SoftwareIdentity {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	build := contract.SoftwareIdentity{Component: "runtime", Scope: "running", Version: Version, Commit: Commit}
-	o := []contract.SoftwareIdentity{build}
-	for _, ns := range []string{"livepeer", "flux-system"} {
+	o := []contract.SoftwareIdentity{{Component: "runtime", Scope: "running", Version: Version, Commit: Commit}}
+	for _, ns := range []string{"livepeer", "flux-system", "kube-system", "system-upgrade"} {
 		var pods transport.PodList
 		if node == "" || s.Kube.Request(ctx, "GET", "/api/v1/namespaces/"+ns+"/pods?fieldSelector="+url.QueryEscape("spec.nodeName="+node), nil, &pods) != nil {
 			continue
@@ -40,7 +39,7 @@ func (s *Source) software(ctx context.Context, node string) []contract.SoftwareI
 			if workload == "" || p.Spec.NodeName != node {
 				continue
 			}
-			for _, c := range p.Status.ContainerStatuses {
+			for _, c := range append(p.Status.ContainerStatuses, p.Status.InitContainerStatuses...) {
 				if c.State.Running == nil {
 					continue
 				}
@@ -67,8 +66,17 @@ func (s *Source) software(ctx context.Context, node string) []contract.SoftwareI
 
 func systemWorkload(ns string, labels map[string]string) string {
 	app := labels["app"]
+	if ns == "kube-system" && labels["k8s-app"] == "kube-dns" {
+		app = "coredns"
+	}
+	if ns == "system-upgrade" {
+		app = labels["app.kubernetes.io/name"]
+		if labels["upgrade.cattle.io/plan"] == "livepeer-k3s" {
+			app = "livepeer-k3s-upgrade"
+		}
+	}
 	switch ns + "/" + app {
-	case "livepeer/orchestrator", "flux-system/livepeer-http-source", "flux-system/livepeer-app-reconciler", "flux-system/livepeer-tunnel", "flux-system/source-controller", "flux-system/kustomize-controller":
+	case "livepeer/orchestrator", "flux-system/livepeer-http-source", "flux-system/livepeer-app-reconciler", "flux-system/livepeer-tunnel", "flux-system/source-controller", "flux-system/kustomize-controller", "kube-system/coredns", "kube-system/local-path-provisioner", "system-upgrade/system-upgrade-controller", "system-upgrade/livepeer-k3s-upgrade":
 		return app
 	}
 	return ""
@@ -93,28 +101,21 @@ func (s *Source) nodeBuild(ctx context.Context, node string) *contract.SoftwareI
 	}
 	parser := expfmt.NewTextParser(model.UTF8Validation)
 	metrics, err := parser.TextToMetricFamilies(bytes.NewReader(b))
-	if err != nil || metrics["livepeer_build_info"] == nil {
+	if err != nil || metrics["livepeer_build_info"] == nil || len(metrics["livepeer_build_info"].Metric) != 1 {
 		return nil
 	}
-	var build *contract.SoftwareIdentity
-	for _, metric := range metrics["livepeer_build_info"].Metric {
-		labels := map[string]string{}
-		for _, l := range metric.Label {
-			labels[l.GetName()] = l.GetValue()
-		}
-		if labels["component"] != "orchestrator" || metric.GetGauge().GetValue() != 1 {
-			continue
-		}
-		if build != nil || len(labels["version"]) > 128 || len(labels["revision"]) > 128 {
-			return nil
-		}
-		commit := labels["revision"]
-		build = &contract.SoftwareIdentity{Component: "livepeer-node", Scope: "running", Version: labels["version"], Commit: commit, PodUID: pod.UID, ContainerID: pod.ContainerID}
+	metric := metrics["livepeer_build_info"].Metric[0]
+	labels := map[string]string{}
+	for _, l := range metric.Label {
+		labels[l.GetName()] = l.GetValue()
+	}
+	if labels["component"] != "orchestrator" || metric.GetGauge().GetValue() != 1 || len(labels["version"]) > 128 || len(labels["revision"]) > 128 {
+		return nil
 	}
 	// Container ID fences a restart within a Pod as well as a Pod replacement.
 	after, err := transport.ObserveNode(ctx, s.Kube)
 	if err != nil || after.UID != pod.UID || after.ContainerID != pod.ContainerID {
 		return nil
 	}
-	return build
+	return &contract.SoftwareIdentity{Component: "livepeer-node", Scope: "running", Version: labels["version"], Commit: labels["revision"], PodUID: pod.UID, ContainerID: pod.ContainerID}
 }
