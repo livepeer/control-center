@@ -95,7 +95,7 @@ func (s *Server) Handler() http.Handler {
 		respond(w, 200, map[string]string{"status": "ready"})
 	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "runtime_node_image": s.params.RuntimeNodeImage})
+		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey})
 	})
 	mux.HandleFunc("GET /api/operator/config", s.operatorConfig)
 	mux.HandleFunc("GET /api/operator/apps", s.operatorApps)
@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/admin/administrators", s.adminRead(s.listAdministrators))
+	mux.HandleFunc("GET /api/admin/deployment", s.adminRead(s.deployment))
 	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
 	mux.HandleFunc("DELETE /api/admin/administrators/{grant_id}", s.adminMutation("administrator.revoke", s.prepareRevoke))
 	mux.HandleFunc("GET /api/admin/machines", s.adminRead(s.fleetMachines))

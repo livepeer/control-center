@@ -3,8 +3,11 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,12 +38,51 @@ func TestPublicConfig(t *testing.T) {
 			want := map[string]string{
 				"supabase_url":             p.SupabaseURL,
 				"supabase_publishable_key": p.SupabasePublishableKey,
-				"runtime_node_image":       image,
 			}
 			if !maps.Equal(got, want) {
 				t.Fatalf("config = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestDeploymentResponse(t *testing.T) {
+	for _, image := range []string{"", "registry.invalid/node@sha256:" + strings.Repeat("d", 64)} {
+		p := testParams()
+		p.RuntimeNodeImage = image
+		w := httptest.NewRecorder()
+		New(nil, p, nil).deployment(w, nil, UserIdentity{})
+		var got map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := (map[string]string{"revision": buildRevision, "runtime_node_image": image}); !maps.Equal(got, want) {
+			t.Fatalf("deployment = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestDeploymentRequiresAuthentication(t *testing.T) {
+	s := New(nil, testParams(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	requireStatus(t, request(t, s, http.MethodGet, "/api/admin/deployment", "", nil), http.StatusUnauthorized)
+}
+
+func TestDeploymentAdministratorAccess(t *testing.T) {
+	s := newTestServer(t)
+	s.params.DefaultAdminEmail = "a@example.invalid"
+	if err := s.BootstrapAdmin(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, request(t, s, http.MethodGet, "/readyz", "", nil), http.StatusOK)
+	requireStatus(t, request(t, s, http.MethodGet, "/api/admin/deployment", "session-b", nil), http.StatusForbidden)
+	w := request(t, s, http.MethodGet, "/api/admin/deployment", "session-a", nil)
+	requireStatus(t, w, http.StatusOK)
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := (map[string]string{"revision": buildRevision, "runtime_node_image": s.params.RuntimeNodeImage}); !maps.Equal(got, want) {
+		t.Fatalf("deployment = %v, want %v", got, want)
 	}
 }
 
