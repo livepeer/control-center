@@ -37,7 +37,8 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
     if (route.request().method() !== 'GET') state.writes.push(path)
-    if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture', public_api_url: 'https://api.example' } })
+    if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
+    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example' } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/me') return route.fulfill({ json: { user_id: user, is_admin: state.admin } })
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })

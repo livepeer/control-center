@@ -95,8 +95,9 @@ func (s *Server) Handler() http.Handler {
 		respond(w, 200, map[string]string{"status": "ready"})
 	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL, "runtime_node_image": s.params.RuntimeNodeImage})
+		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "runtime_node_image": s.params.RuntimeNodeImage})
 	})
+	mux.HandleFunc("GET /api/operator/config", s.operatorConfig)
 	mux.HandleFunc("GET /api/operator/apps", s.operatorApps)
 	mux.HandleFunc("PUT /api/operator/apps/{name}/policy", s.operatorPolicy)
 	mux.HandleFunc("GET /internal/secrets/nodes/{node_id}", s.secretMachine)
@@ -147,6 +148,14 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("X-Livepeer-Tunnels-Enabled", strconv.FormatBool(s.params.CloudflareEnabled))
 		mux.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *Server) operatorConfig(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.user(r.Context(), bearer(r)); err != nil {
+		s.respondError(w, err)
+		return
+	}
+	respond(w, 200, map[string]string{"public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL})
 }
 
 func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {

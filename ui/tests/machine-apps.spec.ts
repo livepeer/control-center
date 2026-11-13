@@ -20,7 +20,8 @@ async function setup(page: Page) {
   await page.route('http://auth.test/**', route => route.fulfill({ json: saved.user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', route => {
     const path = new URL(route.request().url()).pathname, method = route.request().method()
-    if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture', public_api_url: 'http://localhost:5173' } })
+    if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
+    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:5173' } })
     if (path === '/api/me') return route.fulfill({ json: { user_id: owner, is_admin: state.admin } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
