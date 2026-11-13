@@ -1,8 +1,8 @@
 # Operator secrets
 
 The Secrets screen stores write-only values. The client encrypts each value with AES-256-GCM before upload to
-an independent secrets service. Vault Transit wraps the data key; authorized runtimes receive it over mTLS and
-decrypt locally. Control Center receives metadata, not values or private keys.
+an independent secrets service. Vault Transit wraps the data key; authorized runtimes use signed requests over
+HTTPS to receive it and decrypt locally. Control Center receives metadata, not values or private keys.
 
 Apps are allowed by default. An owner's denial applies to a deployment name, all revisions and aliases,
 including apps without secrets. Denial and secret deletion drain workloads; offline machines and active
@@ -11,17 +11,27 @@ issuer.
 
 ## Deploy the service
 
-Build with `docker build -f deploy/Dockerfile.secrets .` and deploy `deploy/compose.secrets.yaml` on
-independent infrastructure with its own TLS PostgreSQL database, Vault, administration and deployment
-credentials. It does not join Control Center's network. Supply the Compose environment variables and
-owner-only files in `deploy/secrets-service-private/`, readable by UID 65532; never commit that directory. The
-service requires HTTPS upstreams and terminates mTLS itself. Proxies must preserve TLS, not forward
-client-certificate headers.
+Deploy `deploy/compose.secrets.yaml` as a standalone Compose project on independent infrastructure with its
+own TLS PostgreSQL database, Vault, administration and deployment credentials. Run
+`docker compose -f deploy/compose.secrets.yaml up --build -d`; it does not join Control Center's network or
+publish an origin port. Its own `cloudflared` connector provides public HTTPS and private origin connectivity.
+Create and administer that tunnel within the secrets-service boundary, using separate tunnel credentials
+from Control Center. Configure its public hostname to route to `http://secrets:8080`.
 
-The private files contain the database URL, a random signing key of at least 32 bytes, an Ed25519 machine CA
-certificate and private key, the endpoint TLS certificate and private key, metadata credential, and Vault
-token. The CA must have certificate-signing usage. Keep the CA and JWT keys independent and back up the CA
-separately from the database.
+Supply the Compose environment variables and owner-only files in `deploy/secrets-service-private/`, readable
+by UID 65532; never commit that directory. The files contain the database URL, a random enrollment-grant
+signing key of at least 32 bytes, metadata credential, Vault token, and `tunnel-token`. Set `SECRETS_PUBLIC_URL`
+to the public HTTPS origin, matching the clients' configured URL exactly. Preserve request methods, escaped
+paths, query strings and body bytes through the proxy. Certificate forwarding is neither used nor trusted.
+The service requires HTTPS upstreams; its HTTP listener is private to the connector. Outside Compose it
+defaults to `127.0.0.1:8080` and can sit behind another HTTPS proxy.
+
+Cloudflare terminates HTTPS and is trusted with API traffic, including operator bearer credentials and the
+plaintext data keys sent for wrapping and runtime delivery. Client-side value encryption does not hide values
+from an intermediary that receives those keys. Machine request signatures prevent request forgery and
+modification, but do not authenticate responses end to end. Keeping keys confidential from Cloudflare would
+require authenticated application-layer encryption for both upload and delivery, with independently trusted
+endpoint keys; this API does not provide it.
 
 Enable Vault Transit at `transit/`. Grant `create,update` on `transit/encrypt/operator-<owner UUID>` and
 `update` on the corresponding `transit/decrypt/` path. Keys are created lazily as nonexportable AES-256-GCM
@@ -56,15 +66,25 @@ installation also requires its saved management credential. An interrupted setup
 host file until completion or expiry; a timer checks expiry every 30 seconds, including after restart.
 
 Managed mode requires a committed service identity, installed host credentials, current runtime capability,
-K3s encryption and admission readiness. The runtime activates its pending binding over mTLS after these checks;
+K3s encryption and admission readiness. The runtime activates its pending binding with a signed request after these checks;
 interrupted activation resumes automatically. Managed mode remains sticky through same-enrollment outages and
 credential refresh. Explicit re-enrollment starts a new identity without inheriting the old marker.
 
-Certificates last 24 hours and renew after 12. Expiry recovery uses a single-use, one-minute challenge signed
-by the bound key and requires an active enrollment. For a lost or compromised key, use owner-authorized
+Each runtime request carries an Ed25519-signed JWT using its existing private key. The issuer is
+`lpcc-secrets-runtime-v1`; the audience is the public HTTPS service origin. Claims bind the node ID, identity
+generation, issue time, one-minute expiry, random nonce (`jti`), and `request` digest. That digest is SHA-256 of
+compact JSON `[method,request_target,hex(SHA256(body))]`, encoded as lowercase hex. The service verifies against
+its own enrolled public key and atomically records used nonces in PostgreSQL before executing a request.
+Replays fail across replicas and restarts, even after failed operations. Retries sign a new request. Hosts
+must synchronize their clocks: issue times may be at most 30 seconds ahead; expiry has no grace period.
+Expired nonce records are collected every minute with an extra minute of retention for small clock differences
+between service replicas.
+
+No machine certificates are issued or renewed. For a lost or compromised key, use owner-authorized
 `POST /v1/machines/{node}/reset`, then run a fresh enrollment command. Reset is resumable and permanently
-fences old keys and certificates, including after restart. Use `/revoke` to revoke without reset. Routine
-management-token refresh preserves the secrets identity.
+fences old keys and identity generations, including after restart. Use `/revoke` to revoke without reset.
+Routine management-token refresh preserves the secrets identity. Control Center cannot replace an enrolled
+key, but the service still consults its live machine state and assignments before authorizing delivery.
 
 The APIs use bearer credentials and JSON without cookies, redirects or an `Origin` requirement; CORS restricts
 browsers, not authorization. Headless clients can use the same protocol. Enrollment does not encrypt
@@ -102,6 +122,11 @@ credentials never restore manual-Secret fallback for an active managed enrollmen
 
 ## Migration and recovery
 
+Upgrade the service, installer and runtime together when moving from machine certificates to signed requests.
+Run a fresh enrollment command on existing installations to install `identity.json` alongside the saved key;
+same-enrollment retries preserve that key. Earlier runtime clients and certificate renewal/recovery endpoints
+are no longer supported.
+
 New installations enable K3s secrets encryption. For existing clusters, follow the [K3s existing-cluster
 procedure](https://docs.k3s.io/cli/secrets-encrypt#enable-secrets-encryption-on-an-existing-cluster): enable,
 configure and restart, rotate keys, restart, then verify `Enabled` and `reencrypt_finished`. Use this
@@ -109,7 +134,7 @@ installation's K3s data directory and systemd unit, then rerun enrollment. Uploa
 treating them as managed; preserve legacy finalizer updates while old Pods drain.
 
 Back up identity files, encrypted Kubernetes state, the runtime journal, service database, signing keys,
-machine CA and Vault state. Keep key backups separate from database backups. Set finite backup retention,
+and Vault state. Keep key backups separate from database backups. Set finite backup retention,
 preserve deletion and revocation records on restore, and test revoked grants and identities and deleted secret
 identities before reopening traffic. Rewrap retained and restorable data before retiring Vault wrapping-key
 versions. Deletion does not immediately erase backups.

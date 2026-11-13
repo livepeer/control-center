@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -24,7 +22,6 @@ import (
 type Client struct {
 	Directory string
 	mu        sync.Mutex
-	nextRenew time.Time
 	activated bool
 }
 
@@ -38,21 +35,25 @@ func (c *Client) IdentityReady() bool {
 	if !c.Enabled() {
 		return false
 	}
-	pair, e := tls.LoadX509KeyPair(filepath.Join(c.Directory, "certificate.pem"), filepath.Join(c.Directory, "key.pem"))
-	if e != nil {
-		return false
-	}
-	cert, e := x509.ParseCertificate(pair.Certificate[0])
-	now := time.Now()
-	return e == nil && !now.Before(cert.NotBefore) && now.Before(cert.NotAfter)
+	_, _, e := c.identity()
+	return e == nil
 }
-func (c *Client) call(ctx context.Context, path string, in, out any, identity bool) error {
+func (c *Client) identity() (protocol.Identity, ed25519.PrivateKey, error) {
+	var id protocol.Identity
+	raw, e := os.ReadFile(filepath.Join(c.Directory, "identity.json"))
+	if e != nil || json.Unmarshal(raw, &id) != nil || id.NodeID == "" || id.Owner == "" || id.Generation < 1 {
+		return id, nil, protocol.ErrUnavailable
+	}
+	key, e := protocol.ParsePrivate(mustRead(filepath.Join(c.Directory, "key.pem")))
+	return id, key, e
+}
+func (c *Client) call(ctx context.Context, path string, in, out any) error {
 	raw, e := os.ReadFile(filepath.Join(c.Directory, "url"))
 	if e != nil {
 		return protocol.ErrUnavailable
 	}
 	u, e := url.Parse(strings.TrimSpace(string(raw)))
-	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if e != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return protocol.ErrUnavailable
 	}
 	body, _ := json.Marshal(in)
@@ -62,14 +63,9 @@ func (c *Client) call(ctx context.Context, path string, in, out any, identity bo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	if identity {
-		cert, e := tls.LoadX509KeyPair(filepath.Join(c.Directory, "certificate.pem"), filepath.Join(c.Directory, "key.pem"))
-		if e != nil {
-			return protocol.ErrUnavailable
-		}
-		transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}}
-		defer transport.CloseIdleConnections()
-		client.Transport = transport
+	id, key, e := c.identity()
+	if e != nil || protocol.SignRequest(req, body, id, key, time.Now()) != nil {
+		return protocol.ErrUnavailable
 	}
 	res, e := client.Do(req)
 	if e != nil {
@@ -96,56 +92,6 @@ func (c *Client) call(ctx context.Context, path string, in, out any, identity bo
 	}
 	return nil
 }
-func (c *Client) Renew(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if time.Now().Before(c.nextRenew) {
-		return nil
-	}
-	raw, e := os.ReadFile(filepath.Join(c.Directory, "certificate.pem"))
-	if e != nil {
-		return protocol.ErrUnavailable
-	}
-	pair, e := tls.X509KeyPair(raw, mustRead(filepath.Join(c.Directory, "key.pem")))
-	if e != nil {
-		return protocol.ErrUnavailable
-	}
-	cert, e := x509.ParseCertificate(pair.Certificate[0])
-	if e != nil {
-		return protocol.ErrUnavailable
-	}
-	var id protocol.Identity
-	if time.Now().Before(cert.NotAfter) {
-		if time.Until(cert.NotAfter) > 12*time.Hour {
-			c.nextRenew = cert.NotAfter.Add(-12 * time.Hour)
-			return nil
-		}
-		e = c.call(ctx, "/v1/machines/renew", struct{}{}, &id, true)
-	} else {
-		key, e2 := protocol.ParsePrivate(mustRead(filepath.Join(c.Directory, "key.pem")))
-		if e2 != nil {
-			return e2
-		}
-		var challenge struct {
-			ID    string `json:"challenge_id"`
-			Nonce []byte `json:"nonce"`
-		}
-		node := cert.Subject.CommonName
-		e = c.call(ctx, "/v1/machines/recover", map[string]string{"node_id": node}, &challenge, false)
-		if e == nil {
-			sig := ed25519.Sign(key, append([]byte("lpcc-recovery-v1\n"+challenge.ID+"\n"), challenge.Nonce...))
-			e = c.call(ctx, "/v1/machines/recover", map[string]any{"node_id": node, "challenge_id": challenge.ID, "signature": sig}, &id, false)
-		}
-	}
-	if e != nil {
-		return e
-	}
-	if e = artifact.AtomicWrite(filepath.Join(c.Directory, "certificate.pem"), id.Certificate, 0600); e != nil {
-		return e
-	}
-	c.nextRenew = time.Now().Add(12 * time.Hour)
-	return nil
-}
 func (c *Client) Activate(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -155,7 +101,7 @@ func (c *Client) Activate(ctx context.Context) error {
 	var result struct {
 		Activated bool `json:"activated"`
 	}
-	if e := c.call(ctx, "/v1/machines/activate", map[string]bool{"admission_ready": true}, &result, true); e != nil {
+	if e := c.call(ctx, "/v1/machines/activate", map[string]bool{"admission_ready": true}, &result); e != nil {
 		return e
 	}
 	if !result.Activated {
@@ -167,18 +113,12 @@ func (c *Client) Activate(ctx context.Context) error {
 func mustRead(path string) []byte { b, _ := os.ReadFile(path); return b }
 func (c *Client) Versions(ctx context.Context, in protocol.ResolveRequest) (protocol.VersionSet, error) {
 	var v protocol.VersionSet
-	if e := c.Renew(ctx); e != nil {
-		return v, e
-	}
-	e := c.call(ctx, "/v1/runtime/versions", in, &v, true)
+	e := c.call(ctx, "/v1/runtime/versions", in, &v)
 	return v, e
 }
 func (c *Client) Resolve(ctx context.Context, in protocol.ResolveRequest) (protocol.VersionSet, error) {
 	var v protocol.VersionSet
-	if e := c.Renew(ctx); e != nil {
-		return v, e
-	}
-	e := c.call(ctx, "/v1/runtime/resolve", in, &v, true)
+	e := c.call(ctx, "/v1/runtime/resolve", in, &v)
 	return v, e
 }
 
@@ -194,9 +134,6 @@ func (c *Client) VersionsAll(ctx context.Context, requests []protocol.ResolveReq
 		Sets   map[string]protocol.VersionSet `json:"sets"`
 		Errors map[string]string              `json:"errors"`
 	}
-	if e := c.Renew(ctx); e != nil {
-		return nil, nil, e
-	}
-	e := c.call(ctx, "/v1/runtime/batch", map[string]any{"assignments": requests}, &out, true)
+	e := c.call(ctx, "/v1/runtime/batch", map[string]any{"assignments": requests}, &out)
 	return out.Sets, out.Errors, e
 }

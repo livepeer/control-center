@@ -16,7 +16,6 @@ import (
 type SecretResolver interface {
 	Enabled() bool
 	MarkManaged() error
-	Renew(context.Context) error
 	Activate(context.Context) error
 	IdentityReady() bool
 	VersionsAll(context.Context, []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error)
@@ -39,9 +38,9 @@ func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
 	if d == nil || !d.Client.Enabled() || now.Before(d.Next) {
 		return
 	}
-	renewalFailed := false
+	identityFailed := false
 	defer func() {
-		failed := renewalFailed
+		failed := identityFailed
 		for _, reason := range d.Faults {
 			if reason == "secrets_unavailable" {
 				failed = true
@@ -62,16 +61,13 @@ func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
 	}()
 	d.Targets = map[string]protocol.VersionSet{}
 	d.Faults = map[string]string{}
-	// Renewal and activation also run on idle machines.
-	e := d.Client.Renew(ctx)
-	if e == nil {
-		e = d.AdmissionReady(ctx)
-	}
+	// Activation also runs on idle machines.
+	e := d.AdmissionReady(ctx)
 	if e == nil {
 		e = d.Client.Activate(ctx)
 	}
 	if e != nil {
-		renewalFailed = !errors.Is(e, protocol.ErrDenied)
+		identityFailed = !errors.Is(e, protocol.ErrDenied)
 		d.identityFault(s, secretFault(e))
 		return
 	}

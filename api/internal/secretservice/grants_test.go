@@ -3,8 +3,8 @@ package secretservice
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
-	"crypto/x509/pkix"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -105,9 +104,10 @@ func TestDatabaseOutageMustBeUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	s := New(db, Config{})
-	cert := &x509.Certificate{Subject: pkix.Name{CommonName: "test-node"}, URIs: []*url.URL{{Scheme: "lpcc", Host: "test-node", Path: "/1"}}}
-	w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, cert)
+	s := New(db, Config{PublicURL: "https://secrets.example"})
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	id := &testIdentity{Identity: protocol.Identity{NodeID: "test-node", Generation: 1}, key: key}
+	w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, id)
 	if w.Code != 503 {
 		t.Fatalf("database failure returned %d %s; runtime interprets this as a permanent denial", w.Code, w.Body.String())
 	}

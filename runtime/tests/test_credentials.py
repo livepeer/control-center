@@ -179,7 +179,7 @@ transition_credentials
         state.mkdir(parents=True)
         (state / 'journal').write_text('previous owner')
         secrets=state.parent/'secrets';secrets.mkdir()
-        for name in ('managed','key.pem','certificate.pem'): (secrets/name).write_text('old enrollment')
+        for name in ('managed','key.pem','identity.json'): (secrets/name).write_text('old enrollment')
         (self.root/'k3s/server').mkdir(parents=True)
         (self.root/'config/k3s.yaml').write_text('data-dir: fixture\n')
         result = self.transition('artifact', mode='reenroll')

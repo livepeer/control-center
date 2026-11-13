@@ -36,7 +36,7 @@ curl() {
   count=$((count+1)); printf '%s' "$count" > "$INSTALL_DIR/count"
   if (( count==1 )); then printf '{"code":"identity_reset_required"}\n409'; return; fi
   if (( count==2 )); then return 1; fi
-  printf '{"node_id":"%s","certificate":"Y2VydGlmaWNhdGU="}\n200' "$NODE_ID"
+  printf '{"node_id":"%s","owner_id":"11111111-1111-4111-8111-111111111111","generation":1}\n200' "$NODE_ID"
 }
 before=$(sha256sum "$target/key.pem")
 enroll_secrets
@@ -45,6 +45,7 @@ replacement=$(sha256sum "$target/key.pem")
 enroll_secrets
 [[ "$replacement" == "$(sha256sum "$target/key.pem")" && ! -f "$target/setup" ]]
 cmp "$target/key.pem" "$INSTALL_DIR/volumes/app-reconciler/secrets/key.pem"
+[[ $(jq -r '.node_id' "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json") == "$NODE_ID" ]]
 [[ $(stat -c %a "$target/key.pem") == 600 ]]
 '''
             result = subprocess.run(['bash', '-c', script, 'fixture', str(SCRIPT), root],

@@ -3,19 +3,16 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane"
 	"github.com/livepeer/control-center/api/internal/secretservice"
-	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -44,28 +41,11 @@ func run(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	ca, e := file("SECRETS_CA_FILE")
-	if e != nil {
-		return e
+	c := secretservice.Config{SigningKey: string(signing), SigningKeyID: os.Getenv("SECRETS_SIGNING_KEY_ID"), SupabaseURL: os.Getenv("SUPABASE_URL"), SupabaseKey: os.Getenv("SUPABASE_PUBLISHABLE_KEY"), ControlURL: os.Getenv("CONTROL_API_URL"), ControlToken: string(control), VaultURL: os.Getenv("VAULT_ADDR"), VaultToken: string(vault), AllowedOrigin: os.Getenv("SECRETS_ALLOWED_ORIGIN"), PublicURL: strings.TrimSuffix(os.Getenv("SECRETS_PUBLIC_URL"), "/")}
+	u, e := url.Parse(c.PublicURL)
+	if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("configure SECRETS_PUBLIC_URL as the public HTTPS origin")
 	}
-	b, _ := pem.Decode(ca)
-	if b == nil {
-		return errors.New("invalid CA")
-	}
-	cert, e := x509.ParseCertificate(b.Bytes)
-	if e != nil || !cert.IsCA || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
-		return errors.New("invalid CA")
-	}
-	raw, e := file("SECRETS_CA_KEY_FILE")
-	if e != nil {
-		return e
-	}
-	key, e := protocol.ParsePrivate(raw)
-	pub, ok := cert.PublicKey.(ed25519.PublicKey)
-	if e != nil || !ok || !pub.Equal(key.Public()) {
-		return errors.New("invalid CA key")
-	}
-	c := secretservice.Config{SigningKey: string(signing), SigningKeyID: os.Getenv("SECRETS_SIGNING_KEY_ID"), SupabaseURL: os.Getenv("SUPABASE_URL"), SupabaseKey: os.Getenv("SUPABASE_PUBLISHABLE_KEY"), ControlURL: os.Getenv("CONTROL_API_URL"), ControlToken: string(control), VaultURL: os.Getenv("VAULT_ADDR"), VaultToken: string(vault), AllowedOrigin: os.Getenv("SECRETS_ALLOWED_ORIGIN"), CA: cert, CAKey: key}
 	if c.SigningKeyID == "" {
 		c.SigningKeyID = "1"
 	}
@@ -89,19 +69,13 @@ func run(ctx context.Context) error {
 	if e = s.Migrate(ctx); e != nil {
 		return errors.New("secrets database initialization failed")
 	}
-	pair, e := tls.LoadX509KeyPair(os.Getenv("SECRETS_TLS_CERT_FILE"), os.Getenv("SECRETS_TLS_KEY_FILE"))
-	if e != nil {
-		return errors.New("invalid server TLS identity")
-	}
-	tc := s.TLSConfig()
-	tc.Certificates = []tls.Certificate{pair}
 	addr := os.Getenv("SECRETS_LISTEN")
 	if addr == "" {
-		addr = ":8443"
+		addr = "127.0.0.1:8080"
 	}
-	srv := &http.Server{Addr: addr, Handler: s.Handler(), TLSConfig: tc, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16384}
+	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 16384}
 	done := make(chan error, 1)
-	go func() { done <- srv.ListenAndServeTLS("", "") }()
+	go func() { done <- srv.ListenAndServe() }()
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {

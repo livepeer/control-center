@@ -208,11 +208,9 @@ type MachineBinding struct {
 	ResetKey       string `json:"reset_key,omitempty"`
 }
 type Identity struct {
-	NodeID      string `json:"node_id"`
-	Owner       string `json:"owner_id"`
-	Generation  int64  `json:"generation"`
-	Certificate []byte `json:"certificate"`
-	CA          []byte `json:"ca"`
+	NodeID     string `json:"node_id"`
+	Owner      string `json:"owner_id"`
+	Generation int64  `json:"generation"`
 }
 type ResolveRequest struct {
 	RevisionID string `json:"revision_id"`

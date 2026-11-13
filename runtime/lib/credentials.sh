@@ -208,7 +208,7 @@ transition_credentials() {
         mv -- "$INSTALL_DIR/volumes/app-reconciler/state" "$INSTALL_DIR/volumes/app-reconciler/state.$previous_node"
         sync -- "$INSTALL_DIR/volumes/app-reconciler"
       fi
-      rm -f -- "$INSTALL_DIR/volumes/app-reconciler/secrets/certificate.pem" "$INSTALL_DIR/volumes/app-reconciler/secrets/key.pem" "$INSTALL_DIR/volumes/app-reconciler/secrets/managed"
+      rm -f -- "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json" "$INSTALL_DIR/volumes/app-reconciler/secrets/key.pem" "$INSTALL_DIR/volumes/app-reconciler/secrets/managed"
       printf '1\n' | atomic_write "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$IDENTITY_NODE_ID"
     fi
     # Fence the retired node's cached artifact and watermark while Flux is suspended.
@@ -314,7 +314,7 @@ secrets_key_proof() {
 }
 
 enroll_secrets() {
-  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public cert_token attempt
+  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt
   [[ -f "$target/setup" ]] || return 0
   local payload exp padded
   payload=$(cut -d. -f2 "$target/setup")
@@ -331,10 +331,10 @@ enroll_secrets() {
   fi
   endpoint=$(cat "$target/url")
   [[ "$endpoint" =~ ^https://[a-zA-Z0-9_.:-]+$ ]] || die 'invalid secrets service HTTPS origin'
-  cert_token=$(cat "$target/setup")
+  setup_token=$(cat "$target/setup")
   for attempt in 1 2; do
     request=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --rawfile signature <(secrets_key_proof "$NODE_ID") --rawfile management "$INSTALL_DIR/credentials/service-token" '{node_id:$node,public_key:$public,signature:$signature,management_token:$management,encryption_ready:true}')
-    response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --proto '=https' --request POST --header 'Content-Type: application/json' --config <(printf 'header = "Authorization: Bearer %s"\n' "$cert_token") --data-binary @<(printf '%s' "$request") --write-out '\n%{http_code}' "$endpoint/v1/machines/enroll") || { log 'Secrets enrollment pending: service unavailable.'; return 0; }
+    response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --proto '=https' --request POST --header 'Content-Type: application/json' --config <(printf 'header = "Authorization: Bearer %s"\n' "$setup_token") --data-binary @<(printf '%s' "$request") --write-out '\n%{http_code}' "$endpoint/v1/machines/enroll") || { log 'Secrets enrollment pending: service unavailable.'; return 0; }
     status=${response##*$'\n'}; response=${response%$'\n'*}
     if [[ "$status" == 409 && "$attempt" == 1 ]] && [[ $(jq -r '.code // empty' <<< "$response") == identity_reset_required ]]; then
       # A verified owner setup grant reached an explicitly reset identity.
@@ -347,10 +347,11 @@ enroll_secrets() {
   if [[ "$status" == 401 ]]; then rm -f -- "$target/setup"; log 'Secrets setup grant expired or revoked; generate a fresh enrollment command.'; return 0; fi
   if [[ "$status" != 200 ]]; then log 'Secrets enrollment pending; no secret values have been installed.'; return 0; fi
   [[ $(jq -r '.node_id' <<< "$response") == "$NODE_ID" ]] || die 'secrets identity mismatch'
+  jq -e '(.owner_id | type == "string" and length > 0) and (.generation | type == "number" and . >= 1 and . == floor)' <<< "$response" >/dev/null || die 'invalid secrets identity'
   public="$INSTALL_DIR/volumes/app-reconciler/secrets"
   install -d -m 0700 "$public"
   atomic_write "$public/key.pem" < "$target/key.pem"
-  jq -er '.certificate' <<< "$response" | base64 --decode | atomic_write "$public/certificate.pem"
+  printf '%s' "$response" | atomic_write "$public/identity.json"
   atomic_write "$public/url" < "$target/url"
   kube label namespace livepeer-apps livepeer.io/managed-secrets=true --overwrite
   printf '1' | atomic_write "$public/managed"

@@ -23,7 +23,6 @@ type fakeSecretResolver struct {
 	err         error
 	enabled     bool
 	activateErr error
-	renewErr    error
 }
 
 func (f *fakeSecretResolver) Enabled() bool      { return f.enabled }
@@ -31,7 +30,6 @@ func (f *fakeSecretResolver) MarkManaged() error { f.enabled = true; return nil 
 func (f *fakeSecretResolver) Versions(context.Context, protocol.ResolveRequest) (protocol.VersionSet, error) {
 	return f.set, f.err
 }
-func (f *fakeSecretResolver) Renew(context.Context) error    { return f.renewErr }
 func (f *fakeSecretResolver) Activate(context.Context) error { return f.activateErr }
 func (f *fakeSecretResolver) IdentityReady() bool            { return f.enabled }
 func (f *fakeSecretResolver) VersionsAll(_ context.Context, in []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error) {
@@ -54,28 +52,6 @@ func (f *fakeSecretResolver) Resolve(context.Context, protocol.ResolveRequest) (
 	var copy protocol.VersionSet
 	_ = json.Unmarshal(b, &copy)
 	return copy, f.err
-}
-
-type renewingSecretResolver struct {
-	fakeSecretResolver
-	renewals int
-}
-
-func (f *renewingSecretResolver) Renew(context.Context) error { f.renewals++; return nil }
-
-func TestIdleMachinesContinueCertificateRenewal(t *testing.T) {
-	client := &renewingSecretResolver{fakeSecretResolver: fakeSecretResolver{enabled: true}}
-	delivery := &SecretDelivery{Client: client, Kube: secretKube(nil)}
-	now := time.Now()
-	delivery.Poll(t.Context(), State{}, now)
-	delivery.Poll(t.Context(), State{}, now.Add(time.Second))
-	if client.renewals != 1 {
-		t.Fatal("idle renewal missing or poll interval ignored", client.renewals)
-	}
-	delivery.Poll(t.Context(), State{}, now.Add(time.Minute))
-	if client.renewals != 2 {
-		t.Fatal("idle renewal did not continue", client.renewals)
-	}
 }
 
 func TestSecretPreparationIsDirectCollisionFreeAndRetryable(t *testing.T) {
@@ -827,13 +803,11 @@ func TestCorrectiveRotationStartsWhenOldReplicasAreUnready(t *testing.T) {
 }
 
 func TestIdentityFaultsCoverRetainedSecretConsumers(t *testing.T) {
-	for _, phase := range []string{"renew", "activate", "bulk"} {
+	for _, phase := range []string{"activate", "bulk"} {
 		for _, failure := range []error{protocol.ErrDenied, protocol.ErrUnavailable} {
 			t.Run(phase+"/"+failure.Error(), func(t *testing.T) {
 				c, input, _, _, _, now, resolver, set := secretController(t, 1, nil)
 				switch phase {
-				case "renew":
-					resolver.renewErr = failure
 				case "activate":
 					resolver.activateErr = failure
 				case "bulk":

@@ -4,21 +4,14 @@ package secretservice
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/subtle"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,8 +28,7 @@ type Config struct {
 	SigningKeys                                                                             map[string]string
 	SigningKeyID                                                                            string
 	SupabaseURL, SupabaseKey, ControlURL, ControlToken, VaultURL, VaultToken, AllowedOrigin string
-	CA                                                                                      *x509.Certificate
-	CAKey                                                                                   ed25519.PrivateKey
+	PublicURL                                                                               string
 }
 type Metadata interface {
 	Machine(context.Context, string, *protocol.MachineBinding) (protocol.Machine, error)
@@ -68,8 +60,9 @@ CREATE TABLE IF NOT EXISTS lpsecrets.revoked_grants(jti text PRIMARY KEY,owner_i
 CREATE TABLE IF NOT EXISTS lpsecrets.identities(node_id text PRIMARY KEY,owner_id uuid NOT NULL,public_key text NOT NULL,generation bigint NOT NULL DEFAULT 1,revoked boolean NOT NULL DEFAULT false);
 ALTER TABLE lpsecrets.identities ADD COLUMN IF NOT EXISTS reset_pending boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS lpsecrets.retired_keys(node_id text NOT NULL REFERENCES lpsecrets.identities,public_key text NOT NULL,PRIMARY KEY(node_id,public_key));
-CREATE TABLE IF NOT EXISTS lpsecrets.challenges(id uuid PRIMARY KEY,node_id text NOT NULL REFERENCES lpsecrets.identities,nonce bytea NOT NULL,expires_at timestamptz NOT NULL);
-CREATE UNIQUE INDEX IF NOT EXISTS machine_recovery_challenge ON lpsecrets.challenges(node_id);
+DROP TABLE IF EXISTS lpsecrets.challenges;
+CREATE TABLE IF NOT EXISTS lpsecrets.request_nonces(node_id text NOT NULL REFERENCES lpsecrets.identities,nonce text NOT NULL,expires_at timestamptz NOT NULL,PRIMARY KEY(node_id,nonce));
+CREATE INDEX IF NOT EXISTS request_nonce_expiry ON lpsecrets.request_nonces(expires_at);
 CREATE TABLE IF NOT EXISTS lpsecrets.secrets(id uuid PRIMARY KEY,owner_id uuid NOT NULL,name text NOT NULL,key text NOT NULL,head uuid,revision bigint NOT NULL DEFAULT 1,deleted boolean NOT NULL DEFAULT false,updated_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS active_secret_reference ON lpsecrets.secrets(owner_id,name,key) WHERE NOT deleted;
 CREATE TABLE IF NOT EXISTS lpsecrets.versions(id uuid PRIMARY KEY,secret_id uuid NOT NULL REFERENCES lpsecrets.secrets,base_revision bigint NOT NULL,nonce bytea,ciphertext bytea,wrapped_key text,created_at timestamptz NOT NULL DEFAULT now());
@@ -86,7 +79,9 @@ func (s *Service) Collect(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	now := s.Now()
-	for _, q := range []string{`DELETE FROM lpsecrets.revoked_grants WHERE expires_at<=$1`, `DELETE FROM lpsecrets.challenges WHERE expires_at<=$1`} {
+	// Keep nonces for an extra minute so small clock differences between replicas
+	// cannot let a collector remove a credential another replica still accepts.
+	for _, q := range []string{`DELETE FROM lpsecrets.revoked_grants WHERE expires_at<=$1`, `DELETE FROM lpsecrets.request_nonces WHERE expires_at<=$1::timestamptz - interval '1 minute'`} {
 		if _, e = tx.ExecContext(ctx, q, now); e != nil {
 			return e
 		}
@@ -216,14 +211,12 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/enrollment-grants/revoke", s.revokeGrant)
 	mux.HandleFunc("POST /v1/machines/enroll", s.enroll)
 	mux.HandleFunc("GET /v1/machines", s.listIdentities)
-	mux.HandleFunc("POST /v1/machines/renew", s.renew)
-	mux.HandleFunc("POST /v1/machines/activate", s.activate)
-	mux.HandleFunc("POST /v1/machines/recover", s.recover)
+	mux.HandleFunc("POST /v1/machines/activate", s.authenticated(s.activate))
 	mux.HandleFunc("POST /v1/machines/{node}/revoke", s.revokeIdentity)
 	mux.HandleFunc("POST /v1/machines/{node}/reset", s.resetIdentity)
-	mux.HandleFunc("POST /v1/runtime/resolve", s.resolve)
-	mux.HandleFunc("POST /v1/runtime/versions", s.versions)
-	mux.HandleFunc("POST /v1/runtime/batch", s.batchVersions)
+	mux.HandleFunc("POST /v1/runtime/resolve", s.authenticated(s.resolve))
+	mux.HandleFunc("POST /v1/runtime/versions", s.authenticated(s.versions))
+	mux.HandleFunc("POST /v1/runtime/batch", s.authenticated(s.batchVersions))
 	mux.HandleFunc("GET /v1/secrets", s.list)
 	mux.HandleFunc("POST /v1/secrets/reserve", s.reserve)
 	mux.HandleFunc("POST /v1/secrets/{id}/wrap", s.wrap)
@@ -413,26 +406,6 @@ func (v *vaultTransit) Unwrap(ctx context.Context, owner, wrapped string) ([]byt
 		return nil, protocol.ErrUnavailable
 	}
 	return key, nil
-}
-func (s *Service) certificate(node, owner, pub string, generation int64) (protocol.Identity, error) {
-	k, e := protocol.PublicKey(pub)
-	if e != nil || s.Config.CA == nil {
-		return protocol.Identity{}, protocol.ErrInvalid
-	}
-	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	now := s.Now()
-	tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: node, Organization: []string{owner}}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
-	tmpl.URIs = []*url.URL{{Scheme: "lpcc", Host: node, Path: "/" + big.NewInt(generation).String()}}
-	der, e := x509.CreateCertificate(rand.Reader, tmpl, s.Config.CA, k, s.Config.CAKey)
-	if e != nil {
-		return protocol.Identity{}, protocol.ErrUnavailable
-	}
-	return protocol.Identity{NodeID: node, Owner: owner, Generation: generation, Certificate: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), CA: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Config.CA.Raw})}, nil
-}
-func (s *Service) TLSConfig() *tls.Config {
-	pool := x509.NewCertPool()
-	pool.AddCert(s.Config.CA)
-	return &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
 }
 
 // Keep credential comparison independent of normal string equality.

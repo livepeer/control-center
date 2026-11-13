@@ -3,14 +3,10 @@ package secretservice
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
-	"strconv"
-	"time"
 )
 
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
@@ -101,21 +97,14 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "unavailable")
 		return
 	}
-	owner = c.Subject
-	key = in.PublicKey
-	identity, e := s.certificate(in.NodeID, owner, key, gen)
-	if e != nil {
-		fail(w, 503, "certificate_unavailable")
-		return
-	}
 	if !exists || reset {
-		e = audit(r.Context(), tx, owner, "machine.enroll", in.NodeID)
+		e = audit(r.Context(), tx, c.Subject, "machine.enroll", in.NodeID)
 	}
 	if e != nil || !s.Now().Before(c.ExpiresAt.Time) || tx.Commit() != nil {
 		fail(w, 503, "enrollment_pending")
 		return
 	}
-	response(w, 200, identity)
+	response(w, 200, protocol.Identity{NodeID: in.NodeID, Owner: c.Subject, Generation: gen})
 }
 func (s *Service) machine(r *http.Request) (protocol.Machine, int64, error) {
 	return s.machineWith(r, s.DB)
@@ -127,40 +116,32 @@ type identityReader interface {
 
 func (s *Service) machineWith(r *http.Request, q identityReader) (protocol.Machine, int64, error) {
 	var m protocol.Machine
-	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-		return m, 0, protocol.ErrDenied
-	}
-	cert := r.TLS.PeerCertificates[0]
-	if len(cert.URIs) != 1 || cert.URIs[0].Scheme != "lpcc" || cert.URIs[0].Host != cert.Subject.CommonName || len(cert.URIs[0].Path) < 2 || cert.URIs[0].Path[0] != '/' {
-		return m, 0, protocol.ErrDenied
-	}
-	gen, e := strconv.ParseInt(cert.URIs[0].Path[1:], 10, 64)
-	if e != nil {
+	id, ok := r.Context().Value(requestIdentityKey{}).(protocol.RequestClaims)
+	if !ok {
 		return m, 0, protocol.ErrDenied
 	}
 	var owner, key string
 	var expected int64
 	var revoked bool
-	e = q.QueryRowContext(r.Context(), `SELECT owner_id::text,public_key,generation,revoked FROM lpsecrets.identities WHERE node_id=$1`, cert.Subject.CommonName).Scan(&owner, &key, &expected, &revoked)
+	e := q.QueryRowContext(r.Context(), `SELECT owner_id::text,public_key,generation,revoked FROM lpsecrets.identities WHERE node_id=$1`, id.Subject).Scan(&owner, &key, &expected, &revoked)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return m, 0, protocol.ErrUnavailable
 	}
-	pub, ok := cert.PublicKey.(ed25519.PublicKey)
-	if e != nil || !ok || revoked || gen != expected || key != base64.StdEncoding.EncodeToString(pub) {
+	if e != nil || revoked || id.Generation != expected {
 		return m, 0, protocol.ErrDenied
 	}
-	m, e = s.Metadata.Machine(r.Context(), cert.Subject.CommonName, nil)
+	m, e = s.Metadata.Machine(r.Context(), id.Subject, nil)
 	if e != nil {
 		return m, 0, e
 	}
 	if !m.Active || m.Owner != owner || m.PublicKey != key || !m.EncryptionReady {
 		return m, 0, protocol.ErrDenied
 	}
-	return m, gen, nil
+	return m, expected, nil
 }
 
 // Activation proves that the host has installed the committed identity. Until
-// this mTLS round trip, the Control Center binding remains pending.
+// this signed round trip, the Control Center binding remains pending.
 func (s *Service) activate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		AdmissionReady bool `json:"admission_ready"`
@@ -169,17 +150,14 @@ func (s *Service) activate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "admission_not_ready")
 		return
 	}
-	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-		fail(w, 403, "identity_refused")
-		return
-	}
 	tx, e := s.DB.BeginTx(r.Context(), nil)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
 	}
 	defer tx.Rollback()
-	if lockIdentity(r.Context(), tx, r.TLS.PeerCertificates[0].Subject.CommonName) != nil {
+	id := r.Context().Value(requestIdentityKey{}).(protocol.RequestClaims)
+	if lockIdentity(r.Context(), tx, id.Subject) != nil {
 		fail(w, 503, "unavailable")
 		return
 	}
@@ -200,108 +178,6 @@ func (s *Service) activate(w http.ResponseWriter, r *http.Request) {
 	response(w, 200, map[string]bool{"activated": true})
 }
 
-func (s *Service) renew(w http.ResponseWriter, r *http.Request) {
-	m, g, e := s.machine(r)
-	if e != nil {
-		if errors.Is(e, protocol.ErrUnavailable) {
-			fail(w, 503, "unavailable")
-			return
-		}
-		fail(w, 403, "identity_refused")
-		return
-	}
-	v, e := s.certificate(m.NodeID, m.Owner, m.PublicKey, g)
-	if e != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
-	response(w, 200, v)
-}
-func (s *Service) recover(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		NodeID    string `json:"node_id"`
-		Challenge string `json:"challenge_id"`
-		Signature []byte `json:"signature"`
-	}
-	if decode(r, &in) != nil {
-		fail(w, 400, "invalid_recovery")
-		return
-	}
-	var owner, key string
-	var gen int64
-	var revoked bool
-	e := s.DB.QueryRowContext(r.Context(), `SELECT owner_id::text,public_key,generation,revoked FROM lpsecrets.identities WHERE node_id=$1`, in.NodeID).Scan(&owner, &key, &gen, &revoked)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		fail(w, 503, "unavailable")
-		return
-	}
-	if e != nil || revoked {
-		fail(w, 403, "identity_refused")
-		return
-	}
-	m, e := s.Metadata.Machine(r.Context(), in.NodeID, nil)
-	if errors.Is(e, protocol.ErrUnavailable) {
-		fail(w, 503, "unavailable")
-		return
-	}
-	if e != nil || !m.Active || !m.EncryptionReady || m.Owner != owner || m.PublicKey != key {
-		fail(w, 403, "identity_refused")
-		return
-	}
-	tx, e := s.DB.BeginTx(r.Context(), nil)
-	if e != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
-	defer tx.Rollback()
-	if lockIdentity(r.Context(), tx, in.NodeID) != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
-	var liveKey, liveOwner string
-	if e = tx.QueryRowContext(r.Context(), `SELECT owner_id::text,public_key,generation,revoked FROM lpsecrets.identities WHERE node_id=$1 FOR UPDATE`, in.NodeID).Scan(&liveOwner, &liveKey, &gen, &revoked); e != nil {
-		if errors.Is(e, sql.ErrNoRows) {
-			fail(w, 403, "identity_refused")
-		} else {
-			fail(w, 503, "unavailable")
-		}
-		return
-	}
-	if revoked || liveKey != key || liveOwner != owner {
-		fail(w, 403, "identity_refused")
-		return
-	}
-	if in.Challenge == "" {
-		nonce := make([]byte, 32)
-		_, _ = rand.Read(nonce)
-		id := ident()
-		now := s.Now()
-		e = tx.QueryRowContext(r.Context(), `INSERT INTO lpsecrets.challenges(id,node_id,nonce,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT(node_id) DO UPDATE SET
-		 id=CASE WHEN challenges.expires_at>$5 THEN challenges.id ELSE EXCLUDED.id END,
-		 nonce=CASE WHEN challenges.expires_at>$5 THEN challenges.nonce ELSE EXCLUDED.nonce END,
-		 expires_at=CASE WHEN challenges.expires_at>$5 THEN challenges.expires_at ELSE EXCLUDED.expires_at END
-		 RETURNING id,nonce`, id, in.NodeID, nonce, now.Add(time.Minute), now).Scan(&id, &nonce)
-		if e != nil || tx.Commit() != nil {
-			fail(w, 503, "unavailable")
-			return
-		}
-		response(w, 200, map[string]any{"challenge_id": id, "nonce": nonce})
-		return
-	}
-	var nonce []byte
-	e = tx.QueryRowContext(r.Context(), `DELETE FROM lpsecrets.challenges WHERE id=$1 AND node_id=$2 AND expires_at>$3 RETURNING nonce`, in.Challenge, in.NodeID, s.Now()).Scan(&nonce)
-	pub, _ := protocol.PublicKey(key)
-	if e != nil || !ed25519.Verify(pub, append([]byte("lpcc-recovery-v1\n"+in.Challenge+"\n"), nonce...), in.Signature) {
-		fail(w, 403, "challenge_refused")
-		return
-	}
-	out, e := s.certificate(in.NodeID, owner, key, gen)
-	if e != nil || tx.Commit() != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
-	response(w, 200, out)
-}
 func (s *Service) revokeIdentity(w http.ResponseWriter, r *http.Request) {
 	s.changeIdentity(w, r, false)
 }
@@ -344,8 +220,7 @@ func (s *Service) changeIdentity(w http.ResponseWriter, r *http.Request, reset b
 		return
 	}
 	if reset {
-		_, e = tx.ExecContext(r.Context(), `DELETE FROM lpsecrets.challenges WHERE node_id=$1`, node)
-		if e == nil && current != "" {
+		if current != "" {
 			_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.retired_keys(node_id,public_key) VALUES($1,$2) ON CONFLICT DO NOTHING`, node, current)
 		}
 		if e != nil {

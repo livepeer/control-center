@@ -5,16 +5,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"github.com/livepeer/control-center/api/internal/testdb"
 	"github.com/livepeer/control-center/schema"
 	protocol "github.com/livepeer/control-center/secrets"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,21 +67,13 @@ func (v *testTransit) Unwrap(_ context.Context, _ string, wrapped string) ([]byt
 func dbService(t *testing.T) (*Service, ed25519.PrivateKey, *testMetadata, *testTransit) {
 	t.Helper()
 	db := testdb.Open(t)
-	s := New(db, Config{SigningKey: strings.Repeat("s", 32), SigningKeyID: "current", SupabaseURL: "https://auth.example"})
+	s := New(db, Config{SigningKey: strings.Repeat("s", 32), SigningKeyID: "current", SupabaseURL: "https://auth.example", PublicURL: "https://secrets.example"})
 	if e := s.Migrate(t.Context()); e != nil {
 		t.Fatal(e)
 	}
 	s.HTTP.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: ioBody(`{"id":"` + testOwner + `"}`)}, nil
 	})
-	_, caKey, _ := ed25519.GenerateKey(rand.Reader)
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test CA"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(48 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-	der, e := x509.CreateCertificate(rand.Reader, tmpl, tmpl, caKey.Public(), caKey)
-	if e != nil {
-		t.Fatal(e)
-	}
-	s.Config.CA, _ = x509.ParseCertificate(der)
-	s.Config.CAKey = caKey
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
 	m := &testMetadata{machine: protocol.Machine{NodeID: "test-node", Owner: testOwner, Active: true, PublicKey: base64.StdEncoding.EncodeToString(pub), EncryptionReady: true, PolicyGeneration: 1}}
 	s.Metadata = m
@@ -99,21 +86,29 @@ func ioBody(s string) *bodyReader { return &bodyReader{strings.NewReader(s)} }
 type bodyReader struct{ *strings.Reader }
 
 func (*bodyReader) Close() error { return nil }
-func call(t *testing.T, s *Service, path, method, token string, in any, cert *x509.Certificate) *httptest.ResponseRecorder {
+func call(t *testing.T, s *Service, path, method, token string, in any, id *testIdentity) *httptest.ResponseRecorder {
 	t.Helper()
 	b, _ := json.Marshal(in)
-	r := httptest.NewRequest(method, path, bytes.NewReader(b))
+	r := httptest.NewRequest(method, s.Config.PublicURL+path, bytes.NewReader(b))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	if cert != nil {
-		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}, VerifiedChains: [][]*x509.Certificate{{cert, s.Config.CA}}}
+	if id != nil {
+		if e := protocol.SignRequest(r, b, id.Identity, id.key, s.Now()); e != nil {
+			t.Fatal(e)
+		}
 	}
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	return w
 }
-func enrolled(t *testing.T, s *Service, key ed25519.PrivateKey, m *testMetadata) *x509.Certificate {
+
+type testIdentity struct {
+	protocol.Identity
+	key ed25519.PrivateKey
+}
+
+func enrolled(t *testing.T, s *Service, key ed25519.PrivateKey, m *testMetadata) *testIdentity {
 	t.Helper()
 	grant, _, _ := s.Grant(testOwner)
 	public := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
@@ -124,15 +119,11 @@ func enrolled(t *testing.T, s *Service, key ed25519.PrivateKey, m *testMetadata)
 	}
 	var id protocol.Identity
 	_ = json.Unmarshal(w.Body.Bytes(), &id)
-	block, _ := pem.Decode(id.Certificate)
-	cert, e := x509.ParseCertificate(block.Bytes)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if w := call(t, s, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, cert); w.Code != 200 {
+	identity := &testIdentity{Identity: id, key: key}
+	if w := call(t, s, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, identity); w.Code != 200 {
 		t.Fatal("activation failed", w.Code, w.Body.String())
 	}
-	return cert
+	return identity
 }
 func TestDatabaseStatelessGrantsRevocationAndIdentity(t *testing.T) {
 	s, key, m, vault := dbService(t)
@@ -142,7 +133,7 @@ func TestDatabaseStatelessGrantsRevocationAndIdentity(t *testing.T) {
 			t.Fatal(w.Code)
 		}
 	}
-	for _, table := range []string{"revoked_grants", "identities", "versions", "secrets", "audit", "challenges"} {
+	for _, table := range []string{"revoked_grants", "identities", "versions", "secrets", "audit", "request_nonces"} {
 		var count int
 		if e := s.DB.QueryRow("SELECT count(*) FROM lpsecrets." + table).Scan(&count); e != nil || count != 0 {
 			t.Fatal(table, count, e)
@@ -168,8 +159,8 @@ func TestDatabaseStatelessGrantsRevocationAndIdentity(t *testing.T) {
 	if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 401 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	cert := enrolled(t, s, key, m)
-	if cert.Subject.CommonName != m.machine.NodeID {
+	identity := enrolled(t, s, key, m)
+	if identity.NodeID != m.machine.NodeID {
 		t.Fatal("identity")
 	}
 	_ = enrolled(t, s, key, m)
@@ -267,67 +258,9 @@ func TestConcurrentEnrollmentAndRevocation(t *testing.T) {
 	}
 }
 
-func TestExpiredCertificateRecoveryIsSingleUseAndChecksEligibility(t *testing.T) {
-	s, key, metadata, _ := dbService(t)
-	cert := enrolled(t, s, key, metadata)
-	now := cert.NotAfter.Add(time.Minute)
-	s.Now = func() time.Time { return now }
-	node := metadata.machine.NodeID
-	challenge := func() (string, []byte) {
-		t.Helper()
-		w := call(t, s, "/v1/machines/recover", "POST", "", map[string]string{"node_id": node}, nil)
-		if w.Code != 200 {
-			t.Fatal(w.Code, w.Body.String())
-		}
-		var v struct {
-			ID    string `json:"challenge_id"`
-			Nonce []byte `json:"nonce"`
-		}
-		_ = json.Unmarshal(w.Body.Bytes(), &v)
-		return v.ID, ed25519.Sign(key, append([]byte("lpcc-recovery-v1\n"+v.ID+"\n"), v.Nonce...))
-	}
-	id, signature := challenge()
-	if again, sig := challenge(); again != id || !bytes.Equal(sig, signature) {
-		t.Fatal("challenge retry replaced an unexpired challenge")
-	}
-	in := map[string]any{"node_id": node, "challenge_id": id, "signature": signature}
-	if w := call(t, s, "/v1/machines/recover", "POST", "", in, nil); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if w := call(t, s, "/v1/machines/recover", "POST", "", in, nil); w.Code != 403 {
-		t.Fatal("replayed recovery challenge", w.Code)
-	}
-	id, signature = challenge()
-	now = now.Add(time.Minute)
-	in = map[string]any{"node_id": node, "challenge_id": id, "signature": signature}
-	if w := call(t, s, "/v1/machines/recover", "POST", "", in, nil); w.Code != 403 {
-		t.Fatal("expired recovery challenge", w.Code)
-	}
-	if fresh, _ := challenge(); fresh == id {
-		t.Fatal("expired challenge was reused")
-	}
-	for _, unavailable := range []string{"retired", "encryption"} {
-		metadata.machine.Active = unavailable != "retired"
-		metadata.machine.EncryptionReady = unavailable != "encryption"
-		if w := call(t, s, "/v1/machines/recover", "POST", "", map[string]string{"node_id": node}, nil); w.Code != 403 {
-			t.Fatal("ineligible identity recovered", unavailable, w.Code)
-		}
-	}
-	metadata.machine.Active, metadata.machine.EncryptionReady = true, true
-	if w := call(t, s, "/v1/machines/"+node+"/revoke", "POST", "operator", nil, nil); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if w := call(t, s, "/v1/machines/recover", "POST", "", map[string]string{"node_id": node}, nil); w.Code != 403 {
-		t.Fatal("revoked identity recovered", w.Code)
-	}
-	if w := call(t, s, "/v1/machines/renew", "POST", "", nil, cert); w.Code != 403 {
-		t.Fatal("revoked identity renewed", w.Code)
-	}
-}
-
 func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	s, key, m, vault := dbService(t)
-	cert := enrolled(t, s, key, m)
+	identity := enrolled(t, s, key, m)
 	var def schema.DefinitionV1
 	raw, e := osReadFixture()
 	if e != nil {
@@ -345,7 +278,7 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	request := protocol.ResolveRequest{RevisionID: a.RevisionID, Generation: 1, Activation: 1, Digest: a.Digest}
 	checkFault := func(in protocol.ResolveRequest, want string) {
 		t.Helper()
-		w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{in}}, cert)
+		w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{in}}, identity)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+want+`"`) {
 			t.Fatal(w.Code, w.Body.String())
 		}
@@ -384,13 +317,13 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	before := vault.calls.Load()
 	bad := in
 	bad.RevisionID = "33333333-3333-4333-8333-333333333333"
-	if w = call(t, s, "/v1/runtime/resolve", "POST", "", bad, cert); w.Code != 409 {
+	if w = call(t, s, "/v1/runtime/resolve", "POST", "", bad, identity); w.Code != 409 {
 		t.Fatal(w.Code)
 	}
 	if vault.calls.Load() != before {
 		t.Fatal("unauthorized request reached Vault")
 	}
-	w = call(t, s, "/v1/runtime/resolve", "POST", "", in, cert)
+	w = call(t, s, "/v1/runtime/resolve", "POST", "", in, identity)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -428,7 +361,7 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	}
 	in.Expected = set.Digest
 	before = vault.calls.Load()
-	if w = call(t, s, "/v1/runtime/resolve", "POST", "", in, cert); w.Code != 409 || vault.calls.Load() != before {
+	if w = call(t, s, "/v1/runtime/resolve", "POST", "", in, identity); w.Code != 409 || vault.calls.Load() != before {
 		t.Fatal("superseded version authorized a new start", w.Code)
 	}
 	in.Expected = ""
@@ -451,13 +384,13 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	w = call(t, s, "/v1/runtime/resolve", "POST", "", in, cert)
+	w = call(t, s, "/v1/runtime/resolve", "POST", "", in, identity)
 	if w.Code != 409 {
 		t.Fatal("deleted value resolved", w.Code)
 	}
 	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: "44444444-4444-4444-8444-444444444444", References: def.Container.Secrets}}
 	before = vault.calls.Load()
-	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{}}, cert)
+	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{}}, identity)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"44444444-4444-4444-8444-444444444444":"secret_missing"`) || vault.calls.Load() != before {
 		t.Fatal("cleanup observation missing or accessed Transit", w.Code, w.Body.String())
 	}
@@ -471,32 +404,10 @@ func osReadFixture() ([]byte, error) {
 	return os.ReadFile("../../../schema/testdata/minimal.canonical.json")
 }
 
-func TestResetFencesEveryPreviousKeyAndCertificate(t *testing.T) {
+func TestResetFencesEveryPreviousKey(t *testing.T) {
 	s, key, metadata, _ := dbService(t)
 	old := enrolled(t, s, key, metadata)
 	initialKey := key
-	server := httptest.NewUnstartedServer(s.Handler())
-	server.TLS = s.TLSConfig()
-	server.StartTLS()
-	defer server.Close()
-	renewTLS := func(cert *x509.Certificate, key ed25519.PrivateKey, want int) {
-		t.Helper()
-		pair, e := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}), protocol.PrivatePEM(key))
-		if e != nil {
-			t.Fatal(e)
-		}
-		tr := server.Client().Transport.(*http.Transport).Clone()
-		tr.TLSClientConfig.Certificates = []tls.Certificate{pair}
-		defer tr.CloseIdleConnections()
-		res, e := (&http.Client{Transport: tr}).Post(server.URL+"/v1/machines/renew", "application/json", strings.NewReader(`{}`))
-		if e != nil {
-			t.Fatal(e)
-		}
-		res.Body.Close()
-		if res.StatusCode != want {
-			t.Fatal("real mTLS reset fencing", res.StatusCode, want)
-		}
-	}
 	grant, _, _ := s.Grant(testOwner)
 	for epoch := int64(2); epoch <= 3; epoch++ {
 		node := metadata.machine.NodeID
@@ -510,22 +421,19 @@ func TestResetFencesEveryPreviousKeyAndCertificate(t *testing.T) {
 				t.Fatal("reset reused a retired key", w.Code, w.Body.String())
 			}
 		}
-		previousKey := key
 		_, key, _ = ed25519.GenerateKey(rand.Reader)
 		current := enrolled(t, s, key, metadata)
-		if current.URIs[0].Path != "/"+big.NewInt(epoch).String() {
-			t.Fatal("reset epoch regressed", current.URIs[0].Path)
+		if current.Generation != epoch {
+			t.Fatal("reset epoch regressed", current.Generation)
 		}
 		restarted := New(s.DB, s.Config)
 		restarted.Metadata = metadata
-		if _, _, e := restarted.machine(&http.Request{TLS: &tls.ConnectionState{PeerCertificates: []*x509.Certificate{old}, VerifiedChains: [][]*x509.Certificate{{old, s.Config.CA}}}}); e != protocol.ErrDenied {
-			t.Fatal("old certificate revived", e)
+		if w := call(t, restarted, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, old); w.Code != 403 {
+			t.Fatal("old identity revived", w.Code)
 		}
-		if w := call(t, s, "/v1/machines/renew", "POST", "", nil, current); w.Code != 200 {
+		if w := call(t, restarted, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, current); w.Code != 200 {
 			t.Fatal("replacement identity refused", w.Code, w.Body.String())
 		}
-		renewTLS(old, previousKey, 403)
-		renewTLS(current, key, 200)
 		old = current
 	}
 }
@@ -557,16 +465,13 @@ func TestRevokeCancelsPendingReset(t *testing.T) {
 }
 
 func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
-	for _, failure := range []string{"certificate", "expiry", "encryption", "lost-response"} {
+	for _, failure := range []string{"expiry", "encryption", "lost-response"} {
 		t.Run(failure, func(t *testing.T) {
 			s, key, metadata, _ := dbService(t)
 			metadata.machine.PublicKey = ""
 			grant, _, _ := s.Grant(testOwner)
 			public := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
 			in := protocol.EnrollRequest{NodeID: metadata.machine.NodeID, PublicKey: public, Signature: ed25519.Sign(key, protocol.Proof(metadata.machine.NodeID, public)), EncryptionReady: failure != "encryption"}
-			if failure == "certificate" {
-				s.Config.CA = nil
-			}
 			if failure == "expiry" {
 				metadata.after = func(*protocol.MachineBinding) error {
 					s.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
@@ -588,12 +493,8 @@ func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
 			}
 			var id protocol.Identity
 			_ = json.Unmarshal(w.Body.Bytes(), &id)
-			block, _ := pem.Decode(id.Certificate)
-			cert, e := x509.ParseCertificate(block.Bytes)
-			if e != nil {
-				t.Fatal(e)
-			}
-			if w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, cert); w.Code != 503 {
+			identity := &testIdentity{Identity: id, key: key}
+			if w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, identity); w.Code != 503 {
 				t.Fatal("pending identity authorized resolution", w.Code)
 			}
 			// A retry after a lost response preserves the binding and remains pending.
@@ -601,7 +502,7 @@ func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
 			if w.Code != 200 || metadata.machine.Managed {
 				t.Fatal("pending retry", w.Code)
 			}
-			if w = call(t, s, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, cert); w.Code != 200 || !metadata.machine.Managed {
+			if w = call(t, s, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, identity); w.Code != 200 || !metadata.machine.Managed {
 				t.Fatal("installed identity did not activate", w.Code)
 			}
 		})
@@ -630,16 +531,16 @@ func TestResetSurvivesLostRemoteResponse(t *testing.T) {
 	restarted := New(s.DB, s.Config)
 	restarted.Metadata = metadata
 	restarted.HTTP = s.HTTP
-	if w := call(t, restarted, "/v1/machines/renew", "POST", "", nil, old); w.Code != 403 {
-		t.Fatal("old cert revived", w.Code)
+	if w := call(t, restarted, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, old); w.Code != 403 {
+		t.Fatal("old identity revived", w.Code)
 	}
 	if w := call(t, restarted, "/v1/machines/"+node+"/reset", "POST", "operator", nil, nil); w.Code != 200 {
 		t.Fatal("reset retry failed", w.Code, w.Body.String())
 	}
 	_, replacement, _ := ed25519.GenerateKey(rand.Reader)
 	current := enrolled(t, restarted, replacement, metadata)
-	if current.URIs[0].Path != "/2" {
-		t.Fatal("reset retry changed epoch", current.URIs[0].Path)
+	if current.Generation != 2 {
+		t.Fatal("reset retry changed epoch", current.Generation)
 	}
 	// A delayed clear may only clear the retired binding, never its successor.
 	_, e := metadata.Machine(t.Context(), node, &protocol.MachineBinding{EnrollRequest: protocol.EnrollRequest{NodeID: node}, Owner: testOwner, ResetKey: base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))})
