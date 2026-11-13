@@ -969,7 +969,7 @@ func TestAbsentSourceReportsItsApprovalForDrain(t *testing.T) {
 	resolver := &fakeSecretResolver{enabled: true, faults: map[string]string{source: "secrets_denied"}}
 	c.Secrets = &SecretDelivery{Client: resolver, Kube: secretKube(nil)}
 	c.Secrets.Poll(t.Context(), state, *now)
-	if len(resolver.consumers) != 1 || resolver.consumers[0].RevisionID != source || resolver.consumers[0].ApprovalGeneration != 1 || resolver.consumers[0].Digest == "" {
+	if len(resolver.consumers) != 1 || resolver.consumers[0].RevisionID != source || resolver.consumers[0].ApprovalGeneration != 1 || resolver.consumers[0].Name != a.Revision.Definition.Name {
 		t.Fatal("absent source not sent for approval check", resolver.consumers)
 	}
 	if retainRolling(&state, old, c, *now) {

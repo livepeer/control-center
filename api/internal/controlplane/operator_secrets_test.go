@@ -140,8 +140,7 @@ func TestOwnerReferencesDescribePinnedAndCleanupRevisions(t *testing.T) {
 	requireStatus(t, w, 200)
 	var view struct {
 		Apps []struct {
-			Revisions []schema.ResolvedRevision `json:"revisions"`
-			Secrets   []struct {
+			Secrets []struct {
 				Secret string `json:"secret"`
 			} `json:"secrets"`
 			Catalog []struct {
@@ -154,9 +153,6 @@ func TestOwnerReferencesDescribePinnedAndCleanupRevisions(t *testing.T) {
 	}
 	if len(view.Apps) != 1 || len(view.Apps[0].Secrets) != 1 || view.Apps[0].Secrets[0].Secret != "lp-app-old" || view.Apps[0].Catalog[0].Secret != "lp-app-new" {
 		t.Fatal("catalog head obscured pinned declarations", w.Body.String())
-	}
-	if len(view.Apps[0].Revisions) != 2 || view.Apps[0].Revisions[0].RevisionRef != first.RevisionRef || view.Apps[0].Revisions[1].RevisionRef != second.RevisionRef {
-		t.Fatal("revision candidates lost pinned history", w.Body.String())
 	}
 	requireStatus(t, request(t, s, "POST", appPath(c, first)+"/replace", "session-a", map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": second.RevisionID, "digest": second.Digest, "expected_generation": 0}}), 202)
 	s.params.SecretsMetadataToken = strings.Repeat("m", 32)
@@ -175,24 +171,6 @@ func TestOwnerReferencesDescribePinnedAndCleanupRevisions(t *testing.T) {
 	if len(metadata.Consumers) != 1 || metadata.Consumers[0].References[0].Secret != "lp-app-old" {
 		t.Fatal("cleanup consumer lost pinned declaration", w.Body.String())
 	}
-	foreign := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "3"`, 1)+decl("lp-app-foreign"), second.RevisionID)
-	other := enroll(t, s, ownerB, strings.Repeat("9", 64))
-	requireStatus(t, putApp(t, s, other, foreign, 0, 1), 202)
-	head := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "4"`, 1)+decl("lp-app-head"), foreign.RevisionID)
-	// Completed policy removal retains a requested historical revision for review.
-	requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+first.Name+"/policy", "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
-	set, digest, _ := appBundle(t, s, c)
-	requireStatus(t, appReport(t, s, c, findApp(t, set, second.RevisionID), digest, "removed"), 200)
-	w = request(t, s, "GET", "/api/operator/apps", "session-a", nil)
-	requireStatus(t, w, 200)
-	if e := json.Unmarshal(w.Body.Bytes(), &view); e != nil {
-		t.Fatal(e)
-	}
-	revisions := view.Apps[0].Revisions
-	if len(revisions) != 3 || revisions[0].RevisionRef != first.RevisionRef || revisions[1].RevisionRef != second.RevisionRef || revisions[2].RevisionRef != head.RevisionRef {
-		t.Fatal("revision candidates lost own history or included another owner's assignment", w.Body.String())
-	}
-
 }
 
 func TestPendingSecretBindingOwnerActivationAndConditionalReset(t *testing.T) {

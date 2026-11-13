@@ -86,6 +86,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  await expect(page.getByRole('cell',{name:'provider-alias',exact:true})).toBeVisible()
  await page.getByRole('button',{name:'Deny',exact:true}).click()
  await expect(page.getByRole('button',{name:'Allow scheduling',exact:true})).toBeVisible()
+ await page.getByLabel('App',{exact:true}).selectOption('provider')
  await page.getByLabel('Secret name').fill(secret.name);await page.getByLabel('Key',{exact:true}).fill(secret.key)
  const save=async()=>{await page.getByLabel('Value',{exact:true}).fill('plaintext-sentinel');await page.getByRole('button',{name:'Save secret'}).click()}
  await save()
@@ -101,6 +102,8 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  await save();await expect(page.getByRole('status').filter({hasText:'Saved.'})).toContainText('Saved.')
  expect(mainRequests.join(' ')).not.toContain('plaintext-sentinel');expect(mainRequests.join(' ')).not.toContain('setup.grant.signature')
  expect(encrypted).toBeDefined();expect(dek).toBeDefined()
+ expect(encrypted!.app_name).toBe('provider');expect(encrypted!.expected_approval_generation).toBe(0)
+ await expect(page.getByRole('button',{name:'Allow scheduling',exact:true})).toBeVisible()
  expect(secretRequests.join(' ')).not.toContain('plaintext-sentinel');expect(secretRequests.join(' ')).not.toContain(dek!.toString('base64'))
  const key=await webcrypto.subtle.importKey('raw',dek!,'AES-GCM',false,['decrypt'])
  const aad=Buffer.from(JSON.stringify([1,owner,secret.secret_id,secret.name,secret.key,secret.version_id]))
@@ -113,21 +116,15 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
 })
 
 
-test('operator reviews exact revisions and revokes secret access before scheduling denial',async({page})=>{
+test('app secret access persists across revisions and remains separate from scheduling',async({page})=>{
  const origin='https://secrets.test',owner=vector.binding.owner_id,expiry=Math.floor(Date.now()/1000)+3600
  const identity=generateKeyPairSync('ed25519'),trust={origin,public_key:identity.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64')}
  const session={access_token:`e30.${Buffer.from(JSON.stringify({exp:expiry})).toString('base64url')}.fixture`,refresh_token:'fixture',token_type:'bearer',expires_at:expiry,expires_in:3600,user:{id:owner,email:'owner@example.invalid',aud:'authenticated',role:'authenticated',app_metadata:{},user_metadata:{},created_at:'2026-11-06T00:00:00Z'}}
  await page.addInitScript(({session,trust})=>{localStorage.setItem('sb-auth-auth-token',JSON.stringify(session));localStorage.setItem(`lpcc-secrets-service:${trust.origin}`,JSON.stringify(trust))},{session,trust})
  await page.route('http://auth.test/**',route=>route.fulfill({json:session.user,headers:{'Access-Control-Allow-Origin':'*'}}))
- const definition=JSON.parse(readFileSync(new URL('../../schema/testdata/minimal.canonical.json',import.meta.url),'utf8'))
- definition.container.command=['/bin/sh','-c','run-app']
- definition.name='provider';definition.container.secrets=[{name:'TOKEN',secret:'lp-app-provider',key:'token'}]
- const first={revision_id:'22222222-2222-4222-8222-222222222222',digest:`sha256:${hash(JSON.stringify(definition))}`,name:'provider',revision:1,app_version:'1',schema_version:1,canonical_format:'app-schema-json-v1',definition}
- const second={...first,revision_id:'33333333-3333-4333-8333-333333333333',revision:2,definition:structuredClone(definition)}
- second.definition.container.secrets=[{name:'OTHER_TOKEN',secret:'lp-app-provider',key:'other'}]
- second.digest=`sha256:${hash(JSON.stringify(second.definition))}`
- let revisions=[first],generation=0,denied=false,failScheduling=false,failApprovals=false
- let grants:typeof first[]=[]
+ const ref={name:'TOKEN',secret:'lp-app-provider',key:'token'},extra={name:'OTHER',secret:ref.secret,key:'other'}
+ let references=[ref],generation=0,denied=false,failScheduling=false,failApprovals=false,legacy=true
+ let bindings:{secret:string;key:string}[]=[]
  const writes:{path:string;body:any}[]=[]
  await page.route('**/api/**',async route=>{
   const req=route.request(),path=new URL(req.url()).pathname
@@ -136,79 +133,71 @@ test('operator reviews exact revisions and revokes secret access before scheduli
   if(path==='/api/me')return route.fulfill({json:{user_id:owner,is_admin:false}})
   if(path==='/api/machines')return route.fulfill({json:{machines:[]}})
   if(path==='/api/bootstrap-token')return route.fulfill({json:{token:'control.grant.signature',expires_at:new Date(expiry*1000).toISOString()}})
-  if(path==='/api/operator/apps')return route.fulfill({json:{apps:[{name:'provider',generation:denied?1:0,denied,secrets:definition.container.secrets,revisions,machines:['machine-a']}]}})
+  if(path==='/api/operator/apps')return route.fulfill({json:{apps:[{name:'provider',generation:denied?1:0,denied,secrets:references,machines:['machine-a']}]}})
   if(path.endsWith('/policy')){writes.push({path,body:req.postDataJSON()});if(failScheduling)return route.fulfill({status:503,json:{error:'unavailable'}});denied=req.postDataJSON().denied;return route.fulfill({json:{generation:1}})}
   return route.fulfill({status:404,json:{error:'unexpected'}})
  })
  await page.route('https://secrets.test/**',async route=>{
-  const req=route.request(),url=new URL(req.url()),path=url.pathname
+  const req=route.request(),path=new URL(req.url()).pathname
   const headers={'Access-Control-Allow-Origin':'http://localhost:5173','Access-Control-Allow-Headers':'authorization,content-type','Access-Control-Allow-Methods':'GET,POST,PUT,OPTIONS','Access-Control-Expose-Headers':'X-Livepeer-Service-Signature'}
   if(req.method()==='OPTIONS')return route.fulfill({status:204,headers})
-  const reply=(body:unknown,status=200,key=identity.privateKey)=>signedReply(route,origin,key,headers,body,status)
+  const reply=(body:unknown,status=200)=>signedReply(route,origin,identity.privateKey,headers,body,status)
   if(path==='/v1/enrollment-grants')return reply({token:'setup.grant.signature',service:trust,expires_at:new Date(expiry*1000).toISOString()})
-  if(path==='/v1/secrets')return reply({secrets:[]})
+  if(path==='/v1/secrets')return reply({secrets:[ref,extra].map((ref,index)=>({owner_id:owner,secret_id:`stored-${index}`,name:ref.secret,key:ref.key,version_id:'stored',revision:2,deleted:false}))})
   if(path==='/v1/app-approvals'&&failApprovals)return reply({code:'unavailable'},503)
-  if(path==='/v1/app-approvals')return reply({generation,apps:[{name:'provider',denied:false,approvals:grants.map(g=>({revision_id:g.revision_id,digest:g.digest,references:g.definition.container.secrets}))}]})
+  if(path==='/v1/app-approvals')return reply({generation,apps:[{name:'provider',denied:false,approvals:legacy?[{revision_id:'legacy',references:[ref],generation:99}]:bindings.length?[{scope:'app-secrets',secrets:bindings,generation:2}]:[]}]})
   if(path==='/v1/app-approvals/provider'){
    const body=req.postDataJSON();writes.push({path,body})
    if(body.expected_generation!==generation)return reply({code:'approval_conflict'},409)
-   if(body.denied)grants=[];else if(body.revision)grants.push(body.revision)
+   legacy=false
+   if(body.denied)bindings=[];else bindings.push(...body.secrets)
    generation++;return reply({generation})
   }
   return reply({code:'unexpected'},404)
  })
  await page.goto('/')
- await page.getByRole('button',{name:'Review revision 1',exact:true}).click()
- const dialog=page.getByRole('dialog',{name:'Approve revision secret access'})
- await expect(dialog).toContainText(first.digest)
- await dialog.getByText('Full app definition',{exact:true}).click()
- await expect(dialog.locator('pre')).toContainText('run-app')
- await expect(dialog.locator('pre')).toContainText(JSON.stringify(definition.network,null,2))
- await expect(dialog).toContainText('lp-app-provider/token → TOKEN')
- // A concurrent policy edit must force fresh review, even if the displayed revision is unchanged.
+ const grant=page.getByRole('button',{name:`Grant access to ${ref.secret}/${ref.key}`,exact:true})
+ await expect(grant).toBeEnabled()
+ await expect(page.getByRole('button',{name:/Review revision/})).toHaveCount(0)
  generation++
- await dialog.getByRole('button',{name:'Approve this revision'}).click()
+ await grant.click()
  await expect(page.getByRole('alert')).toContainText('approval conflict')
- expect(grants).toEqual([])
- await page.getByRole('button',{name:'Review revision 1',exact:true}).click()
- await dialog.getByRole('button',{name:'Approve this revision'}).click()
- expect(writes.at(-1)!.body.revision).toEqual(first)
- await expect(page.getByRole('cell').filter({hasText:'Revision 1:'}).getByText('Approved',{exact:true})).toBeVisible()
- revisions=[first,second]
+ expect(bindings).toEqual([])
+ expect(writes).toHaveLength(1)
+ await grant.click()
+ await expect(page.getByText('Access granted',{exact:true})).toBeVisible()
+ expect(writes.at(-1)!.body).toEqual({expected_generation:1,secrets:[{secret:ref.secret,key:ref.key}]})
+ const grantedWrites=writes.length
+ references=[{...ref,name:'REMAPPED'}]
  await page.evaluate(()=>window.dispatchEvent(new Event('lpcc-secrets-enrolled')))
- await expect(page.getByRole('button',{name:'Review revision 2',exact:true})).toBeVisible()
- await expect(page.getByText('Approval required',{exact:true})).toBeVisible()
- // The review snapshot is discarded on refresh instead of following a new catalog head.
- await page.getByRole('button',{name:'Review revision 2',exact:true}).click()
+ await expect(page.getByText('Access granted',{exact:true})).toBeVisible()
+ expect(writes).toHaveLength(grantedWrites)
+ references.push(extra)
  await page.evaluate(()=>window.dispatchEvent(new Event('lpcc-secrets-enrolled')))
- await expect(dialog).toHaveCount(0)
+ await expect(page.getByRole('button',{name:`Grant access to ${extra.secret}/${extra.key}`,exact:true})).toBeEnabled()
+ expect(bindings).toEqual([{secret:ref.secret,key:ref.key}])
  failScheduling=true
  await page.getByRole('button',{name:'Deny',exact:true}).click()
  await expect(page.getByRole('alert')).toContainText('Secret access revoked. Could not update scheduling')
- expect(grants).toEqual([])
+ expect(bindings).toEqual([])
  expect(writes.slice(-2).map(write=>write.path)).toEqual(['/v1/app-approvals/provider','/api/operator/apps/provider/policy'])
  failScheduling=false
  await page.getByRole('button',{name:'Deny',exact:true}).click()
- // Approval of a denied revision must leave scheduling stopped.
  await expect(page.getByRole('button',{name:'Allow scheduling',exact:true})).toBeVisible()
- const beforeApproval=writes.length
- await page.getByRole('button',{name:'Review revision 1',exact:true}).click()
- await dialog.getByRole('button',{name:'Approve this revision'}).click()
- await expect(page.getByRole('button',{name:'Allow scheduling',exact:true})).toBeVisible()
+ const beforeGrant=writes.length
+ await grant.click()
+ await expect(page.getByText('Access granted',{exact:true})).toBeVisible()
  expect(denied).toBe(true)
- expect(writes.slice(beforeApproval).map(write=>write.path)).toEqual(['/v1/app-approvals/provider'])
- expect(grants).toEqual([first])
- // Scheduling remains available through an independent service outage.
+ expect(writes.slice(beforeGrant).map(write=>write.path)).toEqual(['/v1/app-approvals/provider'])
  failApprovals=true
  await page.evaluate(()=>window.dispatchEvent(new Event('lpcc-secrets-enrolled')))
  await expect(page.getByRole('button',{name:'Deny',exact:true})).toBeDisabled()
  await page.getByRole('button',{name:'Allow scheduling',exact:true}).click()
  await page.getByRole('button',{name:'Deny scheduling',exact:true}).click()
- expect(grants).toEqual([first])
+ expect(bindings).toEqual([{secret:ref.secret,key:ref.key}])
  expect(writes.at(-1)!.body.denied).toBe(true)
- await expect(page.getByRole('status')).toContainText('Secret approvals are unchanged')
  failApprovals=false
  await page.evaluate(()=>window.dispatchEvent(new Event('lpcc-secrets-enrolled')))
- await expect(page.getByRole('button',{name:'Review revision 1',exact:true})).toBeEnabled()
+ await expect(page.getByRole('button',{name:'Deny',exact:true})).toBeEnabled()
  await expect(page.getByRole('alert')).toHaveCount(0)
 })

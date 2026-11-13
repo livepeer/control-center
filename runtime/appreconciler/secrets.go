@@ -94,12 +94,7 @@ func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
 	consumers := []protocol.RuntimeConsumer{}
 	for _, i := range s.Instances {
 		if (i.Phase != "removed" || !i.SecretCleanupDone) && (i.SecretPrepared || i.PodUID != "" || i.PublicationStarted) && len(i.Definition.Container.Secrets) > 0 {
-			canonical, e := schema.CanonicalBytes(i.Definition)
-			if e != nil {
-				d.identityFault(s, "secrets_unavailable")
-				return
-			}
-			consumers = append(consumers, protocol.RuntimeConsumer{RevisionRef: schema.RevisionRef{RevisionID: i.Group.RevisionID, Digest: schema.Digest(canonical)}, Name: i.Definition.Name, ApprovalGeneration: i.SecretApproval})
+			consumers = append(consumers, protocol.RuntimeConsumer{RevisionID: i.Group.RevisionID, Name: i.Definition.Name, ApprovalGeneration: i.SecretApproval})
 		}
 	}
 	sets, faults, e := d.Client.VersionsAll(ctx, requests, consumers)

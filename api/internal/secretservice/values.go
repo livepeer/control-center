@@ -133,9 +133,17 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "authentication_required")
 		return
 	}
-	var in protocol.Ciphertext
-	if decode(r, &in) != nil || in.Owner != owner || in.ID != r.PathValue("id") || len(in.Nonce) != 12 || len(in.Ciphertext) < 16 || len(in.Ciphertext) > protocol.MaxValue+16 {
+	var in struct {
+		protocol.Ciphertext
+		AppName          string `json:"app_name"`
+		ExpectedApproval *int64 `json:"expected_approval_generation"`
+	}
+	if decode(r, &in) != nil || in.Owner != owner || in.ID != r.PathValue("id") || len(in.Nonce) != 12 || len(in.Ciphertext.Ciphertext) < 16 || len(in.Ciphertext.Ciphertext) > protocol.MaxValue+16 {
 		fail(w, 400, "invalid_ciphertext")
+		return
+	}
+	if (in.AppName != "" && (!schema.ValidName(in.AppName) || in.ExpectedApproval == nil || *in.ExpectedApproval < 0)) || (in.AppName == "" && in.ExpectedApproval != nil) {
+		fail(w, 400, "invalid_approval")
 		return
 	}
 	tx, e := s.DB.BeginTx(r.Context(), nil)
@@ -144,6 +152,14 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	var approvalGen int64
+	if in.AppName != "" {
+		approvalGen, e = lockAccess(r.Context(), tx, owner, *in.ExpectedApproval)
+		if e != nil {
+			failApproval(w, e)
+			return
+		}
+	}
 	var rev, base int64
 	var name, key, wrapped string
 	e = tx.QueryRowContext(r.Context(), `SELECT s.revision,v.base_revision,s.name,s.key,COALESCE(v.wrapped_key,'') FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON s.id=v.secret_id WHERE s.id=$1 AND v.id=$2 AND s.owner_id=$3 AND NOT s.deleted AND v.ciphertext IS NULL FOR UPDATE OF s,v`, in.ID, in.Version, owner).Scan(&rev, &base, &name, &key, &wrapped)
@@ -151,7 +167,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "secret_conflict")
 		return
 	}
-	_, e = tx.ExecContext(r.Context(), `UPDATE lpsecrets.versions SET nonce=$1,ciphertext=$2 WHERE id=$3`, in.Nonce, in.Ciphertext, in.Version)
+	_, e = tx.ExecContext(r.Context(), `UPDATE lpsecrets.versions SET nonce=$1,ciphertext=$2 WHERE id=$3`, in.Nonce, in.Ciphertext.Ciphertext, in.Version)
 	if e == nil {
 		_, e = tx.ExecContext(r.Context(), `UPDATE lpsecrets.versions SET superseded_at=$1 WHERE id=(SELECT head FROM lpsecrets.secrets WHERE id=$2)`, s.Now(), in.ID)
 	}
@@ -160,6 +176,9 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	if e == nil {
 		e = audit(r.Context(), tx, owner, "secret.write", in.ID)
+	}
+	if e == nil && in.AppName != "" {
+		e = writeAppApproval(r.Context(), tx, owner, in.AppName, approvalGen, false, []protocol.SecretReference{{Secret: in.Name, Key: in.Key}})
 	}
 	if e != nil || tx.Commit() != nil {
 		fail(w, 503, "unavailable")

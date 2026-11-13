@@ -33,52 +33,74 @@ func approvalAssignment(t *testing.T) schema.AppAssignment {
 }
 func approveAssignment(t *testing.T, s *Service, a schema.AppAssignment, generation int64) {
 	t.Helper()
-	w := call(t, s, "/v1/app-approvals/"+a.Revision.Name, "PUT", "operator", map[string]any{"expected_generation": generation, "revision": a.Revision}, nil)
+	w := call(t, s, "/v1/app-approvals/"+a.Revision.Name, "PUT", "operator", map[string]any{"expected_generation": generation, "secrets": approvalReferences(a.Revision.Definition.Container.Secrets)}, nil)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
 
-func TestApprovalBindsVerifiedRevisionAndReferences(t *testing.T) {
-	a := approvalAssignment(t)
-	refs := a.Revision.Definition.Container.Secrets
-	p := ownerAccess{Apps: []appAccess{{Name: a.Revision.Name, Approvals: []appApproval{{RevisionRef: a.RevisionRef, References: refs, Generation: 3}}}}}
-	in := protocol.ResolveRequest{RevisionID: a.RevisionID, Digest: a.Digest, ApprovalProtocol: 1, Generation: 1, Activation: 1}
-	if approvedRequest(p, protocol.Machine{Assignments: []schema.AppAssignment{a}}, in) != 3 {
-		t.Fatal("valid grant refused")
+func approvalReferences(refs []schema.SecretEnvironment) []protocol.SecretReference {
+	out := []protocol.SecretReference{}
+	for _, ref := range refs {
+		out = append(out, protocol.SecretReference{Secret: ref.Secret, Key: ref.Key})
 	}
-	for _, field := range []string{"definition", "revision", "digest", "envelope", "reference", "denied", "legacy", "duplicate"} {
+	return out
+}
+func TestAppApprovalCoversFutureRevisionsAndMappings(t *testing.T) {
+	a := approvalAssignment(t)
+	p := ownerAccess{Apps: []appAccess{{Name: a.Revision.Name, Approvals: []appApproval{{Scope: appSecretScope, Secrets: approvalReferences(a.Revision.Definition.Container.Secrets), Generation: 3}}}}}
+	for _, field := range []string{"original", "revision", "mapping", "command", "added_binding", "app", "definition", "reference", "denied", "legacy_grant", "legacy_runtime", "duplicate"} {
 		t.Run(field, func(t *testing.T) {
 			raw, _ := json.Marshal(a)
 			var changed schema.AppAssignment
 			_ = json.Unmarshal(raw, &changed)
 			policy := p
-			request := in
-			assignments := []schema.AppAssignment{changed}
+			version := 1
+			allowed := false
 			switch field {
-			case "definition":
-				changed.Revision.Definition.Container.Secrets[0].Key = "other"
+			case "original":
+				allowed = true
 			case "revision":
 				changed.RevisionID = "33333333-3333-4333-8333-333333333333"
-				changed.Revision.RevisionID = changed.RevisionID
-				request.RevisionID = changed.RevisionID
-			case "digest":
-				changed.Digest = "sha256:" + strings.Repeat("0", 64)
-				request.Digest = changed.Digest
-			case "envelope":
+				allowed = true
+			case "mapping":
+				changed.Revision.Definition.Container.Secrets[0].Name = "NEW_TOKEN"
+				allowed = true
+			case "command":
+				command := []string{"other-command"}
+				changed.Revision.Definition.Container.Command = &command
+				allowed = true
+			case "added_binding":
+				changed.Revision.Definition.Container.Secrets = append(changed.Revision.Definition.Container.Secrets, schema.SecretEnvironment{Name: "OTHER", Secret: "lp-app-other", Key: "token"})
+			case "app":
 				changed.Revision.Name = "other"
+				changed.Revision.Definition.Name = "other"
 			case "reference":
-				policy = ownerAccess{Apps: []appAccess{{Name: a.Revision.Name, Approvals: []appApproval{{RevisionRef: a.RevisionRef, References: nil, Generation: 3}}}}}
+				changed.Revision.Definition.Container.Secrets[0].Key = "other"
 			case "denied":
 				policy = ownerAccess{Apps: []appAccess{{Name: a.Revision.Name, Denied: true, Approvals: p.Apps[0].Approvals}}}
-			case "legacy":
-				request.ApprovalProtocol = 0
-			case "duplicate":
-				assignments = append(assignments, a)
+			case "legacy_grant":
+				policy = ownerAccess{Apps: []appAccess{{Name: a.Revision.Name, Approvals: []appApproval{{Secrets: approvalReferences(a.Revision.Definition.Container.Secrets), Generation: 3}}}}}
+			case "legacy_runtime":
+				version = 0
 			}
-			assignments[0] = changed
-			if approvedRequest(policy, protocol.Machine{Assignments: assignments}, request) != 0 {
-				t.Fatal("unapproved representation accepted")
+			canonical, e := schema.CanonicalBytes(changed.Revision.Definition)
+			if e != nil {
+				t.Fatal(e)
+			}
+			changed.Digest = schema.Digest(canonical)
+			changed.Revision.RevisionRef = changed.RevisionRef
+			if field == "definition" {
+				changed.Revision.Definition.Container.Secrets[0].Key = "unverified"
+			}
+			assignments := []schema.AppAssignment{changed}
+			if field == "duplicate" {
+				assignments = append(assignments, changed)
+			}
+			in := protocol.ResolveRequest{RevisionID: changed.RevisionID, Digest: changed.Digest, Generation: 1, Activation: 1, ApprovalProtocol: version}
+			epoch := approvedRequest(policy, protocol.Machine{Assignments: assignments}, in)
+			if (epoch == 3) != allowed {
+				t.Fatal("unexpected app binding authorization", epoch, allowed)
 			}
 		})
 	}
@@ -119,24 +141,23 @@ func TestIndependentApprovalDefaultsAndRevocation(t *testing.T) {
 
 	}
 
-	for _, field := range []string{"digest", "path", "denied", "uuid"} {
+	for _, field := range []string{"reference", "name", "denied", "missing_generation", "legacy_revision"} {
 		t.Run(field, func(t *testing.T) {
-			raw, _ := json.Marshal(a.Revision)
-			var revision schema.ResolvedRevision
-			_ = json.Unmarshal(raw, &revision)
-			path := "/v1/app-approvals/" + revision.Name
-			revoke := false
+			path := "/v1/app-approvals/" + a.Revision.Name
+			body := map[string]any{"expected_generation": 0, "secrets": approvalReferences(a.Revision.Definition.Container.Secrets)}
 			switch field {
-			case "digest":
-				revision.Digest = "sha256:" + strings.Repeat("0", 64)
-			case "path":
-				path += "-other"
+			case "reference":
+				body["secrets"] = []protocol.SecretReference{{Secret: "not-app-secret", Key: "token"}}
+			case "name":
+				path = "/v1/app-approvals/" + url.PathEscape(a.Revision.Name+" invalid")
 			case "denied":
-				revoke = true
-			case "uuid":
-				revision.RevisionID = "not-a-uuid"
+				body["denied"] = true
+			case "missing_generation":
+				delete(body, "expected_generation")
+			case "legacy_revision":
+				body = map[string]any{"expected_generation": 0, "revision": a.Revision}
 			}
-			w := call(t, s, path, "PUT", "operator", map[string]any{"expected_generation": 0, "denied": revoke, "revision": revision}, nil)
+			w := call(t, s, path, "PUT", "operator", body, nil)
 			if w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_approval") {
 				t.Fatal(w.Code, w.Body.String())
 			}
@@ -156,6 +177,16 @@ func TestIndependentApprovalDefaultsAndRevocation(t *testing.T) {
 	approveAssignment(t, s, a, 0)
 	s.HTTP.Transport = original
 	denied()
+	// A previous revision-scoped grant is never promoted to app-wide consent.
+	legacy, _ := json.Marshal([]any{map[string]any{"revision_id": a.RevisionID, "digest": a.Digest, "references": a.Revision.Definition.Container.Secrets, "generation": 99}})
+	if _, e := s.DB.Exec(`INSERT INTO lpsecrets.app_approvals(owner_id,app_name,denied,approvals) VALUES($1,$2,false,$3)`, testOwner, a.Revision.Name, string(legacy)); e != nil {
+		t.Fatal(e)
+	}
+	denied()
+	view = call(t, s, "/v1/app-approvals", "GET", "operator", nil, nil)
+	if json.Unmarshal(view.Body.Bytes(), &unchanged) != nil || len(unchanged.Apps) != 1 || len(unchanged.Apps[0].Approvals) != 0 {
+		t.Fatal("legacy grant was exposed as consent", view.Body.String())
+	}
 	approveAssignment(t, s, a, 0)
 	w := call(t, s, "/v1/runtime/versions", "POST", "", delivery, identity)
 	if w.Code != 409 || !strings.Contains(w.Body.String(), "secret_unprovisioned") {
@@ -168,7 +199,7 @@ func TestIndependentApprovalDefaultsAndRevocation(t *testing.T) {
 	if w = call(t, s, path, "PUT", "", map[string]any{"denied": true, "expected_generation": 1}, nil); w.Code != 401 {
 		t.Fatal("unauthenticated write", w.Code)
 	}
-	// Denying revokes all revisions; allowing scheduling/clearing deny never restores them.
+	// Denying revokes app access; clearing deny never restores it.
 	for gen, deny := range []bool{true, false} {
 		if w = call(t, s, path, "PUT", "operator", map[string]any{"denied": deny, "expected_generation": gen + 1}, nil); w.Code != 200 {
 			t.Fatal(w.Code, w.Body.String())
@@ -186,7 +217,7 @@ func TestIndependentApprovalDefaultsAndRevocation(t *testing.T) {
 		t.Fatal("reapproval did not establish a new epoch", p, e)
 	}
 	// Unassigned cleanup consumers are denied after revocation too.
-	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: a.RevisionID, Digest: a.Digest, AppName: a.Revision.Name, References: a.Revision.Definition.Container.Secrets}}
+	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: a.RevisionID, AppName: a.Revision.Name, References: a.Revision.Definition.Container.Secrets}}
 	m.machine.Assignments = nil
 	if w = call(t, s, path, "PUT", "operator", map[string]any{"denied": true, "expected_generation": 4}, nil); w.Code != 200 {
 		t.Fatal(w.Code)
@@ -207,7 +238,7 @@ func TestIndependentApprovalDefaultsAndRevocation(t *testing.T) {
 			m.machine.Assignments = nil
 		}
 		for _, epoch := range []int64{4, 6} {
-			consumer := protocol.RuntimeConsumer{RevisionRef: a.RevisionRef, Name: a.Revision.Name, ApprovalGeneration: epoch}
+			consumer := protocol.RuntimeConsumer{RevisionID: a.RevisionID, Name: a.Revision.Name, ApprovalGeneration: epoch}
 			requests := []protocol.ResolveRequest{}
 			if assigned {
 				requests = append(requests, in)
@@ -221,13 +252,40 @@ func TestIndependentApprovalDefaultsAndRevocation(t *testing.T) {
 		m.machine.Consumers = nil
 		consumers := []protocol.RuntimeConsumer{}
 		if kind == "metadata" {
-			m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: a.RevisionID, Digest: a.Digest, AppName: a.Revision.Name, References: a.Revision.Definition.Container.Secrets}}
+			m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: a.RevisionID, AppName: a.Revision.Name, References: a.Revision.Definition.Container.Secrets}}
 		} else {
-			consumers = append(consumers, protocol.RuntimeConsumer{RevisionRef: a.RevisionRef, Name: a.Revision.Name, ApprovalGeneration: 6})
+			consumers = append(consumers, protocol.RuntimeConsumer{RevisionID: a.RevisionID, Name: a.Revision.Name, ApprovalGeneration: 6})
 		}
 		checkBatch(map[string]any{"assignments": []any{}, "consumers": consumers}, true, false)
 
 	}
+
+	// Renewal blocks every revision of this app until old local consumers drain,
+	// while preserving independent app grants on the same machine.
+	other := approvalAssignment(t)
+	other.RevisionID = "44444444-4444-4444-8444-444444444444"
+	other.Revision.Name = "other"
+	other.Revision.Definition.Name = "other"
+	canonical, _ := schema.CanonicalBytes(other.Revision.Definition)
+	other.Digest = schema.Digest(canonical)
+	other.Revision.RevisionRef = other.RevisionRef
+	approveAssignment(t, s, other, 6)
+	m.machine.Consumers = nil
+	m.machine.Assignments = []schema.AppAssignment{a, other}
+	otherRequest := in
+	otherRequest.RevisionID = other.RevisionID
+	otherRequest.Digest = other.Digest
+	old := protocol.RuntimeConsumer{RevisionID: "33333333-3333-4333-8333-333333333333", Name: a.Revision.Name, ApprovalGeneration: 4}
+	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []protocol.ResolveRequest{in, otherRequest}, "consumers": []protocol.RuntimeConsumer{old}}, identity)
+	var batch struct {
+		Sets   map[string]protocol.VersionSet `json:"sets"`
+		Errors map[string]string              `json:"errors"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &batch) != nil || len(batch.Sets) != 1 || batch.Sets[other.RevisionID].ApprovalGeneration != 7 || batch.Errors[a.RevisionID] != "secrets_denied" || batch.Errors[old.RevisionID] != "secrets_denied" {
+		t.Fatal("renewal crossed an app drain barrier", w.Code, w.Body.String())
+	}
+
+	checkBatch(map[string]any{"approval_protocol": 1, "assignments": []protocol.ResolveRequest{in}, "consumers": []map[string]any{{"revision_id": a.RevisionID, "digest": a.Digest, "name": a.Revision.Name, "approval_generation": 6}}}, false, true)
 
 }
 

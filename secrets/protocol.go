@@ -188,7 +188,6 @@ type Machine struct {
 // value resolution or authorization of another incarnation.
 type SecretConsumer struct {
 	AppName    string                     `json:"app_name"`
-	Digest     string                     `json:"digest"`
 	RevisionID string                     `json:"revision_id"`
 	References []schema.SecretEnvironment `json:"references"`
 }
@@ -217,8 +216,15 @@ type Identity struct {
 	Service    *ServiceTrust `json:"service,omitempty"`
 }
 
+type SecretReference struct {
+	Secret string `json:"secret"`
+	Key    string `json:"key"`
+}
+
 type RuntimeConsumer struct {
-	schema.RevisionRef
+	RevisionID string `json:"revision_id"`
+	// Accepted from older senders; app grants do not use a consumer digest.
+	Digest             string `json:"digest,omitempty"`
 	Name               string `json:"name"`
 	ApprovalGeneration int64  `json:"approval_generation"`
 }

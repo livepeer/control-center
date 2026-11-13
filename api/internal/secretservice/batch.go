@@ -3,10 +3,8 @@ package secretservice
 import (
 	"database/sql"
 	"errors"
-	"github.com/livepeer/control-center/schema"
 	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
-	"slices"
 )
 
 func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +39,7 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sets := map[string]protocol.VersionSet{}
+	appNames := map[string]string{}
 	faults := map[string]string{}
 	for _, a := range in.Assignments {
 		assigned := eligibleAssignment(m, a)
@@ -81,14 +80,23 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 				faults[a.RevisionID] = "secret_changed"
 			} else {
 				sets[a.RevisionID] = v
+				appNames[a.RevisionID] = assigned.Revision.Name
 			}
 		}
 	}
+	blockedApps := map[string]bool{}
 	for _, consumer := range in.Consumers {
-		grant := access.grant(consumer.Name, consumer.RevisionRef)
+		grant := access.grant(consumer.Name)
 		if in.ApprovalProtocol != 1 || grant == nil || grant.Generation != consumer.ApprovalGeneration {
 			faults[consumer.RevisionID] = "secrets_denied"
 			delete(sets, consumer.RevisionID)
+			blockedApps[consumer.Name] = true
+		}
+	}
+	for id := range sets {
+		if blockedApps[appNames[id]] {
+			faults[id] = "secrets_denied"
+			delete(sets, id)
 		}
 	}
 	for _, id := range m.DeniedRevisions {
@@ -97,8 +105,8 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 	// Removed assignments can retain serving Pods during replacement. Observe
 	// their pinned declarations without granting any unwrap/start authority.
 	for _, consumer := range m.Consumers {
-		grant := access.grant(consumer.AppName, schema.RevisionRef{RevisionID: consumer.RevisionID, Digest: consumer.Digest})
-		if in.ApprovalProtocol != 1 || grant == nil || !slices.Equal(grant.References, consumer.References) {
+		grant := access.grant(consumer.AppName)
+		if in.ApprovalProtocol != 1 || grant == nil || !grant.covers(consumer.References) {
 			faults[consumer.RevisionID] = "secrets_denied"
 			continue
 		}
