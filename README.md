@@ -83,6 +83,7 @@ flowchart TB
 
 ## Documentation
 
+- [Operator secrets](docs/operator-secrets.md): independent Vault Transit service, enrollment and runtime delivery.
 - [App registry](docs/app-registry.md): publish app definitions and assign revisions to machines.
 - [Fleet discovery](docs/fleet-discovery.md): expose managed orchestrators through an aggregate inventory.
 - [Machine status](docs/machine-status.md): inspect rollout, configured health, registration, discovery and cleanup evidence.

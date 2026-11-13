@@ -13,3 +13,5 @@ disable:
   - metrics-server
 kubelet-arg:
   - "root-dir=@INSTALL_DIR@/kubelet"
+
+secrets-encryption: true

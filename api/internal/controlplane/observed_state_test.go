@@ -258,7 +258,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	r.Sequence = 0
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 409)
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
-	w = request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"fingerprint": strings.Repeat("a", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
+	w = request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("a", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
 	requireStatus(t, w, 200)
 	credential := credentials(t, w.Body.Bytes())
 	r.CredentialVersion = 2

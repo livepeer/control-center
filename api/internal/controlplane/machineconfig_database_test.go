@@ -83,7 +83,7 @@ func TestCredentialRefreshSerializesWithBlockedStateWrite(t *testing.T) {
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
 	refreshed := make(chan int, 1)
 	go func() {
-		refreshed <- request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}).Code
+		refreshed <- request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": s.enrollmentToken(m), "fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}).Code
 	}()
 	waitForStateLock(t, s, "UPDATE lpcc.machine_states SET revision=revision+1%", 1)
 	if err = blocking.Rollback(); err != nil {
@@ -288,7 +288,7 @@ func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 		if !refreshed {
 			refreshed = true
 			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
-			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}), 200)
+			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": s.enrollmentToken(m), "fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}), 200)
 		}
 		return nil, nil
 	}})
@@ -326,7 +326,7 @@ func TestTerminalBundleUsesRetirementCredential(t *testing.T) {
 		if d.NodeID == one["node_id"] && !changed {
 			changed = true
 			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
-			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}), 200)
+			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": s.enrollmentToken(m), "fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}), 200)
 			if err := s.RetireMachine(t.Context(), m.NodeID); err != nil {
 				t.Fatal(err)
 			}

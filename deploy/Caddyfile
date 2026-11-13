@@ -40,6 +40,13 @@
 }
 
 :8081 {
+	@secrets_metadata {
+		path /internal/secrets/nodes/*
+		method GET POST
+	}
+	handle @secrets_metadata {
+		reverse_proxy api:43812
+	}
 	@private path /internal /internal/*
 	handle @private {
 		respond "Not found" 404

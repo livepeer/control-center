@@ -193,8 +193,18 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 			desired.RetainedFiles, _ = artifact.Read(prior)
 		}
 	}
+	err = s.store.DB.QueryRowContext(ctx, `SELECT managed,encryption_ready FROM lpcc.secret_machines WHERE node_id=$1`, m.NodeID).Scan(&desired.ManagedSecrets, &desired.SecretsEncryptionReady)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	desired.Apps, err = machineapps.Snapshot(ctx, s.store.DB, m.NodeID)
 	s.prepareApps(ctx, &desired, err)
+	if err = s.fenceAppRepair(ctx, &desired, &record.Revision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
 	data, digest, err := s.deps.Build(desired)
 	if err != nil {
 		s.deps.Logger.Error("keeping previous configuration", "node_id", m.NodeID, "reason", "generation_failed")

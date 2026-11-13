@@ -46,7 +46,7 @@ func DiagnoseMetadata(ctx context.Context, m contract.Metadata, reporter Reporte
 	if reason == "" {
 		status = "ready"
 	}
-	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: contract.AppStatus{Reason: reason, Instances: []contract.InstanceStatus{}}})
+	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: contract.AppStatus{SecretsProtocol: 1, Reason: reason, Instances: []contract.InstanceStatus{}}})
 }
 
 func (r ControlReporter) Status(ctx context.Context, value Report) error {
@@ -88,7 +88,12 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 	if s.ClockUncertain {
 		fault = "clock_uncertain"
 	}
-	status := contract.AppStatus{StagedDigest: s.Staged, PublishedDigest: s.Published, AppliedDigest: s.Applied, Reason: fault, Instances: []contract.InstanceStatus{}, OwnerRecreatedAt: s.OwnerRecreatedAt}
+	status := contract.AppStatus{SecretsProtocol: 1, StagedDigest: s.Staged, PublishedDigest: s.Published, AppliedDigest: s.Applied, Reason: fault, Instances: []contract.InstanceStatus{}, OwnerRecreatedAt: s.OwnerRecreatedAt}
+	status.ManagedSecrets = s.Metadata.ManagedSecrets || (c.Secrets != nil && c.Secrets.Client.Enabled())
+	status.SecretsEncryptionReady = s.Metadata.SecretsEncryptionReady
+	if c.Secrets != nil {
+		status.SecretsIdentityReady = c.Secrets.Client.IdentityReady()
+	}
 	if s.Payload.Intent != nil {
 		status.DesiredGeneration = s.Payload.Intent.Generation
 		status.DesiredDigest = s.Payload.Index.IntentDigest
@@ -106,6 +111,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		}
 	}
 	clean := true
+	registeredInstances := map[string]bool{}
 	ids := instanceIDs(&s)
 	sort.SliceStable(ids, func(a, b int) bool {
 		x, y := s.Instances[ids[a]], s.Instances[ids[b]]
@@ -128,6 +134,8 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 			sessions = 0
 		}
 		registered := s.Identity.Confirmed && i.AppID != "" && !i.RegistrationGone && !nodeAt.IsZero()
+		p := proofs[id]
+		registeredInstances[id] = registered && p.PodUID == i.PodUID && p.App.Status == "ready" && p.Observation.Accepted && p.Observation.RunnerID == s.Identity.RunnerID && p.Observation.Credential == s.Identity.Credential && s.Identity.Sequence != nil && p.Observation.Sequence == *s.Identity.Sequence
 		var probe *contract.ProbeStatus
 		if c.Probes != nil {
 			probe = c.Probes.Status(id, i.PodUID)
@@ -161,6 +169,55 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
 	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
+	status.SecretRollouts = map[string]contract.SecretRollout{}
+	for revision, r := range s.SecretRollouts {
+		if !secretRevisionRelevant(s, revision) {
+			continue
+		}
+		if r.Reason == "" {
+			check := func(i *Instance) {
+				if i.Group.RevisionID == revision && i.Phase != "retired" && i.Phase != "removed" && !i.SecretPrepared && i.WithdrawalID == "" && preparationFailed(i.Reason) {
+					r.Reason = i.Reason
+				}
+			}
+			for _, i := range s.Instances {
+				check(i)
+			}
+			for _, i := range s.SecretSuccessors {
+				check(i)
+			}
+		}
+		complete := fault == "" && r.Reason == "" && r.Desired != ""
+		replicas := -1
+		var activation int64
+		if s.Payload.Intent != nil {
+			for _, a := range s.Payload.Intent.Entries {
+				if a.RevisionID == revision && a.Desired == "present" {
+					replicas, activation = a.Replicas, a.ActivationGeneration
+				}
+			}
+		}
+		count := 0
+		for id, i := range s.Instances {
+			if i.Group.RevisionID == revision && occupied(i) {
+				count++
+				if i.Group.ActivationGeneration != activation || i.SecretVersion != r.Desired || !ready[id] || !registeredInstances[id] || i.WithdrawalID != "" {
+					complete = false
+				}
+			}
+		}
+		r.Applied = ""
+		if complete && count > 0 && count == replicas {
+			r.Applied = r.Desired
+		}
+		status.SecretRollouts[revision] = r
+	}
+	status.Secrets = map[string]string{}
+	for _, i := range s.Instances {
+		if i.SecretPrepared && i.Phase != "removed" {
+			status.Secrets[i.Name] = i.SecretVersion
+		}
+	}
 	report := Report{ReportVersion: 1, ClockUncertain: s.ClockUncertain, NodeID: s.Metadata.NodeID, CredentialVersion: s.Metadata.CredentialVersion, Component: "runner", Generation: s.Metadata.Generation, BundleFormat: contract.BundleFormat, Ready: fault == "", Reason: "ready", Apps: status}
 	if fault != "" {
 		report.Ready = false

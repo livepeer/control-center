@@ -144,6 +144,9 @@ func ReadMetadata(b []byte) (contract.Metadata, error) {
 	if len(b) > 16384 || Decode(b, &m) != nil || !regexp.MustCompile(`^[a-z2-7]{26}$`).MatchString(m.NodeID) || m.Generation < 1 || m.CredentialVersion < 1 || m.BundleFormat != contract.BundleFormat {
 		return m, errors.New("metadata_invalid")
 	}
+	if m.ManagedSecrets && m.SecretsProtocol != 1 {
+		return m, errors.New("unsupported_secrets_protocol")
+	}
 	if m.Onchain.Validate() != nil {
 		return m, errors.New("metadata_onchain_invalid")
 	}
@@ -179,7 +182,11 @@ func InCluster() (*Kube, error) {
 }
 
 func (k *Kube) Request(ctx context.Context, method, resource string, payload any, result any) error {
-	return k.PatchType(ctx, method, resource, payload, result, "application/merge-patch+json")
+	contentType := "application/json"
+	if method == http.MethodPatch {
+		contentType = "application/merge-patch+json"
+	}
+	return k.PatchType(ctx, method, resource, payload, result, contentType)
 }
 func (k *Kube) PatchType(ctx context.Context, method, resource string, payload any, result any, contentType string) error {
 	if !strings.HasPrefix(resource, "/") || strings.HasPrefix(resource, "//") {

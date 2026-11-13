@@ -57,9 +57,11 @@ type ConnectorConfig struct {
 }
 
 type Desired struct {
-	Onchain      onchain.Config
-	OnchainError error
-	OnchainReady bool
+	ManagedSecrets         bool
+	SecretsEncryptionReady bool
+	Onchain                onchain.Config
+	OnchainError           error
+	OnchainReady           bool
 	Machine
 	Apps                    *schema.AppAssignmentSetV1
 	State                   State

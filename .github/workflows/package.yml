@@ -32,6 +32,9 @@ jobs:
           - name: runtime
             file: runtime/Dockerfile
             target: ''
+          - name: secrets
+            file: deploy/Dockerfile.secrets
+            target: ''
         include:
           - arch: amd64
             runner: ubuntu-26.04

@@ -28,6 +28,7 @@ services:
       - machine-token-secret
       - cloudflare-token
       - collector-access-keyring.json
+      - secrets-metadata-token
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:43812/readyz]
       interval: 30s
@@ -83,7 +84,7 @@ services:
     image: cloudflare/cloudflared:2026.10.7
     user: "65532:65532"
     network_mode: host
-    command: [tunnel, --no-autoupdate, --metrics, "127.0.0.1:23812", run]
+    command: [tunnel, --no-autoupdate, --metrics, "127.0.0.1:23813", run]
     environment:
       TUNNEL_TOKEN_FILE: /run/secrets/cloudflare-tunnel-token
     secrets:
@@ -108,6 +109,8 @@ secrets:
     file: ./secrets/collector-access-keyring.json
   cloudflare-tunnel-token:
     file: ./secrets/cloudflare-tunnel-token
+  secrets-metadata-token:
+    file: ./secrets-service-private/control-metadata-token
 
 volumes:
   registry-data:

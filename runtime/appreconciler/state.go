@@ -48,6 +48,11 @@ func (i Identity) sameOwner(other Identity) bool {
 }
 
 type Instance struct {
+	PublicationStarted  bool                `json:"publication_started,omitempty"`
+	SecretCleanupDone   bool                `json:"secret_cleanup_done,omitempty"`
+	SecretVersion       string              `json:"secret_version,omitempty"`
+	SecretPrepared      bool                `json:"secret_prepared,omitempty"`
+	SecretPolicy        int64               `json:"secret_policy_generation,omitempty"`
 	ID                  string              `json:"id"`
 	Group               appbundle.Group     `json:"group"`
 	Generation          int64               `json:"generation"`
@@ -88,33 +93,38 @@ type Receipt struct {
 	ArtifactDigest       string `json:"artifact_digest,omitempty"`
 }
 type State struct {
-	Version                 int                  `json:"version"`
-	Metadata                contract.Metadata    `json:"metadata"`
-	InputDigest             string               `json:"input_digest"`
-	Payload                 appbundle.Payload    `json:"payload"`
-	Instances               map[string]*Instance `json:"instances"`
-	Heads                   map[string]string    `json:"heads"`
-	Identity                Identity             `json:"identity"`
-	ReportSequence          uint64               `json:"report_sequence"`
-	MaintenanceID           string               `json:"maintenance_id,omitempty"`
-	MaintenanceWithdrawal   string               `json:"maintenance_withdrawal,omitempty"`
-	Staged                  string               `json:"staged,omitempty"`
-	Published               string               `json:"published,omitempty"`
-	Applied                 string               `json:"applied,omitempty"`
-	Snapshots               map[string]Snapshot  `json:"snapshots"`
-	Receipts                map[string]Receipt   `json:"receipts"`
-	LastClock               time.Time            `json:"last_clock"`
-	ClockUncertain          bool                 `json:"clock_uncertain"`
-	OwnerRecreatedAt        time.Time            `json:"owner_recreated_at,omitempty"`
-	Retirement              *contract.Evidence   `json:"retirement,omitempty"`
-	Report                  *Report              `json:"report,omitempty"`
-	AssignmentReasons       map[string]string    `json:"assignment_reasons,omitempty"`
-	SchedulingReason        string               `json:"scheduling_reason,omitempty"`
-	InputReason             string               `json:"input_reason,omitempty"`
-	OwnerReason             string               `json:"owner_reason,omitempty"`
-	ReportObservedAt        time.Time            `json:"report_observed_at,omitempty"`
-	ReportDeliveredAt       time.Time            `json:"report_delivered_at,omitempty"`
-	ReportDeliveredSequence uint64               `json:"report_delivered_sequence,omitempty"`
+	SecretRotationSlots     map[string]string                 `json:"secret_rotation_slots,omitempty"`
+	SecretWatermarks        map[string]int64                  `json:"secret_watermarks,omitempty"`
+	SecretPolicyGeneration  int64                             `json:"secret_policy_generation,omitempty"`
+	SecretRollouts          map[string]contract.SecretRollout `json:"secret_rollouts,omitempty"`
+	SecretSuccessors        map[string]*Instance              `json:"secret_successors,omitempty"`
+	Version                 int                               `json:"version"`
+	Metadata                contract.Metadata                 `json:"metadata"`
+	InputDigest             string                            `json:"input_digest"`
+	Payload                 appbundle.Payload                 `json:"payload"`
+	Instances               map[string]*Instance              `json:"instances"`
+	Heads                   map[string]string                 `json:"heads"`
+	Identity                Identity                          `json:"identity"`
+	ReportSequence          uint64                            `json:"report_sequence"`
+	MaintenanceID           string                            `json:"maintenance_id,omitempty"`
+	MaintenanceWithdrawal   string                            `json:"maintenance_withdrawal,omitempty"`
+	Staged                  string                            `json:"staged,omitempty"`
+	Published               string                            `json:"published,omitempty"`
+	Applied                 string                            `json:"applied,omitempty"`
+	Snapshots               map[string]Snapshot               `json:"snapshots"`
+	Receipts                map[string]Receipt                `json:"receipts"`
+	LastClock               time.Time                         `json:"last_clock"`
+	ClockUncertain          bool                              `json:"clock_uncertain"`
+	OwnerRecreatedAt        time.Time                         `json:"owner_recreated_at,omitempty"`
+	Retirement              *contract.Evidence                `json:"retirement,omitempty"`
+	Report                  *Report                           `json:"report,omitempty"`
+	AssignmentReasons       map[string]string                 `json:"assignment_reasons,omitempty"`
+	SchedulingReason        string                            `json:"scheduling_reason,omitempty"`
+	InputReason             string                            `json:"input_reason,omitempty"`
+	OwnerReason             string                            `json:"owner_reason,omitempty"`
+	ReportObservedAt        time.Time                         `json:"report_observed_at,omitempty"`
+	ReportDeliveredAt       time.Time                         `json:"report_delivered_at,omitempty"`
+	ReportDeliveredSequence uint64                            `json:"report_delivered_sequence,omitempty"`
 }
 
 func initialState() State {

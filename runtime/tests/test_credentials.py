@@ -33,6 +33,11 @@ source "$1"
 INSTALL_DIR=$2; export INSTALL_DIR
 if [[ -n $TEST_API ]]; then LIVEPEER_API_URL=$TEST_API; else unset LIVEPEER_API_URL; fi
 CREDENTIAL_TRANSITION=$TEST_MODE
+SECRET_PUBLIC=$(command cat "$INSTALL_DIR/fake-public-key" 2>/dev/null || printf public-fixture)
+replace_secrets_key() { SECRET_PUBLIC=replacement-fixture; printf '%s' "$SECRET_PUBLIC" > "$INSTALL_DIR/fake-public-key"; printf 'key-rotated\n' >> "$INSTALL_DIR/steps"; }
+secrets_key_proof() { printf signature-fixture; }
+registration_key_proof() { command cat >/dev/null; printf registration-proof-sentinel; }
+jq() { printf '%s\0' "$@" >> "$INSTALL_DIR/process-args"; command jq "$@"; }
 LIVEPEER_RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 chown() { :; }
 managed_installation() { return 0; }
@@ -62,6 +67,7 @@ kube() {
 }
 stage_manifests() { printf 'https-code\n' >> "$INSTALL_DIR/steps"; }
 curl() {
+  printf '%s\0' "$@" >> "$INSTALL_DIR/process-args"
   local previous='' arg headers=''
   for arg in "$@"; do
     if [[ "$previous" == --dump-header ]]; then headers=$arg; fi
@@ -74,7 +80,10 @@ curl() {
   fi
   printf 'refresh\n' >> "$INSTALL_DIR/steps"
   for arg in "$@"; do
-    if [[ "$previous" == --data-binary ]]; then printf '%s\n' "$arg" >> "$INSTALL_DIR/requests"; fi
+    if [[ "$previous" == --data-binary ]]; then
+      if [[ "$arg" == @* ]]; then command cat "${arg#@}" >> "$INSTALL_DIR/requests"; printf '\n' >> "$INSTALL_DIR/requests"
+      else printf '%s\n' "$arg" >> "$INSTALL_DIR/requests"; fi
+    fi
     previous=$arg
   done
   [[ "$FAIL_AT" != request ]] || return 1
@@ -143,6 +152,21 @@ transition_credentials
         self.assertGreater(next(i for i, x in enumerate(steps) if 'rollout status' in x), secret)
         self.assertTrue(any('create secret generic livepeer-runner-bootstrap' in x for x in steps[:next(i for i,x in enumerate(steps) if 'rollout status' in x)]))
 
+    def test_management_proof_is_in_body_and_never_process_arguments(self):
+        for mode in ('refresh', 'reenroll'):
+            with self.subTest(mode=mode):
+                result = self.transition(mode=mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                request = json.loads((self.root / 'requests').read_text().splitlines()[-1])
+                self.assertIn(request['management_proof'], ('b' * 64, 'c' * 64))
+                if mode == 'reenroll':
+                    self.assertEqual(request['public_key'], 'replacement-fixture')
+                    self.assertEqual(request['signature'], 'registration-proof-sentinel')
+                    self.assertNotIn(b'registration-proof-sentinel', (self.root / 'process-args').read_bytes())
+                arguments = (self.root / 'process-args').read_bytes()
+                self.assertNotIn(b'b' * 64, arguments)
+                self.assertNotIn(b'c' * 64, arguments)
+
     def test_unconfirmed_consumer_termination_prevents_refresh(self):
         result = self.transition('stop')
         self.assertNotEqual(result.returncode, 0)
@@ -154,16 +178,30 @@ transition_credentials
         state = self.root / 'volumes/app-reconciler/state'
         state.mkdir(parents=True)
         (state / 'journal').write_text('previous owner')
+        secrets=state.parent/'secrets';secrets.mkdir()
+        for name in ('managed','key.pem','identity.json'): (secrets/name).write_text('old enrollment')
+        (self.root/'k3s/server').mkdir(parents=True)
+        (self.root/'config/k3s.yaml').write_text('data-dir: fixture\n')
         result = self.transition('artifact', mode='reenroll')
         self.assertNotEqual(result.returncode, 0)
         archived = state.parent / 'state.aaaaaaaaaaaaaaaaaaaaaaaaaa/journal'
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertTrue((self.root / 'state/credential-transition.json').exists())
+        self.assertFalse((secrets/'managed').exists())
+        self.assertNotIn('secrets-encryption: true',(self.root/'config/k3s.yaml').read_text())
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertFalse((self.root / 'state/credential-transition.json').exists())
         self.assertTrue((state.parent / 'reenrolled-cccccccccccccccccccccccccc').exists())
+
+    def test_reenrollment_changes_key_once_and_retries_with_its_proof(self):
+        self.assertNotEqual(self.transition('request', mode='reenroll').returncode, 0)
+        self.assertEqual(self.transition(mode='reenroll').returncode, 0)
+        requests = [json.loads(x) for x in (self.root / 'requests').read_text().splitlines()]
+        self.assertEqual(requests[0]['public_key'], 'replacement-fixture')
+        self.assertEqual(requests[0]['public_key'], requests[1]['public_key'])
+        self.assertEqual((self.root / 'steps').read_text().count('key-rotated'), 1)
 
     def test_reenrollment_resume_rejects_a_different_issued_identity(self):
         self.assertNotEqual(self.transition('artifact', mode='reenroll').returncode, 0)

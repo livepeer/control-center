@@ -14,3 +14,7 @@ ui/playwright-report/
 /deploy/config.toml
 /deploy/secrets/
 /deploy/bootstrap/
+
+/deploy/secrets-service-private/
+/deploy/secrets-service.env
+/deploy/vault-private/

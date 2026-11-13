@@ -49,7 +49,7 @@ func boundedInput(r *http.Request, out any, limit int64) error {
 	return nil
 }
 func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
-	owner, e := verifyEnrollment(s.params.JWTSigningSecret, bearer(r))
+	grant, e := s.params.enrollmentGrant(bearer(r), s.currentTime(), false)
 	if e != nil {
 		fail(w, 401, "fresh owner enrollment token required")
 		return
@@ -59,6 +59,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
+		ManagementProof string `json:"management_proof"`
 		Fingerprint     string `json:"fingerprint"`
 		InstallDir      string `json:"install_dir"`
 		OperationID     string `json:"operation_id"`
@@ -79,6 +80,10 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if e = s.acceptEnrollmentGrant(r.Context(), tx, grant); e != nil {
+		s.respondError(w, e)
+		return
+	}
 	var m Machine
 	e = tx.QueryRowContext(r.Context(), `SELECT node_id,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
 	if errors.Is(e, sql.ErrNoRows) {
@@ -89,7 +94,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	if owner != m.OwnerID || in.Fingerprint != m.Fingerprint || in.InstallDir != m.InstallDir {
+	if grant.Subject != m.OwnerID || in.Fingerprint != m.Fingerprint || in.InstallDir != m.InstallDir {
 		fail(w, 403, "installation identity mismatch")
 		return
 	}
@@ -100,9 +105,19 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 			fail(w, 409, "refresh operation is conflicting or superseded")
 			return
 		}
+		previous := m
+		previous.CredentialVersion = expected
+		if !hmacEqual(in.ManagementProof, s.enrollmentToken(previous)) && !hmacEqual(in.ManagementProof, s.enrollmentToken(m)) {
+			fail(w, 403, "saved management credential required")
+			return
+		}
 	} else if errors.Is(e, sql.ErrNoRows) {
 		if in.ExpectedVersion != m.CredentialVersion {
 			fail(w, 409, "credential version changed")
+			return
+		}
+		if !hmacEqual(in.ManagementProof, s.enrollmentToken(m)) {
+			fail(w, 403, "saved management credential required")
 			return
 		}
 		m.CredentialVersion++
@@ -125,6 +140,10 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 
 	} else {
 		s.databaseError(w, e)
+		return
+	}
+	if !s.currentTime().Before(grant.ExpiresAt.Time) {
+		fail(w, 401, "enrollment grant expired")
 		return
 	}
 	if e = tx.Commit(); e != nil {

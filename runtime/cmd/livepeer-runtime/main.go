@@ -21,6 +21,7 @@ import (
 	"github.com/livepeer/control-center/runtime/consumer"
 	"github.com/livepeer/control-center/runtime/httpsource"
 	"github.com/livepeer/control-center/runtime/management"
+	"github.com/livepeer/control-center/runtime/secretclient"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -158,6 +159,7 @@ func appReconciler(ctx context.Context, args []string) error {
 	probes := appreconciler.NewProbes()
 	probes.OnChange = owner.Refresh
 	controller := appreconciler.Controller{Journal: journal, Input: appreconciler.Source{Kube: kube, Client: transport.HTTPClient(), ArtifactURL: *sourceURL, IdentityFile: *identity, NodeID: control.NodeID}, Cluster: appreconciler.Kubernetes{Client: kube, NodeID: control.NodeID}, Owner: owner, Store: store, ArtifactURL: *artifactURL, Reporter: appreconciler.ControlReporter{Client: reports}, Probes: probes}
+	controller.Secrets = &appreconciler.SecretDelivery{Client: &secretclient.Client{Directory: filepath.Join(*directory, "secrets")}, Kube: kube}
 	var stateLost atomic.Bool
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" && stateLost.Load() {

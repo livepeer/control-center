@@ -517,15 +517,9 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Empty onchain, certificate and retirement snapshot migrations can roll back while
-	// this enrollment is active; assignment history must still be preserved.
-	for range 3 {
-		if err := migrations.Down(t.Context(), s.db, files); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := migrations.Down(t.Context(), s.db, files); err == nil || !strings.Contains(err.Error(), "retain assignment schema") {
-		t.Fatal("rollback did not protect assignment history", err)
+	// Requested assignment history is now part of the operator-policy schema.
+	if err := migrations.Down(t.Context(), s.db, files); err == nil || !strings.Contains(err.Error(), "retain operator secrets schema") {
+		t.Fatal("rollback did not protect requested assignment history", err)
 	}
 	if count(t, s, `SELECT count(*) FROM lpcc.machine_app_versions`) != 2 {
 		t.Fatal("rollback changed history")

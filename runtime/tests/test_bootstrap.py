@@ -226,6 +226,18 @@ main --status --install-dir "$1"
         self.assertEqual(result.stdout.strip(), 'status')
         self.assertFalse((self.root / 'not-created').exists())
 
+    def test_main_rejects_transition_target_before_creating_identity(self):
+        for mode in ('--refresh-credentials','--reenroll'):
+            target=self.root/mode.removeprefix('--')
+            result=self.shell('''preflight() { :; }
+lock_installation() { :; }
+check_existing_installation() { :; }
+main "$2" --install-dir "$1"
+''',str(target),mode)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('initialized installation',result.stderr)
+            self.assertFalse(target.exists())
+
     def test_main_stage_order_without_host_mutation(self):
         result = self.shell('''
 preflight() { echo eligibility; }

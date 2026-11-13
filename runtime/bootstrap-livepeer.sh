@@ -104,12 +104,13 @@ authenticate_node() {
     request=$(jq -nc --arg fingerprint "$INSTALLATION_FINGERPRINT" --arg hostname "$(hostname)" \
       --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" --argjson development_http "${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0}" \
       '{fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$k3s_version,development_http:($development_http==1)}')
+    if [[ -n ${SECRET_PUBLIC:-} ]]; then request=$(jq -c --arg public "$SECRET_PUBLIC" --rawfile signature <(registration_key_proof <<< "$request") '.+{public_key:$public,signature:$signature}' <<< "$request"); fi
     log 'Registering machine with the Livepeer API.'
     # Pass the bearer header through a descriptor, rather than curl's argv.
     response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 \
       --proto '=http,https' --write-out '\n%{http_code}' --request POST --header 'Content-Type: application/json' \
       --config <(printf 'header = "Authorization: Bearer %s"\n' "$ENROLLMENT_TOKEN") \
-      --data-binary "$request" "$api/v1/nodes/register") || die 'registration request failed; check LIVEPEER_API_URL and API availability'
+      --data-binary @<(printf '%s' "$request") "$api/v1/nodes/register") || die 'registration request failed; check LIVEPEER_API_URL and API availability'
     ENROLLMENT_TOKEN=''
     status=${response##*$'\n'}
     case "$status" in
@@ -187,7 +188,7 @@ prepare_installation() {
   if [[ ! -f "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]]; then
     random_token | atomic_write "$INSTALL_DIR/credentials/runner-bootstrap.secret"
   fi
-  chmod 0600 "$INSTALL_DIR/credentials/"*
+  find "$INSTALL_DIR/credentials" -maxdepth 1 -type f -exec chmod 0600 {} +
   printf '1\n' | atomic_write "$INSTALL_DIR/state/enrolled"
 }
 
@@ -212,7 +213,10 @@ write_host_configuration() {
   render_template "$SCRIPT_DIR/config/gvisor.conflist" "$INSTALL_DIR/config/gvisor-cni/10-gvisor.conflist"
   render_template "$SCRIPT_DIR/config/runsc.toml" "$INSTALL_DIR/config/runsc.toml"
   render_template "$SCRIPT_DIR/config/containerd.tmpl" "$containerd_config"
+  local preserve_unencrypted=0
+  if [[ -d "$INSTALL_DIR/k3s/server" ]] && ! grep -q '^secrets-encryption: true$' "$INSTALL_DIR/config/k3s.yaml"; then preserve_unencrypted=1; fi
   render_template "$SCRIPT_DIR/config/k3s.yaml" "$INSTALL_DIR/config/k3s.yaml"
+  if (( preserve_unencrypted )); then sed -i '/^secrets-encryption: true$/d' "$INSTALL_DIR/config/k3s.yaml"; fi
   render_template "$SCRIPT_DIR/config/kubelet.conf" "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d/10-livepeer.conf"
   render_template "$SCRIPT_DIR/config/livepeer-k3s.service" "$INSTALL_DIR/systemd/$UNIT"
   render_template "$SCRIPT_DIR/config/firewall.nft" "$INSTALL_DIR/config/firewall.nft"
@@ -326,8 +330,20 @@ main() {
   # Serialize enrollment reads as well as writes to prevent concurrent token changes.
   lock_installation
   check_existing_installation
-  if [[ -n "$CREDENTIAL_TRANSITION" ]]; then transition_credentials; return; fi
+  if [[ -n "$CREDENTIAL_TRANSITION" ]]; then
+    managed_installation || die 'credential transition requires an initialized installation'
+    [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" && -s "$INSTALL_DIR/credentials/identity.json" ]] || die 'restore the saved enrollment credentials before changing credentials'
+    read_identity "$(cat "$INSTALL_DIR/credentials/identity.json")" || die 'invalid saved enrollment identity'
+    [[ -n "$ENROLLMENT_TOKEN" ]] || die 'credential transition requires a fresh enrollment command'
+    [[ $(api_url) == https://* ]] || die 'credential transition requires the verified HTTPS API'
+    prepare_secrets_enrollment; transition_credentials; enroll_secrets; return
+  fi
   [[ ! -f "$INSTALL_DIR/state/credential-transition.json" ]] || die 'resume the interrupted credential transition before normal installation'
+  [[ -f "$INSTALL_DIR/credentials/node-id" || -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires an enrollment command'
+  local verified_api
+  verified_api=$(api_url)
+  [[ "$verified_api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS'
+  prepare_secrets_enrollment
   authenticate_node
   trap diagnostics ERR
   prepare_installation
@@ -336,6 +352,7 @@ main() {
   run_phase manifests stage_manifests
   run_phase host write_host_configuration
   run_phase cluster bootstrap_cluster
+  run_phase secrets enroll_secrets
   run_phase smoke smoke_test
   run_phase complete true
   log "Ready. Kubeconfig: $INSTALL_DIR/config/kubeconfig.yaml"

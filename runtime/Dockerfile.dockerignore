@@ -7,3 +7,6 @@
 !runtime/
 !runtime/**/
 !runtime/**/*.go
+
+!secrets/
+!secrets/*.go

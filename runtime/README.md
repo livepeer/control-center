@@ -16,7 +16,7 @@ Install the host packages first:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl jq tar bzip2 gzip coreutils \
+sudo apt-get install -y ca-certificates openssl curl jq tar bzip2 gzip coreutils \
   gawk iproute2 kmod procps util-linux systemd nftables diffutils findutils
 ```
 
@@ -44,9 +44,11 @@ curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
   LIVEPEER_ENROLLMENT_TOKEN='<TOKEN>' sudo --preserve-env=LIVEPEER_ENROLLMENT_TOKEN sh -s --
 ```
 
-The one-hour enrollment token can enroll multiple machines. The installer saves
-service credentials in owner-only files and uses them for reruns. Runtime polls
-Control Center every minute and delivers the last valid configuration to Flux.
+The one-hour enrollment command can enroll multiple machines. The installer saves
+service credentials in owner-only files and uses them for reruns. See [operator
+secrets](../docs/operator-secrets.md#enrollment-and-identity) for managed identity
+setup and recovery. Runtime polls Control Center every minute and delivers the
+last valid configuration to Flux.
 
 The default installation root is `/opt/livepeer`. To choose another root on
 first enrollment, add `--install-dir /srv/livepeer` after `sh -s --`. Use the
@@ -122,28 +124,28 @@ The Runtime connector obtains a Cloudflare Tunnel token and starts cloudflared.
 See the [machine tunnel runbook](../docs/machine-tunnels.md) for backend setup,
 connector image publication, credentials and recovery.
 
-To refresh credentials, use a fresh owner enrollment JWT with the original
+To refresh credentials, use a fresh owner enrollment command with the original
 HTTPS API origin and installation root. For a custom deployment, export the
 original `LIVEPEER_API_URL` first:
 
 ```sh
 set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
-  LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --refresh-credentials --install-dir /opt/livepeer
+  LIVEPEER_ENROLLMENT_TOKEN='<FRESH_TOKEN>' sh -s -- --refresh-credentials --install-dir /opt/livepeer
 ```
 
-If interrupted, repeat with a fresh JWT. Refresh retains the enrollment, tunnel
+If interrupted, repeat with a fresh token. Refresh retains the enrollment, tunnel
 UUID, local runner credential and installed K3s version. Management refresh immediately fences management access; the loaded submission grant remains valid until its replacement is observed.
 
 After the backend removes an enrollment and confirms app cleanup, use
-`--reenroll` with a fresh owner JWT, the original API override for custom
+`--reenroll` with a fresh owner token, the original API override for custom
 deployments, and the same root to create a new enrollment while retaining local
 data:
 
 ```sh
 set +x
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
-  LIVEPEER_ENROLLMENT_TOKEN='<FRESH_OWNER_JWT>' sh -s -- --reenroll --install-dir /opt/livepeer
+  LIVEPEER_ENROLLMENT_TOKEN='<FRESH_TOKEN>' sh -s -- --reenroll --install-dir /opt/livepeer
 ```
 
 Forced enrollment removal stops Node and preserves its database. Routes and
