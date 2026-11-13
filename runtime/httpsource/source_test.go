@@ -515,3 +515,74 @@ func TestAppValidationFailureRemainsReportableWithoutPayloadExcerpt(t *testing.T
 		t.Fatal("raw validation error crossed status wire", report)
 	}
 }
+
+func TestSoftwareObservations(t *testing.T) {
+	f := newFixture(t)
+	oldVersion, oldCommit := Version, Commit
+	Version, Commit = "v1", "abcdef123"
+	t.Cleanup(func() { Version, Commit = oldVersion, oldCommit })
+	node := `{"metadata":{"uid":"pod","labels":{"app":"orchestrator"}},"spec":{"nodeName":"host","containers":[{"name":"orchestrator","image":"desired:unobserved"}]},"status":{"podIP":"10.42.0.2","containerStatuses":[{"name":"orchestrator","containerID":"containerd://old","imageID":"containerd://sha256:actual","state":{"running":{}}}]}}`
+	reads, restart := 0, false
+	f.kube.reply = func(path string) any {
+		pod := node
+		if !strings.Contains(path, "/livepeer/pods?") {
+			labels := `"app":"source-controller"`
+			if strings.Contains(path, "/kube-system/") {
+				labels = `"k8s-app":"kube-dns"`
+			}
+			if strings.Contains(path, "/system-upgrade/") {
+				labels = `"upgrade.cattle.io/plan":"livepeer-k3s"`
+				pod = strings.Replace(pod, `"containerStatuses":`, `"initContainerStatuses":[{"name":"drain","containerID":"containerd://drain","imageID":"containerd://sha256:drain","state":{"running":{}}}],"containerStatuses":`, 1)
+			}
+			pod = strings.Replace(pod, `"app":"orchestrator"`, labels, 1)
+		}
+		if strings.Contains(path, "labelSelector=") {
+			reads++
+			if restart && reads%2 == 0 {
+				pod = strings.ReplaceAll(pod, "containerd://old", "containerd://new")
+			}
+		}
+		return json.RawMessage(`{"items":[` + pod + `]}`)
+	}
+	f.source.Control.Client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "10.42.0.2:8936" || r.Header.Get("Authorization") != "" {
+			t.Fatal("unexpected build probe", r.URL)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("# TYPE livepeer_build_info gauge\nlivepeer_build_info{component=\"orchestrator\",version=\"v1\",revision=\"abcdef123\"} 1\n"))}, nil
+	})
+	installed := installedRecord{RecordedAt: time.Now().Add(-24 * time.Hour).UTC(), FluxCLI: "v2.7.0", GVisor: "release-observed"}
+	f.source.InstalledSoftwareFile = filepath.Join(t.TempDir(), "software.json")
+	b, _ := json.Marshal(installed)
+	if err := os.WriteFile(f.source.InstalledSoftwareFile, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	find := func(o []contract.SoftwareIdentity, name string) *contract.SoftwareIdentity {
+		for _, i := range o {
+			if i.Component == name {
+				return &i
+			}
+		}
+		return nil
+	}
+	o := f.source.software(t.Context(), "host")
+	if n, i := find(o, "livepeer-node"), find(o, "gvisor"); n == nil || n.Commit != "abcdef123" || i == nil || i.Scope != "installed" || !i.RecordedAt.Equal(installed.RecordedAt) || len(o) != 9 {
+		t.Fatalf("lost observations: %+v", o)
+	}
+	if c := find(o, "livepeer/orchestrator/orchestrator"); c == nil || c.ImageID != "containerd://sha256:actual" || find(o, "kube-system/coredns/orchestrator") == nil || find(o, "system-upgrade/livepeer-k3s-upgrade/drain") == nil {
+		t.Fatal("invented image identity")
+	}
+	restart = true
+	reads = 0
+	o = f.source.software(t.Context(), "host")
+	if find(o, "livepeer-node") != nil || find(o, "gvisor") == nil {
+		t.Fatal("restart contaminated independent observations")
+	}
+	restart = false
+	if err := os.Remove(f.source.InstalledSoftwareFile); err != nil {
+		t.Fatal(err)
+	}
+	o = f.source.software(t.Context(), "host")
+	if find(o, "gvisor") != nil || find(o, "livepeer-node") == nil {
+		t.Fatal("missing installation record contaminated live observations")
+	}
+}

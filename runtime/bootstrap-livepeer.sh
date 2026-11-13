@@ -171,6 +171,7 @@ prepare_installation() {
     "$INSTALL_DIR/lib" \
     "$INSTALL_DIR/volumes" "$INSTALL_DIR/kubelet" "$INSTALL_DIR/k3s/agent/etc/containerd" \
     "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d"
+  install -d -m 0755 "$INSTALL_DIR/volumes/installed-software"
   install -d -m 0700 "$INSTALL_DIR/credentials" "$INSTALL_DIR/state" "$INSTALL_DIR/download" \
     "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
@@ -244,6 +245,7 @@ write_host_configuration() {
   else
     systemctl start "$UNIT"
   fi
+  "$INSTALL_DIR/bin/livepeer-record-version" "$INSTALL_DIR/bin/k3s" "$INSTALL_DIR/state/k3s-version" "$INSTALL_DIR/lib/recovery.sh" "$INSTALL_DIR"
   mv "$INSTALL_DIR/state/host-config.new" "$INSTALL_DIR/state/host-config.sha256"
   rm -f -- "$INSTALL_DIR/state/k3s-restart-required"
 }

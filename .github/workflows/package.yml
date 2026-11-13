@@ -63,6 +63,7 @@ jobs:
           load: true
           tags: controlcenter-${{ matrix.image.name }}:test-${{ matrix.arch }}
           build-args: |
+            VERSION=${{ steps.source.outputs.revision }}
             COMMIT=${{ steps.source.outputs.revision }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

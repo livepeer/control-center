@@ -15,7 +15,7 @@ ExecStartPre=@MODPROBE@ br_netfilter
 ExecStartPre=@MODPROBE@ veth
 ExecStartPre=@MODPROBE@ vxlan
 ExecStartPre=@SYSCTL@ -w net.ipv4.ip_forward=1 net.bridge.bridge-nf-call-iptables=1
-ExecStartPre=@INSTALL_DIR@/bin/livepeer-record-version @INSTALL_DIR@/bin/k3s @INSTALL_DIR@/state/k3s-version @INSTALL_DIR@/lib/recovery.sh
+ExecStartPre=@INSTALL_DIR@/bin/livepeer-record-version @INSTALL_DIR@/bin/k3s @INSTALL_DIR@/state/k3s-version @INSTALL_DIR@/lib/recovery.sh @INSTALL_DIR@
 KillMode=process
 Delegate=yes
 LimitNOFILE=1048576

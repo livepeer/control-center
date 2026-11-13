@@ -32,7 +32,8 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  await page.route('**/api/**',async route=>{
   const req=route.request();mainRequests.push(req.postData()||'')
   switch(new URL(req.url()).pathname){
-   case '/api/config':return route.fulfill({json:{supabase_url:'http://auth.test',supabase_publishable_key:'fixture',public_api_url:'https://api.example',secrets_url:origin}})
+   case '/api/config':return route.fulfill({json:{supabase_url:'http://auth.test',supabase_publishable_key:'fixture'}})
+   case '/api/operator/config':expect(req.headers().authorization).toBe(`Bearer ${session.access_token}`);return route.fulfill({json:{public_api_url:'https://api.example',secrets_url:origin}})
    case '/api/bootstrap-token':return route.fulfill({json:{token:'control.grant.signature',expires_at:new Date(expiry*1000).toISOString()}})
    case '/api/machines':return route.fulfill({json:{machines:[]}})
    case '/api/me':return route.fulfill({json:{user_id:owner,is_admin:false}})

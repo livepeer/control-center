@@ -237,7 +237,7 @@ func httpSource(ctx context.Context, args []string) error {
 	}
 	store := artifact.Store{Directory: *directory}
 	ordered := &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}
-	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity}
+	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, InstalledSoftwareFile: "/installed-software/software.json", NodeName: os.Getenv("NODE_NAME")}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	socketErrors := make(chan error, 1)

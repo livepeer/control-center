@@ -24,7 +24,8 @@ async function setup(page: Page, initialAdmin = true) {
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
     const actor = route.request().headers().authorization === `Bearer ${session(b).access_token}` ? b : a
-    if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture-public', public_api_url: 'http://localhost:41932' } })
+    if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture-public' } })
+    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932' } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture-enrollment', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
     if (path === '/api/me') {
