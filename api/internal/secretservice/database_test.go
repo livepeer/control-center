@@ -431,6 +431,11 @@ func TestResetFencesEveryPreviousKey(t *testing.T) {
 		if w := call(t, restarted, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, old); w.Code != 403 {
 			t.Fatal("old identity revived", w.Code)
 		}
+		forged := *old
+		forged.Generation = current.Generation
+		if w := call(t, restarted, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, &forged); w.Code != 403 {
+			t.Fatal("retired key claimed the current generation", w.Code)
+		}
 		if w := call(t, restarted, "/v1/machines/activate", "POST", "", map[string]bool{"admission_ready": true}, current); w.Code != 200 {
 			t.Fatal("replacement identity refused", w.Code, w.Body.String())
 		}

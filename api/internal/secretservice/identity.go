@@ -116,7 +116,7 @@ type identityReader interface {
 
 func (s *Service) machineWith(r *http.Request, q identityReader) (protocol.Machine, int64, error) {
 	var m protocol.Machine
-	id, ok := r.Context().Value(requestIdentityKey{}).(protocol.RequestClaims)
+	id, ok := r.Context().Value(requestIdentityKey{}).(requestIdentity)
 	if !ok {
 		return m, 0, protocol.ErrDenied
 	}
@@ -127,7 +127,7 @@ func (s *Service) machineWith(r *http.Request, q identityReader) (protocol.Machi
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return m, 0, protocol.ErrUnavailable
 	}
-	if e != nil || revoked || id.Generation != expected {
+	if e != nil || revoked || id.Generation != expected || id.PublicKey != key {
 		return m, 0, protocol.ErrDenied
 	}
 	m, e = s.Metadata.Machine(r.Context(), id.Subject, nil)
@@ -156,18 +156,14 @@ func (s *Service) activate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	id := r.Context().Value(requestIdentityKey{}).(protocol.RequestClaims)
+	id := r.Context().Value(requestIdentityKey{}).(requestIdentity)
 	if lockIdentity(r.Context(), tx, id.Subject) != nil {
 		fail(w, 503, "unavailable")
 		return
 	}
 	m, _, e := s.machineWith(r, tx)
 	if e != nil {
-		if errors.Is(e, protocol.ErrUnavailable) {
-			fail(w, 503, "unavailable")
-		} else {
-			fail(w, 403, "identity_refused")
-		}
+		failAuthorization(w, e, 403, "identity_refused")
 		return
 	}
 	m, e = s.Metadata.Machine(r.Context(), m.NodeID, &protocol.MachineBinding{EnrollRequest: protocol.EnrollRequest{NodeID: m.NodeID, PublicKey: m.PublicKey}, Owner: m.Owner, Activate: true, AdmissionReady: true})

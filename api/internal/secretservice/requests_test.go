@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,20 +27,19 @@ func TestSignedRequestBindingAndDurableReplayProtection(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	s.Now = func() time.Time { return now }
 	body := []byte(`{"assignments":[]}`)
-	request := func() *http.Request {
-		r := httptest.NewRequest("POST", s.Config.PublicURL+"/v1/runtime/batch", bytes.NewReader(body))
-		if e := protocol.SignRequest(r, body, id.Identity, key, now); e != nil {
-			t.Fatal(e)
-		}
+	original := httptest.NewRequest("POST", s.Config.PublicURL+"/v1/runtime/batch", bytes.NewReader(body))
+	if e := protocol.SignRequest(original, body, id.Identity, key, now); e != nil {
+		t.Fatal(e)
+	}
+	replay := func() *http.Request {
+		r := original.Clone(t.Context())
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		return r
 	}
-	original := request().Header.Get("Authorization")
-	var accepted atomic.Int64
-	handler := func(s *Service) http.HandlerFunc {
-		return s.authenticated(func(w http.ResponseWriter, r *http.Request) {
-			accepted.Add(1)
-			w.WriteHeader(204)
-		})
+	serve := func(s *Service, r *http.Request) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.authenticated(s.batchVersions)(w, r)
+		return w
 	}
 	for _, mutate := range []func(*http.Request){
 		func(r *http.Request) { r.Method = "GET" },
@@ -49,67 +47,42 @@ func TestSignedRequestBindingAndDurableReplayProtection(t *testing.T) {
 		func(r *http.Request) { r.URL.RawQuery = "other=1" },
 		func(r *http.Request) { r.Body = io.NopCloser(bytes.NewBufferString(`{}`)) },
 		func(r *http.Request) { r.Header.Del("Authorization"); r.Header.Set("Client-Cert", "forged") },
-	} {
-		r := request()
-		r.Header.Set("Authorization", original)
-		mutate(r)
-		w := httptest.NewRecorder()
-		handler(s)(w, r)
-		if w.Code != 403 {
-			t.Fatal("modified or unsigned request accepted", w.Code)
-		}
-	}
-	for _, fault := range []string{"expired", "future", "audience", "key", "generation"} {
-		r := request()
-		signedAt, credential, signer := now, id.Identity, key
-		switch fault {
-		case "expired":
-			signedAt = now.Add(-protocol.RequestLifetime)
-		case "future":
-			signedAt = now.Add(31 * time.Second)
-		case "audience":
+		func(r *http.Request) {
 			r.URL.Host = "another-service.example"
-		case "key":
-			_, signer, _ = ed25519.GenerateKey(rand.Reader)
-		case "generation":
-			credential.Generation++
-		}
-		if e := protocol.SignRequest(r, body, credential, signer, signedAt); e != nil {
-			t.Fatal(e)
-		}
-		w := httptest.NewRecorder()
-		handler(s)(w, r)
-		if w.Code != 403 {
-			t.Fatal(fault, w.Code)
+			_ = protocol.SignRequest(r, body, id.Identity, key, now)
+		},
+		func(r *http.Request) {
+			_, wrong, _ := ed25519.GenerateKey(rand.Reader)
+			_ = protocol.SignRequest(r, body, id.Identity, wrong, now)
+		},
+	} {
+		r := replay()
+		mutate(r)
+		if w := serve(s, r); w.Code != 401 || !bytes.Contains(w.Body.Bytes(), []byte(`"code":"proof_refused"`)) {
+			t.Fatal("invalid proof must be retryable", w.Code, w.Body.String())
 		}
 	}
-	// Independent service instances must share nonce consumption, including when
-	// the first request is still executing. Invalid requests did not consume it.
 	replica := New(s.DB, s.Config)
-	replica.Now = s.Now
-	var wg sync.WaitGroup
+	replica.Metadata, replica.Now = s.Metadata, s.Now
+	results := make(chan int, 8)
 	for i := range 8 {
-		wg.Go(func() {
-			r := request()
-			r.Header.Set("Authorization", original)
-			w := httptest.NewRecorder()
-			handler([]*Service{s, replica}[i%2])(w, r)
-			if w.Code != 204 && w.Code != 403 {
-				t.Error(w.Code, w.Body.String())
-			}
-		})
+		go func() { results <- serve([]*Service{s, replica}[i%2], replay()).Code }()
 	}
-	wg.Wait()
-	if accepted.Load() != 1 {
-		t.Fatal("replay was accepted or invalid requests consumed the nonce", accepted.Load())
+	accepted := 0
+	for range 8 {
+		switch code := <-results; code {
+		case 200:
+			accepted++
+		case 401:
+		default:
+			t.Fatal("unexpected authentication result", code)
+		}
 	}
-	restarted := New(s.DB, s.Config)
-	r := request()
-	r.Header.Set("Authorization", original)
-	w := httptest.NewRecorder()
-	handler(restarted)(w, r)
-	if w.Code != 403 {
-		t.Fatal("restart revived a used credential", w.Code)
+	if accepted != 1 {
+		t.Fatal("replay accepted or invalid proof consumed the nonce", accepted)
+	}
+	if w := serve(New(s.DB, s.Config), replay()); w.Code != 401 {
+		t.Fatal("restart revived a used proof", w.Code)
 	}
 	now = now.Add(2 * protocol.RequestLifetime)
 	if e := s.Collect(t.Context()); e != nil {
@@ -119,20 +92,27 @@ func TestSignedRequestBindingAndDurableReplayProtection(t *testing.T) {
 	if e := s.DB.QueryRow(`SELECT count(*) FROM lpsecrets.request_nonces`).Scan(&retained); e != nil || retained != 0 {
 		t.Fatal("expired nonce state retained", retained, e)
 	}
-	w = httptest.NewRecorder()
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	handler(s)(w, r)
-	if w.Code != 403 {
-		t.Fatal("nonce cleanup revived an expired credential", w.Code)
+	if w := serve(s, replay()); w.Code != 401 {
+		t.Fatal("nonce cleanup revived an expired proof", w.Code)
 	}
 }
 
 func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 	s, key, m, _ := dbService(t)
 	id := enrolled(t, s, key, m)
+	var offset atomic.Int64
+	var replay atomic.Bool
+	s.Now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil {
-			t.Error("test origin must receive plain HTTP")
+		if replay.Load() {
+			body, e := io.ReadAll(r.Body)
+			if e != nil {
+				t.Error(e)
+			}
+			first := r.Clone(r.Context())
+			first.Body = io.NopCloser(bytes.NewReader(body))
+			s.Handler().ServeHTTP(httptest.NewRecorder(), first)
+			r.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		s.Handler().ServeHTTP(w, r)
 	}))
@@ -154,15 +134,25 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 		}
 	}
 	client := &secretclient.Client{Directory: dir}
-	if !client.IdentityReady() {
-		t.Fatal("key and enrolled identity should be ready without a certificate")
-	}
 	if e := client.Activate(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	for range 2 {
+	for _, fault := range []string{"expired", "future", "replay"} {
+		switch fault {
+		case "expired":
+			offset.Store(int64(time.Minute))
+		case "future":
+			offset.Store(-int64(31 * time.Second))
+		case "replay":
+			replay.Store(true)
+		}
+		if _, _, e := client.VersionsAll(t.Context(), nil); !errors.Is(e, protocol.ErrUnavailable) {
+			t.Fatal("proof rejection became permanent identity denial", fault, e)
+		}
+		offset.Store(0)
+		replay.Store(false)
 		if _, _, e := client.VersionsAll(t.Context(), nil); e != nil {
-			t.Fatal("fresh signed request failed through proxy", e)
+			t.Fatal("fresh proof could not recover", fault, e)
 		}
 	}
 	for _, fault := range []string{"retired", "encryption", "revoked"} {

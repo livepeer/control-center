@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -41,7 +42,10 @@ func SignRequest(r *http.Request, body []byte, id Identity, key ed25519.PrivateK
 		Issuer: RequestIssuer, Subject: id.NodeID, Audience: jwt.ClaimStrings{r.URL.Scheme + "://" + r.URL.Host},
 		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(RequestLifetime)), ID: rand.Text(),
 	}, Generation: id.Generation, Digest: RequestDigest(r, body)}
-	token, e := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c).SignedString(key)
+	t := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c)
+	// Select an enrolled or retired key before checking identity revocation.
+	t.Header["kid"] = base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
+	token, e := t.SignedString(key)
 	if e == nil {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}

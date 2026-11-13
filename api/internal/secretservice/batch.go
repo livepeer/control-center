@@ -10,11 +10,7 @@ import (
 func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 	m, g, e := s.machine(r)
 	if e != nil {
-		if errors.Is(e, protocol.ErrUnavailable) {
-			fail(w, 503, "unavailable")
-		} else {
-			fail(w, 403, "identity_refused")
-		}
+		failAuthorization(w, e, 403, "identity_refused")
 		return
 	}
 	if !m.Managed {
