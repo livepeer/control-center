@@ -168,7 +168,7 @@ docker compose ps
 docker compose logs --tail=100 api web cloudflared
 curl --fail http://127.0.0.1:43812/readyz
 curl --fail http://127.0.0.1:33812/api/config
-curl --fail http://127.0.0.1:23812/ready
+curl --fail http://127.0.0.1:23813/ready
 docker compose up -d --build --wait
 ```
 

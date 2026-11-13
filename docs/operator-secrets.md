@@ -69,10 +69,11 @@ encryption.
 
 ## Deployment
 
-1. Deploy separately from Control Center, with its own TLS PostgreSQL database,
-   Vault instance and Cloudflare tunnel. Route the tunnel's public hostname to
-   `http://secrets:8080`. Compose keeps that origin private and publishes no
-   host port.
+1. Run the secrets service and Vault with [Compose](../deploy/compose.secrets.yaml).
+   Route `controlcenter-secrets.livepeer.live` through the existing Cloudflare
+   tunnel to `http://localhost:23812`. Only the secrets service binds a loopback
+   host port. Vault uses HTTP on a private Docker network, with no published port.
+   Prepare `deploy/vault-private/data/` owned by UID 65532 for persistent storage.
 2. Create the files named in [Compose](../deploy/compose.secrets.yaml) under
    `deploy/secrets-service-private/`. Keep them owner-only, readable by UID
    65532, and out of Git. Generate the service signing and encryption keys:
@@ -87,15 +88,20 @@ encryption.
    Compose mounts these as `SECRETS_IDENTITY_KEY_FILE` and
    `SECRETS_ENCRYPTION_KEY_FILE`. Preserve both across redeployments, separately
    from the enrollment-token signing secret.
-3. Enable Vault Transit at `transit/`. Grant `create,update` on
-   `transit/encrypt/operator-<owner UUID>` and `update` on its decrypt path.
+3. Start Vault with `docker compose -f deploy/compose.secrets.yaml up -d vault`,
+   then initialize and unseal it. Enable Vault Transit at `transit/`. Grant
+   `create,update` on `transit/encrypt/operator-<owner UUID>` and `update` on
+   its decrypt path.
    Do not grant key export or administration. Disable raw Vault audit and
-   ingress body logging so credentials and data keys are not recorded.
+   ingress body logging so credentials and data keys are not recorded. Preserve
+   the recovery keys privately and arrange unsealing after restarts and renewal
+   of expiring service tokens.
 4. Set `SECRETS_PUBLIC_URL` and Control Center's `SecretsURL` to the same public
-   HTTPS origin. Set `SecretsMetadataTokenFile` to an independent credential
-   of at least 32 bytes, and set `CONTROL_METADATA_TOKEN_FILE` to the mounted
-   file containing that same credential. Supply the remaining Compose settings
-   and start the separate project:
+   HTTPS origin. Put an independent metadata credential of at least 32 bytes in
+   `secrets-service-private/control-metadata-token`; Control Center's Compose
+   file mounts it at `/run/secrets/secrets-metadata-token`. Set
+   `SecretsMetadataTokenFile` to that path. Supply the remaining Compose settings
+   and start the project:
 
    ```sh
    docker compose -f deploy/compose.secrets.yaml up --build -d
@@ -116,52 +122,6 @@ docker compose -f deploy/compose.secrets.yaml \
 ```
 
 Use `migrate down` to roll back reversible future migrations.
-
-### Shared-host staging
-
-Staging can use the existing Supabase project and Control Center tunnel, with
-Vault and the secrets service in a separate Compose project on the same host.
-This shares the host and database administration boundary with Control Center.
-The application tables remain in the separate `lpsecrets` schema.
-
-Add `deploy/compose.secrets-control.yaml` to the Control Center Compose command.
-It mounts the shared metadata credential at
-`/run/secrets/secrets-metadata-token` and moves tunnel metrics to port `23813`.
-Set `SecretsMetadataTokenFile` to that path and `SecretsURL` to
-`https://controlcenter-secrets.livepeer.live` in the private `config.toml`.
-Caddy forwards only GET/POST requests to `/internal/secrets/nodes/*`; the API
-requires the independent metadata token on these requests.
-
-For the secrets project, combine `compose.secrets.yaml` with
-`compose.secrets-staging.yaml`. The overlay binds the service to
-`127.0.0.1:23812` for the existing host-networked tunnel and disables the
-separate connector by default. Configure the tunnel's secrets hostname to
-use `http://localhost:23812`.
-
-Keep the environment settings from the deployment instructions in the ignored
-`deploy/secrets-service.env`, using `VAULT_ADDR=https://vault:8200`. Place
-Vault's TLS files in `deploy/vault-private/tls/` as `ca.pem`, `server.pem`, and
-`server-key.pem`; the certificate must cover `vault` and `127.0.0.1`. Prepare
-`deploy/vault-private/data/` for persistent Raft storage. The mounted Vault
-configuration, TLS files and data directory must be readable by UID 65532,
-and the data directory must be writable by that UID. To retain an existing
-storage location, set `VAULT_STATE_DIR` in the private environment file.
-
-Create `secrets-service-private/ca-bundle.pem` containing the normal upstream
-CA roots plus Vault's CA, readable by UID 65532. Start Vault first, initialize
-and unseal it, then configure Transit and the restricted service token as
-described above. Preserve the recovery keys privately and arrange unsealing
-after restarts and renewal of expiring service tokens.
-
-```sh
-cd deploy
-docker compose --env-file secrets-service.env \
-  -f compose.secrets.yaml -f compose.secrets-staging.yaml up -d vault
-# Initialize/unseal Vault and provision secrets-service-private/vault-token.
-docker compose --env-file secrets-service.env \
-  -f compose.secrets.yaml -f compose.secrets-staging.yaml up --build -d
-curl --fail https://controlcenter-secrets.livepeer.live/readyz
-```
 
 ## Application behavior
 

@@ -79,10 +79,8 @@ func run(ctx context.Context) error {
 			return errors.New("invalid verification keyring")
 		}
 	}
-	for _, u := range []string{c.SupabaseURL, c.ControlURL, c.VaultURL} {
-		if len(u) < 8 || u[:8] != "https://" {
-			return errors.New("service upstreams require HTTPS")
-		}
+	if e := validateUpstreams(c); e != nil {
+		return e
 	}
 	db, e := controlplane.OpenDB(ctx, string(pg), "")
 	if e != nil {
@@ -115,6 +113,19 @@ func run(ctx context.Context) error {
 		}
 	}
 }
+
+func validateUpstreams(c secretservice.Config) error {
+	for _, u := range []string{c.SupabaseURL, c.ControlURL} {
+		if !strings.HasPrefix(u, "https://") {
+			return errors.New("service upstreams require HTTPS")
+		}
+	}
+	if c.VaultURL != "http://vault:8200" && !strings.HasPrefix(c.VaultURL, "https://") {
+		return errors.New("Vault requires HTTPS or the private Compose origin http://vault:8200")
+	}
+	return nil
+}
+
 func command() *cobra.Command {
 	var path string
 	migrate := migrations.CommandFor(secretservice.Migrator, boa.Cmd[boa.NoParams]{}, &path, secretservice.MigrationFiles,

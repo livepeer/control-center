@@ -1,15 +1,14 @@
 ui = false
 disable_mlock = true
-api_addr = "https://vault:8200"
+api_addr = "http://vault:8200"
 cluster_addr = "https://vault:8201"
 
 storage "raft" {
   path = "/vault/data"
-  node_id = "controlcenter-staging"
+  node_id = "vault"
 }
 
 listener "tcp" {
   address = "0.0.0.0:8200"
-  tls_cert_file = "/vault/tls/server.pem"
-  tls_key_file = "/vault/tls/server-key.pem"
+  tls_disable = true
 }
