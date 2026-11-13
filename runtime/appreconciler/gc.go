@@ -30,7 +30,7 @@ func (c *Controller) collect(view View, now time.Time) error {
 			wanted[g.Key] = true
 		}
 		for id, i := range s.Instances {
-			if i.Phase != "removed" || !i.RegistrationGone {
+			if i.Phase != "removed" || !i.RegistrationGone || i.SecretPrepared || (c.Secrets != nil && c.Secrets.Client.Enabled() && !i.SecretCleanupDone) {
 				continue
 			}
 			if wanted[i.Group.Key] && s.Heads[i.Group.Key] == id {
@@ -48,6 +48,12 @@ func (c *Controller) collect(view View, now time.Time) error {
 			delete(s.Instances, id)
 			if s.Heads[i.Group.Key] == id {
 				delete(s.Heads, i.Group.Key)
+			}
+		}
+		for revision := range s.SecretRollouts {
+			if !secretRevisionRelevant(*s, revision) {
+				delete(s.SecretRollouts, revision)
+				delete(s.SecretRotationSlots, revision)
 			}
 		}
 		return nil

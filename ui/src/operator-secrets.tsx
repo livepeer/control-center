@@ -1,0 +1,55 @@
+import { useEffect, useState } from 'react'
+import type { Session } from '@supabase/supabase-js'
+import { api } from './api'
+
+type Secret = { owner_id: string; secret_id: string; name: string; key: string; version_id: string; revision: number; deleted: boolean }
+type App = { name: string; aliases?: {name: string}[]; denied: boolean; generation: number; secrets: {name: string; secret: string; key: string}[]; machines?: string[]; requested_machines?: string[] }
+export async function secretsAPI<T>(session: Session, origin: string, path: string, options: RequestInit = {}): Promise<T> {
+ const url = new URL(origin)
+ if (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname)) throw new Error('The secrets service requires HTTPS.')
+ const headers = new Headers(options.headers); headers.set('Authorization', `Bearer ${session.access_token}`); headers.set('Content-Type','application/json')
+ const response = await fetch(`${origin.replace(/\/$/,'')}${path}`, {...options, headers, credentials:'omit', cache:'no-store', redirect:'error'})
+ const body = await response.json()
+ if (!response.ok) throw new Error(typeof body.code === 'string' ? body.code.replaceAll('_',' ') : 'Secrets service unavailable.')
+ return body as T
+}
+const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b))
+export function enrollmentEnvelope(control: string, setup: string): string {
+ return 'lpcc1.' + b64(new TextEncoder().encode(JSON.stringify({version:1, control, setup}))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','')
+}
+export async function encryptSecret(binding: Secret, value: string) {
+ const bytes = new TextEncoder().encode(value)
+ if (bytes.length > 65536 || value.includes('\0')) throw new Error('Use a UTF-8 value up to 64 KiB without NUL characters.')
+ const raw = crypto.getRandomValues(new Uint8Array(32)), nonce = crypto.getRandomValues(new Uint8Array(12))
+ const key = await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['encrypt'])
+ const aad = new TextEncoder().encode(JSON.stringify([1,binding.owner_id,binding.secret_id,binding.name,binding.key,binding.version_id]))
+ const encrypted = await crypto.subtle.encrypt({name:'AES-GCM',iv:nonce,additionalData:aad,tagLength:128},key,bytes)
+ bytes.fill(0)
+ return {dataKey:raw, nonce:b64(nonce),ciphertext:b64(new Uint8Array(encrypted))}
+}
+export function OperatorSecrets({session, origin}:{session:Session;origin:string}) {
+ const [secrets,setSecrets]=useState<Secret[]>([]),[apps,setApps]=useState<App[]>([])
+ const [name,setName]=useState(''),[key,setKey]=useState(''),[value,setValue]=useState(''),[problem,setProblem]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false)
+ const refresh=async()=>{
+  const [s,a]=await Promise.allSettled([secretsAPI<{secrets:Secret[]}>(session,origin,'/v1/secrets'),api<{apps:App[]}>(session,'/api/operator/apps')])
+  if(s.status==='fulfilled')setSecrets(s.value.secrets);else{setSecrets([]);setProblem('Could not load secrets.')}
+  if(a.status==='fulfilled')setApps(a.value.apps);else{setApps([]);setProblem('Could not load app access.')}
+ }
+ useEffect(()=>{void refresh().catch(()=>setProblem('Could not load operator secrets.'))},[session.access_token,origin])
+ const perform=async(fn:()=>Promise<void>)=>{setBusy(true);setProblem('');setMessage('');let failure='';try{await fn()}catch(e){failure=e instanceof Error?e.message:'Operation failed.'}finally{await refresh();if(failure)setProblem(failure);setBusy(false)}}
+ async function save(event: React.FormEvent) { event.preventDefault();await perform(async()=>{
+  const current=secrets.find(s=>!s.deleted&&s.name===name&&s.key===key)
+  const binding=await secretsAPI<Secret>(session,origin,'/v1/secrets/reserve',{method:'POST',body:JSON.stringify({name,key,expected_revision:current?.revision??0})})
+  const encrypted=await encryptSecret(binding,value)
+  try{const wrapped=await secretsAPI<{wrapped_key:string}>(session,origin,`/v1/secrets/${binding.secret_id}/wrap`,{method:'POST',body:JSON.stringify({version_id:binding.version_id,data_key:b64(encrypted.dataKey)})})
+   await secretsAPI(session,origin,`/v1/secrets/${binding.secret_id}`,{method:'PUT',body:JSON.stringify({owner_id:binding.owner_id,secret_id:binding.secret_id,name:binding.name,key:binding.key,version_id:binding.version_id,nonce:encrypted.nonce,ciphertext:encrypted.ciphertext,wrapped_key:wrapped.wrapped_key})})
+  } finally {encrypted.dataKey.fill(0);setValue('')}
+  setMessage('Saved. Affected apps will rotate automatically; inspect machine status for completion.')
+ })}
+ return <section className="machines-section" aria-label="Operator secrets"><div className="section-heading"><div><h2>Secrets and app access</h2><p className="muted">Secrets belong to your workspace. Assigned apps receive the values they request.</p></div></div>
+ {problem&&<div className="notice error" role="alert">{problem}</div>}{message&&<div className="notice success" role="status">{message}</div>}
+ <form onSubmit={save} className="machine-panel" style={{padding:24}}><label>Secret name<input required pattern="lp-app-[a-z0-9][a-z0-9-]*" placeholder="lp-app-provider" value={name} onChange={e=>setName(e.target.value)}/></label><label>Key<input required placeholder="api-key" value={key} onChange={e=>setKey(e.target.value)}/></label><label>Value<input type="password" required autoComplete="off" value={value} onChange={e=>setValue(e.target.value)}/></label><button className="button primary" disabled={busy}>Save secret</button></form>
+ <div className="machine-panel table-scroll"><table><thead><tr><th>SECRET</th><th>KEY</th><th>USED BY</th><th>STATE</th><th/></tr></thead><tbody>{secrets.map(s=><tr key={s.secret_id}><td>{s.name}</td><td>{s.key}</td><td>{apps.filter(a=>a.secrets.some(r=>r.secret===s.name&&r.key===s.key)).map(a=>a.name).join(', ')||'No app declarations'}</td><td>{s.deleted?'Deleted; runtime cleanup may be pending':s.version_id?'Available':'Awaiting value'}</td><td>{!s.deleted&&<button className="button" disabled={busy} onClick={()=>void perform(async()=>{await secretsAPI(session,origin,`/v1/secrets/${s.secret_id}`,{method:'DELETE',body:JSON.stringify({expected_revision:s.revision})});setMessage('Deletion accepted. Dependent apps will drain; offline machines remain pending.')})}>Delete</button>}</td></tr>)}</tbody></table></div>
+ <h3>App access</h3><p className="muted">Apps are allowed by default. Denying an app drains all its revisions on your machines.</p><div className="machine-panel table-scroll"><table><thead><tr><th>APP</th><th>ALIASES</th><th>DECLARED SECRETS</th><th>MACHINES</th><th>POLICY</th><th/></tr></thead><tbody>{apps.map(a=><tr key={a.name}><td>{a.name}</td><td>{a.aliases?.map(alias=>alias.name).join(', ')||'None'}</td><td>{a.secrets.map(ref=>`${ref.secret}/${ref.key} → ${ref.name}`).join(', ')||'None'}</td><td>{a.machines?.join(', ')||((a.requested_machines?.length??0)>0?'Assigned; stopped':'None')}</td><td>{a.denied?'Denied; enforcement may be pending':'Allowed'}</td><td><button className="button" disabled={busy} onClick={()=>void perform(async()=>{await api(session,`/api/operator/apps/${encodeURIComponent(a.name)}/policy`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({denied:!a.denied,expected_generation:a.generation})})})}>{a.denied?'Allow':'Deny'}</button></td></tr>)}</tbody></table></div>
+ </section>
+}

@@ -6,6 +6,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY api/cmd ./api/cmd
 COPY api/internal ./api/internal
 COPY schema ./schema
+COPY secrets ./secrets
 COPY runtime ./runtime
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /controlcenter ./api/cmd/controlcenter

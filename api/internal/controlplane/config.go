@@ -27,7 +27,10 @@ type DatabaseParams struct {
 }
 
 type Params struct {
-	ConfigFile string `name:"config" env:"CONTROL_CENTER_CONFIG" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables file loading"`
+	SecretsURL               string `env:"SECRETS_URL" optional:"true" descr:"Independent HTTPS operator secrets API"`
+	SecretsMetadataToken     string `secret:"true" optional:"true"`
+	SecretsMetadataTokenFile string `secretfor:"SecretsMetadataToken" basepath:"source"`
+	ConfigFile               string `name:"config" env:"CONTROL_CENTER_CONFIG" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables file loading"`
 	DatabaseParams
 	TunnelParams
 	DiscoveryParams
@@ -39,6 +42,9 @@ type Params struct {
 	OnchainWebhookSecret     string        `secret:"true" optional:"true"`
 	OnchainWebhookSecretFile string        `secretfor:"OnchainWebhookSecret" basepath:"source"`
 	DefaultAdminEmail        string        `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
+	JWTSigningKeyID          string        `optional:"true" descr:"Enrollment signing key ID; default 1"`
+	JWTVerificationKeys      string        `secret:"true" optional:"true" descr:"JSON map of retained enrollment verification keys"`
+	JWTVerificationKeysFile  string        `secretfor:"JWTVerificationKeys" basepath:"source" descr:"File containing retained enrollment verification keys"`
 	JWTSigningSecret         string        `env:"JWT_SIGNING_SECRET" secret:"true" min:"32" descr:"Persistent enrollment signing secret (at least 32 bytes)"`
 	JWTSigningSecretFile     string        `env:"JWT_SIGNING_SECRET_FILE" secretfor:"JWTSigningSecret" basepath:"source" descr:"File containing the enrollment signing secret"`
 	MachineTokenSecret       string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
@@ -97,6 +103,19 @@ func OpenDB(ctx context.Context, raw, password string) (*sql.DB, error) {
 }
 
 func (p Params) PreValidate() error {
+	if _, e := p.enrollmentKeys(); e != nil {
+		return e
+	}
+	if p.SecretsURL != "" {
+		u, e := url.Parse(p.SecretsURL)
+		if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+			return errors.New("SecretsURL must be an HTTPS origin")
+		}
+		if len(p.SecretsMetadataToken) < 32 {
+			return errors.New("configure independent secrets metadata credentials")
+		}
+	}
+
 	if p.RuntimeNodeDrainTimeout < 0 || p.RuntimeNodeDrainTimeout > 12*time.Hour {
 		return errors.New("RuntimeNodeDrainTimeout must be between zero and 12h")
 	}

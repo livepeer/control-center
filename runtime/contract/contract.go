@@ -9,6 +9,9 @@ import (
 const BundleFormat = 3
 
 type Metadata struct {
+	ManagedSecrets          bool           `json:"managed_secrets,omitempty"`
+	SecretsEncryptionReady  bool           `json:"secrets_encryption_ready,omitempty"`
+	SecretsProtocol         int            `json:"secrets_protocol,omitempty"`
 	Onchain                 onchain.Config `json:"onchain"`
 	OnchainCredentialsRef   string         `json:"onchain_credentials_ref,omitempty"`
 	OnchainActive           bool           `json:"onchain_active"`
@@ -115,19 +118,31 @@ type AssignmentStatus struct {
 	CleanupPending       int       `json:"cleanup_pending"`
 }
 
+type SecretRollout struct {
+	Generation int64  `json:"generation"`
+	Desired    string `json:"desired"`
+	Applied    string `json:"applied,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
 type AppStatus struct {
-	DesiredGeneration int64              `json:"desired_generation"`
-	DesiredDigest     string             `json:"desired_digest,omitempty"`
-	StagedDigest      string             `json:"staged_digest,omitempty"`
-	PublishedDigest   string             `json:"published_digest,omitempty"`
-	AppliedDigest     string             `json:"applied_digest,omitempty"`
-	Reason            string             `json:"reason,omitempty"`
-	Instances         []InstanceStatus   `json:"instances"`
-	OwnerRecreatedAt  time.Time          `json:"owner_recreated_at,omitempty"`
-	Staged            *StageIdentity     `json:"staged,omitempty"`
-	Published         *StageIdentity     `json:"published,omitempty"`
-	Applied           *StageIdentity     `json:"applied,omitempty"`
-	Assignments       []AssignmentStatus `json:"assignments,omitempty"`
-	InstancesTotal    int                `json:"instances_total,omitempty"`
-	InstancesOmitted  int                `json:"instances_omitted,omitempty"`
+	ManagedSecrets         bool                     `json:"managed_secrets,omitempty"`
+	SecretsIdentityReady   bool                     `json:"secrets_identity_ready,omitempty"`
+	SecretsEncryptionReady bool                     `json:"secrets_encryption_ready,omitempty"`
+	SecretsProtocol        int                      `json:"secrets_protocol,omitempty"`
+	SecretRollouts         map[string]SecretRollout `json:"secret_rollouts,omitempty"`
+	Secrets                map[string]string        `json:"secret_versions,omitempty"`
+	DesiredGeneration      int64                    `json:"desired_generation"`
+	DesiredDigest          string                   `json:"desired_digest,omitempty"`
+	StagedDigest           string                   `json:"staged_digest,omitempty"`
+	PublishedDigest        string                   `json:"published_digest,omitempty"`
+	AppliedDigest          string                   `json:"applied_digest,omitempty"`
+	Reason                 string                   `json:"reason,omitempty"`
+	Instances              []InstanceStatus         `json:"instances"`
+	OwnerRecreatedAt       time.Time                `json:"owner_recreated_at,omitempty"`
+	Staged                 *StageIdentity           `json:"staged,omitempty"`
+	Published              *StageIdentity           `json:"published,omitempty"`
+	Applied                *StageIdentity           `json:"applied,omitempty"`
+	Assignments            []AssignmentStatus       `json:"assignments,omitempty"`
+	InstancesTotal         int                      `json:"instances_total,omitempty"`
+	InstancesOmitted       int                      `json:"instances_omitted,omitempty"`
 }

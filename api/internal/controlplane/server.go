@@ -2,12 +2,14 @@ package controlplane
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
 	"embed"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	protocol "github.com/livepeer/control-center/secrets"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
@@ -28,6 +31,9 @@ import (
 var MigrationFiles embed.FS
 
 type Machine struct {
+	PublicKey         string     `json:"public_key,omitempty"`
+	Signature         []byte     `json:"signature,omitempty"`
+	ManagementProof   string     `json:"management_proof,omitempty"`
 	NodeID            string     `json:"node_id"`
 	OwnerID           string     `json:"-"`
 	Fingerprint       string     `json:"fingerprint"`
@@ -42,17 +48,20 @@ type Machine struct {
 }
 
 type Server struct {
-	db            *sql.DB
-	params        Params
-	logger        *slog.Logger
-	client        *http.Client
-	build         func(machineconfig.Desired) ([]byte, string, error)
-	denialMu      sync.Mutex
-	denials       map[AdminAction]denialWindow
-	tunnels       *tunnel.Manager
-	configs       *machineconfig.Manager
-	discovery     *fleet.Manager
-	reconcileWake chan struct{}
+	now            func() time.Time
+	grantsIssued   atomic.Uint64
+	grantsRejected atomic.Uint64
+	db             *sql.DB
+	params         Params
+	logger         *slog.Logger
+	client         *http.Client
+	build          func(machineconfig.Desired) ([]byte, string, error)
+	denialMu       sync.Mutex
+	denials        map[AdminAction]denialWindow
+	tunnels        *tunnel.Manager
+	configs        *machineconfig.Manager
+	discovery      *fleet.Manager
+	reconcileWake  chan struct{}
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
@@ -86,9 +95,15 @@ func (s *Server) Handler() http.Handler {
 		respond(w, 200, map[string]string{"status": "ready"})
 	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "public_api_url": s.params.PublicAPIURL})
+		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL})
 	})
+	mux.HandleFunc("GET /api/operator/apps", s.operatorApps)
+	mux.HandleFunc("PUT /api/operator/apps/{name}/policy", s.operatorPolicy)
+	mux.HandleFunc("GET /internal/secrets/nodes/{node_id}", s.secretMachine)
+	mux.HandleFunc("POST /internal/secrets/nodes/{node_id}", s.secretMachine)
 	mux.HandleFunc("POST /api/bootstrap-token", s.bootstrapToken)
+	mux.HandleFunc("POST /api/bootstrap-token/revoke", s.revokeEnrollmentGrant)
+	mux.HandleFunc("GET /metrics", s.enrollmentMetrics)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
 	mux.HandleFunc("GET /api/me", s.me)
@@ -137,14 +152,16 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
 	owner, err := s.user(r.Context(), bearer(r))
 	if err != nil {
+		s.grantsRejected.Add(1)
 		s.respondError(w, err)
 		return
 	}
-	token, expires, err := signEnrollment(s.params.JWTSigningSecret, owner.ID, time.Now())
+	token, expires, err := s.params.signEnrollment(owner.ID, s.currentTime())
 	if err != nil {
 		fail(w, 500, "could not issue enrollment token")
 		return
 	}
+	s.grantsIssued.Add(1)
 	respond(w, 200, map[string]any{"token": token, "expires_at": expires})
 }
 
@@ -182,7 +199,7 @@ func validMachine(m Machine) bool {
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
-	owner, err := verifyEnrollment(s.params.JWTSigningSecret, bearer(r))
+	grant, err := s.params.enrollmentGrant(bearer(r), s.currentTime(), false)
 	if err != nil {
 		fail(w, 401, err.Error())
 		return
@@ -202,13 +219,26 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.NodeID = strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(id[:]))
+	owner := grant.Subject
 	m.OwnerID = owner
+	newNodeID := m.NodeID
+	if m.PublicKey != "" {
+		pub, e := protocol.PublicKey(m.PublicKey)
+		if e != nil || !ed25519.Verify(pub, protocol.RegistrationProof(bearer(r), m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.PublicKey, m.DevelopmentHTTP), m.Signature) {
+			fail(w, 403, "runtime key proof required")
+			return
+		}
+	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.databaseError(w, err)
 		return
 	}
 	defer tx.Rollback()
+	if err = s.acceptEnrollmentGrant(r.Context(), tx, grant); err != nil {
+		s.respondError(w, err)
+		return
+	}
 	// An active installation retains its ID on retry. A retired installation gets
 	// a fresh ID; its retained cleanup records remain scoped to the previous ID.
 	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,1,$7)
@@ -233,6 +263,32 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
+	if m.NodeID != newNodeID {
+		var public string
+		e := tx.QueryRowContext(r.Context(), `SELECT public_key FROM lpcc.secret_machines WHERE node_id=$1`, m.NodeID).Scan(&public)
+		if e != nil && !errors.Is(e, sql.ErrNoRows) {
+			s.databaseError(w, e)
+			return
+		}
+		if public == "" || m.PublicKey == "" || public != m.PublicKey {
+			if !hmacEqual(m.ManagementProof, s.enrollmentToken(m)) {
+				fail(w, 409, "existing installation requires its saved credential or bound key")
+				return
+			}
+		}
+	}
+	if m.PublicKey != "" {
+		res, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.secret_machines(node_id,public_key) VALUES($1,$2) ON CONFLICT(node_id) DO UPDATE SET public_key=EXCLUDED.public_key WHERE lpcc.secret_machines.public_key='' OR lpcc.secret_machines.public_key=EXCLUDED.public_key`, m.NodeID, m.PublicKey)
+		if e != nil {
+			s.databaseError(w, e)
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			fail(w, 409, "runtime key conflict")
+			return
+		}
+	}
 	data, digest, err := s.build(s.configs.Desired(configurationMachine(m), machineconfig.InitialState(false), nil))
 	if err != nil {
 		fail(w, 503, "configuration generation failed")
@@ -241,6 +297,16 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	// Preserve an existing bundle; the backend reconciler owns later updates.
 	if _, err := tx.ExecContext(r.Context(), `INSERT INTO lpcc.machine_configs(node_id,bundle,sha256) VALUES($1,$2,$3) ON CONFLICT(node_id) DO NOTHING`, m.NodeID, data, digest); err != nil {
 		s.databaseError(w, err)
+		return
+	}
+	if m.NodeID == newNodeID {
+		if _, err = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(owner_id,action,target) VALUES($1,'machine.enroll',$2)`, owner, m.NodeID); err != nil {
+			s.databaseError(w, err)
+			return
+		}
+	}
+	if !s.currentTime().Before(grant.ExpiresAt.Time) {
+		fail(w, 401, "enrollment grant expired")
 		return
 	}
 	if err := tx.Commit(); err != nil {

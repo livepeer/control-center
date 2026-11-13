@@ -22,6 +22,9 @@ func rollingCount(s *State, a schema.AppAssignment) int {
 // Retain healthy old siblings until one slot is needed and all prior successors
 // have fresh health and Node ready evidence. Existing withdrawals never reverse.
 func retainRolling(s *State, i *Instance, c *Controller, now time.Time) bool {
+	if c.Secrets != nil && (c.Secrets.Faults[i.Group.RevisionID] == "secrets_denied" || c.Secrets.Faults[i.Group.RevisionID] == "secret_missing") {
+		return false
+	}
 	if i.WithdrawalID != "" {
 		return false
 	}

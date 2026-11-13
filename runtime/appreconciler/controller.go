@@ -25,6 +25,7 @@ type proof struct {
 	PodUID      string
 }
 type Controller struct {
+	Secrets      *SecretDelivery
 	Journal      *Journal
 	Input        Inputs
 	Cluster      Cluster
@@ -202,8 +203,15 @@ func (c *Controller) observe(o Observation) error {
 // Tick never interprets an unavailable input, failed observation or missing object as an empty desired set.
 // Only this loop makes lifecycle decisions; SDK callbacks commit identity and fresh observations.
 func (c *Controller) Tick(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	now := c.now()
 	before := c.Journal.View()
+	if c.Secrets != nil && before.Metadata.ManagedSecrets && !c.Secrets.Client.Enabled() {
+		if e := c.Secrets.Client.MarkManaged(); e != nil {
+			return e
+		}
+	}
 	if now.Before(before.LastClock.Add(-time.Second)) {
 		// Stop/join the ready snapshot before sending a replacement that withdraws admission.
 		// No deadline or lifecycle timestamp is moved backwards to accommodate the clock.
@@ -228,6 +236,11 @@ func (c *Controller) Tick(ctx context.Context) error {
 		return ErrStateLost
 	}
 	input, inputErr := c.Input.Read(ctx)
+	if inputErr == nil && input.Metadata.ManagedSecrets && c.Secrets != nil && !c.Secrets.Client.Enabled() {
+		if e := c.Secrets.Client.MarkManaged(); e != nil {
+			return e
+		}
+	}
 	now = c.now() // Input/API latency must not keep an expired Node proof fresh.
 	inputReason := ""
 	if inputErr != nil {
@@ -235,13 +248,65 @@ func (c *Controller) Tick(ctx context.Context) error {
 	}
 	if inputErr == nil {
 		m := input.Metadata
-		if before.InputDigest != "" && (m.NodeID != before.Metadata.NodeID || m.CredentialVersion < before.Metadata.CredentialVersion || (before.Metadata.Terminal && !m.Terminal)) {
+		if before.InputDigest != "" && (m.NodeID != before.Metadata.NodeID || m.CredentialVersion < before.Metadata.CredentialVersion || (before.Metadata.ManagedSecrets && !m.ManagedSecrets) || (before.Metadata.Terminal && !m.Terminal)) {
 			return errors.New("input_enrollment_regression")
 		}
 		if m.Generation < before.Metadata.Generation || (input.Payload.Index.Available && before.Payload.Intent != nil && (input.Payload.Intent.Generation < before.Payload.Intent.Generation || (input.Payload.Intent.Generation == before.Payload.Intent.Generation && input.Payload.Index.IntentDigest != before.Payload.Index.IntentDigest))) {
 			inputErr = errors.New("input_regression")
 			inputReason = "input_regression"
 		}
+	}
+	if c.Secrets != nil {
+		pollState := before
+		if inputErr == nil && input.Payload.Index.Available {
+			pollState.Payload = input.Payload
+		}
+		pollCtx, stop := optionalSecretContext(ctx, 2*time.Second)
+		c.Secrets.Poll(pollCtx, pollState, now)
+		stop()
+		if e := c.Journal.Update(func(st *State) error {
+			if st.SecretWatermarks == nil {
+				st.SecretWatermarks = map[string]int64{}
+			}
+			if st.SecretRollouts == nil {
+				st.SecretRollouts = map[string]contract.SecretRollout{}
+			}
+			for revision, target := range c.Secrets.Targets {
+				valid := target.PolicyGeneration >= st.SecretPolicyGeneration
+				for _, v := range target.Values {
+					if v.Revision < st.SecretWatermarks[v.ID] {
+						valid = false
+					}
+				}
+				if !valid {
+					delete(c.Secrets.Targets, revision)
+					c.Secrets.Faults[revision] = "secret_state_regression"
+					continue
+				}
+				if target.PolicyGeneration > st.SecretPolicyGeneration {
+					st.SecretPolicyGeneration = target.PolicyGeneration
+				}
+				for _, v := range target.Values {
+					st.SecretWatermarks[v.ID] = v.Revision
+				}
+				rollout := st.SecretRollouts[revision]
+				if rollout.Desired != target.Digest {
+					rollout.Generation++
+					rollout.Desired = target.Digest
+				}
+				rollout.Reason = ""
+				st.SecretRollouts[revision] = rollout
+			}
+			for revision, reason := range c.Secrets.Faults {
+				rollout := st.SecretRollouts[revision]
+				rollout.Reason = reason
+				st.SecretRollouts[revision] = rollout
+			}
+			return nil
+		}); e != nil {
+			return e
+		}
+		before = c.Journal.View()
 	}
 	usage, usageErr := c.Store.Usage()
 	archiveRoom := usageErr == nil && usage <= archiveBudget-2*artifact.MaxArchive
@@ -316,6 +381,36 @@ func (c *Controller) Tick(ctx context.Context) error {
 				continue
 			}
 			_, desired := wanted[i.Group.Key]
+			if c.Secrets != nil && c.Secrets.Client.Enabled() && len(i.Definition.Container.Secrets) > 0 {
+				fault := c.Secrets.Faults[i.Group.RevisionID]
+				if fault == "secrets_denied" || fault == "secret_missing" {
+					desired = false
+				}
+				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretVersion != target.Digest {
+					a := assignments[i.Group.RevisionID]
+					if !i.PublicationStarted && i.PodUID == "" {
+						// Nothing could have consumed this superseded preparation.
+						desired = false
+					} else {
+						if s.SecretRotationSlots == nil {
+							s.SecretRotationSlots = map[string]string{}
+						}
+						if key := s.SecretRotationSlots[a.RevisionID]; key != "" {
+							head := s.Instances[s.Heads[key]]
+							_, wantedSlot := wanted[key]
+							if !wantedSlot || (head != nil && head.WithdrawalID == "" && head.SecretVersion == target.Digest && c.secretSuccessorReady(head, s, now)) {
+								delete(s.SecretRotationSlots, a.RevisionID)
+							}
+						}
+						next := s.SecretSuccessors[i.ID]
+						if !centralSecretTransition(*s, a) && (s.SecretRotationSlots[a.RevisionID] == "" || s.SecretRotationSlots[a.RevisionID] == i.Group.Key) && next != nil && next.Phase == "starting" && next.Generation == a.Generation && next.SecretPrepared && next.SecretVersion == target.Digest {
+							desired = false
+							s.SecretRotationSlots[a.RevisionID] = i.Group.Key
+						}
+					}
+				}
+			}
+
 			if !maintenance && retainRolling(s, i, c, now) {
 				desired = true
 			}
@@ -354,6 +449,12 @@ func (c *Controller) Tick(ctx context.Context) error {
 				if a.Revision != nil && s.Metadata.Onchain.Compatible(a.Revision.Definition) != nil {
 					s.AssignmentReasons[a.RevisionID] = "onchain_incompatible"
 					continue
+				}
+				if c.Secrets != nil && c.Secrets.Managed(a) {
+					if _, ok := c.Secrets.Targets[a.RevisionID]; !ok {
+						s.AssignmentReasons[a.RevisionID] = c.Secrets.Faults[a.RevisionID]
+						continue
+					}
 				}
 				if !a.StartAllowed {
 					s.AssignmentReasons[a.RevisionID] = "cleanup_prerequisite"
@@ -400,6 +501,19 @@ func (c *Controller) Tick(ctx context.Context) error {
 					return err
 				}
 				s.Instances[id] = &Instance{ID: id, Group: g, Generation: a.Generation, Definition: a.Revision.Definition, Files: files, Name: name, Phase: "starting", CreatedAt: now}
+				for oldID, next := range s.SecretSuccessors {
+					if next.Group.Key == g.Key && next.Phase == "starting" && next.Generation == a.Generation && next.SecretPrepared {
+						if target, ok := c.Secrets.Targets[a.RevisionID]; ok && target.Digest == next.SecretVersion {
+							delete(s.Instances, id)
+							id = next.ID
+							next.Generation = a.Generation
+							next.CreatedAt = now
+							s.Instances[id] = next
+							delete(s.SecretSuccessors, oldID)
+							break
+						}
+					}
+				}
 				s.Heads[g.Key] = id
 			}
 		}
@@ -481,8 +595,80 @@ func (c *Controller) Tick(ctx context.Context) error {
 			}
 		}
 	}
+	if e := c.collectSecrets(ctx); e != nil {
+		return e
+	}
 	reportErr := c.report(ctx, ready, view, now)
-	return errors.Join(inputErr, publishErr, ownerErr, reportErr, c.collect(view, now))
+	result := errors.Join(inputErr, publishErr, ownerErr, reportErr, c.collect(view, now))
+	if c.Secrets != nil {
+		prepareCtx, stop := optionalSecretContext(ctx, 5*time.Second)
+		defer stop()
+		if e := c.prepareSecrets(prepareCtx); e != nil {
+			result = errors.Join(result, e)
+		}
+		if prepareCtx.Err() == nil {
+			if e := c.Secrets.StageRotation(prepareCtx, c, c.Journal.View()); e != nil {
+				result = errors.Join(result, e)
+			}
+		}
+	}
+	return result
+}
+
+// Optional secret work reserves most of the caller's remaining lifecycle budget.
+func optionalSecretContext(ctx context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline)/4 < limit {
+		limit = time.Until(deadline) / 4
+	}
+	return context.WithTimeout(ctx, limit)
+}
+func (c *Controller) prepareSecrets(ctx context.Context) error {
+	s := c.Journal.View()
+	if s.Payload.Intent == nil {
+		return nil
+	}
+	if c.Secrets != nil && c.Secrets.Client.Enabled() {
+		for _, a := range s.Payload.Intent.Entries {
+			if a.Desired != "present" || !c.Secrets.Managed(a) {
+				continue
+			}
+			for _, i := range s.Instances {
+				if i.Group.RevisionID != a.RevisionID || i.Phase == "removed" || i.Phase == "retired" {
+					continue
+				}
+				if i.SecretPrepared || i.PodUID != "" {
+					continue
+				}
+				if i.WithdrawalID != "" {
+					continue
+				}
+				target, ok := c.Secrets.Targets[a.RevisionID]
+				if !ok || ctx.Err() != nil {
+					continue
+				}
+				if i.SecretVersion != "" && i.SecretVersion != target.Digest {
+					if e := c.Secrets.Delete(ctx, i.Name); e != nil {
+						continue
+					}
+				}
+				if e := c.Journal.Update(func(st *State) error { st.Instances[i.ID].SecretVersion = target.Digest; return nil }); e != nil {
+					return e
+				}
+				prepared, e := c.preparedSecret(ctx, a, i)
+				if e != nil {
+					return e
+				}
+				if prepared == nil {
+					continue
+				}
+				if e = c.Journal.Update(func(st *State) error { mergePreparedSecret(st.Instances[i.ID], prepared); return nil }); e != nil {
+					return e
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func withdraw(i *Instance, now time.Time, m contract.Metadata) {
@@ -504,12 +690,30 @@ func instanceIDs(s *State) []string {
 	return ids
 }
 func (c *Controller) publish(ctx context.Context, s State, now time.Time) error {
+	authCtx, stop := optionalSecretContext(ctx, 2*time.Second)
+	defer stop()
 	snapshot := Snapshot{Included: map[string]bool{}, Retired: map[string]bool{}, IntentDigest: s.Payload.Index.IntentDigest, AppsGeneration: s.Payload.Intent.Generation}
 	for _, id := range instanceIDs(&s) {
 		i := s.Instances[id]
 		if i.Phase == "retired" || i.Phase == "removed" {
 			snapshot.Retired[id] = true
 			continue
+		}
+		if c.Secrets != nil && c.Secrets.Client.Enabled() && len(i.Definition.Container.Secrets) > 0 {
+			if !i.SecretPrepared && i.PodUID == "" {
+				continue
+			}
+			if i.PodUID == "" && !i.PublicationStarted && i.WithdrawalID == "" {
+				var a schema.AppAssignment
+				for _, entry := range s.Payload.Intent.Entries {
+					if entry.RevisionID == i.Group.RevisionID {
+						a = entry
+					}
+				}
+				if a.Revision == nil || c.Secrets.Authorize(authCtx, a, i) != nil {
+					continue
+				}
+			}
 		}
 		snapshot.Included[id] = true
 	}
@@ -540,7 +744,16 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 			return err
 		}
 	}
-	if err := c.Journal.Update(func(s *State) error { s.Staged = digest; s.Snapshots[digest] = snapshot; return nil }); err != nil {
+	if err := c.Journal.Update(func(s *State) error {
+		s.Staged = digest
+		s.Snapshots[digest] = snapshot
+		for id := range snapshot.Included {
+			if i := s.Instances[id]; i != nil {
+				i.PublicationStarted = true
+			}
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	info, err := os.Stat(filepath.Join(c.Store.Directory, digest[7:]+".tar.gz"))
@@ -719,6 +932,7 @@ func (c *Controller) safety(ctx context.Context) error {
 	if c.Probes == nil {
 		c.Probes = NewProbes()
 	}
+
 	c.Probes.Configure(s.Instances, view)
 	ready := c.Probes.Poll(ctx, s.Instances, view, c.now())
 	return c.syncOwner(ctx, s, ready, view)

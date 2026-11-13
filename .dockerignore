@@ -19,3 +19,6 @@
 !deploy/Caddyfile
 **/._*
 **/.DS_Store
+
+!secrets/
+!secrets/*.go

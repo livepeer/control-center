@@ -3,6 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY schema ./schema
+COPY secrets ./secrets
 COPY runtime ./runtime
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /livepeer-runtime ./runtime/cmd/livepeer-runtime
 

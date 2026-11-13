@@ -19,6 +19,9 @@ SupabasePublishableKey = "replace-with-publishable-key"
 # Generate each once: openssl rand -hex 32 | tr -d '\n'
 # Keep stable. Changing MachineTokenSecret invalidates installed credentials.
 JWTSigningSecretFile = "secrets/jwt-signing-secret"
+# Keep the old key ID/key in this JSON file for outstanding one-hour grants.
+# JWTSigningKeyID = "2"
+# JWTVerificationKeysFile = "/private/enrollment-verification-keys.json"
 MachineTokenSecretFile = "secrets/machine-token-secret"
 
 Listen = "localhost:41932"
@@ -57,3 +60,7 @@ RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 
 # OnchainSecretsDir = "/run/onchain-rpc" # immutable owner-only versioned files
 # OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
+
+# Independent operator secrets service; see docs/operator-secrets.md.
+# SecretsURL = "https://controlcenter-secrets.livepeer.live"
+# SecretsMetadataTokenFile = "secrets/secrets-metadata-token"

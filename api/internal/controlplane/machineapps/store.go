@@ -18,6 +18,7 @@ type Querier interface {
 }
 
 type Version struct {
+	Requested *schema.AppAssignment `json:"requested,omitempty"`
 	schema.AppAssignment
 	ActorID        string     `json:"actor_id"`
 	AppName        string     `json:"app_name"`
@@ -30,10 +31,14 @@ type Version struct {
 
 func ReadVersion(row interface{ Scan(...any) error }) (Version, error) {
 	var v Version
-	var raw []byte
-	err := row.Scan(&raw, &v.ActorID, &v.CreatedAt, &v.CompletedAt, &v.Failure, &v.ObservedAt, &v.AppName, &v.RevisionNumber)
+	var raw, requested []byte
+	err := row.Scan(&raw, &v.ActorID, &v.CreatedAt, &v.CompletedAt, &v.Failure, &v.ObservedAt, &v.AppName, &v.RevisionNumber, &requested)
 	if err == nil {
 		err = json.Unmarshal(raw, &v.AppAssignment)
+		if err == nil && len(requested) > 0 {
+			v.Requested = new(schema.AppAssignment)
+			err = json.Unmarshal(requested, v.Requested)
+		}
 	}
 	return v, err
 }
@@ -51,8 +56,9 @@ func ReadVersions(rows *sql.Rows) ([]Version, error) {
 	return out, rows.Err()
 }
 
-const VersionColumns = `v.intent,v.actor_id,v.created_at,c.received_at,CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END,COALESCE(c.received_at,d.received_at),r.app_name,r.revision`
+const VersionColumns = `v.intent,v.actor_id,v.created_at,c.received_at,CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END,COALESCE(c.received_at,d.received_at),r.app_name,r.revision,q.intent`
 const VersionJoins = ` JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
+ LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id
  LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation
  LEFT JOIN lpcc.machine_app_diagnostics d ON d.node_id=v.node_id AND d.revision_id=v.revision_id AND d.generation=v.generation `
 
@@ -111,6 +117,24 @@ func Snapshot(ctx context.Context, q Querier, node string) (*schema.AppAssignmen
 }
 
 func Append(ctx context.Context, tx *sql.Tx, node, actor string, a schema.AppAssignment) error {
+	raw, e := json.Marshal(a)
+	if e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_app_requests(node_id,revision_id,intent) VALUES($1,$2,$3) ON CONFLICT(node_id,revision_id) DO UPDATE SET intent=EXCLUDED.intent`, node, a.RevisionID, string(raw)); e != nil {
+		return e
+	}
+	var denied bool
+	e = tx.QueryRowContext(ctx, `SELECT COALESCE(p.denied,false) FROM lpcc.enrollments m JOIN lpcc.app_revisions r ON r.revision_id=$2 LEFT JOIN lpcc.operator_app_policy p ON p.owner_id=m.owner_id AND p.app_name=r.app_name WHERE m.node_id=$1`, node, a.RevisionID).Scan(&denied)
+	if e != nil {
+		return e
+	}
+	if denied {
+		a = a.Absent()
+	}
+	return AppendEffective(ctx, tx, node, actor, a)
+}
+func AppendEffective(ctx context.Context, tx *sql.Tx, node, actor string, a schema.AppAssignment) error {
 	raw, err := json.Marshal(a)
 	if err != nil {
 		return err
@@ -148,4 +172,26 @@ func RecordDelivery(ctx context.Context, tx *sql.Tx, set *schema.AppAssignmentSe
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_app_deliveries(node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, set.NodeID, schema.Digest(raw), bundle, set.Generation, string(membership), terminal)
 	return err
+}
+
+var ErrRequestedBudget = errors.New("requested assignment budget exceeded")
+
+// Reserve full requested work even while policy masks it from execution.
+func CheckRequestedBudget(ctx context.Context, q Querier, node string) error {
+	heads, e := Heads(ctx, q, node)
+	if e != nil {
+		return e
+	}
+	set := schema.AppAssignmentSetV1{SchemaVersion: 1, NodeID: node, Generation: 1, Entries: []schema.AppAssignment{}}
+	for _, h := range heads {
+		if h.Requested != nil && h.Requested.Desired == "present" {
+			set.Entries = append(set.Entries, *h.Requested)
+		} else if h.Desired == "present" || h.CompletedAt == nil {
+			set.Entries = append(set.Entries, h.AppAssignment)
+		}
+	}
+	if schema.CheckAssignmentBudget(set) != nil {
+		return ErrRequestedBudget
+	}
+	return nil
 }

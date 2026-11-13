@@ -359,7 +359,7 @@ func TestNodeIdentityRetirementAndRefresh(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
 	state := readyTunnel(t, s, c)
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
-	in := map[string]any{"fingerprint": strings.Repeat("d", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1}
+	in := map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("d", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1}
 	refreshPath := "/v1/nodes/" + c["node_id"] + "/credentials/refresh"
 	w := request(t, s, "POST", refreshPath, jwt, in)
 	if w.Code != 200 {

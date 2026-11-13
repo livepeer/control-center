@@ -5,11 +5,12 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { ArrowDown, ArrowRight, Check, CheckCheck, ChevronRight, Copy, Cpu, LogOut, Plus, RefreshCw, Server, Terminal, X } from 'lucide-react'
 import './style.css'
 import { api } from './api'
+import { OperatorSecrets, secretsAPI, enrollmentEnvelope } from './operator-secrets'
 import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { MachineStatus, machineStatusSummary } from './machine-status'
 
-type Config = { supabase_url: string; supabase_publishable_key: string; public_api_url: string }
+type Config = { supabase_url: string; supabase_publishable_key: string; public_api_url: string; secrets_url?: string }
 type Machine = { node_id: string; terminal?: boolean; lifecycle?: string; report_state?: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
 type Enrollment = { token: string; expires_at: string }
 
@@ -100,7 +101,11 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
   const [logoutProblem, setLogoutProblem] = useState('')
   const generate = useCallback(async () => {
     setBusy(true); setTokenProblem(''); setCopied(false)
-    try { setEnrollment(await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST' })) }
+    try {
+ const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST' })
+ if (config.secrets_url) {const setup = await secretsAPI<Enrollment>(session,config.secrets_url,'/v1/enrollment-grants',{method:'POST'});control.token=enrollmentEnvelope(control.token,setup.token);control.expires_at=new Date(Math.min(Date.parse(control.expires_at),Date.parse(setup.expires_at))).toISOString()}
+ setEnrollment(control)
+ }
     catch (error) { setTokenProblem(error instanceof Error ? error.message : 'Could not generate a command.') }
     finally { setBusy(false) }
   }, [session.access_token])
@@ -124,7 +129,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
   }, [session.access_token])
   useEffect(() => { const interval = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(interval) }, [])
   const seconds = enrollment ? Math.max(0, Math.floor((Date.parse(enrollment.expires_at) - now) / 1000)) : 0
-  const command = enrollment ? bootstrapCommand(window.location.origin, config.public_api_url, enrollment.token) : ''
+  const command = enrollment ? bootstrapCommand(window.location.origin, config.public_api_url, enrollment.token, config.secrets_url) : ''
   async function copy() {
     try { await navigator.clipboard.writeText(command); setCopied(true); window.setTimeout(() => setCopied(false), 2500) }
     catch { setTokenProblem('Clipboard access is unavailable. Select and copy the command below.') }
@@ -156,6 +161,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
         <p className="table-note">Enrollment and configuration requests do not establish application health. Open Runtime status for rollout and configured health evidence.</p>
       </section>
       {machines?.filter(m => m.node_id === selectedMachine).map(m => <MachineStatus key={`${session.user.id}:${m.node_id}`} session={session} machine={m} />)}
+      {config.secrets_url && <OperatorSecrets session={session} origin={config.secrets_url} />}
       <Administration key={session.user.id} session={session} />
       <footer className="dashboard-footer"><span>LIVEPEER / CONTROL CENTER</span><span>YOUR MACHINES. OPEN POSSIBILITIES.</span></footer>
     </main>

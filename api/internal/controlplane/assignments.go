@@ -82,7 +82,11 @@ func retryMatches(v machineapps.Version, expected int64, want schema.AppAssignme
 		return false
 	}
 	want.Generation = v.Generation
-	return sameIntent(v.AppAssignment, want)
+	actual := v.AppAssignment
+	if want.Desired == "present" && v.Requested != nil && v.Requested.Generation == v.Generation {
+		actual = *v.Requested
+	}
+	return sameIntent(actual, want)
 }
 
 func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply, error) {
@@ -203,6 +207,13 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 					if !retryMatches(old, *in.Expected, removal) {
 						return AdminChange{}, appConflict()
 					}
+					if old.Requested != nil && old.Requested.Desired == "present" {
+						removal.Generation = old.Generation + 1
+						if err = machineapps.Append(ctx, tx, node, u.ID, removal); err != nil {
+							return AdminChange{}, err
+						}
+						changed = true
+					}
 				} else {
 					if old.Generation != *in.Expected {
 						return AdminChange{}, appConflict()
@@ -283,6 +294,11 @@ func (s *Server) prepareAssignment(r *http.Request, _ UserIdentity) (AdminApply,
 			}
 		}
 		if changed {
+			if method != "DELETE" {
+				if err = machineapps.CheckRequestedBudget(ctx, tx, node); err != nil {
+					return AdminChange{}, problem(400, "assignment_limit", "Requested assignments exceed the machine limits.")
+				}
+			}
 			if err = machineapps.Bump(ctx, tx, node); err != nil {
 				return AdminChange{}, err
 			}

@@ -14,6 +14,14 @@ import (
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
+type reconcilerPrincipal struct{ http.RoundTripper }
+
+func (p reconcilerPrincipal) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Impersonate-User", "system:serviceaccount:flux-system:livepeer-app-reconciler")
+	return p.RoundTripper.RoundTrip(r)
+}
+
 // Run only against an isolated disposable cluster with Flux ExternalArtifact
 // support and the repository-pinned gVisor runtime. The owner is a contract double;
 // TestMergedNodeSDKDrain separately exercises the actual Node and SDK.
@@ -62,7 +70,10 @@ func TestLinuxFluxGvisorCleanup(t *testing.T) {
 	if err := create("/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations", map[string]any{"apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization", "metadata": map[string]string{"name": "livepeer-apps"}, "spec": map[string]any{"interval": "1s", "retryInterval": "1s", "timeout": "20s", "path": "./", "prune": true, "wait": false, "deletionPolicy": "Orphan", "sourceRef": map[string]string{"kind": "ExternalArtifact", "name": "livepeer-apps"}}}); err != nil {
 		t.Fatal(err)
 	}
-	c.Cluster = Kubernetes{Client: kube, NodeID: input.value.Metadata.NodeID}
+	runtimeKube, client := *kube, *kube.Client
+	client.Transport = reconcilerPrincipal{http.DefaultTransport}
+	runtimeKube.Client = &client
+	c.Cluster = Kubernetes{Client: &runtimeKube, NodeID: input.value.Metadata.NodeID}
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)

@@ -2,11 +2,15 @@ package controlplane
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/runtime/artifact"
+	protocol "github.com/livepeer/control-center/secrets"
 	"io"
 	"log/slog"
 	"net/http"
@@ -175,12 +179,18 @@ func credentials(t *testing.T, data []byte) map[string]string {
 
 func enroll(t *testing.T, s *Server, owner, fingerprint string) map[string]string {
 	t.Helper()
-	token, _, _ := signEnrollment(s.params.JWTSigningSecret, owner, time.Now())
-	w := request(t, s, "POST", "/v1/nodes/register", token, map[string]string{"fingerprint": fingerprint, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1"})
+	token, _, _ := s.params.signEnrollment(owner, s.currentTime())
+	w := request(t, s, "POST", "/v1/nodes/register", token, registrationBody(owner, fingerprint, token))
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	return credentials(t, w.Body.Bytes())
+}
+func registrationBody(owner, fingerprint, token string) map[string]any {
+	seed := sha256.Sum256([]byte(owner + fingerprint))
+	key := ed25519.NewKeyFromSeed(seed[:])
+	pub := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
+	return map[string]any{"public_key": pub, "signature": ed25519.Sign(key, protocol.RegistrationProof(token, fingerprint, "worker-01", "/opt/livepeer", "v1.37.2+k3s1", pub, false)), "fingerprint": fingerprint, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1"}
 }
 
 func TestEnrollmentAndConfigFlow(t *testing.T) {

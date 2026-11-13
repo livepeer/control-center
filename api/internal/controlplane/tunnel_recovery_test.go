@@ -289,12 +289,12 @@ func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
 	driveTunnels(t, s)
 	// An ordinary enrollment retry over the production URL must not upgrade a
 	// credential previously released to development HTTP consumers.
-	enroll(t, s, ownerA, fp)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, map[string]any{"fingerprint": fp, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1", "management_proof": c["token"]}), 200)
 	driveTunnels(t, s)
 	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE state->>'tunnel_id' IS NOT NULL AND state->>'tunnel_id'<>''`) != 0 {
 		t.Fatal("development enrollment became live")
 	}
-	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", jwt, map[string]any{"fingerprint": fp, "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
+	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", jwt, map[string]any{"management_proof": c["token"], "fingerprint": fp, "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
 	requireStatus(t, w, 200)
 	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible AND credential_version=2`) != 1 {
 		t.Fatal("explicit refresh did not enable secure enrollment")

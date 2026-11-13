@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"errors"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"time"
 )
 
@@ -36,4 +38,41 @@ func (s *Server) Reconcile(ctx context.Context) {
 	}
 }
 
-func (s *Server) reconcile(ctx context.Context) error { return s.configs.Reconcile(ctx) }
+func (s *Server) reconcile(ctx context.Context) error {
+	if _, e := s.db.ExecContext(ctx, `DELETE FROM lpcc.revoked_enrollment_grants WHERE expires_at<=$1`, s.currentTime()); e != nil {
+		return e
+	}
+	tx, e := s.policyTx(ctx)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	rows, e := tx.QueryContext(ctx, `SELECT m.node_id,m.owner_id::text,p.app_name FROM lpcc.machines m JOIN lpcc.operator_app_policy p ON p.owner_id=m.owner_id WHERE NOT p.denied ORDER BY m.node_id,p.app_name`)
+	if e != nil {
+		return e
+	}
+	var pending [][3]string
+	for rows.Next() {
+		var v [3]string
+		if e = rows.Scan(&v[0], &v[1], &v[2]); e != nil {
+			break
+		}
+		pending = append(pending, v)
+	}
+	if e == nil {
+		e = rows.Err()
+	}
+	rows.Close()
+	if e != nil {
+		return e
+	}
+	for _, v := range pending {
+		if e = applyOwnerPolicy(ctx, tx, v[0], v[1], v[2], false); e != nil && !errors.Is(e, machineapps.ErrRequestedBudget) {
+			return e
+		}
+	}
+	if e = tx.Commit(); e != nil {
+		return e
+	}
+	return s.configs.Reconcile(ctx)
+}

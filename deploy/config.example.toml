@@ -2,6 +2,9 @@
 PGConnstrFile = "/run/secrets/pg-connstr"
 PGPasswordFile = "/run/secrets/pg-password"
 JWTSigningSecretFile = "/run/secrets/jwt-signing-secret"
+# Keep the old key ID/key in this JSON file for outstanding one-hour grants.
+# JWTSigningKeyID = "2"
+# JWTVerificationKeysFile = "/private/enrollment-verification-keys.json"
 MachineTokenSecretFile = "/run/secrets/machine-token-secret"
 SupabaseURL = "https://PROJECT.supabase.co"
 SupabasePublishableKey = "replace-with-publishable-key"
@@ -38,3 +41,7 @@ DiscoveryMaxFailedRefreshes = 6
 # Enable with compose.onchain.yaml after applying deployment-owned onchain settings.
 # OnchainSecretsDir = "/run/onchain-rpc"
 # OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
+
+# Independent operator secrets service; see docs/operator-secrets.md.
+# SecretsURL = "https://controlcenter-secrets.livepeer.live"
+# SecretsMetadataTokenFile = "secrets/secrets-metadata-token"
