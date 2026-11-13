@@ -63,15 +63,21 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     void run('apps', signal => api<{ apps: { name: string }[]; next_after_name: string | null }>(session, '/api/admin/apps' + (after ? `?after_name=${encodeURIComponent(after)}` : ''), { signal }), data => { setApps(old => after ? [...old, ...data.apps] : data.apps); setMoreApps(data.next_after_name) })
   }
   function chooseApp(name: string, before?: number) {
-    serial.current.revision = (serial.current.revision || 0) + 1
-    setSelected(null); setAppName(name); if (!before) { setRevisions([]); setMoreRevisions(null) }
-    if (!name) return
-    void run('revisions', signal => api<{ revisions: Summary[]; next_before_revision: number | null }>(session, `/api/admin/apps/${encodeURIComponent(name)}` + (before ? `?before_revision=${before}` : ''), { signal }), data => { setRevisions(old => before ? [...old, ...data.revisions] : data.revisions); setMoreRevisions(data.next_before_revision) })
+    setAppName(name)
+    if (!before) {
+      serial.current.revision = (serial.current.revision || 0) + 1
+      setSelected(null); setRevisions([]); setMoreRevisions(null)
+    }
+    if (!name) { serial.current.revisions = (serial.current.revisions || 0) + 1; return }
+    void run('revisions', signal => api<{ revisions: Summary[]; next_before_revision: number | null }>(session, `/api/admin/apps/${encodeURIComponent(name)}` + (before ? `?before_revision=${before}` : ''), { signal }), data => {
+      setRevisions(old => before ? [...old, ...data.revisions] : data.revisions); setMoreRevisions(data.next_before_revision)
+      if (!before && data.revisions.length) chooseRevision(data.revisions[0].revision_id, name)
+    })
   }
-  function chooseRevision(id: string) {
+  function chooseRevision(id: string, name = appName) {
     setSelected(null)
     if (!id) { serial.current.revision = (serial.current.revision || 0) + 1; return }
-    void run('revision', signal => api<Revision>(session, `/api/admin/apps/${encodeURIComponent(appName)}/revisions/${id}`, { signal }), data => { setSelected(data); setReplicas(data.definition.instances.replicas) })
+    void run('revision', signal => api<Revision>(session, `/api/admin/apps/${encodeURIComponent(name)}/revisions/${id}`, { signal }), data => { setSelected(data); setReplicas(data.definition.instances.replicas) })
   }
   function inspect(id: string, before?: number) {
     if (!before) setDetail(null)
