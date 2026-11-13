@@ -191,6 +191,7 @@ type SecretConsumer struct {
 	References []schema.SecretEnvironment `json:"references"`
 }
 type EnrollRequest struct {
+	Nonce           string `json:"nonce,omitempty"`
 	NodeID          string `json:"node_id"`
 	PublicKey       string `json:"public_key"`
 	Signature       []byte `json:"signature"`
@@ -208,9 +209,13 @@ type MachineBinding struct {
 	ResetKey       string `json:"reset_key,omitempty"`
 }
 type Identity struct {
-	NodeID     string `json:"node_id"`
-	Owner      string `json:"owner_id"`
-	Generation int64  `json:"generation"`
+	NodeID           string        `json:"node_id"`
+	Owner            string        `json:"owner_id"`
+	Generation       int64         `json:"generation"`
+	Service          *ServiceTrust `json:"service,omitempty"`
+	PublicKey        string        `json:"public_key,omitempty"`
+	Nonce            string        `json:"nonce,omitempty"`
+	ReceiptSignature []byte        `json:"receipt_signature,omitempty"`
 }
 type ResolveRequest struct {
 	RevisionID string `json:"revision_id"`
@@ -219,10 +224,17 @@ type ResolveRequest struct {
 	Digest     string `json:"digest"`
 	Expected   string `json:"expected_version_set,omitempty"`
 }
+
+// DeliveryRequest binds a fresh recipient key to the signed resolve request.
+type DeliveryRequest struct {
+	ResolveRequest
+	RecipientKey []byte `json:"recipient_key"`
+}
 type Resolved struct {
 	Revision int64 `json:"revision"`
 	Ciphertext
-	DataKey Sensitive `json:"data_key,omitempty"`
+	DataKey   Sensitive `json:"-"` // Decrypted locally; never serialized.
+	SealedKey Sensitive `json:"sealed_key,omitempty"`
 }
 type VersionSet struct {
 	NodeID             string         `json:"node_id"`

@@ -45,6 +45,12 @@ func (c *Client) identity() (protocol.Identity, ed25519.PrivateKey, error) {
 		return id, nil, protocol.ErrUnavailable
 	}
 	key, e := protocol.ParsePrivate(mustRead(filepath.Join(c.Directory, "key.pem")))
+	if id.Service == nil {
+		return id, nil, protocol.ErrUnavailable
+	}
+	if _, err := protocol.PublicKey(id.Service.PublicKey); err != nil {
+		return id, nil, protocol.ErrUnavailable
+	}
 	return id, key, e
 }
 func (c *Client) call(ctx context.Context, path string, in, out any) error {
@@ -72,11 +78,15 @@ func (c *Client) call(ctx context.Context, path string, in, out any) error {
 		return protocol.ErrUnavailable
 	}
 	defer res.Body.Close()
+	response, e := io.ReadAll(io.LimitReader(res.Body, (2<<20)+1))
+	if e != nil || len(response) > 2<<20 || id.Service.VerifyResponse(req, body, response, res) != nil {
+		return protocol.ErrUnavailable
+	}
 	if res.StatusCode != 200 {
 		var v struct {
 			Code string `json:"code"`
 		}
-		_ = json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&v)
+		_ = json.Unmarshal(response, &v)
 		switch v.Code {
 		case "assignment_refused", "identity_refused":
 			return protocol.ErrDenied
@@ -87,7 +97,7 @@ func (c *Client) call(ctx context.Context, path string, in, out any) error {
 		}
 		return protocol.ErrUnavailable
 	}
-	if json.NewDecoder(io.LimitReader(res.Body, 2<<20)).Decode(out) != nil {
+	if json.Unmarshal(response, out) != nil {
 		return protocol.ErrUnavailable
 	}
 	return nil
@@ -118,8 +128,29 @@ func (c *Client) Versions(ctx context.Context, in protocol.ResolveRequest) (prot
 }
 func (c *Client) Resolve(ctx context.Context, in protocol.ResolveRequest) (protocol.VersionSet, error) {
 	var v protocol.VersionSet
-	e := c.call(ctx, "/v1/runtime/resolve", in, &v)
-	return v, e
+	recipient, e := protocol.EncryptionKEM().GenerateKey()
+	if e != nil {
+		return v, protocol.ErrUnavailable
+	}
+	request := protocol.DeliveryRequest{ResolveRequest: in, RecipientKey: recipient.PublicKey().Bytes()}
+	if e = c.call(ctx, "/v1/runtime/resolve", request, &v); e != nil {
+		return v, e
+	}
+	id, _, e := c.identity()
+	if e != nil {
+		return protocol.VersionSet{}, protocol.ErrUnavailable
+	}
+	for i := range v.Values {
+		v.Values[i].DataKey, e = protocol.OpenDataKey(recipient, protocol.KeyInfo("delivery", id.Service.Origin, v.Values[i].Binding), v.Values[i].SealedKey)
+		if e != nil {
+			for j := range v.Values {
+				clear(v.Values[j].DataKey)
+			}
+			return protocol.VersionSet{}, protocol.ErrUnavailable
+		}
+		v.Values[i].SealedKey = nil
+	}
+	return v, nil
 }
 
 func (c *Client) MarkManaged() error {

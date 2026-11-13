@@ -27,6 +27,7 @@ mkdir -p "$INSTALL_DIR/bin"
 printf '#!/bin/sh\nprintf "Encryption Status: Enabled\\nCurrent Rotation Stage: start\\n"\n' > "$INSTALL_DIR/bin/k3s"
 chmod 700 "$INSTALL_DIR/bin/k3s"
 NODE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaa
+openssl genpkey -algorithm ED25519 -out "$INSTALL_DIR/service-key.pem" 2>/dev/null
 kube() { :; }
 chown() { :; }
 curl() {
@@ -36,7 +37,14 @@ curl() {
   count=$((count+1)); printf '%s' "$count" > "$INSTALL_DIR/count"
   if (( count==1 )); then printf '{"code":"identity_reset_required"}\n409'; return; fi
   if (( count==2 )); then return 1; fi
-  printf '{"node_id":"%s","owner_id":"11111111-1111-4111-8111-111111111111","generation":1}\n200' "$NODE_ID"
+  local service_public reply proof signature
+  service_public=$(openssl pkey -in "$INSTALL_DIR/service-key.pem" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 -w0)
+  reply=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --arg nonce "$(jq -r '.nonce' <<< "$request")" --arg service "$service_public" '{node_id:$node,owner_id:"11111111-1111-4111-8111-111111111111",generation:1,public_key:$public,nonce:$nonce,service:{origin:"https://controlcenter-secrets.livepeer.live",public_key:$service}}')
+  proof=$(jq -c '["lpcc-secrets-enrollment-v1",.service.origin,.service.public_key,.node_id,.owner_id,.generation,.public_key,.nonce]' <<< "$reply")
+  printf '%s' "$proof" > "$INSTALL_DIR/receipt-proof"
+  signature=$(openssl pkeyutl -sign -rawin -inkey "$INSTALL_DIR/service-key.pem" -in "$INSTALL_DIR/receipt-proof" | base64 -w0)
+  jq -c --arg signature "$signature" '. + {receipt_signature:$signature}' <<< "$reply"
+  printf '\n200'
 }
 before=$(sha256sum "$target/key.pem")
 enroll_secrets
@@ -47,6 +55,11 @@ enroll_secrets
 cmp "$target/key.pem" "$INSTALL_DIR/volumes/app-reconciler/secrets/key.pem"
 [[ $(jq -r '.node_id' "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json") == "$NODE_ID" ]]
 [[ $(stat -c %a "$target/key.pem") == 600 ]]
+pin=$(cat "$target/service.json")
+printf '%s' "$TEST_SETUP" > "$target/setup"
+openssl genpkey -algorithm ED25519 -out "$INSTALL_DIR/service-key.pem" 2>/dev/null
+if (enroll_secrets); then exit 1; fi
+[[ $(cat "$target/service.json") == "$pin" && -f "$target/setup" ]]
 '''
             result = subprocess.run(['bash', '-c', script, 'fixture', str(SCRIPT), root],
                                     env={**os.environ, 'TEST_SETUP': grant}, capture_output=True, text=True)

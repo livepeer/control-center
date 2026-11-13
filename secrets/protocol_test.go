@@ -52,7 +52,10 @@ func TestWebCryptoInteroperabilityVector(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	var v Resolved
+	var v struct {
+		Ciphertext
+		DataKey Sensitive `json:"data_key"`
+	}
 	if json.Unmarshal(b, &v) != nil {
 		t.Fatal("invalid vector")
 	}

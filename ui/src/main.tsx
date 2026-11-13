@@ -5,7 +5,7 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { ArrowDown, ArrowRight, Check, CheckCheck, ChevronRight, Copy, Cpu, LogOut, Plus, RefreshCw, Server, Terminal, X } from 'lucide-react'
 import './style.css'
 import { api } from './api'
-import { OperatorSecrets, secretsAPI, enrollmentEnvelope } from './operator-secrets'
+import { OperatorSecrets, enrollSecretsService, enrollmentEnvelope } from './operator-secrets'
 import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { MachineStatus, machineStatusSummary } from './machine-status'
@@ -103,7 +103,7 @@ function Dashboard({ client, session, config }: { client: SupabaseClient; sessio
     setBusy(true); setTokenProblem(''); setCopied(false)
     try {
  const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST' })
- if (config.secrets_url) {const setup = await secretsAPI<Enrollment>(session,config.secrets_url,'/v1/enrollment-grants',{method:'POST'});control.token=enrollmentEnvelope(control.token,setup.token);control.expires_at=new Date(Math.min(Date.parse(control.expires_at),Date.parse(setup.expires_at))).toISOString()}
+ if (config.secrets_url) {const setup = await enrollSecretsService<Enrollment>(session,config.secrets_url);control.token=enrollmentEnvelope(control.token,setup.token);control.expires_at=new Date(Math.min(Date.parse(control.expires_at),Date.parse(setup.expires_at))).toISOString()}
  setEnrollment(control)
  }
     catch (error) { setTokenProblem(error instanceof Error ? error.message : 'Could not generate a command.') }

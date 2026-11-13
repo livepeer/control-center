@@ -4,6 +4,8 @@ package secretservice
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/hpke"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
@@ -29,6 +31,8 @@ type Config struct {
 	SigningKeyID                                                                            string
 	SupabaseURL, SupabaseKey, ControlURL, ControlToken, VaultURL, VaultToken, AllowedOrigin string
 	PublicURL                                                                               string
+	IdentityKey                                                                             ed25519.PrivateKey
+	EncryptionKey                                                                           hpke.PrivateKey
 }
 type Metadata interface {
 	Machine(context.Context, string, *protocol.MachineBinding) (protocol.Machine, error)
@@ -203,6 +207,7 @@ func audit(ctx context.Context, tx *sql.Tx, owner, action, target string) error 
 }
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/encryption-key", s.encryptionKey)
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		fmt.Fprintf(w, "secrets_setup_grants_issued_total %d\nsecrets_setup_grants_rejected_total %d\n", s.issued.Load(), s.issuanceRejected.Load())
@@ -229,7 +234,7 @@ func (s *Service) Handler() http.Handler {
 		}
 		response(w, 200, map[string]bool{"ready": true})
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return s.signedResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if origin := r.Header.Get("Origin"); origin != "" {
@@ -239,6 +244,7 @@ func (s *Service) Handler() http.Handler {
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Expose-Headers", protocol.ServiceSignatureHeader)
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization,Content-Type")
 			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		}
@@ -249,7 +255,7 @@ func (s *Service) Handler() http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 		mux.ServeHTTP(w, r.WithContext(ctx))
-	})
+	}))
 }
 func (s *Service) issue(w http.ResponseWriter, r *http.Request) {
 	owner, e := s.owner(r)
@@ -264,7 +270,7 @@ func (s *Service) issue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.issued.Add(1)
-	response(w, 200, map[string]any{"token": raw, "expires_at": exp})
+	response(w, 200, map[string]any{"token": raw, "expires_at": exp, "service": s.trust()})
 }
 func (s *Service) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	owner, e := s.owner(r)

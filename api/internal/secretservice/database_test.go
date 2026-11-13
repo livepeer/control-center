@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,20 +55,31 @@ func (m *testMetadata) Machine(_ context.Context, _ string, in *protocol.Machine
 	return m.machine, nil
 }
 
-type testTransit struct{ calls atomic.Int64 }
+type testTransit struct {
+	calls atomic.Int64
+	keys  sync.Map
+}
 
 func (v *testTransit) Wrap(_ context.Context, _ string, key []byte) (string, error) {
 	v.calls.Add(1)
-	return "vault:v1:" + base64.StdEncoding.EncodeToString(key), nil
+	wrapped := "vault:v1:" + rand.Text()
+	v.keys.Store(wrapped, append([]byte(nil), key...))
+	return wrapped, nil
 }
 func (v *testTransit) Unwrap(_ context.Context, _ string, wrapped string) ([]byte, error) {
 	v.calls.Add(1)
-	return base64.StdEncoding.DecodeString(strings.TrimPrefix(wrapped, "vault:v1:"))
+	key, ok := v.keys.Load(wrapped)
+	if !ok {
+		return nil, protocol.ErrInvalid
+	}
+	return append([]byte(nil), key.([]byte)...), nil
 }
 func dbService(t *testing.T) (*Service, ed25519.PrivateKey, *testMetadata, *testTransit) {
 	t.Helper()
 	db := testdb.Open(t)
 	s := New(db, Config{SigningKey: strings.Repeat("s", 32), SigningKeyID: "current", SupabaseURL: "https://auth.example", PublicURL: "https://secrets.example"})
+	_, s.Config.IdentityKey, _ = ed25519.GenerateKey(rand.Reader)
+	s.Config.EncryptionKey, _ = protocol.EncryptionKEM().GenerateKey()
 	if e := s.Migrate(t.Context()); e != nil {
 		t.Fatal(e)
 	}
@@ -300,7 +312,22 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	w = call(t, s, "/v1/secrets/"+binding.ID+"/wrap", "POST", "operator", map[string]any{"version_id": binding.Version, "data_key": dek}, nil)
+	beforeWrap := vault.calls.Load()
+	if w = call(t, s, "/v1/secrets/"+binding.ID+"/wrap", "POST", "operator", map[string]any{"version_id": binding.Version, "data_key": dek}, nil); w.Code != 400 {
+		t.Fatal("plaintext upload accepted", w.Code)
+	}
+	wrongInfo, _ := protocol.SealDataKey(s.Config.EncryptionKey.PublicKey().Bytes(), protocol.KeyInfo("delivery", s.Config.PublicURL, binding), dek)
+	if w = call(t, s, "/v1/secrets/"+binding.ID+"/wrap", "POST", "operator", map[string]any{"version_id": binding.Version, "sealed_key": wrongInfo}, nil); w.Code != 400 {
+		t.Fatal("cross-purpose upload accepted", w.Code)
+	}
+	if vault.calls.Load() != beforeWrap {
+		t.Fatal("invalid upload reached Vault")
+	}
+	sealed, err := protocol.SealDataKey(s.Config.EncryptionKey.PublicKey().Bytes(), protocol.KeyInfo("upload", s.Config.PublicURL, binding), dek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = call(t, s, "/v1/secrets/"+binding.ID+"/wrap", "POST", "operator", map[string]any{"version_id": binding.Version, "sealed_key": sealed}, nil)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -313,7 +340,11 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	in := protocol.ResolveRequest{RevisionID: a.RevisionID, Generation: 1, Activation: 1, Digest: a.Digest}
+	recipient, e := protocol.EncryptionKEM().GenerateKey()
+	if e != nil {
+		t.Fatal(e)
+	}
+	in := protocol.DeliveryRequest{ResolveRequest: request, RecipientKey: recipient.PublicKey().Bytes()}
 	before := vault.calls.Load()
 	bad := in
 	bad.RevisionID = "33333333-3333-4333-8333-333333333333"
@@ -332,7 +363,14 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if len(set.Values) != 1 {
 		t.Fatal("values")
 	}
-	plain, e := protocol.Decrypt(set.Values[0].Ciphertext, set.Values[0].DataKey)
+	if bytes.Contains(w.Body.Bytes(), []byte(`"data_key"`)) || bytes.Contains(w.Body.Bytes(), []byte(base64.StdEncoding.EncodeToString(dek))) {
+		t.Fatal("usable data key on delivery wire")
+	}
+	delivered, e := protocol.OpenDataKey(recipient, protocol.KeyInfo("delivery", s.Config.PublicURL, set.Values[0].Binding), set.Values[0].SealedKey)
+	if e != nil {
+		t.Fatal(e)
+	}
+	plain, e := protocol.Decrypt(set.Values[0].Ciphertext, delivered)
 	if e != nil || string(plain) != "value-sentinel" {
 		t.Fatal(e)
 	}
@@ -349,7 +387,11 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	w = call(t, s, "/v1/secrets/"+binding.ID+"/wrap", "POST", "operator", map[string]any{"version_id": binding.Version, "data_key": dek}, nil)
+	sealed, e = protocol.SealDataKey(s.Config.EncryptionKey.PublicKey().Bytes(), protocol.KeyInfo("upload", s.Config.PublicURL, binding), dek)
+	if e != nil {
+		t.Fatal(e)
+	}
+	w = call(t, s, "/v1/secrets/"+binding.ID+"/wrap", "POST", "operator", map[string]any{"version_id": binding.Version, "sealed_key": sealed}, nil)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}

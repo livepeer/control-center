@@ -104,7 +104,11 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "enrollment_pending")
 		return
 	}
-	response(w, 200, protocol.Identity{NodeID: in.NodeID, Owner: c.Subject, Generation: gen})
+	id := protocol.Identity{NodeID: in.NodeID, Owner: c.Subject, Generation: gen, PublicKey: in.PublicKey, Nonce: in.Nonce, Service: s.trust()}
+	if id.Service != nil {
+		id.ReceiptSignature = ed25519.Sign(s.Config.IdentityKey, id.EnrollmentProof())
+	}
+	response(w, 200, id)
 }
 func (s *Service) machine(r *http.Request) (protocol.Machine, int64, error) {
 	return s.machineWith(r, s.DB)

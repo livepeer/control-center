@@ -51,6 +51,9 @@ func (f *fakeSecretResolver) Resolve(context.Context, protocol.ResolveRequest) (
 	b, _ := json.Marshal(f.set)
 	var copy protocol.VersionSet
 	_ = json.Unmarshal(b, &copy)
+	for i := range copy.Values {
+		copy.Values[i].DataKey = append(protocol.Sensitive(nil), f.set.Values[i].DataKey...)
+	}
 	return copy, f.err
 }
 

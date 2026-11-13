@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane"
 	"github.com/livepeer/control-center/api/internal/secretservice"
+	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +26,22 @@ func file(name string) ([]byte, error) {
 	return os.ReadFile(p)
 }
 func run(ctx context.Context) error {
+	identity, e := file("SECRETS_IDENTITY_KEY_FILE")
+	if e != nil {
+		return e
+	}
+	identityKey, e := protocol.ParsePrivate(identity)
+	if e != nil {
+		return errors.New("invalid service identity key")
+	}
+	encryption, e := file("SECRETS_ENCRYPTION_KEY_FILE")
+	if e != nil {
+		return e
+	}
+	encryptionKey, e := protocol.ParseEncryptionPrivate(encryption)
+	if e != nil {
+		return errors.New("invalid service X25519 encryption key")
+	}
 	signing, e := file("SECRETS_SIGNING_KEY_FILE")
 	if e != nil || len(signing) < 32 {
 		return errors.New("configure a signing key file with at least 32 bytes")
@@ -42,6 +59,8 @@ func run(ctx context.Context) error {
 		return e
 	}
 	c := secretservice.Config{SigningKey: string(signing), SigningKeyID: os.Getenv("SECRETS_SIGNING_KEY_ID"), SupabaseURL: os.Getenv("SUPABASE_URL"), SupabaseKey: os.Getenv("SUPABASE_PUBLISHABLE_KEY"), ControlURL: os.Getenv("CONTROL_API_URL"), ControlToken: string(control), VaultURL: os.Getenv("VAULT_ADDR"), VaultToken: string(vault), AllowedOrigin: os.Getenv("SECRETS_ALLOWED_ORIGIN"), PublicURL: strings.TrimSuffix(os.Getenv("SECRETS_PUBLIC_URL"), "/")}
+	c.IdentityKey = identityKey
+	c.EncryptionKey = encryptionKey
 	u, e := url.Parse(c.PublicURL)
 	if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("configure SECRETS_PUBLIC_URL as the public HTTPS origin")

@@ -1,19 +1,38 @@
 import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { api } from './api'
+import { b64, saveServicePin, sealUploadKey, servicePin, verifyServiceResponse } from './secret-crypto'
+import type { ServiceTrust } from './secret-crypto'
 
 type Secret = { owner_id: string; secret_id: string; name: string; key: string; version_id: string; revision: number; deleted: boolean }
 type App = { name: string; aliases?: {name: string}[]; denied: boolean; generation: number; secrets: {name: string; secret: string; key: string}[]; machines?: string[]; requested_machines?: string[] }
-export async function secretsAPI<T>(session: Session, origin: string, path: string, options: RequestInit = {}): Promise<T> {
- const url = new URL(origin)
- if (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname)) throw new Error('The secrets service requires HTTPS.')
+async function serviceRequest<T>(session: Session, origin: string, path: string, options: RequestInit, enrollment = false): Promise<T> {
+ const url = new URL(path, origin)
+ if (url.origin !== origin || (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname))) throw new Error('The secrets service requires an HTTPS origin.')
+ const pin = servicePin(origin)
+ if (!pin && !enrollment) throw new Error('Generate an enrollment command in this browser to trust the secrets service first.')
+ url.searchParams.set('nonce', b64(crypto.getRandomValues(new Uint8Array(32))))
  const headers = new Headers(options.headers); headers.set('Authorization', `Bearer ${session.access_token}`); headers.set('Content-Type','application/json')
- const response = await fetch(`${origin.replace(/\/$/,'')}${path}`, {...options, headers, credentials:'omit', cache:'no-store', redirect:'error'})
- const body = await response.json()
+ const method = options.method ?? 'GET', request = typeof options.body === 'string' ? options.body : ''
+ const response = await fetch(url, {...options, method, headers, credentials:'omit', cache:'no-store', redirect:'error'})
+ const raw = await response.text()
+ if (pin) await verifyServiceResponse(pin, url, method, headers.get('Authorization')!, request, response, raw)
+ const body = JSON.parse(raw)
  if (!response.ok) throw new Error(typeof body.code === 'string' ? body.code.replaceAll('_',' ') : 'Secrets service unavailable.')
+ if (enrollment) {
+  const trust = body.service as ServiceTrust
+  if (!trust || trust.origin !== origin) throw new Error('Invalid secrets service enrollment identity.')
+  await verifyServiceResponse(trust, url, method, headers.get('Authorization')!, request, response, raw)
+  saveServicePin(trust)
+ }
  return body as T
 }
-const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b))
+export function secretsAPI<T>(session: Session, origin: string, path: string, options: RequestInit = {}): Promise<T> {
+ return serviceRequest<T>(session, origin, path, options)
+}
+export function enrollSecretsService<T>(session: Session, origin: string): Promise<T> {
+ return serviceRequest<T>(session, origin, '/v1/enrollment-grants', {method:'POST'}, true)
+}
 export function enrollmentEnvelope(control: string, setup: string): string {
  return 'lpcc1.' + b64(new TextEncoder().encode(JSON.stringify({version:1, control, setup}))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','')
 }
@@ -35,13 +54,15 @@ export function OperatorSecrets({session, origin}:{session:Session;origin:string
   if(s.status==='fulfilled')setSecrets(s.value.secrets);else{setSecrets([]);setProblem('Could not load secrets.')}
   if(a.status==='fulfilled')setApps(a.value.apps);else{setApps([]);setProblem('Could not load app access.')}
  }
- useEffect(()=>{void refresh().catch(()=>setProblem('Could not load operator secrets.'))},[session.access_token,origin])
+ useEffect(()=>{const load=()=>{void refresh().catch(()=>setProblem('Could not load operator secrets.'))};load();window.addEventListener('lpcc-secrets-enrolled',load);return()=>window.removeEventListener('lpcc-secrets-enrolled',load)},[session.access_token,origin])
  const perform=async(fn:()=>Promise<void>)=>{setBusy(true);setProblem('');setMessage('');let failure='';try{await fn()}catch(e){failure=e instanceof Error?e.message:'Operation failed.'}finally{await refresh();if(failure)setProblem(failure);setBusy(false)}}
  async function save(event: React.FormEvent) { event.preventDefault();await perform(async()=>{
   const current=secrets.find(s=>!s.deleted&&s.name===name&&s.key===key)
   const binding=await secretsAPI<Secret>(session,origin,'/v1/secrets/reserve',{method:'POST',body:JSON.stringify({name,key,expected_revision:current?.revision??0})})
   const encrypted=await encryptSecret(binding,value)
-  try{const wrapped=await secretsAPI<{wrapped_key:string}>(session,origin,`/v1/secrets/${binding.secret_id}/wrap`,{method:'POST',body:JSON.stringify({version_id:binding.version_id,data_key:b64(encrypted.dataKey)})})
+  try{const serviceKey=await secretsAPI<{public_key:string}>(session,origin,'/v1/encryption-key')
+   const sealedKey=await sealUploadKey(origin,binding,serviceKey.public_key,encrypted.dataKey)
+   const wrapped=await secretsAPI<{wrapped_key:string}>(session,origin,`/v1/secrets/${binding.secret_id}/wrap`,{method:'POST',body:JSON.stringify({version_id:binding.version_id,sealed_key:sealedKey})})
    await secretsAPI(session,origin,`/v1/secrets/${binding.secret_id}`,{method:'PUT',body:JSON.stringify({owner_id:binding.owner_id,secret_id:binding.secret_id,name:binding.name,key:binding.key,version_id:binding.version_id,nonce:encrypted.nonce,ciphertext:encrypted.ciphertext,wrapped_key:wrapped.wrapped_key})})
   } finally {encrypted.dataKey.fill(0);setValue('')}
   setMessage('Saved. Affected apps will rotate automatically; inspect machine status for completion.')

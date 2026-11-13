@@ -314,7 +314,7 @@ secrets_key_proof() {
 }
 
 enroll_secrets() {
-  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt
+  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt nonce
   [[ -f "$target/setup" ]] || return 0
   local payload exp padded
   payload=$(cut -d. -f2 "$target/setup")
@@ -331,9 +331,11 @@ enroll_secrets() {
   fi
   endpoint=$(cat "$target/url")
   [[ "$endpoint" =~ ^https://[a-zA-Z0-9_.:-]+$ ]] || die 'invalid secrets service HTTPS origin'
+  if [[ -s "$target/service.json" && $(jq -r '.origin' "$target/service.json") != "$endpoint" ]]; then die 'secrets service origin differs from the installed trust anchor'; fi
   setup_token=$(cat "$target/setup")
   for attempt in 1 2; do
-    request=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --rawfile signature <(secrets_key_proof "$NODE_ID") --rawfile management "$INSTALL_DIR/credentials/service-token" '{node_id:$node,public_key:$public,signature:$signature,management_token:$management,encryption_ready:true}')
+    nonce=$(openssl rand -hex 32)
+    request=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --arg nonce "$nonce" --rawfile signature <(secrets_key_proof "$NODE_ID") --rawfile management "$INSTALL_DIR/credentials/service-token" '{node_id:$node,public_key:$public,nonce:$nonce,signature:$signature,management_token:$management,encryption_ready:true}')
     response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --proto '=https' --request POST --header 'Content-Type: application/json' --config <(printf 'header = "Authorization: Bearer %s"\n' "$setup_token") --data-binary @<(printf '%s' "$request") --write-out '\n%{http_code}' "$endpoint/v1/machines/enroll") || { log 'Secrets enrollment pending: service unavailable.'; return 0; }
     status=${response##*$'\n'}; response=${response%$'\n'*}
     if [[ "$status" == 409 && "$attempt" == 1 ]] && [[ $(jq -r '.code // empty' <<< "$response") == identity_reset_required ]]; then
@@ -348,6 +350,7 @@ enroll_secrets() {
   if [[ "$status" != 200 ]]; then log 'Secrets enrollment pending; no secret values have been installed.'; return 0; fi
   [[ $(jq -r '.node_id' <<< "$response") == "$NODE_ID" ]] || die 'secrets identity mismatch'
   jq -e '(.owner_id | type == "string" and length > 0) and (.generation | type == "number" and . >= 1 and . == floor)' <<< "$response" >/dev/null || die 'invalid secrets identity'
+  verify_secrets_enrollment "$response" "$nonce" "$endpoint"
   public="$INSTALL_DIR/volumes/app-reconciler/secrets"
   install -d -m 0700 "$public"
   atomic_write "$public/key.pem" < "$target/key.pem"
@@ -357,4 +360,27 @@ enroll_secrets() {
   printf '1' | atomic_write "$public/managed"
   chown -R 65532:65532 "$public"
   rm -f -- "$target/setup"
+}
+
+verify_secrets_enrollment() {
+  local response=$1 nonce=$2 endpoint=$3 target="$INSTALL_DIR/credentials/secrets" anchor saved temporary proof
+  jq -e --arg nonce "$nonce" --arg public "$SECRET_PUBLIC" --arg origin "$endpoint" \
+    '.nonce == $nonce and .public_key == $public and .service.origin == $origin and (.service.public_key | type == "string")' <<< "$response" >/dev/null || die 'invalid secrets enrollment receipt'
+  anchor=$(jq -cS '.service | {origin,public_key}' <<< "$response")
+  saved=''
+  if [[ -s "$target/service.json" ]]; then saved=$(jq -cS . "$target/service.json")
+  elif [[ -s "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json" ]]; then
+    saved=$(jq -cS '.service // empty' "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json")
+  fi
+  [[ -z "$saved" || "$saved" == "$anchor" ]] || die 'secrets service identity changed; restore the trusted service key before retrying'
+  temporary=$(mktemp -d "$target/receipt.XXXXXX")
+  { printf '\060\052\060\005\006\003\053\145\160\003\041\000'; jq -er '.service.public_key' <<< "$response" | base64 --decode; } > "$temporary/public.der"
+  jq -er '.receipt_signature' <<< "$response" | base64 --decode > "$temporary/signature"
+  proof=$(jq -c '["lpcc-secrets-enrollment-v1",.service.origin,.service.public_key,.node_id,.owner_id,.generation,.public_key,.nonce]' <<< "$response")
+  printf '%s' "$proof" > "$temporary/proof"
+  if ! openssl pkeyutl -verify -rawin -pubin -keyform DER -inkey "$temporary/public.der" -in "$temporary/proof" -sigfile "$temporary/signature" >/dev/null 2>&1; then
+    rm -rf -- "$temporary"; die 'invalid secrets service signature'
+  fi
+  rm -rf -- "$temporary"
+  printf '%s' "$anchor" | atomic_write "$target/service.json"
 }

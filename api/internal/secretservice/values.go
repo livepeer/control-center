@@ -90,21 +90,26 @@ func (s *Service) wrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Version string             `json:"version_id"`
-		DataKey protocol.Sensitive `json:"data_key"`
+		Version   string             `json:"version_id"`
+		SealedKey protocol.Sensitive `json:"sealed_key"`
 	}
-	if decode(r, &in) != nil || len(in.DataKey) != 32 {
+	if decode(r, &in) != nil || len(in.SealedKey) != 80 {
 		fail(w, 400, "invalid_key")
 		return
 	}
-	var allowed bool
-	e = s.DB.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT FROM lpsecrets.versions v JOIN lpsecrets.secrets s ON s.id=v.secret_id WHERE v.id=$1 AND s.id=$2 AND s.owner_id=$3 AND NOT s.deleted AND v.base_revision=s.revision AND v.ciphertext IS NULL AND v.wrapped_key IS NULL)`, in.Version, r.PathValue("id"), owner).Scan(&allowed)
-	if e != nil || !allowed {
+	binding := protocol.Binding{Owner: owner, ID: r.PathValue("id"), Version: in.Version}
+	e = s.DB.QueryRowContext(r.Context(), `SELECT s.name,s.key FROM lpsecrets.versions v JOIN lpsecrets.secrets s ON s.id=v.secret_id WHERE v.id=$1 AND s.id=$2 AND s.owner_id=$3 AND NOT s.deleted AND v.base_revision=s.revision AND v.ciphertext IS NULL AND v.wrapped_key IS NULL`, in.Version, binding.ID, owner).Scan(&binding.Name, &binding.Key)
+	if e != nil {
 		fail(w, 409, "secret_conflict")
 		return
 	}
-	wrapped, e := s.Transit.Wrap(r.Context(), owner, in.DataKey)
-	clear(in.DataKey)
+	key, e := protocol.OpenDataKey(s.Config.EncryptionKey, protocol.KeyInfo("upload", s.Config.PublicURL, binding), in.SealedKey)
+	if e != nil {
+		fail(w, 400, "invalid_key")
+		return
+	}
+	wrapped, e := s.Transit.Wrap(r.Context(), owner, key)
+	clear(key)
 	if e != nil {
 		fail(w, 503, "key_unavailable")
 		return
@@ -212,10 +217,17 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 		fail(w, 503, "activation_pending")
 		return
 	}
-	var in protocol.ResolveRequest
-	if decode(r, &in) != nil {
+	var request protocol.DeliveryRequest
+	if decode(r, &request) != nil {
 		fail(w, 400, "invalid_assignment")
 		return
+	}
+	in := request.ResolveRequest
+	if keys {
+		if _, e := protocol.EncryptionKEM().NewPublicKey(request.RecipientKey); e != nil {
+			fail(w, 400, "invalid_recipient_key")
+			return
+		}
 	}
 	var refs []struct{ Name, Key string }
 	eligible := false
@@ -260,11 +272,6 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 		}
 		out.Values = append(out.Values, v)
 	}
-	defer func() {
-		for i := range out.Values {
-			clear(out.Values[i].DataKey)
-		}
-	}()
 	out.Digest = protocol.VersionDigest(out.Values)
 	if in.Expected != "" && in.Expected != out.Digest {
 		fail(w, 409, "version_changed")
@@ -274,10 +281,16 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 		for i := range out.Values {
 			key, e := s.Transit.Unwrap(r.Context(), m.Owner, out.Values[i].WrappedKey)
 			if e != nil {
+				clear(key)
 				fail(w, 503, "key_unavailable")
 				return
 			}
-			out.Values[i].DataKey = key
+			out.Values[i].SealedKey, e = protocol.SealDataKey(request.RecipientKey, protocol.KeyInfo("delivery", s.Config.PublicURL, out.Values[i].Binding), key)
+			clear(key)
+			if e != nil {
+				fail(w, 400, "invalid_recipient_key")
+				return
+			}
 		}
 		if audit(r.Context(), tx, m.Owner, "secret.resolve", m.NodeID+"/"+in.RevisionID) != nil {
 			fail(w, 503, "unavailable")
