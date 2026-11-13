@@ -22,6 +22,7 @@ import (
 
 const testUser = "11111111-1111-4111-8111-111111111111"
 const testOwner = "0x1111111111111111111111111111111111111111"
+const testMachineCredential = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 type testMetadata struct {
 	machine    protocol.Machine
@@ -97,7 +98,7 @@ func TestOrchestratorSecretsAreSharedAndMachineIdentityOutlivesIssuer(t *testing
 	}
 	grant, _, _ = s.Grant(testUser, testOwner)
 	delete(users, testUser)
-	in := protocol.EnrollRequest{NodeID: m.machine.NodeID, PublicKey: m.machine.PublicKey, EncryptionReady: true, Signature: ed25519.Sign(key, protocol.Proof(m.machine.NodeID, m.machine.PublicKey))}
+	in := enrollmentRequest(m.machine.NodeID, key)
 	if w = call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 403 {
 		t.Fatal("departed issuer could enroll", w.Code)
 	}
@@ -124,7 +125,7 @@ func TestSetupAuthorizationIsRecheckedAfterIdentityWaitAndMetadata(t *testing.T)
 				return nil
 			}
 			grant, _, _ := s.Grant(testUser, testOwner)
-			in := protocol.EnrollRequest{NodeID: m.machine.NodeID, PublicKey: m.machine.PublicKey, EncryptionReady: true, Signature: ed25519.Sign(key, protocol.Proof(m.machine.NodeID, m.machine.PublicKey))}
+			in := enrollmentRequest(m.machine.NodeID, key)
 			var release func()
 			if stage == "identity-lock" {
 				tx, err := s.DB.Begin()
@@ -199,6 +200,8 @@ func (m *testMetadata) Machine(_ context.Context, _ string, in *protocol.Machine
 				return m.machine, protocol.ErrDenied
 			}
 			m.machine.Managed = true
+		} else if !in.ValidProof() || in.ManagementProof != protocol.EnrollmentProof(testMachineCredential, in.NodeID, in.PublicKey, in.Nonce) {
+			return m.machine, protocol.ErrDenied
 		} else if m.machine.PublicKey == "" || in.PublicKey == m.machine.PublicKey {
 			m.machine.PublicKey = in.PublicKey
 		} else {
@@ -286,11 +289,16 @@ type testIdentity struct {
 	key ed25519.PrivateKey
 }
 
+func enrollmentRequest(node string, key ed25519.PrivateKey) protocol.EnrollRequest {
+	public := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
+	nonce := strings.Repeat("a", 64)
+	return protocol.EnrollRequest{NodeID: node, PublicKey: public, Nonce: nonce, ManagementProof: protocol.EnrollmentProof(testMachineCredential, node, public, nonce), Signature: ed25519.Sign(key, protocol.Proof(node, public)), EncryptionReady: true}
+}
+
 func enrolled(t *testing.T, s *Service, key ed25519.PrivateKey, m *testMetadata) *testIdentity {
 	t.Helper()
 	grant, _, _ := s.Grant(testUser, testOwner)
-	public := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
-	in := protocol.EnrollRequest{NodeID: m.machine.NodeID, PublicKey: public, Signature: ed25519.Sign(key, protocol.Proof(m.machine.NodeID, public)), EncryptionReady: true}
+	in := enrollmentRequest(m.machine.NodeID, key)
 	w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -333,7 +341,7 @@ func TestDatabaseStatelessGrantsRevocationAndIdentity(t *testing.T) {
 	if n != 1 {
 		t.Fatal(n)
 	}
-	in := protocol.EnrollRequest{NodeID: m.machine.NodeID, PublicKey: m.machine.PublicKey, Signature: ed25519.Sign(key, protocol.Proof(m.machine.NodeID, m.machine.PublicKey)), EncryptionReady: true}
+	in := enrollmentRequest(m.machine.NodeID, key)
 	if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 401 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -412,7 +420,7 @@ func TestRevocationRechecksExpiryAfterWaitingForGrantLock(t *testing.T) {
 
 func TestConcurrentEnrollmentAndRevocation(t *testing.T) {
 	s, key, m, _ := dbService(t)
-	in := protocol.EnrollRequest{NodeID: m.machine.NodeID, PublicKey: m.machine.PublicKey, Signature: ed25519.Sign(key, protocol.Proof(m.machine.NodeID, m.machine.PublicKey)), EncryptionReady: true}
+	in := enrollmentRequest(m.machine.NodeID, key)
 	for range 5 {
 		grant, _, _ := s.Grant(testUser, testOwner)
 		start := make(chan struct{})
@@ -623,8 +631,7 @@ func TestResetFencesEveryPreviousKey(t *testing.T) {
 			t.Fatal(w.Code, w.Body.String())
 		}
 		for _, retired := range []ed25519.PrivateKey{initialKey, key} {
-			public := base64.StdEncoding.EncodeToString(retired.Public().(ed25519.PublicKey))
-			in := protocol.EnrollRequest{NodeID: node, PublicKey: public, Signature: ed25519.Sign(retired, protocol.Proof(node, public)), EncryptionReady: true}
+			in := enrollmentRequest(node, retired)
 			if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 409 {
 				t.Fatal("reset reused a retired key", w.Code, w.Body.String())
 			}
@@ -662,9 +669,8 @@ func TestRevokeCancelsPendingReset(t *testing.T) {
 		}
 	}
 	_, replacement, _ := ed25519.GenerateKey(rand.Reader)
-	public := base64.StdEncoding.EncodeToString(replacement.Public().(ed25519.PublicKey))
 	grant, _, _ := s.Grant(testUser, testOwner)
-	in := protocol.EnrollRequest{NodeID: node, PublicKey: public, Signature: ed25519.Sign(replacement, protocol.Proof(node, public)), EncryptionReady: true}
+	in := enrollmentRequest(node, replacement)
 	w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil)
 	if w.Code != 409 {
 		t.Fatal("revocation after reset did not close reset enrollment", w.Code, w.Body.String())
@@ -683,8 +689,8 @@ func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
 			s, key, metadata, _ := dbService(t)
 			metadata.machine.PublicKey = ""
 			grant, _, _ := s.Grant(testUser, testOwner)
-			public := base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
-			in := protocol.EnrollRequest{NodeID: metadata.machine.NodeID, PublicKey: public, Signature: ed25519.Sign(key, protocol.Proof(metadata.machine.NodeID, public)), EncryptionReady: failure != "encryption"}
+			in := enrollmentRequest(metadata.machine.NodeID, key)
+			in.EncryptionReady = failure != "encryption"
 			if failure == "expiry" {
 				metadata.after = func(*protocol.MachineBinding) error {
 					s.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
@@ -764,7 +770,6 @@ func TestResetSurvivesLostRemoteResponse(t *testing.T) {
 
 func TestOwnerCanResetPendingBindingWithoutCommittedIdentity(t *testing.T) {
 	s, key, m, _ := dbService(t)
-	oldKey := m.machine.PublicKey
 	node := m.machine.NodeID
 	if w := call(t, s, "/v1/machines/"+node+"/reset", "POST", "operator", nil, nil); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -773,10 +778,43 @@ func TestOwnerCanResetPendingBindingWithoutCommittedIdentity(t *testing.T) {
 		t.Fatal("pending key not cleared")
 	}
 	grant, _, _ := s.Grant(testUser, testOwner)
-	in := protocol.EnrollRequest{NodeID: node, PublicKey: oldKey, Signature: ed25519.Sign(key, protocol.Proof(node, oldKey)), EncryptionReady: true}
+	in := enrollmentRequest(node, key)
 	if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 409 {
 		t.Fatal("retired pending key accepted", w.Code)
 	}
 	_, replacement, _ := ed25519.GenerateKey(rand.Reader)
 	enrolled(t, s, replacement, m)
+}
+
+func TestEnrollmentRequiresProofAndForwardsBinding(t *testing.T) {
+	s, key, m, _ := dbService(t)
+	grant, _, _ := s.Grant(testUser, testOwner)
+	in := enrollmentRequest(m.machine.NodeID, key)
+	for _, field := range []string{"nonce", "management_proof"} {
+		for _, value := range []string{"", "abcd", strings.Repeat("A", 64)} {
+			raw, _ := json.Marshal(in)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			body[field] = value
+			if w := call(t, s, "/v1/machines/enroll", "POST", grant, body, nil); w.Code != 400 {
+				t.Fatal(field, value, w.Code, w.Body.String())
+			}
+		}
+	}
+	// Legacy enrollment bodies are refused rather than forwarded.
+	raw, _ := json.Marshal(in)
+	var legacy map[string]any
+	_ = json.Unmarshal(raw, &legacy)
+	legacy["management_token"] = testMachineCredential
+	if w := call(t, s, "/v1/machines/enroll", "POST", grant, legacy, nil); w.Code != 400 {
+		t.Fatal("legacy field accepted", w.Code)
+	}
+	forwarded := false
+	m.after = func(binding *protocol.MachineBinding) error {
+		forwarded = binding != nil && binding.Owner == testOwner && binding.Nonce == in.Nonce && binding.ManagementProof == in.ManagementProof
+		return nil
+	}
+	if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 200 || !forwarded {
+		t.Fatal("binding not forwarded intact", w.Code, w.Body.String())
+	}
 }

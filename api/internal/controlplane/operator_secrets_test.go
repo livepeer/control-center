@@ -208,7 +208,8 @@ func TestPendingSecretBindingOwnerActivationAndConditionalReset(t *testing.T) {
 	if _, e := s.db.Exec(`INSERT INTO lpcc.machine_reports(node_id,component,generation,credential_version,report) VALUES($1,'runner',1,1,'{"apps":{"secrets_protocol":1}}')`, node); e != nil {
 		t.Fatal(e)
 	}
-	in := protocol.MachineBinding{EnrollRequest: protocol.EnrollRequest{NodeID: node, PublicKey: public, Signature: ed25519.Sign(key, protocol.Proof(node, public)), Management: c["token"], EncryptionReady: true}, Owner: ownerB}
+	nonce := strings.Repeat("a", 64)
+	in := protocol.MachineBinding{EnrollRequest: protocol.EnrollRequest{NodeID: node, PublicKey: public, Nonce: nonce, Signature: ed25519.Sign(key, protocol.Proof(node, public)), ManagementProof: protocol.EnrollmentProof(c["token"], node, public, nonce), EncryptionReady: true}, Owner: orchB}
 	path := "/internal/secrets/nodes/" + node
 	requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, in), 400)
 	var bound string
@@ -218,6 +219,30 @@ func TestPendingSecretBindingOwnerActivationAndConditionalReset(t *testing.T) {
 		t.Fatal("mixed owner mutated binding")
 	}
 	in.Owner = orchA
+	for name, change := range map[string]func(*protocol.MachineBinding){
+		"missing proof":      func(b *protocol.MachineBinding) { b.ManagementProof = "" },
+		"raw credential":     func(b *protocol.MachineBinding) { b.ManagementProof = c["token"] },
+		"missing nonce":      func(b *protocol.MachineBinding) { b.Nonce = "" },
+		"short nonce":        func(b *protocol.MachineBinding) { b.Nonce = "abcd" },
+		"noncanonical nonce": func(b *protocol.MachineBinding) { b.Nonce = strings.Repeat("A", 64) },
+		"changed nonce":      func(b *protocol.MachineBinding) { b.Nonce = strings.Repeat("b", 64) },
+		"other node": func(b *protocol.MachineBinding) {
+			b.ManagementProof = protocol.EnrollmentProof(c["token"], "other-node", public, nonce)
+		},
+		"other key": func(b *protocol.MachineBinding) {
+			b.ManagementProof = protocol.EnrollmentProof(c["token"], node, "other-public", nonce)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := in
+			change(&changed)
+			requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, changed), 403)
+		})
+	}
+	requireStatus(t, request(t, s, "GET", "/v1/nodes/"+node+"/config", in.ManagementProof, nil), 401)
+	requireStatus(t, request(t, s, "POST", path, in.ManagementProof, in), 403)
+	// A retry of the exact binding remains idempotent.
+	requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, in), 200)
 	requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, in), 200)
 	_ = s.db.QueryRow(`SELECT managed FROM lpcc.secret_machines WHERE node_id=$1`, node).Scan(&managed)
 	if managed {
@@ -232,6 +257,18 @@ func TestPendingSecretBindingOwnerActivationAndConditionalReset(t *testing.T) {
 	if bound != public || !managed {
 		t.Fatal("late clear erased new binding")
 	}
+	// Credential refresh invalidates the old proof even for the same binding.
+	grant, _, _ := s.params.signEnrollment(ownerA, orchA, s.currentTime())
+	w := request(t, s, "POST", "/v1/nodes/"+node+"/credentials/refresh", grant, map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("f", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
+	requireStatus(t, w, 200)
+	fresh := credentials(t, w.Body.Bytes())
+	in.Activate, in.AdmissionReady, in.ResetKey = false, false, ""
+	requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, in), 403)
+	if _, err := s.db.Exec(`UPDATE lpcc.machine_reports SET credential_version=2 WHERE node_id=$1`, node); err != nil {
+		t.Fatal(err)
+	}
+	in.ManagementProof = protocol.EnrollmentProof(fresh["token"], node, public, nonce)
+	requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, in), 200)
 }
 
 func TestRegistrationProofCannotBeReplayedWithAnotherGrantOrRequest(t *testing.T) {

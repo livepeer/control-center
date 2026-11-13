@@ -57,16 +57,16 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			pub, err := protocol.PublicKey(in.PublicKey)
-			if err != nil || !in.EncryptionReady || !ed25519.Verify(pub, protocol.Proof(node, in.PublicKey), in.Signature) {
+			if err != nil || !in.EncryptionReady || !in.ValidProof() || !ed25519.Verify(pub, protocol.Proof(node, in.PublicKey), in.Signature) {
 				fail(w, 403, "key proof required")
 				return
 			}
-			m, err := s.authenticateMachine(r.Context(), node, in.Management, false)
+			m, err := s.machineEnrollment(r.Context(), node)
 			if err != nil && errorDetails(err).status >= 500 {
 				fail(w, 503, "unavailable")
 				return
 			}
-			if err != nil || m.OrchestratorAddress != out.Owner {
+			if err != nil || m.Terminal || m.OrchestratorAddress != out.Owner || !hmacEqual(in.ManagementProof, protocol.EnrollmentProof(s.enrollmentToken(m), node, in.PublicKey, in.Nonce)) {
 				fail(w, 403, "machine proof required")
 				return
 			}

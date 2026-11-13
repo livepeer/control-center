@@ -20,7 +20,7 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in protocol.EnrollRequest
-	if decode(r, &in) != nil || !in.EncryptionReady {
+	if decode(r, &in) != nil || !in.EncryptionReady || !in.ValidProof() {
 		fail(w, 400, "invalid_enrollment")
 		return
 	}

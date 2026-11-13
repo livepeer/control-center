@@ -77,3 +77,11 @@ func TestWebCryptoInteroperabilityVector(t *testing.T) {
 		t.Fatal("WebCrypto/Go incompatibility", e)
 	}
 }
+
+func TestEnrollmentProofVector(t *testing.T) {
+	// Independently computed with Python hmac, using the ASCII bearer as key.
+	proof := EnrollmentProof("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "test-node", "runtime-public", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if proof != "c6efccb8529b4c41094f271af3244753889894afbce03006eedec0c830536ad5" {
+		t.Fatal("enrollment proof mismatch", proof)
+	}
+}

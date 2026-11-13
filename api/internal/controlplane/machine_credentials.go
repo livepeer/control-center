@@ -28,6 +28,16 @@ func (s *Server) authenticateMachine(ctx context.Context, node, token string, re
 	if !fingerprintPattern.MatchString(token) {
 		return Machine{}, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 	}
+	m, e := s.machineEnrollment(ctx, node)
+	if e != nil {
+		return m, e
+	}
+	if !hmac.Equal([]byte(token), []byte(s.enrollmentToken(m))) || m.Terminal && !retired {
+		return m, problem(401, "invalid_machine_credential", "Invalid machine credential.")
+	}
+	return m, nil
+}
+func (s *Server) machineEnrollment(ctx context.Context, node string) (Machine, error) {
 	var m Machine
 	e := s.db.QueryRowContext(ctx, `SELECT node_id,orchestrator_address::text,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal)
 	if errors.Is(e, sql.ErrNoRows) {
@@ -35,9 +45,6 @@ func (s *Server) authenticateMachine(ctx context.Context, node, token string, re
 	}
 	if e != nil {
 		return m, e
-	}
-	if !hmac.Equal([]byte(token), []byte(s.enrollmentToken(m))) || m.Terminal && !retired {
-		return m, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 	}
 	return m, nil
 }
