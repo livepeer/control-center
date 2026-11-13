@@ -31,9 +31,10 @@ func TestIssuanceHasNoStorageOrVaultDependency(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"11111111-1111-4111-8111-111111111111"}`)), Header: http.Header{}}, nil
 	})
+	s.Metadata = &testMetadata{machine: protocol.Machine{Owner: testOwner}}
 	seen := map[string]bool{}
 	for range 100 {
-		req := httptest.NewRequest("POST", "/v1/enrollment-grants", nil)
+		req := httptest.NewRequest("POST", "/v1/enrollment-grants?orchestrator_address="+testOwner, nil)
 		req.Header.Set("Authorization", "Bearer operator-session")
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, req)
@@ -53,9 +54,25 @@ func TestIssuanceHasNoStorageOrVaultDependency(t *testing.T) {
 	if s.DB != nil {
 		t.Fatal("issuance must not allocate storage")
 	}
+	for _, tc := range []struct {
+		token, address string
+		status         int
+	}{
+		{"", testOwner, 401}, {"operator-session", "invalid", 400}, {"operator-session", "0x2222222222222222222222222222222222222222", 403},
+	} {
+		req := httptest.NewRequest("POST", "/v1/enrollment-grants?orchestrator_address="+tc.address, nil)
+		if tc.token != "" {
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+		}
+		reply := httptest.NewRecorder()
+		s.Handler().ServeHTTP(reply, req)
+		if reply.Code != tc.status {
+			t.Fatal(reply.Code, reply.Body.String())
+		}
+	}
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
-	if w.Body.String() != "secrets_setup_grants_issued_total 100\nsecrets_setup_grants_rejected_total 0\n" {
+	if w.Body.String() != "secrets_setup_grants_issued_total 100\nsecrets_setup_grants_rejected_total 3\n" {
 		t.Fatal("issuance metrics must have fixed cardinality", w.Body.String())
 	}
 }
@@ -63,7 +80,7 @@ func TestGrantExpiryAudienceScopeAndRollover(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	s := New(nil, Config{SigningKey: strings.Repeat("a", 32), SigningKeyID: "a"})
 	s.Now = func() time.Time { return now }
-	raw, _, e := s.Grant("11111111-1111-4111-8111-111111111111")
+	raw, _, e := s.Grant(testUser, testOwner)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -80,7 +97,7 @@ func TestGrantExpiryAudienceScopeAndRollover(t *testing.T) {
 	if _, e = s.grant(raw, true); e != nil {
 		t.Fatal("revocation cannot inspect signed expiry", e)
 	}
-	c := claims{jwt.RegisteredClaims{Issuer: issuer, Subject: "11111111-1111-4111-8111-111111111111", Audience: jwt.ClaimStrings{"other"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now), ID: ident()}, "machines:enroll"}
+	c := claims{jwt.RegisteredClaims{Issuer: issuer, Subject: "11111111-1111-4111-8111-111111111111", Audience: jwt.ClaimStrings{"other"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now), ID: ident()}, "machines:enroll", testOwner}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
 	token.Header["kid"] = "b"
 	bad, _ := token.SignedString([]byte(s.Config.SigningKey))

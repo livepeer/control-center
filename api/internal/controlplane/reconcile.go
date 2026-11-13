@@ -47,7 +47,7 @@ func (s *Server) reconcile(ctx context.Context) error {
 		return e
 	}
 	defer tx.Rollback()
-	rows, e := tx.QueryContext(ctx, `SELECT m.node_id,m.owner_id::text,p.app_name FROM lpcc.machines m JOIN lpcc.operator_app_policy p ON p.owner_id=m.owner_id WHERE NOT p.denied ORDER BY m.node_id,p.app_name`)
+	rows, e := tx.QueryContext(ctx, `SELECT m.node_id,m.orchestrator_address::text,p.app_name FROM lpcc.machines m JOIN lpcc.operator_app_policy p ON p.orchestrator_address=m.orchestrator_address WHERE NOT p.denied ORDER BY m.node_id,p.app_name`)
 	if e != nil {
 		return e
 	}

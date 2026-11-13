@@ -7,7 +7,7 @@ const node = 'vkvkvkvkvkvkuaaaaaaaaaaaaa'
 const revision = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const digest = `sha256:${'a'.repeat(64)}`
 const session = { access_token: `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify({ sub: user, exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.fixture`, refresh_token: 'fixture', token_type: 'bearer', expires_at: Math.floor(Date.now() / 1000) + 3600, expires_in: 3600, user: { id: user, email: 'owner@example.invalid', aud: 'authenticated', role: 'authenticated', app_metadata: {}, user_metadata: {}, created_at: '2026-11-09T00:00:00Z' } }
-const machine = { node_id: node, hostname: 'worker-status', k3s_version: 'v1.37.2+k3s1', owner_id: user, created_at: '2026-11-09T00:00:00Z', last_config_fetch_at: null, report_state: 'observed', terminal: false }
+const machine = { node_id: node, hostname: 'worker-status', k3s_version: 'v1.37.2+k3s1', orchestrator_address: user, created_at: '2026-11-09T00:00:00Z', last_config_fetch_at: null, report_state: 'observed', terminal: false }
 
 function evidence(): MachineObservation {
   const stamp = new Date().toISOString(), expires = new Date(Date.now() + 120000).toISOString()
@@ -36,6 +36,7 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
   await page.route('http://auth.test/**', route => route.fulfill({ json: session.user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
+    if (path === '/api/orchestrators') return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
     if (route.request().method() !== 'GET') state.writes.push(path)
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example' } })

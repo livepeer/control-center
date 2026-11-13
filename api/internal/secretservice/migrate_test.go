@@ -12,7 +12,7 @@ import (
 	"github.com/livepeer/control-center/api/internal/testdb"
 )
 
-func TestMigrateAdoptsExistingSecretsAndIsolatesHistory(t *testing.T) {
+func TestMigrateRefusesToRelabelExistingSecretsAndIsolatesHistory(t *testing.T) {
 	db := testdb.Open(t)
 	ctx := t.Context()
 	// Represent a database initialized by an older secrets-service binary.
@@ -40,8 +40,8 @@ INSERT INTO lpsecrets.versions(id,secret_id,base_revision,ciphertext) VALUES('33
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
+		if err == nil || !strings.Contains(err.Error(), "fresh deployment") {
+			t.Fatal("populated secrets database was relabeled", err)
 		}
 	}
 	var publicKey, name, ciphertext string
@@ -61,7 +61,7 @@ INSERT INTO lpsecrets.versions(id,secret_id,base_revision,ciphertext) VALUES('33
 		t.Fatal(err)
 	}
 	status, err := Migrator.List(ctx, db, files)
-	if err != nil || len(status) != 1 || !status[0].Applied {
+	if err != nil || len(status) != 2 || !status[0].Applied || status[1].Applied {
 		t.Fatalf("secrets history: %v %v", status, err)
 	}
 	controlStatus, err := migrations.List(ctx, db, controlFiles)
@@ -86,7 +86,7 @@ func TestMigrationStatusDoesNotInitializeDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := Migrator.List(t.Context(), db, files)
-	if err != nil || len(status) != 1 || status[0].Applied {
+	if err != nil || len(status) != 2 || status[0].Applied || status[1].Applied {
 		t.Fatalf("fresh status: %v %v", status, err)
 	}
 	var schema *string

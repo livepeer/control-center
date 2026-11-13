@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
 	"strings"
 	"time"
@@ -21,7 +22,8 @@ const enrollmentAudience = "livepeer-enrollment"
 
 type enrollmentClaims struct {
 	jwt.RegisteredClaims
-	Scope string `json:"scope"`
+	Scope               string `json:"scope"`
+	OrchestratorAddress string `json:"orchestrator_address"`
 }
 
 func (p Params) signingKeyID() string {
@@ -54,12 +56,12 @@ func (p Params) enrollmentKeys() (map[string]string, error) {
 	return keys, nil
 }
 
-func signEnrollment(secret, owner string, now time.Time) (string, time.Time, error) {
-	return (Params{JWTSigningSecret: secret}).signEnrollment(owner, now)
+func signEnrollment(secret, owner, address string, now time.Time) (string, time.Time, error) {
+	return (Params{JWTSigningSecret: secret}).signEnrollment(owner, address, now)
 }
-func (p Params) signEnrollment(owner string, now time.Time) (string, time.Time, error) {
+func (p Params) signEnrollment(owner, address string, now time.Time) (string, time.Time, error) {
 	expires := now.Add(time.Hour).Truncate(time.Second)
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: owner, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires), ID: uuid.New().String()}, Scope: "machines:register"}
+	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: owner, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires), ID: uuid.New().String()}, Scope: "machines:register", OrchestratorAddress: address}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
 	token.Header["kid"] = p.signingKeyID()
 	raw, e := token.SignedString([]byte(p.JWTSigningSecret))
@@ -106,6 +108,11 @@ func (p Params) enrollmentGrant(raw string, now time.Time, expired bool) (*enrol
 			break
 		}
 		c.Subject = id.String()
+		address, err := protocol.OrchestratorAddress(c.OrchestratorAddress)
+		if err != nil {
+			break
+		}
+		c.OrchestratorAddress = address
 		if c.ID == "" {
 			// Signature encodings can vary without changing the verified MAC.
 			// Identity comes from the authenticated signing input, never its alias.
@@ -128,6 +135,9 @@ func lockEnrollmentGrant(ctx context.Context, tx *sql.Tx, id string) error {
 	return e
 }
 func (s *Server) acceptEnrollmentGrant(ctx context.Context, tx *sql.Tx, c *enrollmentClaims) error {
+	if e := lockMembership(ctx, tx, c.Subject, c.OrchestratorAddress); e != nil {
+		return e
+	}
 	if e := lockEnrollmentGrant(ctx, tx, c.ID); e != nil {
 		return e
 	}
@@ -171,6 +181,10 @@ func (s *Server) revokeEnrollmentGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if e = lockMembership(r.Context(), tx, owner.ID, c.OrchestratorAddress); e != nil {
+		s.respondError(w, e)
+		return
+	}
 	if e = lockEnrollmentGrant(r.Context(), tx, c.ID); e != nil {
 		s.databaseError(w, e)
 		return
@@ -179,14 +193,14 @@ func (s *Server) revokeEnrollmentGrant(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]bool{"changed": false})
 		return
 	}
-	res, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.revoked_enrollment_grants(jti,owner_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, c.ID, owner.ID, c.ExpiresAt.Time)
+	res, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.revoked_enrollment_grants(jti,actor_user_id,orchestrator_address,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, c.ID, owner.ID, c.OrchestratorAddress, c.ExpiresAt.Time)
 	if e != nil {
 		s.databaseError(w, e)
 		return
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(owner_id,action,target) VALUES($1,'grant.revoke',$2)`, owner.ID, c.ID)
+		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(actor_user_id,orchestrator_address,action,target) VALUES($1,$2,'grant.revoke',$3)`, owner.ID, c.OrchestratorAddress, c.ID)
 	}
 	if e != nil {
 		s.databaseError(w, e)

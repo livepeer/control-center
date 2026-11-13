@@ -47,6 +47,13 @@
 	handle @secrets_metadata {
 		reverse_proxy api:43812
 	}
+	@orchestrator_membership {
+		path /internal/secrets/users/*/orchestrators/*
+		method GET
+	}
+	handle @orchestrator_membership {
+		reverse_proxy api:43812
+	}
 	@private path /internal /internal/*
 	handle @private {
 		respond "Not found" 404

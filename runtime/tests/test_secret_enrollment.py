@@ -40,7 +40,7 @@ curl() {
   local service_public reply proof signature headers digest authorization body
   while (($#)); do if [[ "$1" == --dump-header ]]; then headers=$2; shift; fi; shift; done
   service_public=$(openssl pkey -in "$INSTALL_DIR/service-key.pem" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 -w0)
-  reply=$(jq -nc --arg node "$NODE_ID" --arg service "$service_public" '{node_id:$node,owner_id:"11111111-1111-4111-8111-111111111111",generation:1,service:{origin:"https://controlcenter-secrets.livepeer.live",public_key:$service}}')
+  reply=$(jq -nc --arg node "$NODE_ID" --arg service "$service_public" '{node_id:$node,orchestrator_address:"0x1111111111111111111111111111111111111111",generation:1,service:{origin:"https://controlcenter-secrets.livepeer.live",public_key:$service}}')
   digest=$(printf '%s' "$request" | sha256sum)
   proof=$(jq -nc --arg body "${digest%% *}" '["POST","/v1/machines/enroll",$body]')
   digest=$(printf '%s' "$proof" | sha256sum)
@@ -155,7 +155,7 @@ root = pathlib.Path(sys.argv[1]); mode = sys.argv[3]
 count = root / 'calls'; n = int(count.read_text()) + 1 if count.exists() else 1; count.write_text(str(n))
 request = sys.stdin.read()
 status = 200 if mode.endswith('200') else 401 if mode.endswith('401') else 409 if n == 1 else 503
-identity = {'node_id': json.loads(request)['node_id'], 'owner_id': '11111111-1111-4111-8111-111111111111', 'generation': 1, 'service': json.loads((root / 'trust.json').read_text())}
+identity = {'node_id': json.loads(request)['node_id'], 'orchestrator_address': '0x1111111111111111111111111111111111111111', 'generation': 1, 'service': json.loads((root / 'trust.json').read_text())}
 if mode == 'changed200': identity['service']['public_key'] = base64.b64encode(bytes(32)).decode()
 body = json.dumps(identity if status == 200 else {'code': 'identity_reset_required' if status == 409 else 'grant_refused' if status == 401 else 'unavailable'}, separators=(',', ':')) + '\n'
 hash = lambda value: hashlib.sha256(value.encode()).hexdigest()

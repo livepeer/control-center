@@ -358,7 +358,7 @@ func TestNodeIdentityRetirementAndRefresh(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
 	state := readyTunnel(t, s, c)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	in := map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("d", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1}
 	refreshPath := "/v1/nodes/" + c["node_id"] + "/credentials/refresh"
 	w := request(t, s, "POST", refreshPath, jwt, in)
@@ -450,12 +450,21 @@ func TestTunnelRotationNeedsConsumerAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestSupabaseCascadeRetiresTunnels(t *testing.T) {
+func TestMemberDeletionPreservesTunnelsAndExplicitRetirementCleansUp(t *testing.T) {
 	s, f := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("f", 64))
 	readyTunnel(t, s, c)
 	if _, e := s.db.Exec(`DELETE FROM auth.users WHERE id=$1`, ownerA); e != nil {
 		t.Fatal(e)
+	}
+	if _, err := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false); err != nil {
+		t.Fatal("member deletion revoked shared machine", err)
+	}
+	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE node_id=$1`, c["node_id"]) != 1 {
+		t.Fatal("member deletion retired machine")
+	}
+	if err := s.RetireMachine(t.Context(), c["node_id"]); err != nil {
+		t.Fatal(err)
 	}
 	driveTunnels(t, s)
 	var retired, complete bool

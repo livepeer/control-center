@@ -38,6 +38,19 @@ func TestEnrollmentEnvelope(t *testing.T) {
 		t.Fatal("invalid envelope")
 	}
 }
+
+func TestOrchestratorAddress(t *testing.T) {
+	address := "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	got, err := OrchestratorAddress("0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD")
+	if err != nil || got != address {
+		t.Fatal(got, err)
+	}
+	for _, raw := range []string{"", "11111111-1111-4111-8111-111111111111", "0x0000000000000000000000000000000000000000", "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", " " + address} {
+		if _, err := OrchestratorAddress(raw); err == nil {
+			t.Fatal("invalid orchestrator accepted", raw)
+		}
+	}
+}
 func TestLocalKeysAndLimits(t *testing.T) {
 	if LocalKey("lp-app-a", "token") == LocalKey("lp-app-b", "token") {
 		t.Fatal("collision")

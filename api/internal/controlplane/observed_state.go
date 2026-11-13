@@ -131,7 +131,7 @@ func (s *Server) observedState(w http.ResponseWriter, r *http.Request) {
 	node := r.PathValue("node_id")
 	var owner string
 	var m Machine
-	err = s.db.QueryRowContext(r.Context(), `SELECT e.node_id::text,e.owner_id::text,e.hostname,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e
+	err = s.db.QueryRowContext(r.Context(), `SELECT e.node_id::text,e.orchestrator_address::text,e.hostname,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e
  WHERE e.node_id=$1`, node).Scan(&m.NodeID, &owner, &m.Hostname, &m.CredentialVersion, &m.Terminal)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = problem(404, "machine_not_found", "Machine enrollment not found.")
@@ -140,7 +140,12 @@ func (s *Server) observedState(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, err)
 		return
 	}
-	if owner != u.ID {
+	allowed, e := member(r.Context(), s.db, u.ID, owner)
+	if e != nil {
+		s.respondError(w, e)
+		return
+	}
+	if !allowed {
 		admin, e := s.adminStatus(r.Context(), u)
 		if e != nil {
 			s.respondError(w, e)
@@ -372,31 +377,31 @@ func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observed
 }
 
 type observedMachineSummary struct {
-	NodeID            string     `json:"node_id"`
-	Hostname          string     `json:"hostname"`
-	OwnerID           *string    `json:"owner_id,omitempty"`
-	InstallDir        string     `json:"install_dir,omitempty"`
-	K3sVersion        string     `json:"k3s_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	LastConfigFetchAt *time.Time `json:"last_config_fetch_at"`
-	Lifecycle         string     `json:"lifecycle"`
-	Terminal          bool       `json:"terminal"`
-	LastObservedAt    *time.Time `json:"last_observed_at"`
-	ReportState       string     `json:"report_state"`
+	NodeID              string     `json:"node_id"`
+	Hostname            string     `json:"hostname"`
+	OrchestratorAddress *string    `json:"orchestrator_address,omitempty"`
+	InstallDir          string     `json:"install_dir,omitempty"`
+	K3sVersion          string     `json:"k3s_version"`
+	CreatedAt           time.Time  `json:"created_at"`
+	LastConfigFetchAt   *time.Time `json:"last_config_fetch_at"`
+	Lifecycle           string     `json:"lifecycle"`
+	Terminal            bool       `json:"terminal"`
+	LastObservedAt      *time.Time `json:"last_observed_at"`
+	ReportState         string     `json:"report_state"`
 }
 
 func (s *Server) observedMachineList(ctx context.Context, owner string, admin bool) ([]observedMachineSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `WITH inventory AS (
- SELECT m.node_id,m.hostname,m.owner_id,m.install_dir,m.k3s_version,m.created_at,m.last_config_fetch_at,m.credential_version,false AS terminal,COALESCE(s.rollout->>'lifecycle','active') AS lifecycle
+ SELECT m.node_id,m.hostname,m.orchestrator_address,m.install_dir,m.k3s_version,m.created_at,m.last_config_fetch_at,m.credential_version,false AS terminal,COALESCE(s.rollout->>'lifecycle','active') AS lifecycle
  FROM lpcc.machines m LEFT JOIN lpcc.machine_states s ON s.node_id=m.node_id
  UNION ALL
- SELECT e.node_id,e.hostname,e.owner_id,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,'cleanup_pending'
+ SELECT e.node_id,e.hostname,e.orchestrator_address,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,'cleanup_pending'
  FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL AND e.removal_ack_at IS NULL
- ) SELECT i.node_id,i.hostname,i.owner_id::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,i.lifecycle,
+ ) SELECT i.node_id,i.hostname,i.orchestrator_address::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,i.lifecycle,
  CASE WHEN COALESCE((r.report->>'clock_uncertain')::boolean,false) THEN NULL
  ELSE LEAST(r.received_at,(r.report->>'observed_at')::timestamptz) END, COALESCE((r.report->>'clock_uncertain')::boolean,false)
  FROM inventory i LEFT JOIN lpcc.machine_reports r ON r.node_id=i.node_id AND r.credential_version=i.credential_version AND r.component='runtime'
- WHERE ($1='' OR i.owner_id::text=$1) ORDER BY i.created_at DESC,i.node_id`, owner)
+ WHERE ($1='' OR i.orchestrator_address::text=$1) ORDER BY i.created_at DESC,i.node_id`, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +419,7 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 			return nil, err
 		}
 		if admin {
-			m.OwnerID = &id
+			m.OrchestratorAddress = &id
 			m.InstallDir = ""
 		}
 		m.ReportState = "unreported"

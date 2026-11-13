@@ -67,7 +67,7 @@ func Split(raw string) (Enrollment, error) {
 }
 
 type Binding struct {
-	Owner   string `json:"owner_id"`
+	Owner   string `json:"orchestrator_address"`
 	ID      string `json:"secret_id"`
 	Name    string `json:"name"`
 	Key     string `json:"key"`
@@ -175,7 +175,7 @@ type Machine struct {
 	DeniedRevisions  []string               `json:"denied_revisions,omitempty"`
 	Consumers        []SecretConsumer       `json:"cleanup_consumers,omitempty"`
 	NodeID           string                 `json:"node_id"`
-	Owner            string                 `json:"owner_id"`
+	Owner            string                 `json:"orchestrator_address"`
 	PublicKey        string                 `json:"public_key"`
 	Active           bool                   `json:"active"`
 	Managed          bool                   `json:"managed"`
@@ -203,14 +203,14 @@ type EnrollRequest struct {
 // Owner comes from the verified grant or stored identity, never from enrollment input.
 type MachineBinding struct {
 	EnrollRequest
-	Owner          string `json:"owner_id"`
+	Owner          string `json:"orchestrator_address"`
 	Activate       bool   `json:"activate,omitempty"`
 	AdmissionReady bool   `json:"admission_ready,omitempty"`
 	ResetKey       string `json:"reset_key,omitempty"`
 }
 type Identity struct {
 	NodeID     string        `json:"node_id"`
-	Owner      string        `json:"owner_id"`
+	Owner      string        `json:"orchestrator_address"`
 	Generation int64         `json:"generation"`
 	Service    *ServiceTrust `json:"service,omitempty"`
 }

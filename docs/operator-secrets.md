@@ -1,9 +1,10 @@
 # Operator secrets
 
 The secrets service stores application credentials and controls which runtimes
-may receive them. Operators add or replace values on the Secrets screen. Control
-Center manages assignments and sees names, but not values or runtime private
-keys.
+may receive them. Select an orchestrator to manage its secrets. Members share
+secrets and app policies; the orchestrator address owns resources and user IDs
+identify audit actors. Control Center manages assignments and sees names, but
+not values or runtime private keys.
 
 The browser encrypts each value with a random data key. The service stores the
 ciphertext and uses Vault Transit to encrypt, or **wrap**, that key for storage.
@@ -34,7 +35,7 @@ sequenceDiagram
     R->>R: Generate runtime signing key
     R->>C: Grant, runtime public key, proof and fresh nonce
     C->>S: Forward enrollment
-    S->>S: Verify grant and proof; bind owner, node and key
+    S->>S: Verify grant and proof; bind orchestrator, node and key
     S-->>C: Service public key and signed receipt
     C-->>R: Forward receipt
     R->>R: Verify receipt and save service-key pin
@@ -48,13 +49,19 @@ key and service pin. Later requests are signed with the runtime key; service
 replies are signed and bound to the exact request and authorization. Invalid
 proofs and replayed replies are retried, while verified revocation is enforced.
 
+API clients obtain a grant from each service and combine them locally; both
+grants must target the same orchestrator. Control Center's bootstrap endpoint
+takes `orchestrator_address` in its JSON body. Human secrets and app-policy
+endpoints require that address as a query parameter and a user bearer token.
+
 Initial enrollment trusts Cloudflare and HTTPS to introduce both signing
 identities. Without a prior pin, the installer cannot establish that the first
 service key belongs to the intended service from its signature alone. The
 browser similarly pins the key returned when it obtains the grant. Cloudflare
-can observe the bearer credentials used for enrollment and owner resets, and
-those authorization paths remain trusted. After enrollment, a modified service
-reply or a replacement signing key fails verification against the saved pin.
+can observe the bearer credentials used for enrollment and member-authorized
+resets, and those authorization paths remain trusted. After enrollment, a
+modified service reply or replacement signing key fails verification against
+the saved pin.
 
 For uploads, the browser verifies a fresh signed service encryption key against
 its pin, then encrypts the data key to the service using HPKE. The service
@@ -90,8 +97,8 @@ encryption.
    from the enrollment-token signing secret.
 3. Start Vault with `docker compose -f deploy/compose.secrets.yaml up -d vault`,
    then initialize and unseal it. Enable Vault Transit at `transit/`. Grant
-   `create,update` on `transit/encrypt/operator-<owner UUID>` and `update` on
-   its decrypt path.
+   `create,update` on `transit/encrypt/orchestrator-<lowercase address>` and
+   `update` on its decrypt path.
    Do not grant key export or administration. Disable raw Vault audit and
    ingress body logging so credentials and data keys are not recorded. Preserve
    the recovery keys privately and arrange unsealing after restarts and renewal
@@ -107,9 +114,11 @@ encryption.
    docker compose -f deploy/compose.secrets.yaml up --build -d
    ```
 
-The service applies PostgreSQL migrations on startup. The first migration
-adopts databases from earlier service versions, preserving existing secrets
-and identities. It refuses baseline rollback because it may contain data.
+The service applies PostgreSQL migrations on startup. Orchestrator ownership
+requires fresh data; migration refuses existing user-owned secrets and
+identities instead of relabeling encrypted values. See [orchestrator
+provisioning](operations.md#orchestrators). The baseline migration cannot be
+rolled back because it may contain data.
 
 To inspect or apply migrations separately, run the service image with
 `SECRETS_DATABASE_URL_FILE` configured. With the Compose deployment above:
@@ -146,9 +155,12 @@ when restoring old data.
 
 Losing the service identity key breaks verification on enrolled runtimes.
 Restore the original private key instead of silently replacing their pins. For
-a compromised runtime key, use owner-authorized
+a compromised runtime key, use member-authorized
 `POST /v1/machines/{node}/reset`, then enroll again. To revoke access without
 resetting identity, use `POST /v1/machines/{node}/revoke`.
+
+A member's departure and routine management credential refresh preserve the
+runtime identity. Machine retirement and explicit identity revocation disable it.
 
 Upgrade the service, installer and runtime together, then rerun enrollment to
 install the pin. Existing clusters must first complete

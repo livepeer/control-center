@@ -48,7 +48,7 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, ref := range assigned.Revision.Definition.Container.Secrets {
 				item := protocol.Resolved{Ciphertext: protocol.Ciphertext{Binding: protocol.Binding{Owner: m.Owner, Name: ref.Secret, Key: ref.Key}}}
-				e = tx.QueryRowContext(r.Context(), `SELECT id::text,head::text,revision FROM lpsecrets.secrets WHERE owner_id=$1 AND name=$2 AND key=$3 AND NOT deleted AND head IS NOT NULL`, m.Owner, ref.Secret, ref.Key).Scan(&item.ID, &item.Version, &item.Revision)
+				e = tx.QueryRowContext(r.Context(), `SELECT id::text,head::text,revision FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted AND head IS NOT NULL`, m.Owner, ref.Secret, ref.Key).Scan(&item.ID, &item.Version, &item.Revision)
 				if errors.Is(e, sql.ErrNoRows) {
 					reason, err := missingSecret(r.Context(), tx, m.Owner, ref.Secret, ref.Key)
 					if err != nil {
@@ -82,7 +82,7 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 	for _, consumer := range m.Consumers {
 		for _, ref := range consumer.References {
 			var present bool
-			if e = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT FROM lpsecrets.secrets WHERE owner_id=$1 AND name=$2 AND key=$3 AND NOT deleted AND head IS NOT NULL)`, m.Owner, ref.Secret, ref.Key).Scan(&present); e != nil {
+			if e = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted AND head IS NOT NULL)`, m.Owner, ref.Secret, ref.Key).Scan(&present); e != nil {
 				fail(w, 503, "unavailable")
 				return
 			}

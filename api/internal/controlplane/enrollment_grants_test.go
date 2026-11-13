@@ -3,9 +3,6 @@ package controlplane
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -16,14 +13,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-func TestEnrollmentIssuanceHasNoStorageDependency(t *testing.T) {
-	s := New(nil, testParams(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s.client.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"id":"` + ownerA + `"}`))}, nil
-	})
+func TestEnrollmentIssuanceCreatesNoEnrollmentState(t *testing.T) {
+	s := newTestServer(t)
 	seen := map[string]bool{}
 	for range 100 {
-		w := request(t, s, "POST", "/api/bootstrap-token", "operator", nil)
+		w := request(t, s, "POST", "/api/bootstrap-token", "session-a", map[string]string{"orchestrator_address": orchA})
 		requireStatus(t, w, 200)
 		var out struct {
 			Token string `json:"token"`
@@ -45,7 +39,7 @@ func TestControlGrantRevocationRolloverAndExpiry(t *testing.T) {
 	s := newTestServer(t)
 	var token string
 	for range 10 {
-		w := request(t, s, "POST", "/api/bootstrap-token", "session-a", nil)
+		w := request(t, s, "POST", "/api/bootstrap-token", "session-a", map[string]string{"orchestrator_address": orchA})
 		requireStatus(t, w, 200)
 		var out struct {
 			Token string `json:"token"`
@@ -78,7 +72,7 @@ func TestControlGrantRevocationRolloverAndExpiry(t *testing.T) {
 	}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", token, registrationBody(ownerA, strings.Repeat("3", 64), token)), 401)
 	// Legacy grants without key IDs remain verifiable and explicitly revocable.
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(time.Now()), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register"}
+	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(time.Now()), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
 	legacy, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(oldKey))
 	if _, e := s.params.enrollmentGrant(legacy, s.currentTime(), false); e != nil {
 		t.Fatal("legacy rollover", e)
@@ -98,7 +92,7 @@ func TestControlGrantRevocationRolloverAndExpiry(t *testing.T) {
 func TestControlGrantAcceptanceAndRevocationSerialize(t *testing.T) {
 	s := newTestServer(t)
 	for n := 0; n < 5; n++ {
-		token, _, _ := s.params.signEnrollment(ownerA, s.currentTime())
+		token, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), s.currentTime())
 		start := make(chan struct{})
 		enrolled, revoked := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
 		body := registrationBody(ownerA, fmt.Sprintf("%064x", n+1), token)
@@ -122,7 +116,7 @@ func TestControlGrantExpiryIsRecheckedAfterLockWait(t *testing.T) {
 	clock.Store(time.Now().Unix())
 	s.now = func() time.Time { return time.Unix(clock.Load(), 0) }
 	for _, operation := range []string{"enroll", "revoke"} {
-		token, _, _ := s.params.signEnrollment(ownerA, s.currentTime())
+		token, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), s.currentTime())
 		c, _ := s.params.enrollmentGrant(token, s.currentTime(), false)
 		tx, e := s.db.Begin()
 		if e != nil {
@@ -172,7 +166,7 @@ func TestControlGrantExpiryIsRecheckedAfterLockWait(t *testing.T) {
 func TestCredentialRefreshRetryRequiresPreviousOrCurrentPossession(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("5", 64))
-	token, _, _ := s.params.signEnrollment(ownerA, s.currentTime())
+	token, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), s.currentTime())
 	body := map[string]any{"fingerprint": strings.Repeat("5", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1, "management_proof": c["token"]}
 	path := "/v1/nodes/" + c["node_id"] + "/credentials/refresh"
 	w := request(t, s, "POST", path, token, body)
@@ -191,7 +185,7 @@ func TestCredentialRefreshRetryRequiresPreviousOrCurrentPossession(t *testing.T)
 func TestLegacyRevocationIdentityIsCanonical(t *testing.T) {
 	now := time.Now()
 	p := testParams()
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: "machines:register"}
+	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
 	raw, e := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(p.JWTSigningSecret))
 	if e != nil {
 		t.Fatal(e)
@@ -212,7 +206,7 @@ func TestLegacyRevocationIdentityIsCanonical(t *testing.T) {
 func TestRevokedLegacyAliasMustNotEnroll(t *testing.T) {
 	s := newTestServer(t)
 	now := s.currentTime()
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: "machines:register"}
+	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
 	raw, e := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(s.params.JWTSigningSecret))
 	if e != nil {
 		t.Fatal(e)

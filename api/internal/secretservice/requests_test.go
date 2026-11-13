@@ -202,7 +202,7 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.DB.Exec(`INSERT INTO lpsecrets.secrets(id,owner_id,name,key,head) VALUES($1,$2,$3,$4,$5)`, binding.ID, testOwner, binding.Name, binding.Key, binding.Version); e != nil {
+	if _, e = s.DB.Exec(`INSERT INTO lpsecrets.secrets(id,orchestrator_address,name,key,head) VALUES($1,$2,$3,$4,$5)`, binding.ID, testOwner, binding.Name, binding.Key, binding.Version); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = s.DB.Exec(`INSERT INTO lpsecrets.versions(id,secret_id,base_revision,nonce,ciphertext,wrapped_key) VALUES($1,$2,1,$3,$4,$5)`, binding.Version, binding.ID, encrypted.Nonce, encrypted.Ciphertext, wrapped); e != nil {

@@ -280,7 +280,7 @@ func TestLateDrainReportNeedsAuditedRetry(t *testing.T) {
 
 func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
 	s, _ := tunnelTestServer(t)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	fp := strings.Repeat("1", 64)
 	w := request(t, s, "POST", "/v1/nodes/register", jwt, map[string]any{"fingerprint": fp, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1", "development_http": true})
 	requireStatus(t, w, 200)

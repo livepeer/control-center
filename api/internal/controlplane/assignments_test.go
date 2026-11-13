@@ -221,7 +221,7 @@ func TestAssignmentGenerationFailureAndPublicationFence(t *testing.T) {
 	}
 }
 func TestMachineRemovalWaitsForAppsAndRetainsTerminalCleanup(t *testing.T) {
-	for _, mode := range []string{"normal", "forced", "owner-delete"} {
+	for _, mode := range []string{"normal", "forced", "direct-retirement"} {
 		t.Run(mode, func(t *testing.T) {
 			s := newTestServer(t)
 			adminA(t, s)
@@ -231,8 +231,10 @@ func TestMachineRemovalWaitsForAppsAndRetainsTerminalCleanup(t *testing.T) {
 			r := publishAssignmentRevision(t, s, registryFixture(t), "")
 			requireStatus(t, putApp(t, s, c, r, 0, 1), 202)
 			appBundle(t, s, c)
-			if mode == "owner-delete" {
-				execSQL(t, s.db, `DELETE FROM auth.users WHERE id=$1`, ownerB)
+			if mode == "direct-retirement" {
+				if err := s.RetireMachine(t.Context(), c["node_id"]); err != nil {
+					t.Fatal(err)
+				}
 			} else {
 				requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{"force": mode == "forced"}), 202)
 			}
@@ -518,7 +520,7 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Requested assignment history is now part of the operator-policy schema.
-	if err := migrations.Down(t.Context(), s.db, files); err == nil || !strings.Contains(err.Error(), "retain operator secrets schema") {
+	if err := migrations.Down(t.Context(), s.db, files); err == nil || !strings.Contains(err.Error(), "orchestrator ownership requires a fresh deployment") {
 		t.Fatal("rollback did not protect requested assignment history", err)
 	}
 	if count(t, s, `SELECT count(*) FROM lpcc.machine_app_versions`) != 2 {

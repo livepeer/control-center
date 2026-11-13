@@ -22,7 +22,7 @@ func TestOwnerDenialRetainsIntentAndReallowWaitsForCleanup(t *testing.T) {
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	requireStatus(t, putApp(t, s, c, r, 0, 2), 202)
 	requireStatus(t, putApp(t, s, other, r, 0, 1), 202)
-	path := "/api/operator/apps/" + r.Name + "/policy"
+	path := "/api/operator/apps/" + r.Name + "/policy?orchestrator_address=" + orchA
 	requireStatus(t, request(t, s, "PUT", path, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	head, e := machineapps.Head(t.Context(), s.db, c["node_id"], r.RevisionID)
 	if e != nil || head.Desired != "absent" || head.Generation != 2 {
@@ -60,11 +60,31 @@ func TestOwnerDenialRetainsIntentAndReallowWaitsForCleanup(t *testing.T) {
 func TestStolenEnrollmentGrantCannotReissueExistingMachineCredential(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	w := request(t, s, "POST", "/v1/nodes/register", token, map[string]any{"fingerprint": strings.Repeat("d", 64), "hostname": "forged", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1"})
 	requireStatus(t, w, 409)
 	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", token, map[string]any{"fingerprint": strings.Repeat("d", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
 	requireStatus(t, w, 403)
+}
+
+func TestSharedPolicyAuditRecordsMemberWithoutMachines(t *testing.T) {
+	s := newTestServer(t)
+	adminA(t, s)
+	r := publishAssignmentRevision(t, s, registryFixture(t), "")
+	execSQL(t, s.db, `INSERT INTO lpcc.orchestrator_memberships VALUES($1,$2)`, ownerB, orchA)
+	path := "/api/operator/apps/" + r.Name + "/policy?orchestrator_address=" + orchA
+	for _, change := range []struct {
+		denied     bool
+		generation int64
+	}{{true, 0}, {true, 1}, {false, 1}} {
+		requireStatus(t, request(t, s, "PUT", path, "session-b", map[string]any{"denied": change.denied, "expected_generation": change.generation}), 200)
+	}
+	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 0 {
+		t.Fatal("fixture unexpectedly has machines")
+	}
+	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE actor_kind='user' AND actor_id=$1 AND target_kind='orchestrator_policy' AND target_id=$2 AND ((action='orchestrator.policy.deny' AND revision='1') OR (action='orchestrator.policy.allow' AND revision='2'))`, ownerB, orchA+"/"+r.Name) != 2 {
+		t.Fatal("policy audit lost actor/scope/change/generation or duplicated a no-op")
+	}
 }
 
 func TestReallowWaitsForEveryReplacementRemoval(t *testing.T) {
@@ -75,7 +95,7 @@ func TestReallowWaitsForEveryReplacementRemoval(t *testing.T) {
 	requireStatus(t, putApp(t, s, c, first, 0, 2), 202)
 	second := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "2"`, 1), first.RevisionID)
 	requireStatus(t, request(t, s, "POST", appPath(c, first)+"/replace", "session-a", map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": second.RevisionID, "digest": second.Digest, "expected_generation": 0, "replicas": 1}}), 202)
-	policy := "/api/operator/apps/" + first.Name + "/policy"
+	policy := "/api/operator/apps/" + first.Name + "/policy?orchestrator_address=" + orchA
 	requireStatus(t, request(t, s, "PUT", policy, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	set, digest, _ := appBundle(t, s, c)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, second.RevisionID), digest, "removed"), 200)
@@ -104,7 +124,7 @@ func TestRenderRepairAdvancesBeyondDeniedFallback(t *testing.T) {
 	_, _, _ = appBundle(t, s, c)
 	second := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `name = "whoami"`, `name = "other"`, 1), "")
 	requireStatus(t, putApp(t, s, c, second, 0, 1), 202)
-	requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+first.Name+"/policy", "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
+	requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+first.Name+"/policy?orchestrator_address="+orchA, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	s.params.AppStopSignals = false
 	s.configs = s.newConfigurationManager()
 	fallback, _, _ := appBundle(t, s, c)
@@ -135,7 +155,7 @@ func TestOwnerReferencesDescribePinnedAndCleanupRevisions(t *testing.T) {
 	requireStatus(t, putApp(t, s, c, first, 0, 1), 202)
 	second := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "2"`, 1)+decl("lp-app-new"), first.RevisionID)
 	s.db.SetMaxOpenConns(1)
-	w := request(t, s, "GET", "/api/operator/apps", "session-a", nil)
+	w := request(t, s, "GET", "/api/operator/apps?orchestrator_address="+orchA, "session-a", nil)
 	s.db.SetMaxOpenConns(10)
 	requireStatus(t, w, 200)
 	var view struct {
@@ -197,7 +217,7 @@ func TestPendingSecretBindingOwnerActivationAndConditionalReset(t *testing.T) {
 	if bound != "" || managed {
 		t.Fatal("mixed owner mutated binding")
 	}
-	in.Owner = ownerA
+	in.Owner = orchA
 	requireStatus(t, request(t, s, "POST", path, s.params.SecretsMetadataToken, in), 200)
 	_ = s.db.QueryRow(`SELECT managed FROM lpcc.secret_machines WHERE node_id=$1`, node).Scan(&managed)
 	if managed {
@@ -216,11 +236,11 @@ func TestPendingSecretBindingOwnerActivationAndConditionalReset(t *testing.T) {
 
 func TestRegistrationProofCannotBeReplayedWithAnotherGrantOrRequest(t *testing.T) {
 	s := newTestServer(t)
-	token, _, _ := s.params.signEnrollment(ownerA, s.currentTime())
+	token, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), s.currentTime())
 	body := registrationBody(ownerA, strings.Repeat("e", 64), token)
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", token, body), 200)
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", token, body), 200)
-	next, _, _ := s.params.signEnrollment(ownerA, s.currentTime())
+	next, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), s.currentTime())
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", next, body), 403)
 	body["hostname"] = "changed-host"
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", token, body), 403)
@@ -232,7 +252,7 @@ func TestReallowDoesNotReactivateDrainingMachine(t *testing.T) {
 	c := enroll(t, s, ownerA, strings.Repeat("9", 64))
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
 	requireStatus(t, putApp(t, s, c, r, 0, 2), 202)
-	policy := "/api/operator/apps/" + r.Name + "/policy"
+	policy := "/api/operator/apps/" + r.Name + "/policy?orchestrator_address=" + orchA
 	requireStatus(t, request(t, s, "PUT", policy, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	set, digest, _ := appBundle(t, s, c)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, r.RevisionID), digest, "removed"), 200)
@@ -254,13 +274,13 @@ func TestDeniedAssignmentRetriesReserveRequestedBudget(t *testing.T) {
 	adminA(t, s)
 	c := enroll(t, s, ownerA, strings.Repeat("c", 64))
 	r := publishAssignmentRevision(t, s, registryFixture(t), "")
-	policy := "/api/operator/apps/" + r.Name + "/policy"
+	policy := "/api/operator/apps/" + r.Name + "/policy?orchestrator_address=" + orchA
 	requireStatus(t, request(t, s, "PUT", policy, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	requireStatus(t, putApp(t, s, c, r, 0, 100), 202)
 	requireStatus(t, putApp(t, s, c, r, 0, 100), 200)
 	for n := 0; n < 5; n++ {
 		second := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `name = "whoami"`, fmt.Sprintf(`name = "other%d"`, n), 1), "")
-		requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+second.Name+"/policy", "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
+		requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+second.Name+"/policy?orchestrator_address="+orchA, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 		want := 202
 		if n == 4 {
 			want = 400
@@ -279,10 +299,10 @@ func TestDeniedCleanedAssignmentKeepsRequestedDeclarations(t *testing.T) {
 	first := publishAssignmentRevision(t, s, registryFixture(t)+decl("lp-app-pinned"), "")
 	requireStatus(t, putApp(t, s, c, first, 0, 1), 202)
 	_ = publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "2"`, 1)+decl("lp-app-new-head"), first.RevisionID)
-	requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+first.Name+"/policy", "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
+	requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+first.Name+"/policy?orchestrator_address="+orchA, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	set, digest, _ := appBundle(t, s, c)
 	requireStatus(t, appReport(t, s, c, findApp(t, set, first.RevisionID), digest, "removed"), 200)
-	w := request(t, s, "GET", "/api/operator/apps", "session-a", nil)
+	w := request(t, s, "GET", "/api/operator/apps?orchestrator_address="+orchA, "session-a", nil)
 	requireStatus(t, w, 200)
 	var view struct {
 		Apps []struct {
