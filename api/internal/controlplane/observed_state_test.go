@@ -50,78 +50,6 @@ func TestSharedAppMembershipQueries(t *testing.T) {
 	}
 }
 
-func TestSoftwareStatusRoundTripAndEnrollment(t *testing.T) {
-	s, c, m, _ := observationFixture(t)
-	at := time.Now().UTC()
-	software := &contract.SoftwareStatus{Runtime: contract.BuildIdentity{Version: "v1.2.3", Commit: strings.Repeat("a", 40)}, Node: &contract.ProcessIdentity{BuildIdentity: contract.BuildIdentity{Version: "v1.0.7", Commit: strings.Repeat("b", 40)}, PodUID: "node-pod", ContainerID: "containerd://node", StartedAt: at}, Host: &contract.HostSoftware{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, ObservedAt: at, FluxCLI: "v2.7.0", GVisorInstalled: "release-20261101", GVisorRunning: []string{"release-20261001"}}, Containers: []contract.ContainerIdentity{{Namespace: "flux-system", Workload: "source-controller", PodName: "source-controller-pod", PodUID: "flux-pod", Container: "manager", ContainerID: "containerd://flux", Image: "ghcr.io/fluxcd/source-controller:mutable", ImageID: "ghcr.io/fluxcd/source-controller@sha256:" + strings.Repeat("c", 64), Digest: "sha256:" + strings.Repeat("c", 64), StartedAt: at, Ready: true}}}
-	report := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime", Generation: m.Generation, Reason: "applying", Software: software, K3sVersion: "v1.37.2+k3s1"})
-	path := "/v1/nodes/" + m.NodeID + "/status"
-	requireStatus(t, request(t, s, "POST", path, c["token"], report), 200)
-	for _, session := range []string{"session-a", "session-b"} {
-		if session == "session-b" { // Give owner B admin access for the shared projection.
-			requireStatus(t, request(t, s, "POST", "/api/admin/administrators", "session-a", map[string]string{"email": "b@example.invalid"}), 201)
-		}
-		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", session, nil)
-		requireStatus(t, w, 200)
-		var v machineObservation
-		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, component := range v.Components {
-			if component.Component == "runtime" {
-				found = true
-				if !component.Fresh || !component.Current || component.K3sVersion != report.K3sVersion || !reflect.DeepEqual(component.Software, software) {
-					t.Fatalf("lost software report: %s", w.Body.String())
-				}
-			}
-		}
-		if !found {
-			t.Fatal("missing Runtime observation")
-		}
-	}
-	// Expiry and receipt bounds apply without another incoming report.
-	for _, sample := range []struct {
-		hostAt, receivedAt time.Time
-		uncertain          bool
-	}{
-		{at.Add(-contract.HostSoftwareTTL - time.Second), at, false},
-		{at.Add(-10 * time.Second), at.Add(-55 * time.Second), false}, // Future at receipt, later read.
-		{at.Add(-56 * time.Second), at.Add(-61 * time.Second), false}, // Future allowance cannot extend TTL.
-		{at, at, true},
-	} {
-		execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(jsonb_set(report,'{software,host,observed_at}',to_jsonb($2::timestamptz)),'{clock_uncertain}',to_jsonb($4::boolean)),received_at=$3 WHERE node_id=$1 AND component='runtime'`, m.NodeID, sample.hostAt, sample.receivedAt, sample.uncertain)
-		expired := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
-		requireStatus(t, expired, 200)
-		var stale machineObservation
-		if err := json.Unmarshal(expired.Body.Bytes(), &stale); err != nil {
-			t.Fatal(err)
-		}
-		for _, component := range stale.Components {
-			if component.Component == "runtime" && ((!sample.uncertain && !component.Fresh) || component.Software.Host != nil || !component.Software.Incomplete || component.Software.Node == nil || len(component.Software.Containers) != 1) {
-				t.Fatal("host expiry lost independent observations", expired.Body.String())
-			}
-		}
-	}
-	// Invalid software cannot weaken the current enrollment association.
-	report.Sequence++
-	report.Software.Host.CredentialVersion++
-	requireStatus(t, request(t, s, "POST", path, c["token"], report), 409)
-	report.Software = nil // Older Runtime reports remain compatible and clear old software.
-	requireStatus(t, request(t, s, "POST", path, c["token"], report), 200)
-	w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
-	requireStatus(t, w, 200)
-	var v machineObservation
-	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
-		t.Fatal(err)
-	}
-	for _, component := range v.Components {
-		if component.Component == "runtime" && component.Software != nil {
-			t.Fatal("retained obsolete software")
-		}
-	}
-}
-
 func observationFixture(t *testing.T) (*Server, map[string]string, contract.Metadata, schema.AppAssignment) {
 	t.Helper()
 	s := newTestServer(t)
@@ -171,6 +99,10 @@ func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfi
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	s, c, m, a := observationFixture(t)
 	report := observationReport(m, a)
+	recordedAt := time.Now().Add(-24 * time.Hour).UTC()
+	software := []contract.SoftwareIdentity{{Component: "runtime", Scope: "running", Version: "v1", Commit: strings.Repeat("a", 40)}, {Component: "gvisor", Scope: "installed", Version: "release-observed", RecordedAt: &recordedAt}}
+	runtimeReport := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime", Generation: m.Generation, Reason: "applying", Software: software})
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], runtimeReport), 200)
 	path := "/v1/nodes/" + m.NodeID + "/status"
 	requireStatus(t, request(t, s, "POST", path, c["token"], report), 200)
 	read := "/api/machines/" + m.NodeID + "/status"
@@ -179,6 +111,11 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	var v machineObservation
 	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
 		t.Fatal(err)
+	}
+	for _, component := range v.Components {
+		if component.Component == "runtime" && (!component.Fresh || !reflect.DeepEqual(component.Software, software)) {
+			t.Fatal("lost software or original installation timestamp", w.Body.String())
+		}
 	}
 	if len(v.Assignments) != 1 || v.Assignments[0].Generation != a.Generation || v.Delivered == nil || v.Delivered.AppsDigest != m.AppsDigest || v.ExternalReachability != "unverified" {
 		t.Fatal("lost desired/delivery evidence", w.Body.String())

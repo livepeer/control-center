@@ -1,9 +1,0 @@
-[Unit]
-Description=Observe Livepeer host software identities
-After=livepeer-k3s.service
-
-[Service]
-Type=oneshot
-ExecStart=@INSTALL_DIR@/bin/livepeer-observe-software @INSTALL_DIR@
-TimeoutStartSec=25
-UMask=0022

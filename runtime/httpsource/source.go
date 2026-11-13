@@ -30,18 +30,20 @@ type Kubernetes interface {
 	Publish(context.Context, string, *transport.Artifact, bool, string) error
 }
 type Source struct {
-	Onchain          func(context.Context, contract.Metadata, bool, bool, string) *onchain.Observation
-	Control          *transport.Control
-	Reporter         transport.Requester
-	Kube             Kubernetes
-	Store            artifact.Store
-	ArtifactURL      string
-	IdentityFile     string
-	HostSoftwareFile string
-	mu               sync.Mutex
-	published        atomic.Pointer[delivery]
-	reporting        atomic.Pointer[delivery]
-	deliveryFailure  atomic.Bool
+	Onchain         func(context.Context, contract.Metadata, bool, bool, string) *onchain.Observation
+	Control         *transport.Control
+	Reporter        transport.Requester
+	Kube            Kubernetes
+	Store           artifact.Store
+	ArtifactURL     string
+	IdentityFile    string
+	mu              sync.Mutex
+	published       atomic.Pointer[delivery]
+	reporting       atomic.Pointer[delivery]
+	deliveryFailure atomic.Bool
+
+	InstalledSoftwareFile string
+	NodeName              string
 }
 
 type delivery struct {
@@ -335,13 +337,10 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 			cancel()
 		}
 	}
-	k3sVersion, nodeName := "", ""
-	{
+	k3sVersion := ""
+	if m.UpgradeVersion != "" {
 		var nodes struct {
 			Items []struct {
-				Metadata struct {
-					Name string `json:"name"`
-				} `json:"metadata"`
 				Status struct {
 					NodeInfo struct {
 						Version string `json:"kubeletVersion"`
@@ -352,11 +351,8 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		err := s.Kube.Request(ctx, http.MethodGet, "/api/v1/nodes?labelSelector="+url.QueryEscape("livepeer.io/node-id="+m.NodeID), nil, &nodes)
 		if err == nil && len(nodes.Items) == 1 {
 			k3sVersion = nodes.Items[0].Status.NodeInfo.Version
-			nodeName = nodes.Items[0].Metadata.Name
 		}
-		if m.UpgradeVersion != "" {
-			ready = ready && k3sVersion == m.UpgradeVersion
-		}
+		ready = ready && k3sVersion == m.UpgradeVersion
 	}
 	reason := "applying"
 	if m.Onchain.Onchain() && applied && actual == m.ConfigDigest && !ready {
@@ -370,7 +366,7 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		reporter = s.Control
 	}
 	payload := map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
-		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": observedAt, "software": s.software(ctx, m, nodeName)}
+		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": observedAt, "software": s.software(ctx, s.NodeName)}
 	if s.Onchain != nil {
 		payload["onchain"] = s.Onchain(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)
 	}

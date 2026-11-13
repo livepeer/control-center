@@ -7,7 +7,7 @@ COPY secrets ./secrets
 COPY runtime ./runtime
 ARG VERSION
 ARG COMMIT
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/livepeer/control-center/runtime/version.Version=${VERSION} -X github.com/livepeer/control-center/runtime/version.Commit=${COMMIT}" -o /livepeer-runtime ./runtime/cmd/livepeer-runtime
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/livepeer/control-center/runtime/httpsource.Version=${VERSION} -X github.com/livepeer/control-center/runtime/httpsource.Commit=${COMMIT}" -o /livepeer-runtime ./runtime/cmd/livepeer-runtime
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

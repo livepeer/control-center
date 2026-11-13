@@ -19,7 +19,7 @@ func validCode(s string) bool  { return s == "" || statusCode.MatchString(s) }
 func optionalID(s string) bool { return s == "" || statusID.MatchString(s) }
 
 func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report) error {
-	if r.Software != nil && (r.Component != "runtime" || !r.Software.Valid(m.NodeID, m.CredentialVersion)) {
+	if r.Software != nil && r.Component != "runtime" {
 		return ErrStaleStatus
 	}
 	if !optionalID(r.ObserverID) {

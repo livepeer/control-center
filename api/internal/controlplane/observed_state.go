@@ -21,7 +21,7 @@ import (
 )
 
 type componentObservation struct {
-	Software *contract.SoftwareStatus `json:"software,omitempty"`
+	Software []contract.SoftwareIdentity `json:"software,omitempty"`
 
 	K3sVersion          string                  `json:"k3s_version,omitempty"`
 	Onchain             *onchain.Observation    `json:"onchain,omitempty"`
@@ -236,16 +236,6 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 		}
 		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
 		c.Software, c.K3sVersion = report.Software, report.K3sVersion
-		if c.Software != nil && c.Software.Host != nil {
-			hostAt := c.Software.Host.ObservedAt
-			if received.Before(hostAt) {
-				hostAt = received
-			}
-			if c.ClockUncertain || c.Software.Host.ObservedAt.After(received.Add(5*time.Second)) || !now.Before(hostAt.Add(contract.HostSoftwareTTL)) {
-				c.Software.Host = nil
-				c.Software.Incomplete = true
-			}
-		}
 		c.Onchain = report.Onchain
 		if c.Onchain != nil {
 			copy := *c.Onchain

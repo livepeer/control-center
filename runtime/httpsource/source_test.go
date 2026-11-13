@@ -89,16 +89,12 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 	f := newFixture(t)
 	m := f.meta
 	m.BundleFormat = contract.BundleFormat
-	m.UpgradeVersion = "v1.37.2+k3s1"
-	f.source.Kube = delayedNodeLookup{f.kube}
 	cache := func(connector string) string {
 		return cacheBundle(t, f.source.Store, m, map[string][]byte{"system/node/node.yaml": []byte("same Node inputs"), "system/connector/connector.yaml": []byte(connector)})
 	}
 	old, current := cache("healthy peer"), cache("broken peer")
 	f.kube.reply = func(path string) any {
 		switch {
-		case strings.HasPrefix(path, "/api/v1/nodes?"):
-			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "host"}, "status": map[string]any{"nodeInfo": map[string]any{"kubeletVersion": m.UpgradeVersion}}}}}
 		case path == fluxPath+"livepeer-node":
 			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 		case strings.Contains(path, "/deployments/orchestrator"):
@@ -125,20 +121,6 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 	if report := f.lastReport(); report["ready"] != true || report["bundle_sha256"] != old[7:] {
 		t.Fatal("peer failure suppressed Node or invented its applied archive", report)
 	}
-}
-
-// A successful but slow K3s lookup must retain the existing readiness behavior.
-type delayedNodeLookup struct{ Kubernetes }
-
-func (k delayedNodeLookup) Request(ctx context.Context, method, path string, body, out any) error {
-	if strings.HasPrefix(path, "/api/v1/nodes?") {
-		select {
-		case <-time.After(1100 * time.Millisecond):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return k.Kubernetes.Request(ctx, method, path, body, out)
 }
 
 func (k *fakeKube) Publish(_ context.Context, _ string, a *transport.Artifact, ready bool, _ string) error {
@@ -531,5 +513,68 @@ func TestAppValidationFailureRemainsReportableWithoutPayloadExcerpt(t *testing.T
 	report := f.lastReport()
 	if report["apps_error"] != "invalid_app_payload" {
 		t.Fatal("raw validation error crossed status wire", report)
+	}
+}
+
+func TestSoftwareObservations(t *testing.T) {
+	f := newFixture(t)
+	oldVersion, oldCommit := Version, Commit
+	Version, Commit = "v1", "abcdef123"
+	t.Cleanup(func() { Version, Commit = oldVersion, oldCommit })
+	node := `{"metadata":{"uid":"pod","labels":{"app":"orchestrator"}},"spec":{"nodeName":"host","containers":[{"name":"orchestrator","image":"desired:unobserved"}]},"status":{"podIP":"10.42.0.2","containerStatuses":[{"name":"orchestrator","containerID":"containerd://old","imageID":"containerd://sha256:actual","state":{"running":{}}}]}}`
+	reads, restart := 0, false
+	f.kube.reply = func(path string) any {
+		if !strings.Contains(path, "/livepeer/pods?") {
+			return json.RawMessage(`{"items":[]}`)
+		}
+		pod := node
+		if strings.Contains(path, "labelSelector=") {
+			reads++
+			if restart && reads%2 == 0 {
+				pod = strings.ReplaceAll(pod, "containerd://old", "containerd://new")
+			}
+		}
+		return json.RawMessage(`{"items":[` + pod + `]}`)
+	}
+	f.source.Control.Client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "10.42.0.2:8936" || r.Header.Get("Authorization") != "" {
+			t.Fatal("unexpected build probe", r.URL)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("# TYPE livepeer_build_info gauge\nlivepeer_build_info{component=\"orchestrator\",version=\"v1\",revision=\"abcdef123\"} 1\n"))}, nil
+	})
+	installed := installedRecord{RecordedAt: time.Now().Add(-24 * time.Hour).UTC(), FluxCLI: "v2.7.0", GVisor: "release-observed"}
+	f.source.InstalledSoftwareFile = filepath.Join(t.TempDir(), "software.json")
+	b, _ := json.Marshal(installed)
+	if err := os.WriteFile(f.source.InstalledSoftwareFile, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	find := func(o []contract.SoftwareIdentity, name string) *contract.SoftwareIdentity {
+		for _, i := range o {
+			if i.Component == name {
+				return &i
+			}
+		}
+		return nil
+	}
+	o := f.source.software(t.Context(), "host")
+	if n, i := find(o, "livepeer-node"), find(o, "gvisor"); n == nil || n.Commit != "abcdef123" || i == nil || i.Scope != "installed" || !i.RecordedAt.Equal(installed.RecordedAt) || len(o) != 5 {
+		t.Fatalf("lost observations: %+v", o)
+	}
+	if c := find(o, "livepeer/orchestrator/orchestrator"); c == nil || c.ImageID != "containerd://sha256:actual" {
+		t.Fatal("invented image identity")
+	}
+	restart = true
+	reads = 0
+	o = f.source.software(t.Context(), "host")
+	if find(o, "livepeer-node") != nil || find(o, "gvisor") == nil {
+		t.Fatal("restart contaminated independent observations")
+	}
+	restart = false
+	if err := os.Remove(f.source.InstalledSoftwareFile); err != nil {
+		t.Fatal(err)
+	}
+	o = f.source.software(t.Context(), "host")
+	if find(o, "gvisor") != nil || find(o, "livepeer-node") == nil {
+		t.Fatal("missing installation record contaminated live observations")
 	}
 }

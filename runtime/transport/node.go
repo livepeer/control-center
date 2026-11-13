@@ -1,9 +1,6 @@
 package transport
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 type KubernetesReader interface {
 	Request(context.Context, string, string, any, any) error
@@ -12,26 +9,12 @@ type KubernetesReader interface {
 type NodePod struct {
 	UID, ConfigDigest string
 	Ready, Absent     bool
-	IP, NodeName      string
-	Container         ContainerStatus
-}
 
-type ContainerStatus struct {
-	Name        string `json:"name"`
-	Image       string `json:"image"`
-	ImageID     string `json:"imageID"`
-	ContainerID string `json:"containerID"`
-	Ready       bool   `json:"ready"`
-	State       struct {
-		Running *struct {
-			StartedAt time.Time `json:"startedAt"`
-		} `json:"running"`
-	} `json:"state"`
+	IP, NodeName, ContainerID string
 }
 
 type Pod struct {
 	Metadata struct {
-		Name              string            `json:"name"`
 		UID               string            `json:"uid"`
 		DeletionTimestamp *string           `json:"deletionTimestamp"`
 		Annotations       map[string]string `json:"annotations"`
@@ -41,10 +24,16 @@ type Pod struct {
 		NodeName string `json:"nodeName"`
 	} `json:"spec"`
 	Status struct {
-		PodIP                 string            `json:"podIP"`
-		Conditions            []Condition       `json:"conditions"`
-		ContainerStatuses     []ContainerStatus `json:"containerStatuses"`
-		InitContainerStatuses []ContainerStatus `json:"initContainerStatuses"`
+		PodIP             string      `json:"podIP"`
+		Conditions        []Condition `json:"conditions"`
+		ContainerStatuses []struct {
+			Name        string `json:"name"`
+			ImageID     string `json:"imageID"`
+			ContainerID string `json:"containerID"`
+			State       struct {
+				Running *struct{} `json:"running"`
+			} `json:"state"`
+		} `json:"containerStatuses"`
 	} `json:"status"`
 }
 
@@ -68,8 +57,8 @@ func ObserveNode(ctx context.Context, k KubernetesReader) (NodePod, error) {
 		o.UID, o.ConfigDigest = p.Metadata.UID, p.Metadata.Annotations["livepeer.io/config-sha256"]
 		o.IP, o.NodeName = p.Status.PodIP, p.Spec.NodeName
 		for _, c := range p.Status.ContainerStatuses {
-			if c.Name == "orchestrator" {
-				o.Container = c
+			if c.Name == "orchestrator" && c.State.Running != nil {
+				o.ContainerID = c.ContainerID
 			}
 		}
 		for _, c := range p.Status.Conditions {
