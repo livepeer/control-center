@@ -8,6 +8,13 @@ enrollment does not inherit access to the previous enrollment's diagnostics.
 
 ## Reading status
 
+The **Work readiness** summary appears before rollout details. It distinguishes
+known blockers from missing or expired evidence for Node deployment, apps,
+tunnel provisioning and discovery. Runtime reporting alone does not establish
+readiness. Apps need current health and Node registration evidence; a verified
+tunnel connector does not establish that tunnel provisioning is complete.
+Disabled tunnel or discovery services are shown separately from blockers.
+
 Compare the stages and their timestamps for the same enrollment and app:
 
 | Stage | What it establishes |
