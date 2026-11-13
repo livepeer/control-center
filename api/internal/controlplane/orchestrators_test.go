@@ -69,7 +69,7 @@ func TestOrchestratorScopeAndMetadata(t *testing.T) {
 	execSQL(t, s.db, `INSERT INTO lpcc.orchestrator_memberships VALUES($1,$2)`, ownerA, address)
 	requireStatus(t, request(t, s, "GET", "/api/machines?orchestrator_address=0x"+strings.ToUpper(address[2:]), "session-a", nil), 200)
 	s.params.SecretsMetadataToken = "independent-metadata-principal"
-	path := "/internal/secrets/users/" + ownerA + "/orchestrators/" + orchA
+	path := "/internal/users/" + ownerA + "/orchestrators/" + orchA
 	requireStatus(t, request(t, s, "GET", path, "session-a", nil), 403)
 	requireStatus(t, request(t, s, "GET", path, s.params.SecretsMetadataToken, nil), 200)
 	execSQL(t, s.db, `DELETE FROM lpcc.orchestrator_memberships WHERE user_id=$1`, ownerA)

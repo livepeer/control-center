@@ -48,7 +48,7 @@
 		reverse_proxy api:43812
 	}
 	@orchestrator_membership {
-		path /internal/secrets/users/*/orchestrators/*
+		path /internal/users/*/orchestrators/*
 		method GET
 	}
 	handle @orchestrator_membership {

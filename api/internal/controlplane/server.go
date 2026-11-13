@@ -106,7 +106,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bootstrap-token/revoke", s.revokeEnrollmentGrant)
 	mux.HandleFunc("GET /metrics", s.enrollmentMetrics)
 	mux.HandleFunc("GET /api/orchestrators", s.listOrchestrators)
-	mux.HandleFunc("GET /internal/secrets/users/{user_id}/orchestrators/{address}", s.secretMembership)
+	mux.HandleFunc("GET /internal/users/{user_id}/orchestrators/{address}", s.orchestratorMembership)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
 	mux.HandleFunc("GET /api/me", s.me)

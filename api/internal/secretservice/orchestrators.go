@@ -49,7 +49,7 @@ func (s *Service) operator(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (c *controlMetadata) Member(ctx context.Context, user, address string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.s.Config.ControlURL, "/")+"/internal/secrets/users/"+url.PathEscape(user)+"/orchestrators/"+url.PathEscape(address), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.s.Config.ControlURL, "/")+"/internal/users/"+url.PathEscape(user)+"/orchestrators/"+url.PathEscape(address), nil)
 	if err != nil {
 		return protocol.ErrUnavailable
 	}

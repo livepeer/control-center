@@ -81,7 +81,7 @@ func (s *Server) listOrchestrators(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]any{"orchestrators": result})
 }
 
-func (s *Server) secretMembership(w http.ResponseWriter, r *http.Request) {
+func (s *Server) orchestratorMembership(w http.ResponseWriter, r *http.Request) {
 	if !hmacEqual(bearer(r), s.params.SecretsMetadataToken) {
 		fail(w, 403, "metadata principal required")
 		return
