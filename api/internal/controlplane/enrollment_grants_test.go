@@ -71,13 +71,6 @@ func TestControlGrantRevocationRolloverAndExpiry(t *testing.T) {
 		t.Fatal("revocation retry duplicated audit", n)
 	}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", token, registrationBody(ownerA, strings.Repeat("3", 64), token)), 401)
-	// Legacy grants without key IDs remain verifiable and explicitly revocable.
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(time.Now()), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
-	legacy, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(oldKey))
-	if _, e := s.params.enrollmentGrant(legacy, s.currentTime(), false); e != nil {
-		t.Fatal("legacy rollover", e)
-	}
-	requireStatus(t, request(t, s, "POST", "/api/bootstrap-token/revoke", "session-a", map[string]string{"token": legacy}), 200)
 	future := time.Now().Add(2 * time.Hour)
 	s.now = func() time.Time { return future }
 	requireStatus(t, request(t, s, "POST", "/api/bootstrap-token/revoke", "session-a", map[string]string{"token": token}), 200)
@@ -182,32 +175,34 @@ func TestCredentialRefreshRetryRequiresPreviousOrCurrentPossession(t *testing.T)
 	}
 }
 
-func TestLegacyRevocationIdentityIsCanonical(t *testing.T) {
-	now := time.Now()
+func TestEnrollmentRequiresKeyID(t *testing.T) {
 	p := testParams()
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
-	raw, e := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(p.JWTSigningSecret))
-	if e != nil {
-		t.Fatal(e)
+	now := time.Now()
+	raw, _, _ := p.signEnrollment(ownerA, orchA, now)
+	c, err := p.enrollmentGrant(raw, now, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	first, e := p.enrollmentGrant(raw, now, false)
-	if e != nil {
-		t.Fatal(e)
-	}
-	alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-	n := strings.IndexByte(alphabet, raw[len(raw)-1])
-	alias := raw[:len(raw)-1] + string(alphabet[n+1])
-	second, e := p.enrollmentGrant(alias, now, false)
-	if e == nil && first.ID != second.ID {
-		t.Fatalf("same authenticated grant has different revocation/acceptance lock identities: %s vs %s", first.ID, second.ID)
+	for _, kid := range []any{nil, "", 123, "unknown"} {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
+		if kid != nil {
+			token.Header["kid"] = kid
+		}
+		raw, err := token.SignedString([]byte(p.JWTSigningSecret))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, expired := range []bool{false, true} {
+			if _, err = p.enrollmentGrant(raw, now, expired); err == nil {
+				t.Fatalf("accepted invalid key ID %v", kid)
+			}
+		}
 	}
 }
 
-func TestRevokedLegacyAliasMustNotEnroll(t *testing.T) {
+func TestRevokedGrantAliasMustNotEnroll(t *testing.T) {
 	s := newTestServer(t)
-	now := s.currentTime()
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
-	raw, e := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(s.params.JWTSigningSecret))
+	raw, _, e := s.params.signEnrollment(ownerA, orchA, s.currentTime())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -216,8 +211,6 @@ func TestRevokedLegacyAliasMustNotEnroll(t *testing.T) {
 	alias := raw[:len(raw)-1] + string(alphabet[n+1])
 	requireStatus(t, request(t, s, "POST", "/api/bootstrap-token/revoke", "session-a", map[string]string{"token": raw}), 200)
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", raw, registrationBody(ownerA, strings.Repeat("9", 64), raw)), 401)
-	w := request(t, s, "POST", "/v1/nodes/register", alias, registrationBody(ownerA, strings.Repeat("9", 64), raw))
-	if w.Code == 200 {
-		t.Fatal("alternate signature encoding bypassed legacy grant revocation and enrolled a machine")
-	}
+	w := request(t, s, "POST", "/v1/nodes/register", alias, registrationBody(ownerA, strings.Repeat("9", 64), alias))
+	requireStatus(t, w, 401)
 }

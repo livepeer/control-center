@@ -63,10 +63,14 @@ func TestEnrollmentAuthorization(t *testing.T) {
 		func(c *enrollmentClaims) { c.Issuer = "other" }, func(c *enrollmentClaims) { c.Audience = jwt.ClaimStrings{"other"} },
 		func(c *enrollmentClaims) { c.Scope = "other" }, func(c *enrollmentClaims) { c.Subject = "not-a-user" },
 		func(c *enrollmentClaims) { c.ExpiresAt = nil },
+		func(c *enrollmentClaims) { c.IssuedAt = nil },
+		func(c *enrollmentClaims) { c.ID = "" },
 	} {
-		claims := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
+		claims := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(time.Now()), ID: "fixture-grant", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
 		change(&claims)
-		raw, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(p.JWTSigningSecret))
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		token.Header["kid"] = p.signingKeyID()
+		raw, _ := token.SignedString([]byte(p.JWTSigningSecret))
 		if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
 			t.Fatal("accepted wrong claims")
 		}

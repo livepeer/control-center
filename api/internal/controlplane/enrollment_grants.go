@@ -2,15 +2,12 @@ package controlplane
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
-	"strings"
 	"time"
 	"uuid"
 
@@ -83,45 +80,29 @@ func (p Params) enrollmentGrant(raw string, now time.Time, expired bool) (*enrol
 	if expired {
 		opts = append(opts, jwt.WithoutClaimsValidation())
 	}
-	// Tokens issued before key IDs were introduced remain valid for their
-	// original hour. They can also be explicitly revoked by their signed hash.
-	for _, legacyKey := range keys {
-		c := new(enrollmentClaims)
-		_, e = jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
-			if value, ok := t.Header["kid"]; ok {
-				id, ok := value.(string)
-				if !ok || id == "" || keys[id] == "" {
-					return nil, errors.New("unknown enrollment key")
-				}
-				return []byte(keys[id]), nil
-			}
-			return []byte(legacyKey), nil
-		}, opts...)
-		if e != nil {
-			continue
+	c := new(enrollmentClaims)
+	_, e = jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
+		id, ok := t.Header["kid"].(string)
+		if !ok || keys[id] == "" {
+			return nil, errors.New("unknown enrollment key")
 		}
-		if c.Issuer != enrollmentIssuer || len(c.Audience) != 1 || c.Audience[0] != enrollmentAudience || c.Scope != "machines:register" || c.ExpiresAt == nil || c.IssuedAt == nil || c.IssuedAt.After(now) || !c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > time.Hour {
-			break
-		}
-		id, e := uuid.Parse(c.Subject)
-		if e != nil || id == uuid.Nil() {
-			break
-		}
-		c.Subject = id.String()
-		address, err := protocol.OrchestratorAddress(c.OrchestratorAddress)
-		if err != nil {
-			break
-		}
-		c.OrchestratorAddress = address
-		if c.ID == "" {
-			// Signature encodings can vary without changing the verified MAC.
-			// Identity comes from the authenticated signing input, never its alias.
-			digest := sha256.Sum256([]byte(raw[:strings.LastIndexByte(raw, '.')]))
-			c.ID = "legacy-" + hex.EncodeToString(digest[:])
-		}
-		return c, nil
+		return []byte(keys[id]), nil
+	}, opts...)
+	invalid := errors.New("invalid or expired enrollment token")
+	if e != nil || c.Issuer != enrollmentIssuer || len(c.Audience) != 1 || c.Audience[0] != enrollmentAudience || c.Scope != "machines:register" || c.ID == "" || c.ExpiresAt == nil || c.IssuedAt == nil || c.IssuedAt.After(now) || !c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > time.Hour {
+		return nil, invalid
 	}
-	return nil, errors.New("invalid or expired enrollment token")
+	id, e := uuid.Parse(c.Subject)
+	if e != nil || id == uuid.Nil() {
+		return nil, invalid
+	}
+	c.Subject = id.String()
+	address, e := protocol.OrchestratorAddress(c.OrchestratorAddress)
+	if e != nil {
+		return nil, invalid
+	}
+	c.OrchestratorAddress = address
+	return c, nil
 }
 
 func (s *Server) currentTime() time.Time {

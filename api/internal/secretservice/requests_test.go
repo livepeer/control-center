@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/livepeer/control-center/runtime/secretclient"
 	"github.com/livepeer/control-center/schema"
 	protocol "github.com/livepeer/control-center/secrets"
@@ -44,6 +45,18 @@ func TestSignedRequestBindingAndDurableReplayProtection(t *testing.T) {
 		return w
 	}
 	for _, mutate := range []func(*http.Request){
+		func(r *http.Request) {
+			token, _, err := jwt.NewParser().ParseUnverified(r.Header.Get("Authorization")[7:], &protocol.RequestClaims{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			delete(token.Header, "kid")
+			raw, err := token.SignedString(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Header.Set("Authorization", "Bearer "+raw)
+		},
 		func(r *http.Request) { r.Method = "GET" },
 		func(r *http.Request) { r.URL.Path = "/v1/runtime/resolve" },
 		func(r *http.Request) { r.URL.RawQuery = "other=1" },
