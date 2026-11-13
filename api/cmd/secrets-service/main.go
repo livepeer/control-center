@@ -121,7 +121,7 @@ func validateUpstreams(c secretservice.Config) error {
 		}
 	}
 	if c.VaultURL != "http://vault:8200" && !strings.HasPrefix(c.VaultURL, "https://") {
-		return errors.New("Vault requires HTTPS or the private Compose origin http://vault:8200")
+		return errors.New("vault requires HTTPS or the private Compose origin http://vault:8200")
 	}
 	return nil
 }

@@ -395,12 +395,11 @@ func TestRegressionCollectRemovedUncommittedPreparation(t *testing.T) {
 }
 func TestRegressionSettledStartAfterMustAllowRotation(t *testing.T) {
 	c, _, _, _, _, _ := fixtureController(t)
-	set, p := regressionSecretFixture(t)
+	set, _ := regressionSecretFixture(t)
 	a := &set.Entries[0]
 	a.StartAfter = &schema.AppStartAfter{RevisionID: "22222222-2222-4222-8222-222222222222", Generation: 2}
 	a.StartAllowed = true // backend confirmed prerequisite cleanup; no old revision remains
-	var e error
-	p, e = appbundle.Render(set, appbundle.Options{})
+	p, e := appbundle.Render(set, appbundle.Options{})
 	if e != nil {
 		t.Fatal(e)
 	}
