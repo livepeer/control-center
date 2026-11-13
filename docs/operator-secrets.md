@@ -126,9 +126,37 @@ Use `migrate down` to roll back reversible future migrations.
 ## Application behavior
 
 Applications declare secret references in `container.secrets`; the runtime
-provides values as environment variables. When a secret changes, affected app
-instances are replaced one at a time, waiting for each replacement to become
-ready. A single-instance app has downtime during this process.
+provides values as environment variables. Each exact revision needs approval,
+even if its references have not changed. In **Secrets → App access**, review its
+ID, digest, image and secret/key-to-environment mappings. Expand **Full app
+definition** to inspect the complete definition, then choose **Approve this
+revision**. Catalog and assigned historical revisions are listed separately.
+
+The independent secrets service stores workspace approvals. Approval requests
+use the operator bearer session, so the Control Center backend receiving it and
+the browser code it serves are trusted. **Deny** requires the secrets service
+and revokes all approvals before requesting removal of the app's instances.
+**Deny scheduling** preserves approvals; it and **Allow scheduling** work during
+a secrets service outage. Scheduling and approval are separate: after approving
+a denied app's revision, choose **Allow scheduling** to resume it. Assignment
+changes and scheduling do not grant access to secrets. After revocation,
+reapproval waits for previous instances to drain, even if values are unchanged;
+offline machines enforce this when they reconnect.
+
+Owner-authenticated clients can use the secrets service's `GET /v1/app-approvals`
+and `PUT /v1/app-approvals/{name}`. Use the GET response's workspace-wide
+`generation` as the PUT's `expected_generation`; supply the complete resolved
+revision in `revision` to approve it, or `denied: true` to revoke all approvals
+for the app. On a generation conflict, read again and review before retrying.
+
+Upgrade runtimes before approving revisions: older runtimes cannot receive new
+secret deliveries. Upgrade preserves existing values and identities, but does not
+turn assignments or app-name policies into approvals. Upgraded runtimes drain
+unapproved consumers when they next contact the service.
+
+When a secret changes, affected app instances are replaced one at a time,
+waiting for each replacement to become ready. A single-instance app has downtime
+during this process.
 
 Running instances continue during a service or Vault outage. Starting or
 restarting an instance that needs secrets requires current authorization.

@@ -25,6 +25,11 @@ func retainRolling(s *State, i *Instance, c *Controller, now time.Time) bool {
 	if c.Secrets != nil && (c.Secrets.Faults[i.Group.RevisionID] == "secrets_denied" || c.Secrets.Faults[i.Group.RevisionID] == "secret_missing") {
 		return false
 	}
+	if c.Secrets != nil {
+		if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretApproval != target.ApprovalGeneration {
+			return false
+		}
+	}
 	if i.WithdrawalID != "" {
 		return false
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/livepeer/control-center/schema"
 	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
 )
@@ -229,17 +230,8 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 			return
 		}
 	}
-	var refs []struct{ Name, Key string }
-	eligible := false
-	for _, a := range m.Assignments {
-		if a.Desired == "present" && a.StartAllowed && a.Revision != nil && a.RevisionID == in.RevisionID && a.Generation == in.Generation && a.ActivationGeneration == in.Activation && a.Digest == in.Digest {
-			eligible = true
-			for _, v := range a.Revision.Definition.Container.Secrets {
-				refs = append(refs, struct{ Name, Key string }{v.Secret, v.Key})
-			}
-		}
-	}
-	if !eligible || assignmentDenied(m, in.RevisionID) {
+	assigned := eligibleAssignment(m, in)
+	if assigned == nil {
 		if assignmentDenied(m, in.RevisionID) {
 			fail(w, 403, "assignment_refused")
 		} else {
@@ -253,12 +245,22 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 		return
 	}
 	defer tx.Rollback()
-	out := protocol.VersionSet{NodeID: m.NodeID, IdentityGeneration: gen, PolicyGeneration: m.PolicyGeneration, Assignment: in, Values: []protocol.Resolved{}}
-	for _, ref := range refs {
-		v := protocol.Resolved{Ciphertext: protocol.Ciphertext{Binding: protocol.Binding{Owner: m.Owner, Name: ref.Name, Key: ref.Key}}}
-		e = tx.QueryRowContext(r.Context(), `SELECT s.id::text,v.id::text,v.nonce,v.ciphertext,v.wrapped_key,s.revision FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON v.id=s.head WHERE s.owner_id=$1 AND s.name=$2 AND s.key=$3 AND NOT s.deleted FOR SHARE OF s,v`, m.Owner, ref.Name, ref.Key).Scan(&v.ID, &v.Version, &v.Nonce, &v.Ciphertext.Ciphertext, &v.WrappedKey, &v.Revision)
+	access, e := readAccess(r.Context(), tx, m.Owner, true)
+	if e != nil {
+		fail(w, 503, "unavailable")
+		return
+	}
+	approval := access.approval(assigned, in.ApprovalProtocol)
+	if approval == 0 {
+		fail(w, 403, "assignment_refused")
+		return
+	}
+	out := protocol.VersionSet{NodeID: m.NodeID, IdentityGeneration: gen, PolicyGeneration: m.PolicyGeneration, Assignment: in, ApprovalGeneration: approval, Values: []protocol.Resolved{}}
+	for _, ref := range assigned.Revision.Definition.Container.Secrets {
+		v := protocol.Resolved{Ciphertext: protocol.Ciphertext{Binding: protocol.Binding{Owner: m.Owner, Name: ref.Secret, Key: ref.Key}}}
+		e = tx.QueryRowContext(r.Context(), `SELECT s.id::text,v.id::text,v.nonce,v.ciphertext,v.wrapped_key,s.revision FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON v.id=s.head WHERE s.owner_id=$1 AND s.name=$2 AND s.key=$3 AND NOT s.deleted FOR SHARE OF s,v`, m.Owner, ref.Secret, ref.Key).Scan(&v.ID, &v.Version, &v.Nonce, &v.Ciphertext.Ciphertext, &v.WrappedKey, &v.Revision)
 		if errors.Is(e, sql.ErrNoRows) {
-			reason, err := missingSecret(r.Context(), tx, m.Owner, ref.Name, ref.Key)
+			reason, err := missingSecret(r.Context(), tx, m.Owner, ref.Secret, ref.Key)
 			if err != nil {
 				fail(w, 503, "unavailable")
 				return
@@ -299,7 +301,7 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 	}
 	// Recheck live policy/identity immediately before returning a newly issued authorization.
 	again, g, e := s.machine(r)
-	if e != nil || g != gen || !again.Managed || again.PolicyGeneration != m.PolicyGeneration || !eligibleAssignment(again, in) {
+	if e != nil || g != gen || !again.Managed || again.PolicyGeneration != m.PolicyGeneration || approvedRequest(access, again, in) != approval {
 		fail(w, 409, "authorization_changed")
 		return
 	}
@@ -310,16 +312,32 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 	response(w, 200, out)
 }
 
-func eligibleAssignment(m protocol.Machine, in protocol.ResolveRequest) bool {
-	if assignmentDenied(m, in.RevisionID) {
-		return false
-	}
+func matchingAssignment(m protocol.Machine, in protocol.ResolveRequest) *schema.AppAssignment {
+	var found *schema.AppAssignment
 	for _, a := range m.Assignments {
-		if a.Desired == "present" && a.StartAllowed && a.Revision != nil && a.RevisionID == in.RevisionID && a.Generation == in.Generation && a.ActivationGeneration == in.Activation && a.Digest == in.Digest {
-			return true
+		if a.RevisionID != in.RevisionID {
+			continue
 		}
+		if found != nil {
+			return nil
+		}
+		copy := a
+		found = &copy
 	}
-	return false
+	if found == nil || found.Revision == nil || found.Revision.RevisionRef != found.RevisionRef || found.Revision.Verify() != nil {
+		return nil
+	}
+	return found
+}
+func eligibleAssignment(m protocol.Machine, in protocol.ResolveRequest) *schema.AppAssignment {
+	if assignmentDenied(m, in.RevisionID) {
+		return nil
+	}
+	a := matchingAssignment(m, in)
+	if a == nil || a.Desired != "present" || !a.StartAllowed || a.Generation != in.Generation || a.ActivationGeneration != in.Activation || a.Digest != in.Digest {
+		return nil
+	}
+	return a
 }
 
 func assignmentDenied(m protocol.Machine, revision string) bool {

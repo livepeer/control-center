@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { api } from './api'
+import { AppSecretAccess } from './app-secret-access'
+import type { OperatorApp } from './app-secret-access'
 import { b64, saveServicePin, sealUploadKey, servicePin, verifyServiceResponse } from './secret-crypto'
 import type { ServiceTrust } from './secret-crypto'
 
 type Secret = { owner_id: string; secret_id: string; name: string; key: string; version_id: string; revision: number; deleted: boolean }
-type App = { name: string; aliases?: {name: string}[]; denied: boolean; generation: number; secrets: {name: string; secret: string; key: string}[]; machines?: string[]; requested_machines?: string[] }
+type App = OperatorApp
 async function serviceRequest<T>(session: Session, origin: string, path: string, options: RequestInit, enrollment = false): Promise<T> {
  const url = new URL(path, origin)
  if (url.origin !== new URL(origin).origin || (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname))) throw new Error('The secrets service requires an HTTPS origin.')
@@ -71,10 +73,10 @@ export function OperatorSecrets({session, origin}:{session:Session;origin:string
   } finally {encrypted.dataKey.fill(0);setValue('')}
   setMessage('Saved. Affected apps will rotate automatically; inspect machine status for completion.')
  })}
- return <section className="machines-section" aria-label="Operator secrets"><div className="section-heading"><div><h2>Secrets and app access</h2><p className="muted">Secrets belong to your workspace. Assigned apps receive the values they request.</p></div></div>
+ return <section className="machines-section" aria-label="Operator secrets"><div className="section-heading"><div><h2>Secrets and app access</h2><p className="muted">Secrets belong to your workspace. Assigned apps receive approved secret values.</p></div></div>
  {(problem||loadProblem)&&<div className="notice error" role="alert">{problem||loadProblem}</div>}{message&&<div className="notice success" role="status">{message}</div>}
  <form onSubmit={save} className="machine-panel" style={{padding:24}}><label>Secret name<input required pattern="lp-app-[a-z0-9][a-z0-9-]*" placeholder="lp-app-provider" value={name} onChange={e=>setName(e.target.value)}/></label><label>Key<input required placeholder="api-key" value={key} onChange={e=>setKey(e.target.value)}/></label><label>Value<input type="password" required autoComplete="off" value={value} onChange={e=>setValue(e.target.value)}/></label><button className="button primary" disabled={busy}>Save secret</button></form>
  <div className="machine-panel table-scroll"><table><thead><tr><th>SECRET</th><th>KEY</th><th>USED BY</th><th>STATE</th><th/></tr></thead><tbody>{secrets.map(s=><tr key={s.secret_id}><td>{s.name}</td><td>{s.key}</td><td>{apps.filter(a=>a.secrets.some(r=>r.secret===s.name&&r.key===s.key)).map(a=>a.name).join(', ')||'No app declarations'}</td><td>{s.deleted?'Deleted; runtime cleanup may be pending':s.version_id?'Available':'Awaiting value'}</td><td>{!s.deleted&&<button className="button" disabled={busy} onClick={()=>void perform(async()=>{await secretsAPI(session,origin,`/v1/secrets/${s.secret_id}`,{method:'DELETE',body:JSON.stringify({expected_revision:s.revision})});setMessage('Deletion accepted. Dependent apps will drain; offline machines remain pending.')})}>Delete</button>}</td></tr>)}</tbody></table></div>
- <h3>App access</h3><p className="muted">Apps are allowed by default. Denying an app drains all its revisions on your machines.</p><div className="machine-panel table-scroll"><table><thead><tr><th>APP</th><th>ALIASES</th><th>DECLARED SECRETS</th><th>MACHINES</th><th>POLICY</th><th/></tr></thead><tbody>{apps.map(a=><tr key={a.name}><td>{a.name}</td><td>{a.aliases?.map(alias=>alias.name).join(', ')||'None'}</td><td>{a.secrets.map(ref=>`${ref.secret}/${ref.key} → ${ref.name}`).join(', ')||'None'}</td><td>{a.machines?.join(', ')||((a.requested_machines?.length??0)>0?'Assigned; stopped':'None')}</td><td>{a.denied?'Denied; enforcement may be pending':'Allowed'}</td><td><button className="button" disabled={busy} onClick={()=>void perform(async()=>{await api(session,`/api/operator/apps/${encodeURIComponent(a.name)}/policy`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({denied:!a.denied,expected_generation:a.generation})})})}>{a.denied?'Allow':'Deny'}</button></td></tr>)}</tbody></table></div>
+ <AppSecretAccess session={session} origin={origin} apps={apps} refreshApps={refresh} />
  </section>
 }

@@ -160,11 +160,11 @@ func (c *Client) MarkManaged() error {
 	return artifact.AtomicWrite(filepath.Join(c.Directory, "managed"), []byte("1"), 0600)
 }
 
-func (c *Client) VersionsAll(ctx context.Context, requests []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error) {
+func (c *Client) VersionsAll(ctx context.Context, requests []protocol.ResolveRequest, consumers []protocol.RuntimeConsumer) (map[string]protocol.VersionSet, map[string]string, error) {
 	var out struct {
 		Sets   map[string]protocol.VersionSet `json:"sets"`
 		Errors map[string]string              `json:"errors"`
 	}
-	e := c.call(ctx, "/v1/runtime/batch", map[string]any{"assignments": requests}, &out)
+	e := c.call(ctx, "/v1/runtime/batch", map[string]any{"assignments": requests, "approval_protocol": 1, "consumers": consumers}, &out)
 	return out.Sets, out.Errors, e
 }

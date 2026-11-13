@@ -141,7 +141,7 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(definition.Container.Secrets) > 0 {
-				out.Consumers = append(out.Consumers, protocol.SecretConsumer{RevisionID: a.RevisionID, References: definition.Container.Secrets})
+				out.Consumers = append(out.Consumers, protocol.SecretConsumer{RevisionID: a.RevisionID, Digest: a.Digest, AppName: definition.Name, References: definition.Container.Secrets})
 			}
 		}
 	}
@@ -254,7 +254,29 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 			references = d.Container.Secrets
 		}
 
-		out = append(out, map[string]any{"machines": machines, "requested_machines": requestedMachines, "name": name, "aliases": aliases, "secrets": references, "catalog_secrets": d.Container.Secrets, "denied": denied, "generation": gen})
+		revisions := []schema.ResolvedRevision{}
+		candidates, err := s.db.QueryContext(r.Context(), `SELECT `+revisionColumns+revisionFrom+`WHERE r.app_name=$1 AND (r.revision_id=(SELECT head_revision_id FROM lpcc.apps WHERE name=$1) OR EXISTS(SELECT FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.owner_id=$2 AND v.revision_id=r.revision_id AND (v.intent->>'desired'='present' OR q.intent->>'desired'='present' OR c.received_at IS NULL))) ORDER BY r.revision`, name, u.ID)
+		if err != nil {
+			s.databaseError(w, err)
+			return
+		}
+		for candidates.Next() {
+			revision, err := readRevision(candidates)
+			if err != nil {
+				e = err
+				break
+			}
+			revisions = append(revisions, revision.ResolvedRevision)
+		}
+		if e == nil {
+			e = candidates.Err()
+		}
+		candidates.Close()
+		if e != nil {
+			s.databaseError(w, e)
+			return
+		}
+		out = append(out, map[string]any{"revisions": revisions, "machines": machines, "requested_machines": requestedMachines, "name": name, "aliases": aliases, "secrets": references, "catalog_secrets": d.Container.Secrets, "denied": denied, "generation": gen})
 	}
 	respond(w, 200, map[string]any{"apps": out})
 }

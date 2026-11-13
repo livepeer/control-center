@@ -386,7 +386,10 @@ func (c *Controller) Tick(ctx context.Context) error {
 				if fault == "secrets_denied" || fault == "secret_missing" {
 					desired = false
 				}
-				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretVersion != target.Digest {
+				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretApproval != target.ApprovalGeneration {
+					desired = false
+				}
+				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretVersion != target.Digest && i.SecretApproval == target.ApprovalGeneration {
 					a := assignments[i.Group.RevisionID]
 					if !i.PublicationStarted && i.PodUID == "" {
 						// Nothing could have consumed this superseded preparation.
@@ -503,7 +506,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 				s.Instances[id] = &Instance{ID: id, Group: g, Generation: a.Generation, Definition: a.Revision.Definition, Files: files, Name: name, Phase: "starting", CreatedAt: now}
 				for oldID, next := range s.SecretSuccessors {
 					if next.Group.Key == g.Key && next.Phase == "starting" && next.Generation == a.Generation && next.SecretPrepared {
-						if target, ok := c.Secrets.Targets[a.RevisionID]; ok && target.Digest == next.SecretVersion {
+						if target, ok := c.Secrets.Targets[a.RevisionID]; ok && target.Digest == next.SecretVersion && target.ApprovalGeneration == next.SecretApproval {
 							delete(s.Instances, id)
 							id = next.ID
 							next.Generation = a.Generation

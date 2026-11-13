@@ -286,11 +286,15 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	canonical, _ := schema.CanonicalBytes(def)
 	ref := schema.RevisionRef{RevisionID: "22222222-2222-4222-8222-222222222222", Digest: schema.Digest(canonical)}
 	a := schema.AppAssignment{RevisionRef: ref, Generation: 1, ActivationGeneration: 1, Desired: "present", StartAllowed: true, Replicas: 1, Revision: &schema.ResolvedRevision{Definition: def}}
+
+	a.Revision = &schema.ResolvedRevision{RevisionRef: a.RevisionRef, Name: a.Revision.Definition.Name, AppVersion: a.Revision.Definition.AppVersion, Revision: 1, SchemaVersion: 1, CanonicalFormat: schema.CanonicalFormat, Definition: a.Revision.Definition}
 	m.machine.Assignments = []schema.AppAssignment{a}
-	request := protocol.ResolveRequest{RevisionID: a.RevisionID, Generation: 1, Activation: 1, Digest: a.Digest}
+	approveAssignment(t, s, a, 0)
+
+	request := protocol.ResolveRequest{ApprovalProtocol: 1, RevisionID: a.RevisionID, Generation: 1, Activation: 1, Digest: a.Digest}
 	checkFault := func(in protocol.ResolveRequest, want string) {
 		t.Helper()
-		w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{in}}, identity)
+		w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []protocol.ResolveRequest{in}}, identity)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+want+`"`) {
 			t.Fatal(w.Code, w.Body.String())
 		}
@@ -430,10 +434,10 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if w.Code != 409 {
 		t.Fatal("deleted value resolved", w.Code)
 	}
-	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: "44444444-4444-4444-8444-444444444444", References: def.Container.Secrets}}
+	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: a.RevisionID, Digest: a.Digest, AppName: def.Name, References: def.Container.Secrets}}
 	before = vault.calls.Load()
-	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{}}, identity)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"44444444-4444-4444-8444-444444444444":"secret_missing"`) || vault.calls.Load() != before {
+	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []protocol.ResolveRequest{}}, identity)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+a.RevisionID+`":"secret_missing"`) || vault.calls.Load() != before {
 		t.Fatal("cleanup observation missing or accessed Transit", w.Code, w.Body.String())
 	}
 	var n int
@@ -541,7 +545,7 @@ func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
 			var id protocol.Identity
 			_ = json.Unmarshal(w.Body.Bytes(), &id)
 			identity := &testIdentity{Identity: id, key: key}
-			if w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, identity); w.Code != 503 {
+			if w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []any{}}, identity); w.Code != 503 {
 				t.Fatal("pending identity authorized resolution", w.Code)
 			}
 			// A retry after a lost response preserves the binding and remains pending.
@@ -578,7 +582,7 @@ func TestResetSurvivesLostRemoteResponse(t *testing.T) {
 	restarted := New(s.DB, s.Config)
 	restarted.Metadata = metadata
 	restarted.HTTP = s.HTTP
-	if w := call(t, restarted, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, old); w.Code != 403 {
+	if w := call(t, restarted, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []any{}}, old); w.Code != 403 {
 		t.Fatal("old identity revived", w.Code)
 	}
 	if w := call(t, restarted, "/v1/machines/"+node+"/reset", "POST", "operator", nil, nil); w.Code != 200 {

@@ -44,6 +44,10 @@ INSERT INTO lpsecrets.versions(id,secret_id,base_revision,ciphertext) VALUES('33
 			t.Fatal(err)
 		}
 	}
+	var grants int
+	if err := db.QueryRow(`SELECT count(*) FROM lpsecrets.app_approvals`).Scan(&grants); err != nil || grants != 0 {
+		t.Fatal("migration inferred consent", grants, err)
+	}
 	var publicKey, name, ciphertext string
 	var reset bool
 	if err := db.QueryRow(`SELECT public_key, reset_pending FROM lpsecrets.identities WHERE node_id='node'`).Scan(&publicKey, &reset); err != nil || publicKey != "key" || reset {
@@ -61,14 +65,14 @@ INSERT INTO lpsecrets.versions(id,secret_id,base_revision,ciphertext) VALUES('33
 		t.Fatal(err)
 	}
 	status, err := Migrator.List(ctx, db, files)
-	if err != nil || len(status) != 1 || !status[0].Applied {
+	if err != nil || len(status) != 2 || (!status[0].Applied || !status[1].Applied) {
 		t.Fatalf("secrets history: %v %v", status, err)
 	}
 	controlStatus, err := migrations.List(ctx, db, controlFiles)
 	if err != nil || len(controlStatus) != 1 || !controlStatus[0].Applied {
 		t.Fatalf("control-plane history: %v %v", controlStatus, err)
 	}
-	if err := Migrator.Down(ctx, db, files); err == nil || !strings.Contains(err.Error(), "cannot be rolled back") {
+	if err := Migrator.Down(ctx, db, files); err == nil || !strings.Contains(err.Error(), "must be preserved") {
 		t.Fatalf("baseline rollback: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE lpsecrets.migrations SET sha256=repeat('0',64)`); err != nil {
@@ -86,7 +90,7 @@ func TestMigrationStatusDoesNotInitializeDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := Migrator.List(t.Context(), db, files)
-	if err != nil || len(status) != 1 || status[0].Applied {
+	if err != nil || len(status) != 2 || status[0].Applied {
 		t.Fatalf("fresh status: %v %v", status, err)
 	}
 	var schema *string
