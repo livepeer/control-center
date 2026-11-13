@@ -40,11 +40,6 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
   -t <REGISTRY>/livepeer-tunnel:<RELEASE> runtime/services
 ```
 
-Retire existing machines. Use fresh enrollments, the bundled Node revision or later,
-and Runtime and connector images built from this release. The connector contains
-checksum-verified cloudflared 2026.10.7; push it and set `RuntimeConnectorImage`
-to its digest before enabling ingress.
-
 ## Credential boundaries
 
 | Class | Delivery / storage | Consumers |
