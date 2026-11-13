@@ -95,7 +95,7 @@ func (s *Server) Handler() http.Handler {
 		respond(w, 200, map[string]string{"status": "ready"})
 	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL})
+		respond(w, 200, map[string]string{"supabase_url": s.params.SupabaseURL, "supabase_publishable_key": s.params.SupabasePublishableKey, "public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL, "runtime_node_image": s.params.RuntimeNodeImage})
 	})
 	mux.HandleFunc("GET /api/operator/apps", s.operatorApps)
 	mux.HandleFunc("PUT /api/operator/apps/{name}/policy", s.operatorPolicy)
