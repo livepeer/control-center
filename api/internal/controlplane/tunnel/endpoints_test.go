@@ -188,7 +188,7 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 			if err := os.WriteFile(runners, []byte(fmt.Sprintf("[[Runners]]\nID = \"app-fixture\"\nApp = \"fixture\"\nRunnerURL = %q\nMode = \"persistent\"\nProxy = true\nCapacity = 2\n\n[[Runners]]\nID = \"app-echo\"\nApp = \"echo\"\nRunnerURL = %q\nMode = \"single-shot\"\nProxy = true\nCapacity = 2\n", app.URL, app.URL)), 0600); err != nil {
 				t.Fatal(err)
 			}
-			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"CF-Access-*\"]\nExcludedCookies = [\"CF_Authorization\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
+			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"CF-Access-*\", \"Livepeer-Session-*\", \"X-Forwarded-*\"]\nExcludedCookies = [\"CF_Authorization\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
 			configPath := filepath.Join(directory, "config.toml")
 			if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 				t.Fatal(err)
@@ -286,6 +286,8 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 			}
 			req, _ = http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
 			req.Header.Set("Cf-Access-Jwt-Assertion", "caller-supplied")
+			req.Header.Set("Livepeer-Session-Extra", "caller-supplied")
+			req.Header.Set("X-Forwarded-Extra", "caller-supplied")
 			req.Header.Add("Cookie", "CF_Authorization=edge-cookie; session=app-cookie")
 			req.Header.Add("Cookie", "CF_Authorization=duplicate-edge-cookie")
 			req.Header.Set("Authorization", "Bearer app-authorization")
@@ -299,8 +301,8 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 				t.Fatal("public application echo failed", response.StatusCode)
 			}
 			for name := range headers {
-				if strings.HasPrefix(strings.ToLower(name), "cf-access-") {
-					t.Fatal("Access credential reached application", name)
+				if strings.HasPrefix(strings.ToLower(name), "cf-access-") || strings.HasPrefix(strings.ToLower(name), "livepeer-session-") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+					t.Fatal("excluded header reached application", name)
 				}
 			}
 			if headers.Get("Cookie") != "session=app-cookie" || headers.Get("Authorization") != "Bearer app-authorization" {
