@@ -61,7 +61,7 @@ data:
     APIOriginURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     RunnerServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     ProxyURLTemplate = "@PROXY_URL_TEMPLATE@"
-    ExcludedHeaders = ["CF-Access-*"]
+    ExcludedHeaders = ["CF-Access-*", "Livepeer-Session-*", "X-Forwarded-*"]
     ExcludedCookies = ["CF_Authorization"]
     BootstrapSecretFile = "/credentials/secret"
     HeartbeatInterval = "5s"
@@ -104,7 +104,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: orchestrator
-        image: ghcr.io/livepeer/node:pr-88-sha-9273a78b0842b7d26171ec09174a24a0ac549df2@sha256:9aea6dd48f91bd580d163e693493e40e591cf8d7fd046429e9a7d5b0d16557a1
+        image: ghcr.io/livepeer/node:pr-89-sha-a58f3fc2258614917b3345d5c3901ff38c8c5ae3@sha256:1ff721439a34bbe375deb4dbbb9f4ec87927dae6af5f9e0d0c1ae1d2bb02ffb1
         args:
         - orchestrator
         - --config
