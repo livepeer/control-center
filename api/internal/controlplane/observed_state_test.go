@@ -99,6 +99,10 @@ func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfi
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	s, c, m, a := observationFixture(t)
 	report := observationReport(m, a)
+	recordedAt := time.Now().Add(-24 * time.Hour).UTC()
+	software := []contract.SoftwareIdentity{{Component: "runtime", Scope: "running", Version: "v1", Commit: strings.Repeat("a", 40)}, {Component: "gvisor", Scope: "installed", Version: "release-observed", RecordedAt: &recordedAt}}
+	runtimeReport := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime", Generation: m.Generation, Reason: "applying", Software: software})
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], runtimeReport), 200)
 	path := "/v1/nodes/" + m.NodeID + "/status"
 	requireStatus(t, request(t, s, "POST", path, c["token"], report), 200)
 	read := "/api/machines/" + m.NodeID + "/status"
@@ -107,6 +111,11 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	var v machineObservation
 	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
 		t.Fatal(err)
+	}
+	for _, component := range v.Components {
+		if component.Component == "runtime" && (!component.Fresh || !reflect.DeepEqual(component.Software, software)) {
+			t.Fatal("lost software or original installation timestamp", w.Body.String())
+		}
 	}
 	if len(v.Assignments) != 1 || v.Assignments[0].Generation != a.Generation || v.Delivered == nil || v.Delivered.AppsDigest != m.AppsDigest || v.ExternalReachability != "unverified" {
 		t.Fatal("lost desired/delivery evidence", w.Body.String())

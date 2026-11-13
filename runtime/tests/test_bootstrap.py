@@ -66,6 +66,30 @@ class TempTest(unittest.TestCase):
         self.addCleanup(self.stack.close)
 
 
+class SoftwareRecordingTests(TempTest):
+    def test_startup_records_installed_binaries_and_partial_failure(self):
+        for name in ['bin', 'lib', 'volumes/installed-software']:
+            (self.root / name).mkdir(parents=True, exist_ok=True)
+        helper = self.root / 'lib/recovery.sh'
+        helper.write_text('atomic_write() { cat > "$1"; chmod "${2:-0600}" "$1"; }\n')
+        for name, output in [('k3s', 'k3s version v1.38.0+k3s1 (test)'), ('runsc', 'runsc version release-observed'), ('flux', 'flux: v2.7.0')]:
+            binary = self.root / 'bin' / name
+            binary.write_text(f'#!/bin/sh\necho "{output}"\n')
+            binary.chmod(0o755)
+        startup = self.root / 'bash-env'
+        startup.write_text('timeout() { shift; "$@"; }\n')
+        def record():
+            result = subprocess.run(['bash', str(PROJECT / 'lib/record-version.sh'), str(self.root / 'bin/k3s'), str(self.root / 'k3s-version'), str(helper), str(self.root)],
+                                    env={**os.environ, 'BASH_ENV': str(startup)}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads((self.root / 'volumes/installed-software/software.json').read_text())
+        observed = record()
+        self.assertEqual((self.root / 'k3s-version').read_text().strip(), 'v1.38.0+k3s1')
+        self.assertEqual(observed['flux_cli'], 'v2.7.0')
+        self.assertEqual(observed['gvisor'], 'release-observed')
+        (self.root / 'bin/flux').write_text('#!/bin/sh\nexit 1\n')
+        self.assertEqual(record()['flux_cli'], '')
+
 
 class ShellTests(TempTest):
     def test_managed_kubeconfig_compatibility_directory(self):

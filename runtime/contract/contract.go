@@ -146,3 +146,15 @@ type AppStatus struct {
 	InstancesTotal         int                      `json:"instances_total,omitempty"`
 	InstancesOmitted       int                      `json:"instances_omitted,omitempty"`
 }
+
+// Scope distinguishes live observations from facts recorded during installation.
+type SoftwareIdentity struct {
+	Component   string     `json:"component"`
+	Scope       string     `json:"scope"`
+	Version     string     `json:"version,omitempty"`
+	Commit      string     `json:"commit,omitempty"`
+	ImageID     string     `json:"image_id,omitempty"`
+	PodUID      string     `json:"pod_uid,omitempty"`
+	ContainerID string     `json:"container_id,omitempty"`
+	RecordedAt  *time.Time `json:"recorded_at,omitempty"`
+}

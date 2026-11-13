@@ -41,6 +41,9 @@ type Source struct {
 	published       atomic.Pointer[delivery]
 	reporting       atomic.Pointer[delivery]
 	deliveryFailure atomic.Bool
+
+	InstalledSoftwareFile string
+	NodeName              string
 }
 
 type delivery struct {
@@ -250,6 +253,7 @@ func (s *Source) applied(ctx context.Context, name, digest string) (bool, string
 	return k.Status.ObservedGeneration == k.Metadata.Generation && (current || unchanged), k.Status.LastAppliedRevision
 }
 func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appError string) error {
+	observedAt := time.Now().UTC()
 	applied, revision := s.applied(ctx, "livepeer-node", digest)
 	if m.Terminal {
 		if !m.TerminalCleanup {
@@ -362,7 +366,7 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		reporter = s.Control
 	}
 	payload := map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
-		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": time.Now().UTC()}
+		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": observedAt, "software": s.software(ctx, s.NodeName)}
 	if s.Onchain != nil {
 		payload["onchain"] = s.Onchain(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)
 	}
