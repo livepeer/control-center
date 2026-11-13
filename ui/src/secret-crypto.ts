@@ -9,7 +9,7 @@ const unb64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
 const digest = async (bytes: Uint8Array<ArrayBuffer>) =>
  Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('')
 const canonical = (value: unknown) => JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
-const pinName = (origin: string) => `lpcc-secrets-service:${origin}`
+const pinName = (origin: string) => `lpcc-secrets-service:${new URL(origin).origin}`
 export function servicePin(origin: string): ServiceTrust | undefined {
  const raw = localStorage.getItem(pinName(origin))
  return raw ? JSON.parse(raw) as ServiceTrust : undefined
@@ -24,7 +24,7 @@ export function saveServicePin(trust: ServiceTrust) {
 // Enrollment alone may establish the signing root. Later responses, including
 // encryption-key discovery, must verify against that root and this exact request.
 export async function verifyServiceResponse(trust: ServiceTrust, url: URL, method: string, authorization: string, request: string, response: Response, body: string) {
- if (trust.origin !== url.origin) throw new Error('Untrusted secrets service origin.')
+ if (new URL(trust.origin).origin !== url.origin) throw new Error('Untrusted secrets service origin.')
  const target = url.pathname + url.search
  const requestHash = await digest(utf8.encode(canonical([method, target, await digest(utf8.encode(request))])))
  const proof = JSON.stringify(['lpcc-secrets-response-v1', trust.origin, requestHash, await digest(utf8.encode(authorization)), response.status, await digest(utf8.encode(body))])

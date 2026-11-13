@@ -40,32 +40,3 @@ func TestServiceResponsesRequireTheEnrolledKeyAndExactRequest(t *testing.T) {
 		req, body, denial, response.StatusCode, trust = originalRequest, originalBody, originalDenial, originalStatus, originalTrust
 	}
 }
-
-func TestEnrollmentReceiptBindsBothIdentitiesAndFreshNonce(t *testing.T) {
-	pub, key, _ := ed25519.GenerateKey(rand.Reader)
-	trust := ServiceTrust{Origin: "https://secrets.example", PublicKey: base64.StdEncoding.EncodeToString(pub)}
-	id := Identity{NodeID: "node", Owner: "owner", Generation: 1, PublicKey: "runtime-key", Nonce: rand.Text(), Service: &trust}
-	id.ReceiptSignature = ed25519.Sign(key, id.EnrollmentProof())
-	for _, field := range []string{"valid", "node", "owner", "generation", "key", "nonce", "service"} {
-		copy := id
-		switch field {
-		case "node":
-			copy.NodeID = "another-node"
-		case "owner":
-			copy.Owner = "another-owner"
-		case "generation":
-			copy.Generation++
-		case "key":
-			copy.PublicKey = "another-runtime-key"
-		case "nonce":
-			copy.Nonce = rand.Text()
-		case "service":
-			other := trust
-			other.PublicKey = "substitute-service-key"
-			copy.Service = &other
-		}
-		if e := trust.VerifyEnrollment(copy, id.NodeID, id.PublicKey, id.Nonce); (e == nil) != (field == "valid") {
-			t.Fatal("enrollment receipt binding failed", field, e)
-		}
-	}
-}

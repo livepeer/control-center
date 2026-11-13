@@ -209,14 +209,12 @@ type MachineBinding struct {
 	ResetKey       string `json:"reset_key,omitempty"`
 }
 type Identity struct {
-	NodeID           string        `json:"node_id"`
-	Owner            string        `json:"owner_id"`
-	Generation       int64         `json:"generation"`
-	Service          *ServiceTrust `json:"service,omitempty"`
-	PublicKey        string        `json:"public_key,omitempty"`
-	Nonce            string        `json:"nonce,omitempty"`
-	ReceiptSignature []byte        `json:"receipt_signature,omitempty"`
+	NodeID     string        `json:"node_id"`
+	Owner      string        `json:"owner_id"`
+	Generation int64         `json:"generation"`
+	Service    *ServiceTrust `json:"service,omitempty"`
 }
+
 type ResolveRequest struct {
 	RevisionID string `json:"revision_id"`
 	Generation int64  `json:"generation"`

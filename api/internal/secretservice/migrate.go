@@ -11,12 +11,12 @@ import (
 //go:embed migrations/*.sql
 var MigrationFiles embed.FS
 
-var MigrationRunner = migrations.ForSchema("lpsecrets")
+var Migrator = migrations.ForSchema("lpsecrets")
 
 func (s *Service) Migrate(ctx context.Context) error {
 	files, err := fs.Sub(MigrationFiles, "migrations")
 	if err != nil {
 		return err
 	}
-	return MigrationRunner.Up(ctx, s.DB, files)
+	return Migrator.Up(ctx, s.DB, files)
 }

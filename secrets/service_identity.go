@@ -18,19 +18,6 @@ type ServiceTrust struct {
 	PublicKey string `json:"public_key"`
 }
 
-func (id Identity) EnrollmentProof() []byte {
-	proof, _ := json.Marshal([]any{"lpcc-secrets-enrollment-v1", id.Service.Origin, id.Service.PublicKey, id.NodeID, id.Owner, id.Generation, id.PublicKey, id.Nonce})
-	return proof
-}
-
-func (trust ServiceTrust) VerifyEnrollment(id Identity, node, public, nonce string) error {
-	key, e := PublicKey(trust.PublicKey)
-	if e != nil || id.Service == nil || *id.Service != trust || id.NodeID != node || id.PublicKey != public || len(nonce) < 26 || id.Nonce != nonce || id.Generation < 1 || id.Owner == "" || !ed25519.Verify(key, id.EnrollmentProof(), id.ReceiptSignature) {
-		return ErrUnavailable
-	}
-	return nil
-}
-
 func serviceResponseProof(origin string, r *http.Request, request, response []byte, status int) []byte {
 	credential := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 	digest := sha256.Sum256(response)

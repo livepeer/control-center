@@ -6,7 +6,7 @@ import {DhkemX25519HkdfSha256} from '@hpke/dhkem-x25519'
 
 const vector=JSON.parse(readFileSync(new URL('../../secrets/testdata/hpke.json',import.meta.url),'utf8'))
 const suite=()=>new CipherSuite({kem:new DhkemX25519HkdfSha256(),kdf:new HkdfSha256(),aead:new Aes256Gcm()})
-const info=(direction:string)=>Buffer.from(JSON.stringify(['lpcc-data-key-v1',direction,vector.origin,vector.binding.owner_id,vector.binding.secret_id,vector.binding.name,vector.binding.key,vector.binding.version_id]))
+const info=(direction:string,origin=vector.origin)=>Buffer.from(JSON.stringify(['lpcc-data-key-v1',direction,origin,vector.binding.owner_id,vector.binding.secret_id,vector.binding.name,vector.binding.key,vector.binding.version_id]))
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
 
 test('hpke-js opens Go standard-library delivery ciphertext',async()=>{
@@ -16,24 +16,27 @@ test('hpke-js opens Go standard-library delivery ciphertext',async()=>{
 })
 
 test('uploads hide data keys from the HTTPS edge and refuse service-key substitution',async({page})=>{
+ const origin='https://SECRETS.test:443'
  const owner=vector.binding.owner_id,expiry=Math.floor(Date.now()/1000)+3600
  const session={access_token:`e30.${Buffer.from(JSON.stringify({exp:expiry})).toString('base64url')}.fixture`,refresh_token:'fixture',token_type:'bearer',expires_at:expiry,expires_in:3600,user:{id:owner,email:'owner@example.invalid',aud:'authenticated',role:'authenticated',app_metadata:{},user_metadata:{},created_at:'2026-11-06T00:00:00Z'}}
  await page.addInitScript(s=>localStorage.setItem('sb-auth-auth-token',JSON.stringify(s)),session)
  await page.route('http://auth.test/**',r=>r.fulfill({json:session.user,headers:{'Access-Control-Allow-Origin':'*'}}))
  const secret={...vector.binding,revision:1,deleted:false}
  const identity=generateKeyPairSync('ed25519'),substitute=generateKeyPairSync('ed25519')
- const trust={origin:vector.origin,public_key:identity.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64')}
+ const trust={origin,public_key:identity.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64')}
  const mainRequests:string[]=[],secretRequests:string[]=[]
+ let releaseInitialApps=()=>{},appReads=0
+ const initialApps=new Promise<void>(resolve=>{releaseInitialApps=resolve})
  let denied=false,reserved=false,failWrap=true,tamperKey=true,replacePin=false,wrapCalls=0
  let dek:Buffer|undefined,encrypted:Record<string,string>|undefined
- await page.route('**/api/**',route=>{
+ await page.route('**/api/**',async route=>{
   const req=route.request();mainRequests.push(req.postData()||'')
   switch(new URL(req.url()).pathname){
-   case '/api/config':return route.fulfill({json:{supabase_url:'http://auth.test',supabase_publishable_key:'fixture',public_api_url:'https://api.example',secrets_url:vector.origin}})
+   case '/api/config':return route.fulfill({json:{supabase_url:'http://auth.test',supabase_publishable_key:'fixture',public_api_url:'https://api.example',secrets_url:origin}})
    case '/api/bootstrap-token':return route.fulfill({json:{token:'control.grant.signature',expires_at:new Date(expiry*1000).toISOString()}})
    case '/api/machines':return route.fulfill({json:{machines:[]}})
    case '/api/me':return route.fulfill({json:{user_id:owner,is_admin:false}})
-   case '/api/operator/apps':return route.fulfill({json:{apps:[{name:'provider',aliases:[{name:'provider-alias'}],secrets:[{name:'API_TOKEN',secret:secret.name,key:secret.key}],machines:['owner-machine'],denied,generation:denied?1:0}]}})
+   case '/api/operator/apps':if(appReads++===0){await initialApps;return route.fulfill({status:503,json:{error:'unavailable'}})}return route.fulfill({json:{apps:[{name:'provider',aliases:[{name:'provider-alias'}],secrets:[{name:'API_TOKEN',secret:secret.name,key:secret.key}],machines:['owner-machine'],denied,generation:denied?1:0}]}})
    case '/api/operator/apps/provider/policy':denied=req.postDataJSON().denied;return route.fulfill({json:{generation:1}})
    default:return route.fulfill({status:404,json:{error:'unexpected'}})
   }
@@ -45,7 +48,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
   secretRequests.push(req.postData()||'')
   const reply=(body:unknown,status=200,key=identity.privateKey)=>{
    const raw=JSON.stringify(body),digest=hash(JSON.stringify([req.method(),path+url.search,hash(req.postData()||'')]))
-   const proof=JSON.stringify(['lpcc-secrets-response-v1',vector.origin,digest,hash(req.headers().authorization||''),status,hash(raw)])
+   const proof=JSON.stringify(['lpcc-secrets-response-v1',origin,digest,hash(req.headers().authorization||''),status,hash(raw)])
    return route.fulfill({status,body:raw,contentType:'application/json',headers:{...headers,'X-Livepeer-Service-Signature':sign(null,Buffer.from(proof),key).toString('base64')}})
   }
   if(path==='/v1/enrollment-grants')return reply({token:'setup.grant.signature',expires_at:new Date(expiry*1000).toISOString(),service:replacePin?{...trust,public_key:substitute.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64')}:trust},200,replacePin?substitute.privateKey:identity.privateKey)
@@ -57,7 +60,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
    expect(req.postDataJSON()).not.toHaveProperty('data_key')
    const hpke=suite(),sealed=Buffer.from(req.postDataJSON().sealed_key,'base64')
    expect(sealed.length).toBe(80)
-   dek=Buffer.from(await hpke.open({recipientKey:await hpke.kem.deserializePrivateKey(Buffer.from(vector.private_key,'base64')),enc:sealed.subarray(0,32),info:info('upload')},sealed.subarray(32)))
+   dek=Buffer.from(await hpke.open({recipientKey:await hpke.kem.deserializePrivateKey(Buffer.from(vector.private_key,'base64')),enc:sealed.subarray(0,32),info:info('upload',origin)},sealed.subarray(32)))
    if(failWrap){failWrap=false;return reply({code:'key_unavailable'},503)}
    return reply({wrapped_key:'vault:v1:fixture'})
   }
@@ -69,6 +72,11 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  const command=page.getByLabel('Bootstrap command');await expect(command).toContainText('lpcc1.')
  const envelope=(await command.innerText()).match(/lpcc1\.([A-Za-z0-9_-]+)/)![1]
  expect(JSON.parse(Buffer.from(envelope,'base64url').toString())).toEqual({version:1,control:'control.grant.signature',setup:'setup.grant.signature'})
+ const staleApps=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/operator/apps')
+ releaseInitialApps();await (await staleApps).finished()
+ await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())))
+ await expect(page.getByRole('alert')).toHaveCount(0)
+ await expect(page.getByRole('cell',{name:'provider-alias',exact:true})).toBeVisible()
  await page.getByRole('button',{name:'Deny',exact:true}).click()
  await expect(page.getByRole('button',{name:'Allow',exact:true})).toBeVisible()
  await page.getByLabel('Secret name').fill(secret.name);await page.getByLabel('Key',{exact:true}).fill(secret.key)
@@ -76,6 +84,11 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  await save()
  await expect(page.getByRole('alert')).toContainText('could not be authenticated')
  expect(wrapCalls).toBe(0)
+ const refreshed=page.waitForResponse(r=>new URL(r.url()).pathname==='/v1/secrets')
+ await page.evaluate(()=>window.dispatchEvent(new Event('lpcc-secrets-enrolled')))
+ await (await refreshed).finished()
+ await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())))
+ await expect(page.getByRole('alert')).toContainText('could not be authenticated')
  tamperKey=false
  await save();await expect(page.getByRole('alert')).toContainText('key unavailable')
  await save();await expect(page.getByRole('status')).toContainText('Saved.')

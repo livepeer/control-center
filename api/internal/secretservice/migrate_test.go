@@ -60,7 +60,7 @@ INSERT INTO lpsecrets.versions(id,secret_id,base_revision,ciphertext) VALUES('33
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := MigrationRunner.List(ctx, db, files)
+	status, err := Migrator.List(ctx, db, files)
 	if err != nil || len(status) != 1 || !status[0].Applied {
 		t.Fatalf("secrets history: %v %v", status, err)
 	}
@@ -68,7 +68,7 @@ INSERT INTO lpsecrets.versions(id,secret_id,base_revision,ciphertext) VALUES('33
 	if err != nil || len(controlStatus) != 1 || !controlStatus[0].Applied {
 		t.Fatalf("control-plane history: %v %v", controlStatus, err)
 	}
-	if err := MigrationRunner.Down(ctx, db, files); err == nil || !strings.Contains(err.Error(), "cannot be rolled back") {
+	if err := Migrator.Down(ctx, db, files); err == nil || !strings.Contains(err.Error(), "cannot be rolled back") {
 		t.Fatalf("baseline rollback: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE lpsecrets.migrations SET sha256=repeat('0',64)`); err != nil {
@@ -85,7 +85,7 @@ func TestMigrationStatusDoesNotInitializeDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := MigrationRunner.List(t.Context(), db, files)
+	status, err := Migrator.List(t.Context(), db, files)
 	if err != nil || len(status) != 1 || status[0].Applied {
 		t.Fatalf("fresh status: %v %v", status, err)
 	}
