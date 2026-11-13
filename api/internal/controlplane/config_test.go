@@ -2,6 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
+	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,38 @@ import (
 
 	"github.com/j0sh/boa/pkg/boa"
 )
+
+func TestPublicConfig(t *testing.T) {
+	for name, image := range map[string]string{
+		"configured": "registry.invalid/node@sha256:" + strings.Repeat("d", 64),
+		"bundled":    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := testParams()
+			p.SupabaseURL = "https://auth.example"
+			p.SecretsURL = "https://secrets.example"
+			p.RuntimeNodeImage = image
+			w := request(t, New(nil, p, nil), http.MethodGet, "/api/config", "", nil)
+			if w.Code != http.StatusOK {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			var got map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"supabase_url":             p.SupabaseURL,
+				"supabase_publishable_key": p.SupabasePublishableKey,
+				"public_api_url":           p.PublicAPIURL,
+				"secrets_url":              p.SecretsURL,
+				"runtime_node_image":       image,
+			}
+			if !maps.Equal(got, want) {
+				t.Fatalf("config = %v, want %v", got, want)
+			}
+		})
+	}
+}
 
 func TestOpenDBRejectsPlaintextRoutes(t *testing.T) {
 	for _, mode := range []string{"disable", "allow", "prefer"} {
