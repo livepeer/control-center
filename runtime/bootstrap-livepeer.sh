@@ -171,6 +171,7 @@ prepare_installation() {
     "$INSTALL_DIR/lib" \
     "$INSTALL_DIR/volumes" "$INSTALL_DIR/kubelet" "$INSTALL_DIR/k3s/agent/etc/containerd" \
     "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d"
+  install -d -m 0755 "$INSTALL_DIR/volumes/host-software"
   install -d -m 0700 "$INSTALL_DIR/credentials" "$INSTALL_DIR/state" "$INSTALL_DIR/download" \
     "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
@@ -232,7 +233,14 @@ write_host_configuration() {
   if cmp -s "$INSTALL_DIR/state/host-config.new" "$INSTALL_DIR/state/host-config.sha256"; then changed=0; fi
   atomic_symlink "$INSTALL_DIR/systemd/$UNIT" "/etc/systemd/system/$UNIT"
   atomic_symlink "$INSTALL_DIR/systemd/livepeer-firewall.service" /etc/systemd/system/livepeer-firewall.service
+  atomic_binary "$SCRIPT_DIR/lib/observe-software.sh" "$INSTALL_DIR/bin/livepeer-observe-software"
+  local observer_unit
+  for observer_unit in livepeer-software-observer.service livepeer-software-observer.timer; do
+    render_template "$SCRIPT_DIR/config/$observer_unit" "$INSTALL_DIR/systemd/$observer_unit"
+    atomic_symlink "$INSTALL_DIR/systemd/$observer_unit" "/etc/systemd/system/$observer_unit"
+  done
   systemctl daemon-reload
+  systemctl enable --now livepeer-software-observer.timer
   systemctl enable livepeer-firewall.service
   if ! systemctl start livepeer-firewall.service || ! systemctl reload livepeer-firewall.service; then
     systemctl stop "$UNIT" || true

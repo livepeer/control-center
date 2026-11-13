@@ -66,6 +66,97 @@ class TempTest(unittest.TestCase):
         self.addCleanup(self.stack.close)
 
 
+class SoftwareObservationTests(TempTest):
+    def test_observed_binaries_partial_failure_and_enrollment(self):
+        for name in ['bin', 'lib', 'credentials', 'volumes/host-software', 'runtimes/gvisor/old']:
+            (self.root / name).mkdir(parents=True, exist_ok=True)
+        (self.root / 'lib/recovery.sh').write_text('atomic_write() { cat > "$1"; chmod "$2" "$1"; }\n')
+        identity = {'node_id': 'a' * 26, 'credential_version': 3}
+        (self.root / 'credentials/identity.json').write_text(json.dumps(identity))
+        runsc = self.root / 'bin/runsc'
+        runsc.write_text('#!/bin/sh\necho "runsc version release-observed"\n')
+        old_runsc = self.root / 'runtimes/gvisor/old/runsc'
+        old_runsc.write_text('#!/bin/sh\necho "runsc version release-running-old"\n')
+        old_runsc.chmod(0o755)
+        flux = self.root / 'bin/flux'
+        flux.write_text('#!/bin/sh\necho "flux: v2.7.0"\n')
+        for binary in [runsc, flux]:
+            binary.chmod(0o755)
+        # Mock /proc reads and the timeout utility without changing the observer.
+        startup = self.root / 'bash-env'
+        startup.write_text('''readlink() { printf '%s/runtimes/gvisor/old/runsc' "$TEST_INSTALL"; }
+timeout() {
+  shift
+  case "$1" in
+    /proc/*/exe) echo 'untrusted process executable was invoked' >&2; return 99;;
+    *) "$@";;
+  esac
+}
+stat() {
+  case "${@: -1}" in
+    /proc/*/exe) printf '%s' "${TEST_PROCESS_INODE:-1:2}";;
+    *) [[ ${TEST_DELETED:-0} == 0 ]] || return 1; echo '1:2';;
+  esac
+}
+''')
+        env = {**os.environ, 'BASH_ENV': str(startup), 'TEST_INSTALL': str(self.root)}
+        def observe():
+            result = subprocess.run(['bash', str(PROJECT / 'lib/observe-software.sh'), str(self.root)],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads((self.root / 'volumes/host-software/software.json').read_text())
+        report = observe()
+        self.assertEqual(report['node_id'], identity['node_id'])
+        self.assertEqual(report['credential_version'], 3)
+        self.assertEqual(report['flux_cli'], 'v2.7.0')
+        self.assertEqual(report['gvisor_installed'], 'release-observed')
+        self.assertEqual(report['gvisor_running'], ['release-running-old'])
+        self.assertRegex(report['observed_at'], r'^\d{4}-\d\d-\d\dT')
+        # Same-device inode mismatch (including a replaced PID) and a deleted
+        # generation must stay unknown and must never execute /proc/PID/exe.
+        env['TEST_PROCESS_INODE'] = '1:3'
+        self.assertIsNone(observe()['gvisor_running'])
+        env['TEST_PROCESS_INODE'] = '1:2'
+        env['TEST_DELETED'] = '1'
+        self.assertIsNone(observe()['gvisor_running'])
+        env['TEST_DELETED'] = '0'
+        flux.write_text('#!/bin/sh\nexit 1\n')
+        runsc.write_text('#!/bin/sh\necho "unrecognized version output"\n')
+        report = observe()
+        self.assertEqual(report['flux_cli'], '')
+        self.assertEqual(report['gvisor_installed'], '')
+        self.assertEqual(report['gvisor_running'], ['release-running-old'])
+        if sys.platform.startswith('linux'):
+            vanished = subprocess.Popen(['sleep', '60'])
+            survivor = subprocess.Popen(['sleep', '60'])
+            try:
+                env.update(VANISHED_PID=str(vanished.pid), SURVIVOR_PID=str(survivor.pid))
+                with startup.open('a') as script:
+                    script.write('''readlink() {
+  case "$1" in
+    /proc/"$VANISHED_PID"/exe|/proc/"$SURVIVOR_PID"/exe) printf '%s/runtimes/gvisor/old/runsc' "$TEST_INSTALL";;
+    *) return 1;;
+  esac
+}
+stat() {
+  if [[ ${@: -1} == /proc/"$VANISHED_PID"/exe ]]; then
+    kill -KILL "$VANISHED_PID"
+    for _ in {1..100}; do [[ -e /proc/"$VANISHED_PID"/exe ]] || break; sleep .01; done
+    return 1
+  fi
+  echo '1:2'
+}
+''')
+                self.assertEqual(observe()['gvisor_running'], ['release-running-old'])
+                self.assertEqual(vanished.wait(timeout=2), -9)
+            finally:
+                for process in [vanished, survivor]:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=2)
+
+
+
 
 class ShellTests(TempTest):
     def test_managed_kubeconfig_compatibility_directory(self):

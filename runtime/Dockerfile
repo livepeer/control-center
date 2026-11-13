@@ -5,7 +5,9 @@ RUN go mod download
 COPY schema ./schema
 COPY secrets ./secrets
 COPY runtime ./runtime
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /livepeer-runtime ./runtime/cmd/livepeer-runtime
+ARG VERSION
+ARG COMMIT
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/livepeer/control-center/runtime/version.Version=${VERSION} -X github.com/livepeer/control-center/runtime/version.Commit=${COMMIT}" -o /livepeer-runtime ./runtime/cmd/livepeer-runtime
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

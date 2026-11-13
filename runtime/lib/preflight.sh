@@ -157,7 +157,7 @@ preflight() {
   source /etc/os-release
   [[ "$ID" == debian || "$ID" == ubuntu ]] || die 'only Debian and Ubuntu are supported'
   for tool in openssl base64 tail cut date jq hostname curl tar bzip2 gzip sha256sum sha512sum install systemctl ip ss modprobe \
-    flock realpath chown tee cmp ln readlink awk head chmod cat mv sleep sysctl sed \
+    flock realpath chown tee cmp ln readlink awk head chmod cat mv sleep sysctl sed timeout \
     cp nproc df grep tr od sort wc ls dirname uname mktemp sync rm rmdir diff find nft; do
     command -v "$tool" >/dev/null || die "missing command: $tool; install the README prerequisites"
   done

@@ -59,6 +59,9 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: controlcenter-${{ matrix.image.name }}:test-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ env.COMMIT }}
+            COMMIT=${{ env.COMMIT }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.COMMIT }}

@@ -89,12 +89,16 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 	f := newFixture(t)
 	m := f.meta
 	m.BundleFormat = contract.BundleFormat
+	m.UpgradeVersion = "v1.37.2+k3s1"
+	f.source.Kube = delayedNodeLookup{f.kube}
 	cache := func(connector string) string {
 		return cacheBundle(t, f.source.Store, m, map[string][]byte{"system/node/node.yaml": []byte("same Node inputs"), "system/connector/connector.yaml": []byte(connector)})
 	}
 	old, current := cache("healthy peer"), cache("broken peer")
 	f.kube.reply = func(path string) any {
 		switch {
+		case strings.HasPrefix(path, "/api/v1/nodes?"):
+			return map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "host"}, "status": map[string]any{"nodeInfo": map[string]any{"kubeletVersion": m.UpgradeVersion}}}}}
 		case path == fluxPath+"livepeer-node":
 			return map[string]any{"metadata": map[string]any{"generation": 1}, "status": map[string]any{"observedGeneration": 1, "lastAppliedRevision": old, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 		case strings.Contains(path, "/deployments/orchestrator"):
@@ -121,6 +125,20 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 	if report := f.lastReport(); report["ready"] != true || report["bundle_sha256"] != old[7:] {
 		t.Fatal("peer failure suppressed Node or invented its applied archive", report)
 	}
+}
+
+// A successful but slow K3s lookup must retain the existing readiness behavior.
+type delayedNodeLookup struct{ Kubernetes }
+
+func (k delayedNodeLookup) Request(ctx context.Context, method, path string, body, out any) error {
+	if strings.HasPrefix(path, "/api/v1/nodes?") {
+		select {
+		case <-time.After(1100 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return k.Kubernetes.Request(ctx, method, path, body, out)
 }
 
 func (k *fakeKube) Publish(_ context.Context, _ string, a *transport.Artifact, ready bool, _ string) error {

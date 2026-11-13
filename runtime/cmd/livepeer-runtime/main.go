@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/livepeer/control-center/runtime/management"
 	"github.com/livepeer/control-center/runtime/secretclient"
 	"github.com/livepeer/control-center/runtime/transport"
+	"github.com/livepeer/control-center/runtime/version"
 )
 
 func main() {
@@ -38,6 +40,8 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("choose http-source, app-reconciler, connector-start, or connector-probe")
 	}
 	switch args[0] {
+	case "version", "--version":
+		return json.NewEncoder(os.Stdout).Encode(version.Current())
 	case "orchestrator-start":
 		return consumer.Start(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/rpc", os.Getenv("POD_NAME"), os.Getenv("POD_UID"), args[1:])
 	case "orchestrator-probe":
@@ -219,6 +223,7 @@ func httpSource(ctx context.Context, args []string) error {
 	listen := flags.String("listen", ":8080", "Private artifact listener")
 	mode := flags.String("transport", "https", "https or development-http")
 	interval := flags.Duration("interval", time.Minute, "Configuration polling interval")
+	hostSoftware := flags.String("host-software-file", "", "Read-only host software observation")
 	socketRoot := flags.String("socket-root", "", "Protected per-consumer socket directories")
 	if flags.Parse(args) != nil {
 		return errors.New("invalid http-source flags")
@@ -237,7 +242,7 @@ func httpSource(ctx context.Context, args []string) error {
 	}
 	store := artifact.Store{Directory: *directory}
 	ordered := &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}
-	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity}
+	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, HostSoftwareFile: *hostSoftware}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	socketErrors := make(chan error, 1)

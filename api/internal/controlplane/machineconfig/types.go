@@ -84,6 +84,8 @@ var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{
 func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }
 
 type Report struct {
+	Software *contract.SoftwareStatus `json:"software,omitempty"`
+
 	Onchain             *onchain.Observation    `json:"onchain,omitempty"`
 	ObserverID          string                  `json:"observer_id,omitempty"`
 	ObserverStartedAt   time.Time               `json:"observer_started_at,omitempty"`

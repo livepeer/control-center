@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Livepeer host software identities
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=20s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

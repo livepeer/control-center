@@ -41,6 +41,8 @@ spec:
         - '@CONTROL_TRANSPORT@'
         - --artifact-url
         - http://livepeer-http-source.flux-system.svc.cluster.local:8080
+        - --host-software-file
+        - /host-software/software.json
         - --socket-root
         - /management
         ports:
@@ -65,6 +67,9 @@ spec:
         - name: artifacts
           mountPath: /artifacts
           readOnly: false
+        - name: host-software
+          mountPath: /host-software
+          readOnly: true
         - name: management
           mountPath: /management
         livenessProbe:
@@ -85,6 +90,10 @@ spec:
         hostPath:
           path: '@INSTALL_DIR@/volumes/http-source'
           type: Directory
+      - name: host-software
+        hostPath:
+          path: '@INSTALL_DIR@/volumes/host-software'
+          type: DirectoryOrCreate
       - name: management
         hostPath:
           path: '@INSTALL_DIR@/volumes/management-sockets'
