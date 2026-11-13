@@ -44,4 +44,5 @@ DiscoveryMaxFailedRefreshes = 6
 
 # Independent operator secrets service; see docs/operator-secrets.md.
 # SecretsURL = "https://controlcenter-secrets.livepeer.live"
-# SecretsMetadataTokenFile = "secrets/secrets-metadata-token"
+# With compose.secrets-control.yaml:
+# SecretsMetadataTokenFile = "/run/secrets/secrets-metadata-token"

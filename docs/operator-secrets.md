@@ -117,6 +117,52 @@ docker compose -f deploy/compose.secrets.yaml \
 
 Use `migrate down` to roll back reversible future migrations.
 
+### Shared-host staging
+
+Staging can use the existing Supabase project and Control Center tunnel, with
+Vault and the secrets service in a separate Compose project on the same host.
+This shares the host and database administration boundary with Control Center.
+The application tables remain in the separate `lpsecrets` schema.
+
+Add `deploy/compose.secrets-control.yaml` to the Control Center Compose command.
+It mounts the shared metadata credential at
+`/run/secrets/secrets-metadata-token` and moves tunnel metrics to port `23813`.
+Set `SecretsMetadataTokenFile` to that path and `SecretsURL` to
+`https://controlcenter-secrets.livepeer.live` in the private `config.toml`.
+Caddy forwards only GET/POST requests to `/internal/secrets/nodes/*`; the API
+requires the independent metadata token on these requests.
+
+For the secrets project, combine `compose.secrets.yaml` with
+`compose.secrets-staging.yaml`. The overlay binds the service to
+`127.0.0.1:23812` for the existing host-networked tunnel and disables the
+separate connector by default. Configure the tunnel's secrets hostname to
+use `http://localhost:23812`.
+
+Keep the environment settings from the deployment instructions in the ignored
+`deploy/secrets-service.env`, using `VAULT_ADDR=https://vault:8200`. Place
+Vault's TLS files in `deploy/vault-private/tls/` as `ca.pem`, `server.pem`, and
+`server-key.pem`; the certificate must cover `vault` and `127.0.0.1`. Prepare
+`deploy/vault-private/data/` for persistent Raft storage. The mounted Vault
+configuration, TLS files and data directory must be readable by UID 65532,
+and the data directory must be writable by that UID. To retain an existing
+storage location, set `VAULT_STATE_DIR` in the private environment file.
+
+Create `secrets-service-private/ca-bundle.pem` containing the normal upstream
+CA roots plus Vault's CA, readable by UID 65532. Start Vault first, initialize
+and unseal it, then configure Transit and the restricted service token as
+described above. Preserve the recovery keys privately and arrange unsealing
+after restarts and renewal of expiring service tokens.
+
+```sh
+cd deploy
+docker compose --env-file secrets-service.env \
+  -f compose.secrets.yaml -f compose.secrets-staging.yaml up -d vault
+# Initialize/unseal Vault and provision secrets-service-private/vault-token.
+docker compose --env-file secrets-service.env \
+  -f compose.secrets.yaml -f compose.secrets-staging.yaml up --build -d
+curl --fail https://controlcenter-secrets.livepeer.live/readyz
+```
+
 ## Application behavior
 
 Applications declare secret references in `container.secrets`; the runtime
