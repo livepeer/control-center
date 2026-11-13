@@ -109,6 +109,24 @@ protects data keys in transit rather than replacing operator authentication.
    docker compose -f deploy/compose.secrets.yaml up --build -d
    ```
 
+The service applies its embedded, versioned PostgreSQL migrations on startup.
+The first migration adopts databases initialized by earlier service versions,
+preserving existing secrets and identities. It removes the obsolete enrollment
+challenge table, as the earlier startup initialization did. Its baseline cannot
+be rolled back because it may contain existing data.
+
+To inspect or apply migrations separately, run the service image with
+`SECRETS_DATABASE_URL_FILE` configured. With the Compose deployment above:
+
+```sh
+docker compose -f deploy/compose.secrets.yaml run --rm --no-deps secrets migrate status
+docker compose -f deploy/compose.secrets.yaml run --rm --no-deps secrets migrate up
+```
+
+The migration history is stored in `lpsecrets.migrations`, independently of
+Control Center's `lpcc.migrations`. The shared tool also supports `migrate down`
+for reversible future migrations; the initial baseline refuses rollback.
+
 ## When an application's secrets change
 
 Applications declare their secret references in `container.secrets`; the runtime

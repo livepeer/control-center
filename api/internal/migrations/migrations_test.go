@@ -178,3 +178,15 @@ func TestInvalidCatalog(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemaNames(t *testing.T) {
+	schema, table, err := ForSchema(`quote"schema`).names()
+	if err != nil || schema != `"quote""schema"` || table != `"quote""schema"."migrations"` {
+		t.Fatalf("schema quoting: %q %q %v", schema, table, err)
+	}
+	for _, invalid := range []string{"", strings.Repeat("a", 64), "bad\x00schema"} {
+		if _, _, err := ForSchema(invalid).names(); err == nil {
+			t.Fatalf("accepted invalid schema %q", invalid)
+		}
+	}
+}

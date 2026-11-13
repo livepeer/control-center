@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type querier interface {
@@ -14,8 +17,26 @@ type querier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+// Runner keeps a migration catalog and its history isolated in the given schema.
+type Runner struct{ schema string }
+
+func ForSchema(schema string) Runner { return Runner{schema: schema} }
+
+func (r Runner) names() (string, string, error) {
+	if len(r.schema) == 0 || len(r.schema) > 63 || strings.ContainsRune(r.schema, '\x00') {
+		return "", "", fmt.Errorf("invalid migration schema")
+	}
+	return pgx.Identifier{r.schema}.Sanitize(), pgx.Identifier{r.schema, "migrations"}.Sanitize(), nil
+}
+
+var controlplane = ForSchema("lpcc")
+
 // List never creates schema or migration metadata, including on a fresh database.
 func List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
+	return controlplane.List(ctx, db, files)
+}
+
+func (r Runner) List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
 	specs, err := catalog(files)
 	if err != nil {
 		return nil, err
@@ -25,22 +46,26 @@ func List(ctx context.Context, db *sql.DB, files fs.FS) ([]Status, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	return list(ctx, tx, specs)
+	return r.list(ctx, tx, specs)
 }
 
-func list(ctx context.Context, q querier, specs []migration) ([]Status, error) {
+func (r Runner) list(ctx context.Context, q querier, specs []migration) ([]Status, error) {
+	_, tableName, err := r.names()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Status, len(specs))
 	for i := range specs {
 		out[i] = specs[i].Status
 	}
 	var table sql.NullString
-	if err := q.QueryRowContext(ctx, `SELECT to_regclass('lpcc.migrations')::text`).Scan(&table); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, tableName).Scan(&table); err != nil {
 		return nil, err
 	}
 	if !table.Valid {
 		return out, nil
 	}
-	rows, err := q.QueryContext(ctx, `SELECT version, filename, sha256, applied_at_ms FROM lpcc.migrations ORDER BY version`)
+	rows, err := q.QueryContext(ctx, `SELECT version, filename, sha256, applied_at_ms FROM `+tableName+` ORDER BY version`)
 	if err != nil {
 		return nil, fmt.Errorf("read migration metadata: %w", err)
 	}
@@ -74,12 +99,16 @@ func list(ctx context.Context, q querier, specs []migration) ([]Status, error) {
 
 // Up commits each pending migration and its metadata in the same transaction.
 func Up(ctx context.Context, db *sql.DB, files fs.FS) error {
+	return controlplane.Up(ctx, db, files)
+}
+
+func (r Runner) Up(ctx context.Context, db *sql.DB, files fs.FS) error {
 	specs, err := catalog(files)
 	if err != nil {
 		return err
 	}
 	for {
-		changed, err := applyNext(ctx, db, specs, false)
+		changed, err := r.applyNext(ctx, db, specs, false)
 		if err != nil || !changed {
 			return err
 		}
@@ -88,15 +117,23 @@ func Up(ctx context.Context, db *sql.DB, files fs.FS) error {
 
 // Down rolls back exactly the latest migration. It can destroy application data.
 func Down(ctx context.Context, db *sql.DB, files fs.FS) error {
+	return controlplane.Down(ctx, db, files)
+}
+
+func (r Runner) Down(ctx context.Context, db *sql.DB, files fs.FS) error {
 	specs, err := catalog(files)
 	if err != nil {
 		return err
 	}
-	_, err = applyNext(ctx, db, specs, true)
+	_, err = r.applyNext(ctx, db, specs, true)
 	return err
 }
 
-func applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (bool, error) {
+func (r Runner) applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (bool, error) {
+	schema, tableName, err := r.names()
+	if err != nil {
+		return false, err
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -107,8 +144,8 @@ func applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (b
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(1129073483, 1)`); err != nil {
 		return false, err
 	}
-	if _, err = tx.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS lpcc;
- CREATE TABLE IF NOT EXISTS lpcc.migrations (
+	if _, err = tx.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+schema+`;
+ CREATE TABLE IF NOT EXISTS `+tableName+` (
   version INTEGER PRIMARY KEY CHECK(version > 0),
   filename TEXT NOT NULL UNIQUE,
   sha256 TEXT NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
@@ -116,7 +153,7 @@ func applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (b
  )`); err != nil {
 		return false, err
 	}
-	statuses, err := list(ctx, tx, specs)
+	statuses, err := r.list(ctx, tx, specs)
 	if err != nil {
 		return false, err
 	}
@@ -142,9 +179,9 @@ func applyNext(ctx context.Context, db *sql.DB, specs []migration, down bool) (b
 		return false, fmt.Errorf("migration %s: %w", item.Filename, err)
 	}
 	if down {
-		_, err = tx.ExecContext(ctx, `DELETE FROM lpcc.migrations WHERE version=$1`, item.Version)
+		_, err = tx.ExecContext(ctx, `DELETE FROM `+tableName+` WHERE version=$1`, item.Version)
 	} else {
-		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.migrations(version,filename,sha256,applied_at_ms) VALUES($1,$2,$3,$4)`, item.Version, item.Filename, item.SHA256, time.Now().UnixMilli())
+		_, err = tx.ExecContext(ctx, `INSERT INTO `+tableName+`(version,filename,sha256,applied_at_ms) VALUES($1,$2,$3,$4)`, item.Version, item.Filename, item.SHA256, time.Now().UnixMilli())
 	}
 	if err != nil {
 		return false, err

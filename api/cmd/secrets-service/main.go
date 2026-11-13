@@ -3,12 +3,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/livepeer/control-center/api/internal/controlplane"
-	"github.com/livepeer/control-center/api/internal/secretservice"
-	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +14,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/j0sh/boa/pkg/boa"
+	"github.com/livepeer/control-center/api/internal/controlplane"
+	"github.com/livepeer/control-center/api/internal/migrations"
+	"github.com/livepeer/control-center/api/internal/secretservice"
+	protocol "github.com/livepeer/control-center/secrets"
+	"github.com/spf13/cobra"
 )
 
 func file(name string) ([]byte, error) {
@@ -110,10 +115,26 @@ func run(ctx context.Context) error {
 		}
 	}
 }
+func command() *cobra.Command {
+	var path string
+	migrate := migrations.CommandFor(secretservice.MigrationRunner, boa.Cmd[boa.NoParams]{}, &path, secretservice.MigrationFiles,
+		func(ctx context.Context, _ string, _ bool) (*sql.DB, error) {
+			pg, err := file("SECRETS_DATABASE_URL_FILE")
+			if err != nil {
+				return nil, err
+			}
+			return controlplane.OpenDB(ctx, string(pg), "")
+		})
+	root := &cobra.Command{Use: "secrets-service", Short: "Run the secrets service", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error { return run(cmd.Context()) }, SilenceUsage: true, SilenceErrors: true}
+	root.AddCommand(migrate)
+	return root
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if e := run(ctx); e != nil && !errors.Is(e, http.ErrServerClosed) {
+	if e := command().ExecuteContext(ctx); e != nil && !errors.Is(e, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
 	}
