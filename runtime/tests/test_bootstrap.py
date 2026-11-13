@@ -131,6 +131,38 @@ check_ports
         (directory / 'data').symlink_to(self.root)
         self.assertFalse(accepted())
 
+    def test_stopped_cluster_repair_recognizes_only_committed_flannel_state(self):
+        target = self.root / 'stopped'
+        for directory in ('state', 'config', 'systemd', 'k3s/server'):
+            (target / directory).mkdir(parents=True, exist_ok=True)
+        (target / 'state/install-dir').write_text(str(target) + '\n')
+        (target / 'state/k3s-version').write_text('v1.37.2+k3s1\n')
+        generated = target / 'config/k3s.yaml'
+        generated.write_text('data-dir: ' + str(target / 'k3s') + '\n')
+        (target / 'state/host-config.sha256').write_text(
+            hashlib.sha256(generated.read_bytes()).hexdigest() + '  ' + str(generated) + '\n')
+        def accepted():
+            return self.shell('''INSTALL_DIR="$1"; MANAGED=1
+systemctl() { return 1; }
+ip() { printf 'vxlan id 1 local 10.204.0.3 dstport 8472 nolearning\\n'; }
+ss() { printf 'udp UNCONN 0 0 0.0.0.0:8472 0.0.0.0:*\\n'; }
+check_ports
+''', str(target)).returncode == 0
+        self.assertTrue(accepted())
+        # Operator edits, missing release identity, or an uncommitted root do
+        # not provide ownership evidence for an otherwise identical socket.
+        original = generated.read_bytes()
+        generated.write_text('operator configuration')
+        self.assertFalse(accepted())
+        generated.write_bytes(original)
+        (target / 'state/k3s-version').write_text('unknown\n')
+        self.assertFalse(accepted())
+        (target / 'state/k3s-version').unlink()
+        self.assertFalse(accepted())
+        (target / 'state/k3s-version').write_text('v1.37.2+k3s1\n')
+        (target / 'state/install-dir').unlink()
+        self.assertFalse(accepted())
+
     def shell(self, commands, *args):
         # Any accidental host Python invocation fails, even on developer machines.
         setup = '''source "$1"; shift
