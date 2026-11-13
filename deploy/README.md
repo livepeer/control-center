@@ -69,10 +69,9 @@ installer's origin firewall remains required.
 
 ## Onchain setup
 
-Package the Node image with Runtime's startup wrapper and set `RuntimeNodeImage`
-to the pushed digest. Use the same Node build for `LIVEPEER_REDEEMER_IMAGE`.
-Use Node revision `2364436` or later with `RPCURLFile`, `RedeemerHeadersFile`
-and unregister acknowledgements that wait for durable redeemer handoff.
+Wrap the bundled Node revision or later with Runtime's startup wrapper. Set
+`RuntimeNodeImage` to the pushed digest and use the same Node build for
+`LIVEPEER_REDEEMER_IMAGE`.
 
 ```sh
 docker build -f ../runtime/services/Dockerfile.node \
