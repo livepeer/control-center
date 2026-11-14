@@ -79,9 +79,11 @@ encryption.
 
 1. Run the secrets service and Vault with [Compose](../deploy/compose.secrets.yaml).
    Route `controlcenter-secrets.livepeer.live` through the existing Cloudflare
-   tunnel to `http://localhost:23812`. Only the secrets service binds a loopback
-   host port. Vault uses HTTP on a private Docker network, with no published port.
-   Prepare `deploy/vault-private/data/` owned by UID 65532 for persistent storage.
+   tunnel to `http://localhost:23812`. The secrets service binds to host
+   loopback. Vault uses HTTPS on the shared Compose network and publishes its
+   administrative port only on host loopback.
+   Prepare `/opt/controlcenter-secrets/vault/data/` owned by UID 65532 for
+   persistent storage. Move existing Vault data there before redeploying.
 2. Create the files named in [Compose](../deploy/compose.secrets.yaml) under
    `deploy/secrets-service-private/`. Keep them owner-only, readable by UID
    65532, and out of Git. Generate the service signing and encryption keys:
@@ -96,10 +98,19 @@ encryption.
    Compose mounts these as `SECRETS_IDENTITY_KEY_FILE` and
    `SECRETS_ENCRYPTION_KEY_FILE`. Preserve both across redeployments, separately
    from the enrollment-token signing secret.
-3. Start Vault with `docker compose -f deploy/compose.secrets.yaml up -d vault`,
+3. The staging Compose definition uses HTTPS Vault at `https://vault:8200`,
+   with configuration, TLS certificates, and data in
+   `/opt/controlcenter-secrets/vault/{config,tls,data}`. Supply
+   `config/server.hcl`, the server certificates, and `tls/ca.pem`; the server
+   certificate must cover the hostname `vault` and IP address `127.0.0.1`
+   for service requests and health checks. Include the Vault CA in
+   `deploy/secrets-service-private/ca-bundle.pem` for the secrets service.
+   Start Vault with
+   `docker compose -f deploy/compose.secrets.yaml up -d vault`,
    then initialize and unseal it. Enable Vault Transit at `transit/`. Grant
    `create,update` on `transit/encrypt/orchestrator-<lowercase address>` and
-   `update` on its decrypt path.
+   `update` on its decrypt path. Vault's administrative HTTPS port binds only to
+   `127.0.0.1:28200` on the host.
    Do not grant key export or administration. Disable raw Vault audit and
    ingress body logging so credentials and data keys are not recorded. Preserve
    the recovery keys privately and arrange unsealing after restarts and renewal

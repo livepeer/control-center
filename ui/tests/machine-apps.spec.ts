@@ -60,6 +60,14 @@ async function setup(page: Page) {
   return state
 }
 
+test('choosing a catalog app defaults to its latest revision and replica count', async ({ page }) => {
+  await setup(page)
+  await page.getByLabel('Catalog app for machine').selectOption('whoami')
+  await expect(page.getByLabel('Catalog revision for machine')).toHaveValue(r2)
+  await expect(page.getByLabel('New assignment replicas')).toHaveValue('2')
+  await expect(page.getByRole('button', { name: 'Assign selected revision', exact: true })).toBeEnabled()
+})
+
 test('machine apps assign, scale and replace only after cleanup', async ({ page }) => {
   const state = await setup(page)
   await page.getByLabel('Catalog app for machine').selectOption('whoami')
