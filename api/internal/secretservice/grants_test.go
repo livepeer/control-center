@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -153,5 +154,47 @@ func TestMetadataAvailabilityAndExplicitEligibility(t *testing.T) {
 		if _, e := s.Metadata.Machine(context.Background(), "node", nil); !errors.Is(e, tc.want) {
 			t.Fatal(tc.status, tc.body, e)
 		}
+	}
+}
+
+func TestPrivateMetadataCallback(t *testing.T) {
+	binding := &protocol.MachineBinding{PublicKey: "runtime-key"}
+	var seen []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer metadata-token" {
+			t.Error("metadata callback lost its bearer token")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/internal/secrets/nodes/node":
+			if r.Method == http.MethodPost {
+				var got protocol.MachineBinding
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil || !reflect.DeepEqual(got, *binding) {
+					t.Errorf("binding = %+v, error = %v", got, err)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(protocol.Machine{NodeID: "node", Owner: testOwner, Active: true})
+		case "/internal/users/user/orchestrators/" + testOwner:
+			_ = json.NewEncoder(w).Encode(map[string]string{"user_id": "user", "orchestrator_address": testOwner})
+		default:
+			t.Errorf("unexpected metadata path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	s := New(nil, Config{ControlURL: api.URL, ControlToken: "metadata-token"})
+	for _, in := range []*protocol.MachineBinding{nil, binding} {
+		if machine, err := s.Metadata.Machine(context.Background(), "node", in); err != nil || machine.NodeID != "node" {
+			t.Fatalf("machine = %+v, error = %v", machine, err)
+		}
+	}
+	if err := s.Metadata.Member(context.Background(), "user", testOwner); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET /internal/secrets/nodes/node", "POST /internal/secrets/nodes/node", "GET /internal/users/user/orchestrators/" + testOwner}
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("callbacks = %v, want %v", seen, want)
 	}
 }

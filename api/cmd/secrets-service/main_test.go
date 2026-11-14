@@ -57,7 +57,8 @@ func TestConfigValidation(t *testing.T) {
 		{"HTTP private Vault", "https://auth.example", "https://control.example", "http://vault:8200", 32, false},
 		{"external Vault", "https://auth.example", "https://control.example", "https://vault.example", 32, true},
 		{"HTTP auth", "http://auth.example", "https://control.example", "https://vault:8200", 32, false},
-		{"HTTP control", "https://auth.example", "http://control.example", "https://vault:8200", 32, false},
+		{"private HTTP control", "https://auth.example", "http://api:43812", "https://vault:8200", 32, true},
+		{"invalid control scheme", "https://auth.example", "ftp://api:43812", "https://vault:8200", 32, false},
 		{"HTTP external Vault", "https://auth.example", "https://control.example", "http://vault.example:8200", 32, false},
 		{"short signing key", "https://auth.example", "https://control.example", "https://vault:8200", 31, false},
 	} {

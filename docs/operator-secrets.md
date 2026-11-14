@@ -87,7 +87,11 @@ before running Compose. This value is required even when starting only Vault.
 1. Copy `secrets-service.env.example` to `secrets-service.env`. Use the same
    Supabase settings as `config.toml`, and keep `SECRETS_PUBLIC_URL` equal to
    `SecretsURL`. Route that public hostname through the Cloudflare tunnel to
-   `http://localhost:23812`.
+   `http://localhost:23812`. Set `SECRETS_CONTROL_URL=http://control-metadata:43812`
+   for callbacks over the private API and secrets network. Callbacks require the
+   shared metadata token. The API must listen on `0.0.0.0:43812`, as in
+   `config.example.toml`. Use HTTPS for callbacks across hosts or untrusted
+   networks. Public origins and service identity pins use `SECRETS_PUBLIC_URL`.
 2. Create `secrets-service-private/`, owned by `65532:65532`, mode `0700`.
    Give its files the same ownership and mode `0600`:
 
