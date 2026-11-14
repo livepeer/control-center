@@ -8,8 +8,10 @@ import (
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/internal/testutil"
 	"github.com/livepeer/control-center/schema"
+	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -184,24 +186,32 @@ func TestAssignmentRefusalIsSpecificBeforeInstanceCreation(t *testing.T) {
 }
 
 func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {
-	c, _, k, _, reports, now := fixtureController(t)
-	registerApps(t, c, k)
-	c.Probes = NewProbes()
-	for id, i := range c.Journal.View().Instances {
-		c.Probes.values[id] = &health{uid: i.PodUID, observedAt: *now, observedDue: now.Add(5 * time.Second), timeout: 2 * time.Second, success: false, failures: 3, started: true}
-	}
-	if err := c.report(t.Context(), map[string]bool{}, k.view, *now); err != nil {
-		t.Fatal(err)
-	}
-	a := reports.reports[len(reports.reports)-1].Apps.Assignments[0]
-	if a.Ready != 0 || !a.ProbeExpiresAt.Equal(now.Add(30*time.Second)) {
-		t.Fatal("fresh failing probes became unknown", a)
-	}
-	*now = now.Add(31 * time.Second)
-	if err := c.report(t.Context(), map[string]bool{}, k.view, *now); err != nil {
-		t.Fatal(err)
-	}
-	if got := reports.reports[len(reports.reports)-1].Apps.Assignments[0]; !got.ProbeExpiresAt.Equal(a.ProbeExpiresAt) || now.Before(got.ProbeExpiresAt) {
-		t.Fatal("delivery renewed failing evidence", got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c, _, k, _, reports, _ := fixtureController(t)
+		c.Now = time.Now
+		c.Probes = NewProbes()
+		c.Probes.Client.Transport = reviewRoundTripper(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("probe unavailable")
+		})
+		registerApps(t, c, k)
+		synctest.Wait()
+		now := time.Now()
+		for id, i := range c.Journal.View().Instances {
+			c.Probes.values[id] = &health{uid: i.PodUID, observedAt: now, observedDue: now.Add(5 * time.Second), timeout: 2 * time.Second, success: false, failures: 3, started: true}
+		}
+		if err := c.report(t.Context(), map[string]bool{}, k.view, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		a := reports.reports[len(reports.reports)-1].Apps.Assignments[0]
+		if a.Ready != 0 || !a.ProbeExpiresAt.Equal(now.Add(30*time.Second)) {
+			t.Fatal("fresh failing probes became unknown", a)
+		}
+		time.Sleep(31 * time.Second)
+		if err := c.report(t.Context(), map[string]bool{}, k.view, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if got := reports.reports[len(reports.reports)-1].Apps.Assignments[0]; !got.ProbeExpiresAt.Equal(a.ProbeExpiresAt) || time.Now().Before(got.ProbeExpiresAt) {
+			t.Fatal("delivery renewed failing evidence", got)
+		}
+	})
 }
