@@ -84,6 +84,10 @@ Provision a new immutable `rpc_secret` file for RPC rotation; the configured
 reference is the SHA-256 of its exact bytes, including a final newline. The API
 rehashes the owner-only file on every read. Increment `credential_revision` to
 rotate process-scoped submission grants; the successor replaces the prior grant.
+Grant requests require a fresh signature from the enrolled runtime key after
+the Pod is checked. The key is installed with management credentials before
+secrets setup. Onchain grants do not contact the secrets service; registrations
+without a runtime key are refused.
 Retain referenced RPC versions for held workloads and rollback. Reapply previous
 settings at the current revision to roll back. Configuration changes use the
 normal app and session drain flow. Inspect configuration, local admission and

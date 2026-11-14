@@ -120,7 +120,7 @@ prepare_secrets_enrollment
 class EnrollmentReplies(unittest.TestCase):
     def test_only_authenticated_replies_can_change_saved_credentials(self):
         grant = 'header.' + base64.urlsafe_b64encode(json.dumps({'exp': int(time.time()) + 3600}).encode()).decode().rstrip('=') + '.signature'
-        for mode, replaced, removed in [('missing409', False, False), ('missing401', False, False), ('forged409', False, False), ('replay409', False, False), ('signed409', True, False), ('signed401', False, True), ('initial200', False, True), ('initial-forged200', False, False), ('changed200', False, False)]:
+        for mode, replaced, removed in [('missing409', False, False), ('missing401', False, False), ('forged409', False, False), ('replay409', False, False), ('signed409', True, False), ('signed401', False, True), ('initial200', False, True), ('retry200', True, True), ('initial-forged200', False, False), ('changed200', False, False)]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 target = root / 'credentials/secrets'
@@ -129,18 +129,12 @@ class EnrollmentReplies(unittest.TestCase):
                 (target / 'key.pem').write_text('original-key')
                 (target / 'setup').write_text(grant)
                 (target / 'url').write_text('https://secrets.example')
-                (target / 'new-cluster').touch()
                 service_key = root / 'service.pem'
                 subprocess.run(['openssl', 'genpkey', '-algorithm', 'ED25519', '-out', str(service_key)], check=True, capture_output=True)
                 public = subprocess.check_output(['openssl', 'pkey', '-in', str(service_key), '-pubout', '-outform', 'DER'], stderr=subprocess.DEVNULL)[-32:]
-                pin = json.dumps({'origin': 'https://secrets.example', 'public_key': base64.b64encode(public).decode()})
-                # Exercise both persisted-pin locations, including interrupted setup.
+                pin = json.dumps({'origin': 'https://secrets.example', 'public_key': base64.b64encode(public).decode()}, separators=(',', ':'))
                 saved = target / 'service.json'
-                if mode == 'forged409':
-                    saved = root / 'volumes/app-reconciler/secrets/identity.json'
-                    saved.parent.mkdir(parents=True)
-                    saved.write_text(json.dumps({'service': json.loads(pin)}))
-                elif not mode.startswith('initial'):
+                if not mode.startswith('initial'):
                     saved.write_text(pin)
                 saved_bytes = saved.read_bytes() if saved.exists() else None
                 (root / 'trust.json').write_text(pin)
@@ -155,6 +149,7 @@ root = pathlib.Path(sys.argv[1]); mode = sys.argv[3]
 count = root / 'calls'; n = int(count.read_text()) + 1 if count.exists() else 1; count.write_text(str(n))
 request = sys.stdin.read()
 status = 200 if mode.endswith('200') else 401 if mode.endswith('401') else 409 if n == 1 else 503
+if mode == 'retry200': status = 409 if n == 1 else 503 if n == 2 else 200
 identity = {'node_id': json.loads(request)['node_id'], 'owner_id': '11111111-1111-4111-8111-111111111111', 'generation': 1, 'service': json.loads((root / 'trust.json').read_text())}
 if mode == 'changed200': identity['service']['public_key'] = base64.b64encode(bytes(32)).decode()
 body = json.dumps(identity if status == 200 else {'code': 'identity_reset_required' if status == 409 else 'grant_refused' if status == 401 else 'unavailable'}, separators=(',', ':')) + '\n'
@@ -175,8 +170,10 @@ NODE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaa
 log() { printf '%s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
 atomic_write() { cat > "$1"; }
+install_machine_secret() { cp "$INSTALL_DIR/credentials/secrets/key.pem" "$INSTALL_DIR/management-key"; }
 kube() { :; }
 chown() { :; }
+sleep() { :; }
 SECRET_PUBLIC=runtime-public-fixture
 secrets_key_proof() { printf proof-fixture; }
 replace_secrets_key() { printf replacement-key > "$INSTALL_DIR/credentials/secrets/key.pem"; SECRET_PUBLIC=replacement-public; }
@@ -200,5 +197,7 @@ enroll_secrets
                     self.assertEqual(json.loads(saved.read_text()), json.loads(pin))
                 else:
                     self.assertFalse(saved.exists())
-                self.assertEqual(int((root / 'calls').read_text()), 2 if replaced else 1)
+                self.assertEqual(int((root / 'calls').read_text()), 12 if mode == 'signed409' else 3 if mode == 'retry200' else 1)
+                if mode in ('initial200', 'retry200'):
+                    self.assertEqual((root / 'management-key').read_bytes(), (target / 'key.pem').read_bytes())
                 self.assertNotIn(grant, result.stdout + result.stderr)

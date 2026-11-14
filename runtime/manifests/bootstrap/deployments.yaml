@@ -37,6 +37,8 @@ spec:
         - /credentials/token
         - --identity-file
         - /credentials/identity.json
+        - --signing-key-file
+        - /credentials/runtime-key.pem
         - --transport
         - '@CONTROL_TRANSPORT@'
         - --artifact-url

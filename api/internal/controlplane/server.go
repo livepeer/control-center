@@ -33,7 +33,6 @@ var MigrationFiles embed.FS
 type Machine struct {
 	PublicKey         string     `json:"public_key,omitempty"`
 	Signature         []byte     `json:"signature,omitempty"`
-	ManagementProof   string     `json:"management_proof,omitempty"`
 	NodeID            string     `json:"node_id"`
 	OwnerID           string     `json:"-"`
 	Fingerprint       string     `json:"fingerprint"`
@@ -232,12 +231,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	owner := grant.Subject
 	m.OwnerID = owner
 	newNodeID := m.NodeID
-	if m.PublicKey != "" {
-		pub, e := protocol.PublicKey(m.PublicKey)
-		if e != nil || !ed25519.Verify(pub, protocol.RegistrationProof(bearer(r), m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.PublicKey, m.DevelopmentHTTP), m.Signature) {
-			fail(w, 403, "runtime key proof required")
-			return
-		}
+	pub, e := protocol.PublicKey(m.PublicKey)
+	if e != nil || !ed25519.Verify(pub, protocol.RegistrationProof(bearer(r), m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.PublicKey, m.DevelopmentHTTP), m.Signature) {
+		fail(w, 403, "runtime key proof required")
+		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -275,29 +272,19 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.NodeID != newNodeID {
 		var public string
-		e := tx.QueryRowContext(r.Context(), `SELECT public_key FROM lpcc.secret_machines WHERE node_id=$1`, m.NodeID).Scan(&public)
+		e := tx.QueryRowContext(r.Context(), `SELECT public_key FROM lpcc.secret_machines WHERE node_id=$1 FOR UPDATE`, m.NodeID).Scan(&public)
 		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			s.databaseError(w, e)
 			return
 		}
-		if public == "" || m.PublicKey == "" || public != m.PublicKey {
-			if !hmacEqual(m.ManagementProof, s.enrollmentToken(m)) {
-				fail(w, 409, "existing installation requires its saved credential or bound key")
-				return
-			}
+		if public != m.PublicKey {
+			fail(w, 409, "existing installation requires its bound key")
+			return
 		}
 	}
-	if m.PublicKey != "" {
-		res, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.secret_machines(node_id,public_key) VALUES($1,$2) ON CONFLICT(node_id) DO UPDATE SET public_key=EXCLUDED.public_key WHERE lpcc.secret_machines.public_key='' OR lpcc.secret_machines.public_key=EXCLUDED.public_key`, m.NodeID, m.PublicKey)
-		if e != nil {
-			s.databaseError(w, e)
-			return
-		}
-		n, _ := res.RowsAffected()
-		if n != 1 {
-			fail(w, 409, "runtime key conflict")
-			return
-		}
+	if _, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.secret_machines(node_id,public_key) VALUES($1,$2) ON CONFLICT(node_id) DO NOTHING`, m.NodeID, m.PublicKey); e != nil {
+		s.databaseError(w, e)
+		return
 	}
 	data, digest, err := s.build(s.configs.Desired(configurationMachine(m), machineconfig.InitialState(false), nil))
 	if err != nil {

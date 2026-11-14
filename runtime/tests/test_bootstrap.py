@@ -193,6 +193,8 @@ check_ports
 python() { echo 'host Python is forbidden' >&2; exit 199; }
 python3() { echo 'host Python is forbidden' >&2; exit 199; }
 ENROLLMENT_TOKEN='header.payload.signature'
+SECRET_PUBLIC=public-key-fixture
+registration_key_proof() { cat >/dev/null; printf registration-proof-fixture; }
 LIVEPEER_API_URL='http://127.0.0.1:41932'
 LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
 RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -841,13 +843,18 @@ stage_manifests
         steps.unlink(missing_ok=True)
         result = self.shell('''INSTALL_DIR="$1"
 install_machine_secret() { :; }
+bound=0
+enroll_secrets() { bound=1; }
 kube() {
   printf '%s\\n' "$*" >> "$INSTALL_DIR/cluster-steps"
   if [[ "$*" == 'get nodes -o name' ]]; then printf 'node/test-node'; fi
   if [[ "$*" == *'create secret generic'* ]]; then printf '{}'; fi
   if [[ "$*" == 'apply -f -' ]]; then cat >/dev/null; fi
+  if [[ "$*" == *'rollout status deployment/orchestrator'* ]]; then (( bound == 1 )); fi
 }
 bootstrap_cluster
+enroll_secrets
+smoke_test
 ''', str(self.root))
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = steps.read_text().splitlines()
