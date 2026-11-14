@@ -29,29 +29,16 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 		return ErrStaleStatus
 	}
 	stages := []*contract.StageIdentity{r.Downloaded}
-	if r.Downloaded != nil && r.Downloaded.AppsDigest != "" {
-		var known bool
-		err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 AND bundle_sha256=$3)`, m.NodeID, r.Downloaded.AppsDigest, strings.TrimPrefix(r.Downloaded.ArtifactDigest, "sha256:")).Scan(&known)
-		if err != nil {
-			return err
-		}
-		if !known {
-			return ErrStaleStatus
-		}
+	members := []contract.AssignmentStatus{}
+	var downloadedDigest, downloadedArtifact, desiredDigest string
+	var desiredGeneration int64
+	if r.Downloaded != nil {
+		downloadedDigest = r.Downloaded.AppsDigest
+		downloadedArtifact = strings.TrimPrefix(r.Downloaded.ArtifactDigest, "sha256:")
 	}
 	if r.Apps != nil {
 		a := r.Apps
-		if m.Terminal && r.Component == "runner" {
-			var bound bool
-			err := s.store.DB.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND terminal)
- OR EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND terminal AND apps_generation=$2 AND apps_digest=$3)`, m.NodeID, a.DesiredGeneration, a.DesiredDigest).Scan(&bound)
-			if err != nil {
-				return err
-			}
-			if !bound {
-				return ErrStaleStatus
-			}
-		}
+		desiredDigest, desiredGeneration = a.DesiredDigest, a.DesiredGeneration
 		for _, digest := range []string{a.StagedDigest, a.PublishedDigest, a.AppliedDigest} {
 			if digest != "" && !artifact.HashPattern.MatchString(digest) {
 				return ErrStaleStatus
@@ -80,22 +67,12 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 		}
 		// Both current summaries and retained incarnation identities must have
 		// actually been delivered to this enrollment, not merely exist in the catalog.
-		members := []contract.AssignmentStatus{}
 		members = append(members, a.Assignments...)
 		for _, i := range a.Instances {
 			members = append(members, contract.AssignmentStatus{RevisionID: i.RevisionID, Generation: i.Generation, ActivationGeneration: i.ActivationGeneration})
 		}
-		b, _ := json.Marshal(members)
-		var valid bool
-		err := s.store.DB.QueryRowContext(ctx, `SELECT NOT EXISTS(SELECT FROM jsonb_to_recordset($2::jsonb) AS i(revision_id text,generation bigint,activation_generation bigint)
- WHERE NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries d WHERE d.node_id=$1 AND d.entries @> jsonb_build_array(jsonb_build_object('revision_id',i.revision_id,'generation',i.generation,'activation_generation',i.activation_generation))))`, m.NodeID, string(b)).Scan(&valid)
-		if err != nil {
-			return err
-		}
-		if !valid {
-			return ErrStaleStatus
-		}
 	}
+	deliveredStages := []contract.StageIdentity{}
 	for _, stage := range stages {
 		if stage == nil {
 			continue
@@ -109,14 +86,31 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 			}
 			continue
 		}
-		var known bool
-		err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 AND ($3::bigint=0 OR apps_generation=$3))`, m.NodeID, stage.AppsDigest, stage.Generation).Scan(&known)
-		if err != nil {
-			return err
-		}
-		if !known {
-			return ErrStaleStatus
-		}
+		deliveredStages = append(deliveredStages, *stage)
+	}
+	if r.Apps == nil && len(deliveredStages) == 0 {
+		return nil
+	}
+	memberJSON, _ := json.Marshal(members)
+	stageJSON, _ := json.Marshal(deliveredStages)
+	// Each check has its own delivery witness; an artifact and its reported
+	// generation may have been recorded by different deliveries. The scalar
+	// stage EXISTS keeps each lookup constrained by the delivery digest index.
+	var downloaded, bound, membership, knownStages bool
+	err := s.store.DB.QueryRowContext(ctx, `SELECT
+ ($2::text='' OR EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND apps_digest=$2 AND bundle_sha256=$3)),
+ (NOT $4::boolean OR NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND terminal)
+ OR EXISTS(SELECT FROM lpcc.machine_app_deliveries WHERE node_id=$1 AND terminal AND apps_generation=$5 AND apps_digest=$6)),
+ NOT EXISTS(SELECT FROM jsonb_to_recordset($7::jsonb) AS i(revision_id text,generation bigint,activation_generation bigint)
+ WHERE NOT EXISTS(SELECT FROM lpcc.machine_app_deliveries d WHERE d.node_id=$1 AND d.entries @> jsonb_build_array(jsonb_build_object('revision_id',i.revision_id,'generation',i.generation,'activation_generation',i.activation_generation)))),
+ NOT EXISTS(SELECT FROM jsonb_to_recordset($8::jsonb) AS s(generation bigint,apps_digest text)
+ WHERE NOT (SELECT EXISTS(SELECT FROM lpcc.machine_app_deliveries d WHERE d.node_id=$1 AND d.apps_digest=s.apps_digest AND (s.generation=0 OR d.apps_generation=s.generation))))`,
+		m.NodeID, downloadedDigest, downloadedArtifact, r.Apps != nil && m.Terminal && r.Component == "runner", desiredGeneration, desiredDigest, string(memberJSON), string(stageJSON)).Scan(&downloaded, &bound, &membership, &knownStages)
+	if err != nil {
+		return err
+	}
+	if !downloaded || !bound || !membership || !knownStages {
+		return ErrStaleStatus
 	}
 	return nil
 }
