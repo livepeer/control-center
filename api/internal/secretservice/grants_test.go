@@ -79,7 +79,6 @@ func TestIssuanceHasNoStorageOrVaultDependency(t *testing.T) {
 }
 func TestGrantExpiryAudienceScopeAndRollover(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		now := time.Now().UTC().Truncate(time.Second)
 		s := New(nil, Config{SigningKey: strings.Repeat("a", 32), SigningKeyID: "a"})
 		s.Now = time.Now
 		raw, _, e := s.Grant(testUser, testOwner)
@@ -93,7 +92,7 @@ func TestGrantExpiryAudienceScopeAndRollover(t *testing.T) {
 			t.Fatal("old key rejected", e)
 		}
 		time.Sleep(time.Hour)
-		now = time.Now()
+		now := time.Now()
 		if _, e = s.grant(raw, false); e == nil {
 			t.Fatal("expired grant accepted")
 		}
