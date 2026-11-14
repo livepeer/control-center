@@ -74,5 +74,8 @@ func (s *Server) reconcile(ctx context.Context) error {
 	if e = tx.Commit(); e != nil {
 		return e
 	}
+	if e = s.reconcileOnchain(ctx); e != nil {
+		return e
+	}
 	return s.configs.Reconcile(ctx)
 }

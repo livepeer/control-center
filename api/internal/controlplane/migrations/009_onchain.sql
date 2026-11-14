@@ -1,7 +1,5 @@
 -- UP
 -- Retain storage identity after the active machine is removed.
-CREATE TABLE lpcc.onchain_revision (id BOOLEAN PRIMARY KEY DEFAULT true CHECK(id), revision BIGINT NOT NULL DEFAULT 0);
-INSERT INTO lpcc.onchain_revision DEFAULT VALUES;
 CREATE TABLE lpcc.onchain_configs (
  fingerprint TEXT NOT NULL, generation BIGINT NOT NULL, config JSONB NOT NULL,
  PRIMARY KEY(fingerprint,generation)
@@ -32,17 +30,16 @@ BEGIN
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;
-ALTER TABLE lpcc.onchain_revision ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.onchain_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.onchain_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.onchain_grants ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants FROM PUBLIC;
+REVOKE ALL ON lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants FROM PUBLIC;
 REVOKE ALL ON SEQUENCE lpcc.onchain_grants_issued_sequence_seq FROM PUBLIC;
 DO $$ DECLARE r TEXT;
 BEGIN
  FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
   IF EXISTS(SELECT FROM pg_roles WHERE rolname=r) THEN
-   EXECUTE format('REVOKE ALL ON lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants FROM %I',r);
+   EXECUTE format('REVOKE ALL ON lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants FROM %I',r);
    EXECUTE format('REVOKE ALL ON SEQUENCE lpcc.onchain_grants_issued_sequence_seq FROM %I',r);
   END IF;
  END LOOP;
@@ -63,4 +60,4 @@ BEGIN
  AND e.retained_bundle IS NULL;
  RETURN OLD;
 END $$;
-DROP TABLE lpcc.onchain_revision,lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants;
+DROP TABLE lpcc.onchain_state,lpcc.onchain_configs,lpcc.onchain_grants;

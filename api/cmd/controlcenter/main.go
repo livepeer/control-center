@@ -34,7 +34,7 @@ func command() *cobra.Command {
 		func(ctx context.Context, raw string, _ bool) (*sql.DB, error) {
 			return controlplane.OpenDB(ctx, raw, database.PGPassword)
 		})
-	root := boa.Cmd[boa.NoParams]{Use: "controlcenter", Short: "Livepeer machine control plane", SubCmds: []*cobra.Command{serve, migrate, controlplane.OnchainCommand()}}.ToCobra()
+	root := boa.Cmd[boa.NoParams]{Use: "controlcenter", Short: "Livepeer machine control plane", SubCmds: []*cobra.Command{serve, migrate}}.ToCobra()
 	root.SilenceUsage, root.SilenceErrors = true, true
 	return root
 }
@@ -50,6 +50,9 @@ func serve(ctx context.Context, p controlplane.Params) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	app := controlplane.New(db, p, logger)
+	if err := app.ConfigureMode(ctx); err != nil {
+		return fmt.Errorf("initialize Control Center mode: %w", err)
+	}
 	if err := app.ConfigureTunnels(); err != nil {
 		return fmt.Errorf("initialize tunnel provisioning: %w", err)
 	}

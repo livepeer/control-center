@@ -58,14 +58,15 @@ func TestSharedOrchestratorLifecycle(t *testing.T) {
 func TestOrchestratorScopeAndMetadata(t *testing.T) {
 	s := newTestServer(t)
 	adminA(t, s)
-	for _, address := range []string{"", "not-an-address", "0x0000000000000000000000000000000000000000"} {
+	for _, address := range []string{"", "not-an-address"} {
 		requireStatus(t, request(t, s, "GET", "/api/machines?orchestrator_address="+address, "session-a", nil), 400)
 		requireStatus(t, request(t, s, "POST", "/api/bootstrap-token", "session-a", map[string]string{"orchestrator_address": address}), 400)
 	}
+	requireStatus(t, request(t, s, "GET", "/api/machines?orchestrator_address="+zeroAddress, "session-a", nil), 403)
 	requireStatus(t, request(t, s, "GET", "/api/machines?orchestrator_address="+orchB, "session-a", nil), 403)
 	// Hex case is normalized before authorization.
 	address := "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
-	execSQL(t, s.db, `INSERT INTO lpcc.orchestrators(address) VALUES($1)`, address)
+	execSQL(t, s.db, `INSERT INTO lpcc.orchestrators(address,claimed_by_user_id) VALUES($1,$2)`, address, ownerA)
 	execSQL(t, s.db, `INSERT INTO lpcc.orchestrator_memberships VALUES($1,$2)`, ownerA, address)
 	requireStatus(t, request(t, s, "GET", "/api/machines?orchestrator_address=0x"+strings.ToUpper(address[2:]), "session-a", nil), 200)
 	s.params.SecretsMetadataToken = "independent-metadata-principal"

@@ -103,3 +103,4 @@
  .operator-secrets .secret-entries td.secret-editor-cell::before { content: none; }
  .operator-secrets .secret-entries tr:has(.secret-editor-cell) { display: block; padding: 0; }
 }
+.orchestrator-claim{display:grid;gap:12px;max-width:760px;margin-top:16px;padding:20px;border:1px solid #dce3d5;border-radius:10px;background:#fff}.orchestrator-claim label{display:grid;gap:6px;font-weight:600}.orchestrator-claim input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #aab5a3;border-radius:6px;font:inherit}.orchestrator-claim pre{margin:0;padding:14px;border-radius:6px;background:#f3f5f0;white-space:pre-wrap;overflow-wrap:anywhere}.orchestrator-claim p{margin:0}.orchestrator-claim .button{justify-self:start;margin-left:0}.orchestrator-claim [role=alert]{color:#a12b2b}

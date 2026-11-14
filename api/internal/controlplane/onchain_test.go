@@ -24,52 +24,102 @@ func onchainSettings(t *testing.T, s *Server) onchain.Config {
 	s.params.OnchainSecretsDir = dir
 	s.params.OnchainWebhookSecret = strings.Repeat("w", 32)
 	ref := rpcSecret(t, s, "https://rpc.example/private-token")
-	return onchain.Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 123, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: ref, RedeemerURL: "https://api.example/redemption", WeiPerUSD: "1000000000000000", TicketFaceValue: "1000", TicketWinProb: "100", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
+	s.params.Mode = "onchain"
+	c := onchain.Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "arbitrum-one-mainnet", ChainID: 42161, Controller: mainnetController, Recipient: orchA, RPCSecret: ref, RedeemerURL: "https://api.example/redemption", WeiPerUSD: "1000000000000000", TicketFaceValue: "1000", TicketWinProb: "100", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
+	template := c
+	template.Recipient = ""
+	template.CredentialRevision = 0
+	s.params.OnchainConfigFile = filepath.Join(t.TempDir(), "onchain.json")
+	if err := os.WriteFile(s.params.OnchainConfigFile, onchainTemplateJSON(t, template), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
-func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
+func TestAutomaticOnchainConfigurationAndUpdates(t *testing.T) {
+	s, c, machine := onchainMachine(t)
+	node := machine["node_id"]
+	loaded, err := loadOnchain(t.Context(), s.db, node)
+	if err != nil || loaded.Recipient != c.Recipient || loaded.Generation != 1 {
+		t.Fatal(loaded, err)
+	}
+	if delivered := onchainMetadata(t, s, node).Onchain; !delivered.Onchain() || delivered.Recipient != c.Recipient || delivered.Generation != 1 {
+		t.Fatal("first boot did not receive the claimed recipient", delivered)
+	}
+	var initiator string
+	if err = s.db.QueryRow(`SELECT enrolled_by_user_id FROM lpcc.machines WHERE node_id=$1`, node).Scan(&initiator); err != nil || initiator != ownerA {
+		t.Fatal(initiator, err)
+	}
+	next, err := s.loadOnchainTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.TicketFaceValue = "2000"
+	if err = os.WriteFile(s.params.OnchainConfigFile, onchainTemplateJSON(t, next), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = loadOnchain(t.Context(), s.db, node)
+	if err != nil || loaded.Generation != 2 || loaded.TicketFaceValue != "2000" {
+		t.Fatal(loaded, err)
+	}
+	if delivered := onchainMetadata(t, s, node).Onchain; delivered.Generation != 2 || delivered.TicketFaceValue != "2000" {
+		t.Fatal("template update was not delivered", delivered)
+	}
+}
+
+func TestControlCenterModeCannotChange(t *testing.T) {
 	s := newTestServer(t)
-	c := onchainSettings(t, s)
-	fingerprint := strings.Repeat("a", 64)
-	in := onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: c}}
-	if rev, e := s.applyOnchain(t.Context(), in, 0); e != nil || rev != 1 {
-		t.Fatal(rev, e)
+	if err := s.ConfigureMode(t.Context()); err != nil {
+		t.Fatal(err)
 	}
-	if rev, e := s.applyOnchain(t.Context(), in, 1); e != nil || rev != 1 {
-		t.Fatal("retry", rev, e)
+	onchainSettings(t, s)
+	if err := s.ConfigureMode(t.Context()); err == nil {
+		t.Fatal("deployment mode changed")
 	}
-	if rev, e := s.applyOnchain(t.Context(), in, 0); e != nil || rev != 1 {
-		t.Fatal("lost response retry", rev, e)
+}
+
+func TestOnchainTemplateRejectsMachineFieldsAndUnknownSettings(t *testing.T) {
+	s := &Server{params: testParams()}
+	onchainSettings(t, s)
+	raw, err := os.ReadFile(s.params.OnchainConfigFile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	stale := c
-	stale.CredentialRevision++
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: stale}}, 0); e == nil {
-		t.Fatal("stale edit accepted")
+	if err = os.WriteFile(s.params.OnchainConfigFile, raw, 0600); err != nil {
+		t.Fatal(err)
 	}
-	var n int
-	if e := s.db.QueryRow(`SELECT count(*) FROM lpcc.admin_audit_events WHERE action='onchain.apply'`).Scan(&n); e != nil || n != 1 {
-		t.Fatal(n, e)
+	if _, err = s.loadOnchainTemplate(); err != nil {
+		t.Fatal(err)
 	}
-	// Omission and immutable bindings fail without committing another audit event.
-	other := onchain.Offchain()
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{strings.Repeat("b", 64): other}}, 1); e == nil {
-		t.Fatal("omission disabled onchain machine")
-	}
-	for _, mutate := range []func(*onchain.Config){func(c *onchain.Config) { c.Recipient = "0x" + strings.Repeat("3", 40) }, func(c *onchain.Config) { c.ChainID++ }, func(c *onchain.Config) { c.TicketWinProb = "0" }} {
-		next := c
-		mutate(&next)
-		if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: next}}, 1); e == nil {
-			t.Fatal("invalid change accepted")
+	for _, field := range []string{`"recipient":"0x1111111111111111111111111111111111111111",`, `"generation":1,`, `"unrecognized":true,`} {
+		bad := append([]byte("{"+field), raw[1:]...)
+		if err = os.WriteFile(s.params.OnchainConfigFile, bad, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.loadOnchainTemplate(); err == nil {
+			t.Fatal("accepted machine or unknown field", field)
 		}
 	}
-	if e := os.WriteFile(filepath.Join(s.params.OnchainSecretsDir, c.RPCSecret), []byte("https://rpc.example/changed-secret"), 0600); e != nil {
-		t.Fatal(e)
+}
+
+func onchainTemplateJSON(t *testing.T, c onchain.Config) []byte {
+	t.Helper()
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, e := s.applyOnchain(t.Context(), in, 1); e == nil {
-		t.Fatal("overwritten secret version accepted")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
 	}
-	if e := s.db.QueryRow(`SELECT count(*) FROM lpcc.admin_audit_events WHERE action='onchain.apply'`).Scan(&n); e != nil || n != 1 {
-		t.Fatal("partial commit", n, e)
+	delete(fields, "generation")
+	raw, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return raw
 }
 func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	s, c, machine := onchainMachine(t)
@@ -144,6 +194,10 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if e = s.RetireMachine(t.Context(), node); e != nil {
 		t.Fatal(e)
 	}
+	var initiator string
+	if e = s.db.QueryRow(`SELECT enrolled_by_user_id FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&initiator); e != nil || initiator != ownerA {
+		t.Fatal("retained enrollment lost its initiator", initiator, e)
+	}
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
 		t.Fatal("forced retirement did not revoke")
 	}
@@ -161,10 +215,7 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if err = s.db.QueryRow(`SELECT initialized FROM lpcc.onchain_state WHERE fingerprint=$1`, fingerprint).Scan(&initialized); err != nil || !initialized {
 		t.Fatal("re-enrollment lost storage identity", err)
 	}
-	c.Recipient = "0x" + strings.Repeat("3", 40)
-	if _, e = s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: c}}, 1); e == nil {
-		t.Fatal("re-enrollment reset pinned recipient")
-	}
+
 }
 
 func TestOnchainActivationAndNormalDrain(t *testing.T) {
@@ -270,66 +321,6 @@ func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	}
 }
 
-func TestOnchainIsolationAndGenericCatalogCompatibility(t *testing.T) {
-	s := newTestServer(t)
-	cfg := onchainSettings(t, s)
-	fingerprint := strings.Repeat("a", 64)
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: cfg}}, 0); e != nil {
-		t.Fatal(e)
-	}
-	a := enroll(t, s, ownerA, fingerprint)
-	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
-	adminA(t, s)
-	freeSource := strings.Replace(registryFixture(t), `amount = "0.001"`, `amount = "0"`, 1)
-	free, status := revisionResponse(t, s, freeSource, "", true)
-	if status != 201 {
-		t.Fatal("catalog applied machine policy", status)
-	}
-	requireStatus(t, putApp(t, s, a, free, 0, 1), 400)
-	requireStatus(t, putApp(t, s, b, free, 0, 1), 202)
-	w := request(t, s, "GET", "/v1/nodes/"+b["node_id"]+"/config", b["token"], nil)
-	requireStatus(t, w, 200)
-	files, e := artifact.Read(w.Body.Bytes())
-	if e != nil {
-		t.Fatal(e)
-	}
-	var meta contract.Metadata
-	json.Unmarshal(files["runtime.json"], &meta)
-	if meta.Onchain.Onchain() || strings.Contains(string(files["runtime.json"]), cfg.Recipient) {
-		t.Fatal("cross-machine onchain delivery")
-	}
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+a["node_id"]+"/onchain/credentials", b["token"], map[string]any{}), 401)
-	// Browser administration has no onchain-settings mutation interface.
-	requireStatus(t, request(t, s, "PUT", "/api/admin/machines/"+a["node_id"]+"/onchain", "session-a", cfg), 404)
-}
-
-func TestConcurrentOnchainApplyCannotCommitTwoDifferentTargets(t *testing.T) {
-	s := newTestServer(t)
-	c := onchainSettings(t, s)
-	fingerprint := strings.Repeat("a", 64)
-	errors := make(chan error, 2)
-	for n := range 2 {
-		copy := c
-		copy.CredentialRevision = uint64(n + 1)
-		go func() {
-			_, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{fingerprint: copy}}, 0)
-			errors <- e
-		}()
-	}
-	successes := 0
-	for range 2 {
-		if <-errors == nil {
-			successes++
-		}
-	}
-	if successes != 1 {
-		t.Fatal("concurrent edits both committed", successes)
-	}
-	if count(t, s, `SELECT count(*) FROM lpcc.onchain_configs`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='onchain.apply'`) != 1 {
-		t.Fatal("configuration and audit diverged")
-	}
-}
-
 func TestConcurrentReportsNormalizeClocksBeforeRetiringGrants(t *testing.T) {
 	s, _, c := onchainMachine(t)
 	m := onchainMetadata(t, s, c["node_id"])
@@ -373,57 +364,6 @@ func TestConcurrentReportsNormalizeClocksBeforeRetiringGrants(t *testing.T) {
 	}
 }
 
-func TestUnapprovedOnchainStartupCanRepairItsImageButCannotDisable(t *testing.T) {
-	s, cfg, c := onchainMachine(t)
-	node := c["node_id"]
-	read := func() contract.Metadata { return onchainMetadata(t, s, node) }
-	before := read()
-	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("f", 64)
-	s.configs = s.newConfigurationManager()
-	if e := s.reconcile(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	after := read()
-	if after.ConfigDigest == before.ConfigDigest || !after.Onchain.Onchain() || after.OnchainActive || after.Onchain.Generation != before.Onchain.Generation {
-		t.Fatal("unapproved onchain target could not repair its image under the same onchain binding", after)
-	}
-	// A syntactically valid but unusable RPC can prevent Node's listener from
-	// starting. Repair its credentials without asking that failed process to drain.
-	cfg.RPCSecret = rpcSecret(t, s, "https://rpc.example/corrected\n")
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{installationFingerprint(t, s, node): cfg}}, 1); e != nil {
-		t.Fatal(e)
-	}
-	if e := s.reconcile(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	if fixed := read(); fixed.Onchain.RPCSecret != cfg.RPCSecret || fixed.OnchainActive {
-		t.Fatal("RPC repair stalled or opened admission", fixed)
-	}
-	fixed := read()
-	report := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: fixed.Generation, ConfigDigest: fixed.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true})
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], report), 200)
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE rollout->>'applying_config_digest'<>'' AND COALESCE(rollout->>'approved_config_digest','')<>$1`, fixed.ConfigDigest) != 1 || read().OnchainActive {
-		t.Fatal("generic readiness approved an onchain repair without admission evidence")
-	}
-	for ref, want := range map[string]string{before.Onchain.RPCSecret: "https://rpc.example/private-token", cfg.RPCSecret: "https://rpc.example/corrected"} {
-		if value, err := s.readOnchainRPC(ref); err != nil || string(value) != want {
-			t.Fatal("rotated or retained RPC input unavailable", err)
-		}
-	}
-	if _, e := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{installationFingerprint(t, s, node): onchain.Offchain()}}, 2); e != nil {
-		t.Fatal(e)
-	}
-	if e := s.reconcile(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	if !read().Onchain.Onchain() {
-		t.Fatal("failed onchain startup bypassed normal drain to offchain")
-	}
-}
-
 func rpcSecret(t *testing.T, s *Server, value string) string {
 	t.Helper()
 	hash := sha256.Sum256([]byte(value))
@@ -438,9 +378,7 @@ func onchainMachine(t *testing.T) (*Server, onchain.Config, map[string]string) {
 	t.Helper()
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
-	if _, err := s.applyOnchain(t.Context(), onchainInput{Version: 1, Machines: map[string]onchain.Config{strings.Repeat("a", 64): c}}, 0); err != nil {
-		t.Fatal(err)
-	}
+	_ = c
 	return s, c, enroll(t, s, ownerA, strings.Repeat("a", 64))
 }
 func onchainMetadata(t *testing.T, s *Server, node string) contract.Metadata {

@@ -10,6 +10,49 @@ enable the sign-in methods you plan to use and allow
 `http://localhost:5173/auth/callback` as a redirect URL. Authentication and the
 database must use the same trusted project. `make api` loads `api/config.toml`.
 
+## Orchestrators
+
+Users select an orchestrator in the console. Its canonical owner is its lowercase
+recipient address, independent of network and payment configuration. Members
+share machines, secrets and app access policies. Administration remains global.
+
+In an on-chain deployment, select **Add orchestrator**, enter its active
+Arbitrum One address and wait for the activity check. Download the challenge
+JWT, which has no trailing newline, then sign its exact bytes:
+
+```sh
+livepeer chain sign message --message-file ./orchestrator-claim.jwt \
+  --keystore-file <file> --keystore-password-file <file> --output json
+```
+
+Paste the returned `signature` into the console. A successful claim creates
+your membership, selects the orchestrator and displays its machine enrollment
+command. One claim permits enrolling multiple machines. A later user cannot
+claim the same address. In an off-chain deployment, **Add orchestrator** creates
+the zero-address workspace by default; enter a distinct Ethereum address to
+create another workspace.
+
+Configure the [Vault policy](operator-secrets.md#deployment) for each address.
+
+Remove access with:
+
+```sql
+DELETE FROM lpcc.orchestrator_memberships
+WHERE user_id='<USER_UUID>'::uuid
+AND orchestrator_address=lower('<RECIPIENT_ADDRESS>');
+```
+
+Removing a member or deleting their account preserves shared machines, secrets
+and runtime identities, even when no members remain. A grant cannot be used while its issuer lacks
+membership or has a deleted account; rejoining can restore an unexpired grant.
+Only the issuing user can revoke a grant, and revocation lasts until expiry in
+both services.
+
+The orchestrator ownership migrations require fresh Control Center and secrets
+service data. They refuse populated ownership-dependent tables. Existing
+ciphertext cannot be reassigned by editing its owner field because ownership is
+part of its authenticated encryption metadata.
+
 ## Administrator access
 
 Ensure email confirmation is enabled and administrator accounts have verified
@@ -67,30 +110,23 @@ in the fleet to assign them. See the [app registry guide](app-registry.md).
 ## Onchain operation
 
 Configure the redeemer and secret mounts using [deployment setup](../deploy/README.md#onchain-setup).
-Key [onchain.example.json](../deploy/onchain.example.json) with `credentials/fingerprint`.
-Apply from the API deployment:
-
-```sh
-controlcenter onchain apply --config /etc/controlcenter/config.toml \
-  --file /operator/onchain.json --expected-revision 0
-```
-
-Use the returned revision for the next apply. The file is a complete snapshot;
-retain enabled machines or explicitly set `{"version":1,"mode":"offchain"}` to
-disable one. Unconfigured machines default to offchain. App catalog prices remain
-authoritative; every advertised onchain app needs a positive USD `hour` or `fixed` price.
+Set `Mode = "onchain"` and `OnchainConfigFile` before first startup. Use
+[onchain.example.json](../deploy/onchain.example.json) as the Control Center
+template. Control Center fills in each claimed orchestrator address as the
+recipient when a machine registers and automatically reconciles template
+changes. App catalog prices remain authoritative; every advertised onchain
+app needs a positive USD `hour` or `fixed` price.
 
 Provision a new immutable `rpc_secret` file for RPC rotation; the configured
 reference is the SHA-256 of its exact bytes, including a final newline. The API
-rehashes the owner-only file on every read. Increment `credential_revision` to
-rotate process-scoped submission grants; the successor replaces the prior grant.
-Retain referenced RPC versions for held workloads and rollback. Reapply previous
-settings at the current revision to roll back. Configuration changes use the
+rehashes the owner-only file on every read. Change the template's `rpc_secret`
+to rotate the RPC endpoint and process-scoped grants. Retain referenced RPC
+versions for held workloads and rollback. Configuration changes use the
 normal app and session drain flow. Inspect configuration, local admission and
 handoff health separately in **Runtime status**. Redeemer owns confirmation.
 
-Disabling onchain operation or removing a machine can leave pending tickets
-unredeemed. Forced removal revokes submission grants and stops Node early. Keep
+Removing a machine can leave pending tickets unredeemed. Forced removal revokes
+submission grants and stops Node early. Keep
 Node's durable data, including a consistent backup of `/data/onchain.sqlite`
 and its sidecars, and back up the redeemer database and wallet separately. The
 recipient, chain and controller remain immutable for a stable machine even after

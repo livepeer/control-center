@@ -15,10 +15,8 @@ func OrchestratorAddress(raw string) (string, error) {
 	if err != nil {
 		return "", ErrInvalid
 	}
-	for _, v := range b {
-		if v != 0 {
-			return strings.ToLower(raw), nil
-		}
+	if len(b) != 20 {
+		return "", ErrInvalid
 	}
-	return "", ErrInvalid
+	return strings.ToLower(raw), nil
 }

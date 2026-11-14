@@ -9,7 +9,6 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
-	protocol "github.com/livepeer/control-center/secrets"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -25,6 +24,7 @@ import (
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/api/internal/migrations"
+	protocol "github.com/livepeer/control-center/secrets"
 )
 
 //go:embed migrations/*.sql
@@ -36,6 +36,7 @@ type Machine struct {
 	ManagementProof     string     `json:"management_proof,omitempty"`
 	NodeID              string     `json:"node_id"`
 	OrchestratorAddress string     `json:"-"`
+	EnrolledByUserID    string     `json:"-"`
 	Fingerprint         string     `json:"fingerprint"`
 	Hostname            string     `json:"hostname"`
 	InstallDir          string     `json:"install_dir"`
@@ -62,6 +63,7 @@ type Server struct {
 	configs        *machineconfig.Manager
 	discovery      *fleet.Manager
 	reconcileWake  chan struct{}
+	activeCheck    func(context.Context, string) (bool, error)
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
@@ -106,6 +108,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bootstrap-token/revoke", s.revokeEnrollmentGrant)
 	mux.HandleFunc("GET /metrics", s.enrollmentMetrics)
 	mux.HandleFunc("GET /api/orchestrators", s.listOrchestrators)
+	mux.HandleFunc("POST /api/orchestrators/challenge", s.orchestratorChallenge)
+	mux.HandleFunc("POST /api/orchestrators", s.createOrchestrator)
 	mux.HandleFunc("GET /internal/users/{user_id}/orchestrators/{address}", s.orchestratorMembership)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
@@ -158,7 +162,7 @@ func (s *Server) operatorConfig(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, err)
 		return
 	}
-	respond(w, 200, map[string]string{"public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL})
+	respond(w, 200, map[string]string{"public_api_url": s.params.PublicAPIURL, "secrets_url": s.params.SecretsURL, "mode": s.params.networkMode()})
 }
 
 func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +192,17 @@ func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
 	if !yes {
 		s.respondError(w, problem(403, "orchestrator_access_required", "Orchestrator access is required."))
 		return
+	}
+	if s.params.networkMode() == "onchain" {
+		active, e := s.checkActive(r.Context(), address)
+		if e != nil {
+			s.respondError(w, problem(503, "chain_unavailable", "Could not verify orchestrator activity. Try again."))
+			return
+		}
+		if !active {
+			s.respondError(w, problem(403, "orchestrator_inactive", "Orchestrator is not active on chain."))
+			return
+		}
 	}
 	token, expires, err := s.params.signEnrollment(owner.ID, address, s.currentTime())
 	if err != nil {
@@ -259,6 +274,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	m.NodeID = strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(id[:]))
 	owner := grant.OrchestratorAddress
 	m.OrchestratorAddress = owner
+	m.EnrolledByUserID = grant.Subject
 	newNodeID := m.NodeID
 	if m.PublicKey != "" {
 		pub, e := protocol.PublicKey(m.PublicKey)
@@ -279,11 +295,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	// An active installation retains its ID on retry. A retired installation gets
 	// a fresh ID; its retained cleanup records remain scoped to the previous ID.
-	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,orchestrator_address,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,1,$7)
+	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,orchestrator_address,enrolled_by_user_id,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8)
  ON CONFLICT(fingerprint) DO UPDATE SET hostname=EXCLUDED.hostname,updated_at=now()
  WHERE lpcc.machines.orchestrator_address=EXCLUDED.orchestrator_address AND lpcc.machines.fingerprint=EXCLUDED.fingerprint
 	 AND lpcc.machines.install_dir=EXCLUDED.install_dir AND lpcc.machines.k3s_version=EXCLUDED.k3s_version
- RETURNING node_id,credential_version`, m.NodeID, m.Fingerprint, owner, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
+ RETURNING node_id,credential_version`, m.NodeID, m.Fingerprint, owner, m.EnrolledByUserID, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
 	err = row.Scan(&m.NodeID, &m.CredentialVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 409, "machine already registered with a different owner or installation")
@@ -294,10 +310,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A random collision with a retained node must fail, never reuse cleanup state.
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7)
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
  ON CONFLICT(node_id) DO UPDATE SET hostname=EXCLUDED.hostname
  WHERE lpcc.enrollments.retired_at IS NULL AND lpcc.enrollments.orchestrator_address=EXCLUDED.orchestrator_address AND lpcc.enrollments.fingerprint=EXCLUDED.fingerprint
- RETURNING node_id`, m.NodeID, m.OrchestratorAddress, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion).Scan(&m.NodeID); err != nil {
+ RETURNING node_id`, m.NodeID, m.OrchestratorAddress, m.EnrolledByUserID, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion).Scan(&m.NodeID); err != nil {
 		s.databaseError(w, err)
 		return
 	}
@@ -327,7 +343,14 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	data, digest, err := s.build(s.configs.Desired(configurationMachine(m), machineconfig.InitialState(false), nil))
+	config, _, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	if err != nil {
+		s.databaseError(w, err)
+		return
+	}
+	desired := s.configs.Desired(configurationMachine(m), machineconfig.InitialState(false), nil)
+	desired.Onchain, desired.OnchainError = config, nil
+	data, digest, err := s.build(desired)
 	if err != nil {
 		fail(w, 503, "configuration generation failed")
 		return

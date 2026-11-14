@@ -59,6 +59,8 @@ RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
 
 # OnchainSecretsDir = "/run/onchain-rpc" # immutable owner-only versioned files
+# Mode = "onchain" # fixed at first startup; defaults to offchain
+# OnchainConfigFile = "/etc/controlcenter/onchain.json"
 # OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
 
 # Independent operator secrets service; see docs/operator-secrets.md.
