@@ -53,12 +53,13 @@ func TestConfigValidation(t *testing.T) {
 		signing                    int
 		valid                      bool
 	}{
-		{"private Vault", "https://auth.example", "https://control.example", "http://vault:8200", 32, true},
+		{"private Vault", "https://auth.example", "https://control.example", "https://vault:8200", 32, true},
+		{"HTTP private Vault", "https://auth.example", "https://control.example", "http://vault:8200", 32, false},
 		{"external Vault", "https://auth.example", "https://control.example", "https://vault.example", 32, true},
-		{"HTTP auth", "http://auth.example", "https://control.example", "http://vault:8200", 32, false},
-		{"HTTP control", "https://auth.example", "http://control.example", "http://vault:8200", 32, false},
+		{"HTTP auth", "http://auth.example", "https://control.example", "https://vault:8200", 32, false},
+		{"HTTP control", "https://auth.example", "http://control.example", "https://vault:8200", 32, false},
 		{"HTTP external Vault", "https://auth.example", "https://control.example", "http://vault.example:8200", 32, false},
-		{"short signing key", "https://auth.example", "https://control.example", "http://vault:8200", 31, false},
+		{"short signing key", "https://auth.example", "https://control.example", "https://vault:8200", 31, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := params{DatabaseURL: "postgres://localhost/test", IdentityKey: "identity", EncryptionKey: "encryption",

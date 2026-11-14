@@ -41,7 +41,7 @@ type params struct {
 
 	SupabaseURL            string `pattern:"^https://"`
 	ControlURL             string `pattern:"^https://"`
-	VaultURL               string `pattern:"^(http://vault:8200$|https://)"`
+	VaultURL               string `pattern:"^https://"`
 	SupabaseKey, PublicURL string
 	AllowedOrigin          string `optional:"true"`
 }

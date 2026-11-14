@@ -80,14 +80,16 @@ encryption.
 The secrets service and Vault are required services in the default
 [Compose deployment](../deploy/compose.yaml). Existing installations using the
 `livepeer-secrets` project should use the local deployment helper to retain the
-running Vault and its network. For a fresh setup, work from `deploy/`:
+running Vault and its network. For a fresh setup, work from `deploy/`. Set
+`LIVEPEER_REDEEMER_IMAGE` in `.env` to a compatible digest-pinned Node image
+before running Compose. This value is required even when starting only Vault.
 
 1. Copy `secrets-service.env.example` to `secrets-service.env`. Use the same
    Supabase settings as `config.toml`, and keep `SECRETS_PUBLIC_URL` equal to
    `SecretsURL`. Route that public hostname through the Cloudflare tunnel to
    `http://localhost:23812`.
-2. Create `secrets-service-private/`, mode `0700`, with files readable by UID
-   65532 and mode `0600`:
+2. Create `secrets-service-private/`, owned by `65532:65532`, mode `0700`.
+   Give its files the same ownership and mode `0600`:
 
    | File | Contents |
    | --- | --- |
@@ -116,12 +118,15 @@ running Vault and its network. For a fresh setup, work from `deploy/`:
    docker compose up -d vault
    ```
 
-   Initialize and unseal it, then enable Transit at `transit/`. Grant the service
-   token `create,update` on `transit/encrypt/orchestrator-<lowercase address>` and
-   `update` on its decrypt path; save the token in `vault-token`. Do not grant key
-   export or administration. Keep recovery keys privately and arrange unsealing
-   after restarts and renewal of expiring tokens. Vault's HTTPS port binds only
-   to `127.0.0.1:28200`. Disable raw Vault audit and ingress body logging.
+   Initialize and unseal it, then enable Transit at `transit/`. Using an
+   administrator credential, apply [the service policy](../deploy/vault-policy.hcl)
+   as `operator-secrets` and issue a token with that policy. Save the token in
+   `vault-token`. The policy allows wrapping and unwrapping for `orchestrator-*`,
+   token renewal, and inspection of the token's own permissions.
+   Do not grant key export or administration. Keep recovery keys privately and
+   arrange unsealing after restarts and renewal of expiring tokens. Vault's HTTPS
+   port binds only to `127.0.0.1:28200`. Disable raw Vault audit and ingress body
+   logging.
 4. Start the complete deployment:
 
    ```sh
