@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,7 +30,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 	return &http.Client{Transport: endpointRoundTrip(func(req *http.Request) (*http.Response, error) {
 		w := httptest.NewRecorder()
 		host := strings.ToLower(req.URL.Hostname())
-		if host == endpointHost(state.ServiceURL) || host == endpointHost(state.DiscoveryURL) {
+		if host == endpointHost(state.DiscoveryURL) {
 			secret, ok := accepted[req.Header.Get("CF-Access-Client-Id")]
 			if !ok || secret != req.Header.Get("CF-Access-Client-Secret") {
 				w.WriteHeader(401)
@@ -54,13 +53,15 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 			clone := req.Clone(req.Context())
 			clone.RequestURI = ""
 			if rule.OriginRequest != nil {
-				if rule.OriginRequest.Access == nil || !rule.OriginRequest.Access.Required || len(rule.OriginRequest.Access.Audience) != 1 || rule.OriginRequest.Access.Audience[0] != "audience" {
-					t.Error("missing shared audience")
+				if access := rule.OriginRequest.Access; access != nil {
+					if !access.Required || len(access.Audience) != 1 || access.Audience[0] != "audience" || host != endpointHost(state.DiscoveryURL) {
+						t.Error("invalid discovery audience")
+					}
+					clone.Header.Set("Cf-Access-Jwt-Assertion", "edge-assertion")
 				}
-				clone.Header.Set("Cf-Access-Jwt-Assertion", "edge-assertion")
 				clone.Host = rule.OriginRequest.HTTPHostHeader
 				if clone.Host != endpointHost(PrivateOrchestrator) {
-					t.Error("protected origin Host not rewritten")
+					t.Error("origin Host not rewritten")
 				}
 			} else {
 				clone.Host = req.URL.Host
@@ -72,7 +73,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 	})}
 }
 
-func TestReadinessAuthenticatesBothOriginsAndIsolation(t *testing.T) {
+func TestReadinessRequiresPublicAPIProtectedDiscoveryAndIsolation(t *testing.T) {
 	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
 	creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
 	node := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,9 +112,6 @@ func TestReadinessAuthenticatesBothOriginsAndIsolation(t *testing.T) {
 	for _, path := range []string{"/runners/heartbeat", "/metrics", "//discovery"} {
 		probeClient := &http.Client{Transport: endpointRoundTrip(func(req *http.Request) (*http.Response, error) {
 			if req.URL.Host == endpointHost(state.ServiceURL) && req.URL.Path == path {
-				if req.Header.Get("CF-Access-Client-Secret") != creds.ClientSecret {
-					t.Error("API isolation probe lacks valid credentials")
-				}
 				return &http.Response{StatusCode: 400, Header: http.Header{}, Body: http.NoBody, Request: req}, nil
 			}
 			return transport.RoundTrip(req)
@@ -123,7 +121,7 @@ func TestReadinessAuthenticatesBothOriginsAndIsolation(t *testing.T) {
 			t.Fatal("ordinary API rejection was confused with edge normalization", path, err)
 		}
 	}
-	// Access rejection must not conceal a broken authenticated API route.
+	// Access rejection must not conceal a broken public API route.
 	bad := endpointFixture(t, state, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/discovery" {
 			_ = json.NewEncoder(w).Encode([]map[string]string{{"address": state.ServiceURL}})
@@ -157,7 +155,7 @@ func freeListenerAddress(t *testing.T) string {
 	return address
 }
 
-func TestNodeSharedAccessIntegration(t *testing.T) {
+func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 	binary := os.Getenv("NODE_BINARY")
 	if binary == "" {
 		t.Skip("set NODE_BINARY to a compatible livepeer-orchestrator binary")
@@ -226,27 +224,25 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 			client := endpointFixture(t, state, private, accepted)
 			creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
 			for _, host := range []string{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:8443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "foreign.invalid"} {
-				response, err := client.Post("https://"+host+"/apps/app-fixture/session", "application/json", nil)
+				response, err := client.Get("https://" + host + "/apps/app-fixture/session")
 				if err != nil {
 					t.Fatal(err)
 				}
 				_ = response.Body.Close()
 				want := http.StatusNotFound
-				if host == endpointHost(state.ServiceURL) || host == endpointHost(state.DiscoveryURL) {
+				if host == endpointHost(state.ServiceURL) {
+					want = http.StatusMethodNotAllowed
+				} else if host == endpointHost(state.DiscoveryURL) {
 					want = http.StatusUnauthorized
 				}
 				if response.StatusCode != want {
-					t.Fatal("unauthorized hostname reached Node API", host, response.StatusCode)
+					t.Fatal("unexpected hostname routing", host, response.StatusCode)
 				}
 			}
 			if backend.template != state.ProxyURLTemplate {
 				return
 			}
-			req, _ := http.NewRequest("GET", state.ServiceURL+"/apps/app-echo/app/echo", nil)
-			req.Header.Set("CF-Access-Client-Id", creds.ClientID)
-			req.Header.Set("CF-Access-Client-Secret", creds.ClientSecret)
-			req.Header.Set("Cookie", "CF_Authorization=edge-cookie")
-			response, err := client.Do(req)
+			response, err := client.Get(state.ServiceURL + "/apps/app-echo/app/echo")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -257,19 +253,17 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 			if err := verifyEndpointClient(t.Context(), state, creds, client); err != nil {
 				t.Fatal("real Node readiness", err)
 			}
-			req, _ = http.NewRequest("POST", state.ServiceURL+"/apps/app-fixture/session", bytes.NewReader(nil))
-			req.Header.Set("CF-Access-Client-Id", creds.ClientID)
-			req.Header.Set("CF-Access-Client-Secret", creds.ClientSecret)
-			response, err = client.Do(req)
+			response, err = client.Post(state.ServiceURL+"/apps/app-fixture/session", "application/json", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer response.Body.Close()
 			var reserved struct {
-				AppURL string `json:"app_url"`
+				AppURL     string `json:"app_url"`
+				ControlURL string `json:"control_url"`
 			}
 			if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&reserved) != nil {
-				t.Fatal("authenticated reservation failed", response.StatusCode)
+				t.Fatal("public reservation failed", response.StatusCode)
 			}
 			appURL, err := url.Parse(reserved.AppURL)
 			if err != nil || appURL.Host == endpointHost(state.ServiceURL) {
@@ -284,7 +278,15 @@ func TestNodeSharedAccessIntegration(t *testing.T) {
 			if response.StatusCode != 200 || string(body) != "application response" {
 				t.Fatal("Host-preserving public proxy failed", response.StatusCode, string(body))
 			}
-			req, _ = http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
+			response, err = client.Post(reserved.ControlURL+"/stop", "application/json", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != 200 {
+				t.Fatal("public stop failed", response.StatusCode)
+			}
+			req, _ := http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
 			req.Header.Set("Cf-Access-Jwt-Assertion", "caller-supplied")
 			req.Header.Set("Livepeer-Session-Extra", "caller-supplied")
 			req.Header.Set("X-Forwarded-Extra", "caller-supplied")

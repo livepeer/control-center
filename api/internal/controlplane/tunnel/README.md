@@ -12,15 +12,14 @@ stable hostnames.
 
 | Host | Purpose |
 | --- | --- |
-| `api-<suffix>.<node>.<domain>` | Allowed orchestrator client API routes, protected by Access |
+| `api.<node>.<domain>` | Public orchestrator client API routes |
 | `*.<node>.<domain>` | Application traffic |
-| `discovery-<suffix>.<node>.<domain>/discovery` | Discovery, protected by the same Access application |
+| `discovery.<node>.<domain>/discovery` | Discovery, protected by Access |
 
 The API host allows only reserve, stop/payment and payment refresh controls.
-API and discovery require Cloudflare Access and forward with the private Node Host;
-application hosts preserve the original Host. Discovery, runner, metrics, health
-and Trickle paths are denied on API and app hosts; unknown hosts and unmatched
-API paths return 404.
+API and discovery forward with the private Node Host; application hosts preserve
+the original Host. Discovery, runner, metrics, health and Trickle paths are denied
+on API and app hosts; unknown hosts and unmatched API paths return 404.
 
 ## Cloudflare API token permissions
 
@@ -30,7 +29,7 @@ Create a custom token scoped to the relevant account and zone:
 | --- | --- | --- | --- |
 | Account | Cloudflare One Connector: cloudflared | Edit | Manage tunnels, connector credentials and connections |
 | Account | Access: Apps and Policies | Edit | Protect machines with Cloudflare Service Auth applications and policies |
-| Account | Access: Service Tokens | Edit | Authenticate machine requests to Nodes |
+| Account | Access: Service Tokens | Edit | Authenticate discovery requests |
 | Zone | DNS | Edit | Manage machine and wildcard CNAMEs and any validation records |
 | Zone | SSL and Certificates | Edit | Manage Advanced Certificate packs for machine wildcard coverage |
 
@@ -51,8 +50,8 @@ Cloudflare resources, including an Advanced certificate for the zone apex and
 machine wildcard. Certificate ownership and late-result cleanup follow the stable
 namespace across enrollments. It then waits for recent Runtime and connector
 reports, publishes DNS, and verifies HTTPS endpoints. Verification checks
-authenticated API and discovery access and isolation of sensitive public paths. Ingress approval
-controls readiness advertisement; provisioned routes can already be reachable.
+public API routing, authenticated discovery access and public path isolation.
+Ingress approval controls readiness advertisement; routes can already be reachable.
 Readiness is tied to the current machine generation and expires when observations
 become stale.
 
@@ -65,7 +64,7 @@ endpoint replacement through its drain and configuration gates. The
 
 The backend API token provisions resources; the enrollment credential
 authenticates the machine; the connector token joins its tunnel; and an Access
-credential authorizes API and discovery requests. A broker delivers the connector
+credential authorizes discovery requests. A broker delivers the connector
 token without mounting the enrollment credential in `cloudflared`.
 
 Connector and Access credentials rotate independently. Normal Access rotation

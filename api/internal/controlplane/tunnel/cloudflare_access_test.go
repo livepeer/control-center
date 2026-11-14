@@ -5,13 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"testing"
 )
 
-func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
+func TestDiscoveryAccessApplicationReadbackAndConflicts(t *testing.T) {
 	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid")
-	want := CFResource{Kind: "app", Name: "owned", Host: endpointHost(state.DiscoveryURL), Hosts: []string{endpointHost(state.ServiceURL), endpointHost(state.DiscoveryURL)}}
+	want := CFResource{Kind: "app", Name: "owned", Host: endpointHost(state.DiscoveryURL)}
 	var current cfObject
 	var foreign *cfObject
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +20,7 @@ func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
 				t.Error(err)
 			}
 			if !safeApplication(want, current) {
-				t.Error("create omitted shared protection")
+				t.Error("create omitted discovery protection")
 			}
 			current.ID = "app"
 			current.Audience = "shared-audience"
@@ -43,9 +42,8 @@ func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
 	if err != nil || created.Audience != "shared-audience" {
 		t.Fatal(created, err)
 	}
-	slices.Reverse(current.Destinations)
 	if found, err := provider.Find(t.Context(), created); err != nil || len(found) != 1 {
-		t.Fatal("order-sensitive destination comparison", found, err)
+		t.Fatal("discovery application readback", found, err)
 	}
 	current.Destinations[0].Overrides = []json.RawMessage{json.RawMessage(`{"behavior":"public","path_pattern":"/*"}`)}
 	if _, err := provider.Find(t.Context(), created); !errors.Is(err, ErrUnsafeProtection) {
@@ -56,15 +54,15 @@ func TestSharedAccessApplicationReadbackAndConflicts(t *testing.T) {
 	if _, err := provider.Find(t.Context(), created); !errors.Is(err, ErrUnsafeProtection) {
 		t.Fatal("wildcard protection accepted", err)
 	}
-	current.Destinations = current.Destinations[:2]
-	foreign = &cfObject{ID: "foreign", Name: "foreign", Domain: "unrelated.example.invalid", Type: "self_hosted", Destinations: []accessDestination{{Type: "public", URI: want.Hosts[0] + "/apps"}}}
+	current.Destinations = current.Destinations[:1]
+	foreign = &cfObject{ID: "foreign", Name: "foreign", Domain: "unrelated.example.invalid", Type: "self_hosted", Destinations: []accessDestination{{Type: "public", URI: want.Host + "/discovery"}}}
 	if _, err := provider.Find(t.Context(), created); !errors.Is(err, ErrResourceConflict) {
-		t.Fatal("API-only overlap was not detected", err)
+		t.Fatal("discovery overlap was not detected", err)
 	}
 	if found, err := provider.FindOwned(t.Context(), created); err != nil || len(found) != 1 {
 		t.Fatal("foreign conflict prevented owned cleanup", found, err)
 	}
-	for _, hostname := range []string{"ap*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discover*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "a*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "ap*.*.example.invalid"} {
+	for _, hostname := range []string{"discover*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "d*.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discover*.*.example.invalid"} {
 		foreign.Destinations[0].URI = hostname + "/apps"
 		if _, err := provider.Find(t.Context(), created); !errors.Is(err, ErrResourceConflict) {
 			t.Fatal("partial-label overlap missed", hostname, err)

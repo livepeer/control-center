@@ -148,9 +148,6 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	if !exists {
 		operation := max(r.OperationVersion, 1)
 		r = CFResource{Kind: kind, Name: resourceName(l.Machine, key), Host: host, CreationTarget: target, OperationVersion: operation}
-		if kind == "app" {
-			r.Hosts = []string{endpointHost(l.state.ServiceURL), host}
-		}
 		if operation > 1 {
 			r.Name += "-op" + strconv.FormatInt(operation, 10)
 		}

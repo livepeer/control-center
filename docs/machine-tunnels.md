@@ -2,8 +2,8 @@
 
 Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
 connector starts cloudflared, which forwards directly to the private Node service;
-Node routes application traffic to private workloads. API and discovery use
-separate hostnames protected by one Cloudflare Access application.
+Node routes application traffic to private workloads. Client API and app hostnames
+are public through the tunnel; discovery requires Cloudflare Access.
 
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
@@ -46,7 +46,7 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
 | --- | --- | --- |
 | Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel/Access and zone DNS/certificate write permissions | Control Center only |
 | Machine Tunnel token | Provider API → authenticated Control Center endpoint → management agent's scoped Unix socket → private tmpfs file mode 0600 | cloudflared process only |
-| API/discovery Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Authorized backend API callers and discovery Collector |
+| Discovery Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Discovery Collector |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
 the `flux-system/livepeer-service-auth` Secret. Only the management agent mounts
@@ -90,20 +90,19 @@ diagnosis and recovery.
 ## Reconciliation and recovery
 
 The worker provisions the tunnel, Access application and Service Auth policy,
-then installs audience-validating ingress before publishing routes. Node
+then installs audience-validating discovery ingress before publishing routes. Node
 configuration changes drain before replacement; an expired deadline requires
 intervention. Connector token changes replace its Deployment.
 
 After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
-`api-<suffix>.<node>.<domain>`, `discovery-<suffix>.<node>.<domain>` and `*.<node>.<domain>`.
-The shared random base32 suffix is persisted per enrollment. API and discovery
-share Access service credentials. TLS, authenticated API/discovery,
-unauthenticated rejection and authenticated isolation probes must succeed for each
-endpoint generation. API/discovery forwarding sets Host to the private orchestrator;
-wildcard application forwarding preserves the actual Host.
-The API host allows reservation, stop/payment and payment refresh; discovery
-allows `/discovery`. Other paths on those hosts return 404. App hosts deny
-reserved paths and forward the rest; Node checks HTTP methods.
+`api.<node>.<domain>`, `discovery.<node>.<domain>` and `*.<node>.<domain>`.
+TLS, public API routing, authenticated discovery, unauthenticated discovery
+rejection and public route isolation probes must succeed for each endpoint
+generation. API and discovery forwarding set Host to the private orchestrator;
+app forwarding preserves the original Host. The API host allows reservation,
+stop/payment and payment refresh; discovery allows `/discovery`. Other paths on
+those hosts return 404. App hosts deny discovery, runner, metrics, health and
+Trickle paths and forward the rest; Node checks HTTP methods.
 Services remain ClusterIP. Never add public Ingress, NodePort, LoadBalancer,
 hostPort or hostNetwork to generated workloads.
 
