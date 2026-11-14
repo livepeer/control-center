@@ -33,7 +33,7 @@ func TestOnchainCredentialsRequireBoundRuntimeProofWithoutSecretsService(t *test
 	s.params.SecretsURL = "https://127.0.0.1:1"
 	node := machine["node_id"]
 	path := "/v1/nodes/" + node + "/onchain/credentials"
-	in := signedOnchainRequest(t, s, node, consumer.Launch{"orchestrator", "pod", strings.Repeat("a", 32), strings.Repeat("b", 64)})
+	in := signedOnchainRequest(t, s, node, consumer.Launch{PodName: "orchestrator", PodUID: "pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)})
 	seed := sha256.Sum256([]byte(ownerA + installationFingerprint(t, s, node)))
 	key, endpoint := ed25519.NewKeyFromSeed(seed[:]), s.params.PublicAPIURL+path
 	for name, mutate := range map[string]func(*consumer.Request){
