@@ -425,7 +425,6 @@ func onchainMachine(t *testing.T) (*Server, onchain.Config, map[string]string) {
 	t.Helper()
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
-	_ = c
 	return s, c, enroll(t, s, ownerA, strings.Repeat("a", 64))
 }
 func onchainMetadata(t *testing.T, s *Server, node string) contract.Metadata {

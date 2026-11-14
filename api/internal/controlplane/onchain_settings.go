@@ -51,7 +51,7 @@ func (s *Server) ConfigureMode(ctx context.Context) error {
  AND lpcc.control_center_mode.controller=EXCLUDED.controller
  RETURNING mode`, mode, chainID, controller).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("deployment mode and chain identity cannot change after initialization")
+		return errors.New("control center mode and chain identity cannot change after initialization")
 	}
 	return err
 }
