@@ -459,7 +459,7 @@ func TestRotationRejectsConfigOnlyRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	adminA(t, s)
-	for _, kind := range []string{"connector", "access"} {
+	for _, kind := range []string{"connector"} {
 		w := request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": kind, "compromised": true})
 		requireStatus(t, w, 404)
 	}
@@ -508,7 +508,7 @@ func TestCompletedEndpointDrainDoesNotMaskProviderFailure(t *testing.T) {
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
 	reportRuntime(t, s, c, "runner", true)
-	testTunnelDeps(s).Provider = &appCreateFailure{f}
+	testTunnelDeps(s).Provider = &endpointCreateFailure{f}
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
 	state, _, err := s.loadTunnel(t.Context(), c["node_id"])

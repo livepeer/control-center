@@ -127,7 +127,7 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	if len(v.Assignments) != 1 || v.Assignments[0].Generation != a.Generation || v.Delivered == nil || v.Delivered.AppsDigest != m.AppsDigest || v.ExternalReachability != "unverified" {
 		t.Fatal("lost desired/delivery evidence", w.Body.String())
 	}
-	for _, secret := range []string{"environment-sentinel", c["token"], `"container":`, `"environment":`, `"actor_id":`, `"runner_service_url":`, "10.43.", "CF-Access"} {
+	for _, secret := range []string{"environment-sentinel", c["token"], `"container":`, `"environment":`, `"actor_id":`, `"runner_service_url":`, "10.43."} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Fatal("unsafe projection", secret)
 		}
@@ -454,10 +454,6 @@ type statusDiscoverySource struct{ source fleet.Source }
 func (s statusDiscoverySource) Sources(context.Context) ([]fleet.Source, error) {
 	return []fleet.Source{s.source}, nil
 }
-func (statusDiscoverySource) Resolve(context.Context, string) (fleet.Credential, error) {
-	return fleet.Credential{}, nil
-}
-func (statusDiscoverySource) Acknowledge(context.Context, fleet.Source) error { return nil }
 
 func TestObservedStateComposesExactDiscoveryMembership(t *testing.T) {
 	s, c, m, shot := observationFixture(t)

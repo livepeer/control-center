@@ -2,25 +2,17 @@
 
 This package manages Cloudflare resources, credentials, ingress protection, and
 external readiness for machine tunnels. On the machine, `cloudflared` opens an
-outbound connection to Cloudflare and forwards to private Traefik ingress, then Node. Node routes application traffic to private workloads.
+outbound connection to Cloudflare and forwards to private Traefik ingress, then
+Node. Node routes application traffic to private workloads.
 
 Each tunnel belongs to a machine enrollment. Credential refresh preserves the
 enrollment and tunnel; deletion and re-enrollment create a new enrollment.
 Cleanup of an earlier enrollment must finish before a later one can reuse its
 stable hostnames.
 
-| Host | Purpose |
-| --- | --- |
-| `api.<node>.<domain>` | Public orchestrator client API routes |
-| `*.<node>.<domain>` | Application traffic |
-| `discovery.<node>.<domain>/discovery` | Discovery, protected by Access and ingress bearer auth |
-
-The API host allows only reserve, stop/payment and payment refresh controls.
-API and discovery forward with the private Node Host; application hosts preserve
-the original Host. Discovery, runner, metrics, health and Trickle paths are denied
-on API and app hosts; unknown hosts and unmatched API paths return 404.
-
-See the [two-stage authentication rollout](../../../../docs/discovery-auth-rollout.md) for signing configuration and separate existing-resource migrations.
+See the [operator guide](../../../../docs/machine-tunnels.md) for host/path rules,
+credential boundaries, rotation and removal. The [authentication rollout](../../../../docs/discovery-auth-rollout.md)
+covers signing configuration and separate existing-resource migrations.
 
 ## Cloudflare API token permissions
 
@@ -29,8 +21,6 @@ Create a custom token scoped to the relevant account and zone:
 | Scope | Permission | Access | Why |
 | --- | --- | --- | --- |
 | Account | Cloudflare One Connector: cloudflared | Edit | Manage tunnels, connector credentials and connections |
-| Account | Access: Apps and Policies | Edit | Protect machines with Cloudflare Service Auth applications and policies |
-| Account | Access: Service Tokens | Edit | Authenticate discovery requests |
 | Zone | DNS | Edit | Manage machine and wildcard CNAMEs and any validation records |
 | Zone | SSL and Certificates | Edit | Manage Advanced Certificate packs for machine wildcard coverage |
 
@@ -63,21 +53,6 @@ shared concurrency. This package prepares certificate coverage and coordinates
 endpoint replacement through its drain and configuration gates. The
 [discovery package](../discovery/README.md) owns the collector.
 
-The backend API token provisions resources; the enrollment credential
-authenticates the machine; the connector token joins its tunnel; and an Access
-credential authorizes discovery requests. A broker delivers the connector
-token without mounting the enrollment credential in `cloudflared`.
-
-Connector and Access credentials rotate independently. Normal Access rotation
-overlaps credentials until the collector acknowledges the replacement;
-compromise rotation revokes predecessors immediately. Connector rotation
-preserves the tunnel UUID; compromise rotation also disconnects existing
-connectors. Credential maintenance can continue while Runtime is offline.
-
-After normal removal drains the workload, external cleanup installs deny-only
-ingress, revokes connector authentication, disconnects connections, and deletes
-DNS, the tunnel, and Access resources. The machine separately receives a terminal
-bundle to remove its local workloads.
-
-See the [machine tunnel runbook](../../../../docs/machine-tunnels.md) for setup
-and release operations.
+Existing resources must be migrated separately before deployment reconciliation
+is enabled. Unsupported persisted routing is refused before provider I/O; the
+application contains no legacy-resource conversion or cleanup implementation.

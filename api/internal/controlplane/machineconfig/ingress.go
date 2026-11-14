@@ -59,13 +59,11 @@ spec:
   headers:
     customRequestHeaders:
       Authorization: ''
-      CF-Access-Client-Id: ''
-      CF-Access-Client-Secret: ''
 `
 	for _, route := range []struct{ name, entrypoint, match, middleware string }{
-		{"api", "livepeer-api", "Host(`orchestrator.livepeer.svc.cluster.local`) && PathRegexp(`" + clientPath + "`)", ""},
+		{"api", "livepeer-api", "Host(`orchestrator.livepeer.svc.cluster.local`) && PathRegexp(`" + ClientIngressPath + "`)", ""},
 		{"discovery", "livepeer-discovery", "Host(`orchestrator.livepeer.svc.cluster.local`) && Method(`GET`) && Path(`/discovery`)", "    middlewares: [{name: discovery-auth}, {name: discovery-strip-auth}]\n"},
-		{"apps", "livepeer-apps", "HostRegexp(`" + appHost + "`) && !PathRegexp(`" + reservedPath + "`)", ""},
+		{"apps", "livepeer-apps", "HostRegexp(`" + appHost + "`) && !PathRegexp(`" + ReservedIngressPath + "`)", ""},
 	} {
 		routes += fmt.Sprintf(`---
 apiVersion: traefik.io/v1alpha1
@@ -136,5 +134,5 @@ spec:
 	return nil
 }
 
-const reservedPath = `(?i)(?:^|/)(?:discovery|runners?|metrics|healthz|readyz)(?:/|;|$)|(?:^|/)ai/trickle(?:/|;|$)`
-const clientPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment))?|refresh-payment)$`
+const ReservedIngressPath = `(?i)(?:^|/)(?:discovery|runners?|metrics|healthz|readyz)(?:/|;|$)|(?:^|/)ai/trickle(?:/|;|$)`
+const ClientIngressPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment))?|refresh-payment)$`

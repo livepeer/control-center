@@ -48,7 +48,7 @@ func (s *Manager) claimCertificate(ctx context.Context, zone, wildcard, account 
 	if err != nil {
 		return nil, err
 	}
-	l.provider = s.providerFor(RoutingState{AccountID: account, ZoneID: zone, TeamName: s.params.CloudflareTeamName})
+	l.provider = s.providerFor(RoutingState{AccountID: account, ZoneID: zone})
 	if err = json.Unmarshal(raw, &l.state); err != nil {
 		l.close()
 		return nil, err

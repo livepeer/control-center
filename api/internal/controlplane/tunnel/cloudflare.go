@@ -11,15 +11,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 )
 
 var ErrResourceConflict = errors.New("resource ownership conflict in Cloudflare")
-var ErrUnsafeProtection = errors.New("unsafe Cloudflare Access protection readback")
 var errAmbiguousCreate = errors.New("unknown Cloudflare create outcome; waiting for owned resource")
 
 type ProviderError struct {
@@ -42,12 +39,6 @@ func (c *cloudflareHTTP) resourcePath(r CFResource) string {
 	switch r.Kind {
 	case "tunnel":
 		return c.account() + "/cfd_tunnel"
-	case "token":
-		return c.account() + "/access/service_tokens"
-	case "app":
-		return c.account() + "/access/apps"
-	case "policy":
-		return c.account() + "/access/apps/" + url.PathEscape(r.Host) + "/policies"
 	case "dns":
 		return "/zones/" + c.params.CloudflareZoneID + "/dns_records"
 	}
@@ -100,29 +91,14 @@ func (c *cloudflareHTTP) call(ctx context.Context, method, path string, in, out 
 }
 
 type cfObject struct {
-	ID             string              `json:"id"`
-	Name           string              `json:"name"`
-	Domain         string              `json:"domain"`
-	Audience       string              `json:"aud"`
-	Type           string              `json:"type"`
-	Comment        string              `json:"comment"`
-	ConfigSrc      string              `json:"config_src"`
-	Tags           json.RawMessage     `json:"tags"`
-	ClientID       string              `json:"client_id"`
-	ClientSecret   string              `json:"client_secret"`
-	ExpiresAt      time.Time           `json:"expires_at"`
-	CreatedAt      time.Time           `json:"created_at"`
-	DeletedAt      *time.Time          `json:"deleted_at"`
-	Content        string              `json:"content"`
-	Proxied        bool                `json:"proxied"`
-	Destinations   []accessDestination `json:"destinations"`
-	ServiceAuth401 bool                `json:"service_auth_401_redirect"`
-}
-
-type accessDestination struct {
-	Type      string            `json:"type"`
-	URI       string            `json:"uri"`
-	Overrides []json.RawMessage `json:"overrides,omitempty"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Type      string     `json:"type"`
+	Comment   string     `json:"comment"`
+	ConfigSrc string     `json:"config_src"`
+	DeletedAt *time.Time `json:"deleted_at"`
+	Content   string     `json:"content"`
+	Proxied   bool       `json:"proxied"`
 }
 
 func sameHosts(a, b []string) bool {
@@ -130,26 +106,6 @@ func sameHosts(a, b []string) bool {
 	slices.Sort(a)
 	slices.Sort(b)
 	return slices.Equal(a, b)
-}
-
-func safeApplication(r CFResource, o cfObject) bool {
-	if r.Host == "" || !o.ServiceAuth401 || len(o.Destinations) != 1 {
-		return false
-	}
-	d := o.Destinations[0]
-	return d.Type == "public" && d.URI == r.Host && len(d.Overrides) == 0
-}
-
-func applicationOverlaps(r CFResource, o cfObject) bool {
-	for _, candidate := range append([]accessDestination{{URI: o.Domain}}, o.Destinations...) {
-		host := strings.ToLower(strings.SplitN(candidate.URI, "/", 2)[0])
-		// Access permits a wildcard within each DNS label.
-		pattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(host), `\*`, `[^.]*`) + "$"
-		if regexp.MustCompile(pattern).MatchString(strings.ToLower(r.Host)) {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *cloudflareHTTP) Find(ctx context.Context, r CFResource) ([]CFResource, error) {
@@ -179,14 +135,11 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 		if !missing && (!resourceOwned(r, o) || o.ID != r.ID) {
 			return nil, ErrResourceConflict
 		}
-		if !missing && !ownedOnly && r.Kind == "app" && !safeApplication(r, o) {
-			return nil, ErrUnsafeProtection
-		}
 		if !missing && (r.Kind != "tunnel" || o.DeletedAt == nil || o.DeletedAt.IsZero()) {
 			v := observedResource(r, o)
 			selected = &v
 		}
-		if !r.Watch && r.Kind != "app" {
+		if !r.Watch {
 			if selected != nil {
 				return []CFResource{*selected}, nil
 			}
@@ -222,13 +175,7 @@ func (c *cloudflareHTTP) find(ctx context.Context, r CFResource, ownedOnly bool)
 				if !ownedOnly && o.Name == r.Host && !owned {
 					return nil, ErrResourceConflict
 				}
-			case "app":
-				if !ownedOnly && applicationOverlaps(r, o) && !owned {
-					return nil, ErrResourceConflict
-				}
-				if owned && !ownedOnly && !safeApplication(r, o) {
-					return nil, ErrUnsafeProtection
-				}
+
 			}
 			if owned && o.ID != "" && (selected == nil || o.ID != selected.ID) && (r.Kind != "tunnel" || o.DeletedAt == nil || o.DeletedAt.IsZero()) {
 				found = append(found, observedResource(r, o))
@@ -245,91 +192,44 @@ func resourceOwned(r CFResource, o cfObject) bool {
 	switch r.Kind {
 	case "dns":
 		return o.Name == r.Host && o.Type == "CNAME" && o.Comment == r.Name
-	case "token":
-		var tags map[string]string
-		return json.Unmarshal(o.Tags, &tags) == nil && o.Name == r.Name && tags["lpcc-owner"] == r.Name
-	case "app":
-		return o.Name == r.Name && o.Domain == r.Host && o.Type == "self_hosted"
 	case "tunnel":
 		return o.Name == r.Name && o.ConfigSrc == "cloudflare"
-	case "policy":
-		return o.Name == r.Name // parent Access application scopes the lookup
 	}
 	return false
 }
 func observedResource(r CFResource, o cfObject) CFResource {
 	r.ID = o.ID
 	r.Pending = false
-	r.Audience = o.Audience
 	r.Target = o.Content
 	r.Proxied = o.Proxied
 	return r
 }
-func (c *cloudflareHTTP) Create(ctx context.Context, r CFResource, tunnel string) (CFResource, *AccessCredential, time.Time, error) {
+func (c *cloudflareHTTP) Create(ctx context.Context, r CFResource, tunnel string) (CFResource, error) {
 	input := map[string]any{"name": r.Name}
 	switch r.Kind {
 	case "tunnel":
 		secret := make([]byte, 32)
 		if _, e := rand.Read(secret); e != nil {
-			return r, nil, time.Time{}, e
+			return r, e
 		}
 		input["config_src"] = "cloudflare"
 		input["tunnel_secret"] = base64.StdEncoding.EncodeToString(secret)
-	case "token":
-		duration := r.Duration
-		if duration == "" {
-			duration = c.params.CloudflareAccessLifetime.String()
-		}
-		input["duration"] = duration
-		input["tags"] = map[string]string{"lpcc-owner": r.Name}
-	case "app":
-		input["domain"] = r.Host
-		input["type"] = "self_hosted"
-		input["app_launcher_visible"] = false
-		input["service_auth_401_redirect"] = true
-		input["destinations"] = []accessDestination{{Type: "public", URI: r.Host}}
-	case "policy":
-		input["decision"] = "non_identity"
-		input["include"] = []any{map[string]any{"service_token": map[string]string{"token_id": tunnel}}}
 	case "dns":
 		input = map[string]any{"name": r.Host, "type": "CNAME", "proxied": true, "content": tunnel + ".cfargotunnel.com", "comment": r.Name}
 	default:
-		return r, nil, time.Time{}, errors.New("unknown Cloudflare resource")
+		return r, errors.New("unknown Cloudflare resource")
 	}
 	var o cfObject
 	_, e := c.call(ctx, "POST", c.resourcePath(r), input, &o)
 	if e != nil {
-		return r, nil, time.Time{}, e
+		return r, e
 	}
 	if o.ID == "" {
-		return r, nil, time.Time{}, errAmbiguousCreate
+		return r, errAmbiguousCreate
 	}
 	r.ID = o.ID
 	r.Pending = false
-	r.Audience = o.Audience
-	if r.Kind == "app" && (!resourceOwned(r, o) || !safeApplication(r, o)) {
-		return r, nil, time.Time{}, ErrUnsafeProtection
-	}
-	if r.Kind == "token" {
-		if o.ClientID == "" || o.ClientSecret == "" {
-			return r, nil, time.Time{}, errAmbiguousCreate
-		}
-		expiry := o.ExpiresAt
-		if expiry.IsZero() {
-			if o.CreatedAt.IsZero() {
-				return r, nil, time.Time{}, errAmbiguousCreate
-			}
-			duration := c.params.CloudflareAccessLifetime
-			if r.Duration != "" {
-				if parsed, err := time.ParseDuration(r.Duration); err == nil {
-					duration = parsed
-				}
-			}
-			expiry = o.CreatedAt.Add(duration)
-		}
-		return r, &AccessCredential{ClientID: o.ClientID, ClientSecret: o.ClientSecret}, expiry, nil
-	}
-	return r, nil, time.Time{}, nil
+	return r, nil
 }
 func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []IngressRule) (int64, error) {
 	path := c.account() + "/cfd_tunnel/" + url.PathEscape(id) + "/configurations"
@@ -343,7 +243,7 @@ func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []Ingre
 	_, e := c.call(ctx, "GET", path, nil, &current)
 	clean := func(r []IngressRule) []IngressRule {
 		for i := range r {
-			if r[i].OriginRequest != nil && r[i].OriginRequest.Access == nil && r[i].OriginRequest.HTTPHostHeader == "" {
+			if r[i].OriginRequest != nil && r[i].OriginRequest.HTTPHostHeader == "" {
 				r[i].OriginRequest = nil
 			}
 		}
@@ -368,63 +268,6 @@ func (c *cloudflareHTTP) Configure(ctx context.Context, id string, rules []Ingre
 		return 0, errors.New("ingress readback mismatch from Cloudflare")
 	}
 	return current.Version, nil
-}
-func (c *cloudflareHTTP) Protect(ctx context.Context, policy CFResource, tokens []string) error {
-	// Dedicated application: an unexpected policy could bypass Service Auth.
-	for page := 1; ; page++ {
-		if page > 100 {
-			return errors.New("policy listing from Cloudflare exceeds limit")
-		}
-		var policies []cfObject
-		pages, err := c.call(ctx, "GET", c.resourcePath(policy)+"?per_page=100&page="+strconv.Itoa(page), nil, &policies)
-		if err != nil {
-			return err
-		}
-		for _, p := range policies {
-			if p.ID != policy.ID {
-				return ErrResourceConflict
-			}
-		}
-		if pages > 0 && page >= pages || pages == 0 && len(policies) < 100 {
-			break
-		}
-	}
-	include := make([]any, 0, len(tokens))
-	for _, id := range tokens {
-		include = append(include, map[string]any{"service_token": map[string]string{"token_id": id}})
-	}
-	input := map[string]any{"name": policy.Name, "decision": "non_identity", "include": include}
-	if _, e := c.call(ctx, "PUT", c.resourcePath(policy)+"/"+url.PathEscape(policy.ID), input, nil); e != nil {
-		return e
-	}
-	var read struct {
-		Decision string                       `json:"decision"`
-		Include  []map[string]json.RawMessage `json:"include"`
-		Exclude  []json.RawMessage            `json:"exclude"`
-		Require  []json.RawMessage            `json:"require"`
-	}
-	if _, e := c.call(ctx, "GET", c.resourcePath(policy)+"/"+url.PathEscape(policy.ID), nil, &read); e != nil {
-		return e
-	}
-	if read.Decision != "non_identity" || len(read.Include) != len(tokens) || len(read.Exclude) != 0 || len(read.Require) != 0 {
-		return ErrUnsafeProtection
-	}
-	seen := map[string]bool{}
-	for _, v := range read.Include {
-		var token struct {
-			ID string `json:"token_id"`
-		}
-		if len(v) != 1 || json.Unmarshal(v["service_token"], &token) != nil || token.ID == "" {
-			return ErrUnsafeProtection
-		}
-		seen[token.ID] = true
-	}
-	for _, id := range tokens {
-		if !seen[id] {
-			return ErrUnsafeProtection
-		}
-	}
-	return nil
 }
 func (c *cloudflareHTTP) ConnectorToken(ctx context.Context, id string) (string, error) {
 	var token string

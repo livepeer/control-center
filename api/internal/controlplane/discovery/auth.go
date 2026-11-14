@@ -1,9 +1,7 @@
 package discovery
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,18 +15,11 @@ import (
 	shared "github.com/livepeer/node/discovery/shared"
 )
 
-// Formatting and JSON must not expose process-local credential values.
-func (Credential) String() string   { return "[redacted Access credential]" }
-func (Credential) GoString() string { return "[redacted Access credential]" }
-
-// Each immutable authorization owns its collection confirmation and diagnostics.
-// Confirmation permits retirement of an older credential; it does not version inventory.
+// Authorization snapshots contain source identity and diagnostics, never tokens.
 type authorization struct {
-	source                  Source
-	credential              Credential
-	available               bool
-	confirmed, acknowledged bool
-	attempt                 attempt
+	source    Source
+	available bool
+	attempt   attempt
 }
 type attempt struct {
 	completed time.Time
@@ -75,20 +66,6 @@ func canonicalEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func validCredential(c Credential) bool {
-	for _, value := range []string{c.ClientID, c.ClientSecret} {
-		if len(value) == 0 || len(value) > 4096 {
-			return false
-		}
-		for _, b := range []byte(value) {
-			if b < 33 || b > 126 {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL == nil || req.Method != http.MethodGet || req.Host != "" && !strings.EqualFold(req.Host, req.URL.Host) {
 		return nil, errors.New("discovery request is outside its configured scope")
@@ -115,32 +92,28 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		clone.Header = make(http.Header)
 	}
 	for key := range clone.Header {
-		for _, sensitive := range []string{"CF-Access-Client-Id", "CF-Access-Client-Secret", "Authorization", "Proxy-Authorization", "Cookie"} {
+		for _, sensitive := range []string{"Authorization", "Proxy-Authorization", "Cookie"} {
 			if strings.EqualFold(key, sensitive) {
 				delete(clone.Header, key)
 			}
 		}
 	}
 	switch auth.source.AuthMode {
-	case AuthCloudflare:
-		if u.Scheme != "https" || !auth.available || !validCredential(auth.credential) {
+	case AuthBearer:
+		if u.Scheme != "https" || t.signToken == nil {
 			finish(0, "credential_unavailable")
-			return nil, errors.New("discovery credential is unavailable")
+			return nil, errors.New("discovery signer is unavailable")
 		}
-		clone.Header.Set("CF-Access-Client-Id", auth.credential.ClientID)
-		clone.Header.Set("CF-Access-Client-Secret", auth.credential.ClientSecret)
-	case AuthNone:
-	default:
-		finish(0, "credential_unavailable")
-		return nil, errors.New("discovery authentication mode is invalid")
-	}
-	if t.signToken != nil && auth.source.AuthMode != AuthNone {
 		bearer, err := t.signToken(auth.source)
-		if err != nil || bearer == "" {
+		if err != nil || bearer == "" || len(bearer) > 8192 || strings.ContainsAny(bearer, " \t\r\n") {
 			finish(0, "credential_unavailable")
 			return nil, errors.New("discovery bearer is unavailable")
 		}
 		clone.Header.Set("Authorization", "Bearer "+bearer)
+	case AuthNone:
+	default:
+		finish(0, "credential_unavailable")
+		return nil, errors.New("invalid discovery authentication mode")
 	}
 	resp, err := t.base.RoundTrip(clone)
 	if err != nil {
@@ -167,27 +140,6 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		outcome = "http_error"
 	}
 	finish(resp.StatusCode, outcome)
-	// Confirm the exact credential against Node's bounded, decoded wire contract.
-	// The Collector still owns its snapshots and failure policy. Re-reading these
-	// bounded bytes there avoids correlating transport attempts with cache timestamps.
-	if resp.StatusCode == http.StatusOK {
-		data, readErr := shared.Read(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, errors.New("invalid discovery response")
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(data))
-		entries, decodeErr := shared.Decode[runner](data, time.Now())
-		valid := decodeErr == nil
-		for _, entry := range entries {
-			valid = valid && publicAddress(auth.source, entry.Address)
-		}
-		if valid {
-			t.mu.Lock()
-			auth.confirmed = true
-			t.mu.Unlock()
-		}
-	}
 	return resp, nil
 }
 

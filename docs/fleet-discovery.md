@@ -8,21 +8,23 @@ service or Node release.
 
 1. Run the [end-to-end harness](development.md#end-to-end-tests). Discovery
    is disabled by default.
-2. Mount the existing `CloudflareKeyringFile` privately, with directory mode
-   0700 and file mode 0600, readable by the API identity. All API replicas need
-   the same keyring and credential database. A discovery reader does not need a
-   Cloudflare provisioning token when provisioning is disabled.
+2. Mount Control Center's Ed25519 signing key using `JWTSigningPrivateKeyFile`.
+   All API replicas share signing configuration and the source database. Ingress
+   receives only public verification keys through its independent configuration
+   inventory. A reader needs no Cloudflare provisioning token when provisioning
+   is disabled.
 3. Set `CloudflareIngressApproved = true` and `DiscoveryEnabled = true` in
-   the existing API deployment. Expose public,
-   read-only `GET /discovery` through its HTTPS proxy and restrict the API origin.
+   the existing API deployment. Expose the public, read-only `GET /discovery`
+   through its HTTPS proxy and restrict the API origin.
    Reading this aggregate requires no source credentials. Grant private
    destinations with `DiscoveryGrants` only when explicitly required.
 
-Keep Access credentials, the keyring and provisioning tokens out of bundles,
-ConfigMaps, application environments, browser responses, logs and command flags.
-Every machine's raw `/discovery` requires an ingress bearer token and, in Stage 1, Cloudflare Access Service Auth. See the [rollout](discovery-auth-rollout.md) for local Ed25519 signing, public-key distribution, and separate migrations. Public app hosts and direct origins must deny discovery and management
-access. See the [machine tunnel runbook](machine-tunnels.md) for credential
-protection, rotation, removal and rollback.
+Keep the private signing key, bearer tokens and provisioning credentials out of
+machine bundles, ConfigMaps, browser responses, logs and command flags. Each
+machine's raw `/discovery` requires a machine-bound ingress bearer token. Public
+app hosts and direct origins deny discovery and management access. See the
+[authentication rollout](discovery-auth-rollout.md) for the two release stages
+and separate existing-resource migrations.
 
 The aggregate returns 503 when disabled. When enabled it returns cached
 Node-compatible JSON, including `200 []` when no runners are advertised. An
@@ -41,27 +43,22 @@ Unverified provisioning generations are excluded; previously approved offline
 generations continue polling, including after restart. Draining sources remain
 selected to observe withdrawals. Removed enrollments and blocked ingress are
 excluded. Removing a source removes its cached inventory. Follow the tunnel
-runbook's drain, acknowledgement and provider cleanup order before retirement.
+runbook's drain and provider cleanup order before retirement.
 
-Credentials are immutable, AES-GCM encrypted PostgreSQL versions; only the
-keyring is mounted as a protected file. Reconciliation loads a source-scoped
-credential snapshot, while in-flight requests retain the version they started
-with. Missing, expired, revoked or malformed credentials fail closed without
-stopping healthy sources. Managed Cloudflare sources use authenticated HTTPS;
-there is no plaintext credential export or unauthenticated fallback.
+Control Center mints a five-minute Ed25519 token locally for each source request.
+The token has a discovery-specific audience and scope and is bound to that
+machine's identity. Ingress verifies it with mounted public keys, independently
+of the secrets service. Signing failure denies the request without stopping
+healthy sources; managed sources always use authenticated HTTPS.
 
 Requests use verified TLS, a three-second timeout, no environment proxy, cookies
 or redirects, and Node's destination policy and 1 MiB source-body limit. The
 Collector ignores advertised peer metadata and never collects its own origin.
 Credential changes apply to the next scheduled poll. HTTP reads never poll sources.
 
-For ordinary Access rotation, publish the new credential with provider overlap
-as described in the tunnel runbook. Confirm discovery acknowledgement and
-subsequent provider retirement before finishing. Acknowledgement requires a new,
-successfully decoded response using the current credential and expected owning
-address. An old in-flight response, login HTML or eviction cannot acknowledge it; an unsafe app URL alone does not block
-retirement. Use the runbook's compromise path for immediate revocation and its
-controlled restart/re-encryption procedure for keyring rotation.
+Rotate keys by distributing the next public key before switching signers, then
+retain the previous verification key for at least 24 hours after last issuance.
+See the rollout runbook for applied-digest checks.
 
 ## Inventory and diagnosis
 
@@ -84,10 +81,10 @@ registration when public routes are wrong; records are not rewritten.
 Use administrator `GET /api/admin/discovery` to inspect selection freshness,
 source lifecycle and generation, collection state (`uninitialized`, `healthy`,
 `retained` or `evicted`), last success, failures, cached records, bounded
-transport outcomes, credential availability, acknowledgement and blocked
+transport outcomes, signer availability and blocked
 publication. Collection is stale after two refresh intervals; selection is stale
 after two reconciliation intervals. These thresholds do not evict inventory.
-Response sizes over 1 MiB are logged, without truncating inventory; consumers may reject them.
+Response sizes over 1 MiB are logged without truncation; consumers may reject them.
 
 Status supports correlation with assignment, bundle and registration
 reports. It cannot prove an applied deployment or external app reachability:
@@ -96,7 +93,6 @@ credentials and source URLs; session and credential identities are not metric
 labels.
 
 If selection is stale or reconciliation fails, restore database access; do not
-interpret a failed read as an empty fleet. For Access failures, check credential
-availability, source state and rotation acknowledgement, then restore the correct
-version through the tunnel workflow. After correcting public routes, wait for
-collection.
+interpret a failed read as an empty fleet. For authentication failures, check the
+signing key ID, source machine identity, public verification keys and applied
+ingress digest. After correcting public routes, wait for collection.

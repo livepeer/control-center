@@ -36,7 +36,6 @@ CloudflareEnabled = false
 CloudflareIngressApproved = false
 
 # Fleet discovery shares the API process and existing TLS proxy. It requires
-# approved machine ingress and CloudflareKeyringFile; no provisioning API token
 # is needed when CloudflareEnabled is false.
 DiscoveryEnabled = false
 DiscoveryRefreshInterval = "5m"
@@ -47,14 +46,10 @@ DiscoveryGrants = []
 # CloudflareAccountID = "<ACCOUNT_ID>"
 # CloudflareZoneID = "<ZONE_ID>"
 # CloudflareBaseDomain = "<BASE_DOMAIN>"
-# CloudflareTeamName = "<ZERO_TRUST_TEAM>"
 # CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
-# CloudflareKeyringFile = "secrets/collector-access-keyring.json"
 RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required; build instructions in runtime/README.md
 RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 # RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # Runtime helper and cloudflared
-# CloudflareAccessLifetime = "<TOKEN_LIFETIME>"
-# CloudflareRotateBefore = "<ROTATION_WINDOW>"
 # TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
 # TunnelDrainTimeout = "<DRAIN_DEADLINE>"
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory

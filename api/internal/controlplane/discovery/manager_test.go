@@ -24,11 +24,9 @@ import (
 )
 
 type simulatedDiscoveryBackend struct {
-	mu               sync.Mutex
-	sources          []Source
-	credentials      map[string]Credential
-	acknowledgements []Source
-	err              bool
+	mu      sync.Mutex
+	sources []Source
+	err     bool
 }
 
 func (b *simulatedDiscoveryBackend) Sources(context.Context) ([]Source, error) {
@@ -39,32 +37,17 @@ func (b *simulatedDiscoveryBackend) Sources(context.Context) ([]Source, error) {
 	}
 	return append([]Source(nil), b.sources...), nil
 }
-func (b *simulatedDiscoveryBackend) Resolve(_ context.Context, ref string) (Credential, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	credential, ok := b.credentials[ref]
-	if !ok {
-		return Credential{}, errors.New("credential-store-sentinel")
-	}
-	return credential, nil
-}
-func (b *simulatedDiscoveryBackend) Acknowledge(_ context.Context, source Source) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.acknowledgements = append(b.acknowledgements, source)
-	return nil
-}
 
 const discoveryTestRecord = `{"url":"https://orch.example/apps/a/session","app":"test","version":"v1","observed_at":"2000-01-01T00:00:00.123+00:00","mode":"persistent","capacity":4,"capacity_used":1,"capacity_available":3,"gpu":{"name":"H100"},"price_info":{"price":123456789012345678901234567890,"price_usd":0.123456789012345678901234567890123456,"currency":"wei","unit":"seconds"},"extension":{"integer":9007199254740993,"ratio":1.2300e+04}}`
 const discoveryTestInventory = `[{"nodes":[{"url":"https://never-follow.example","queried_at":"2000-01-01T00:00:00Z"}]},{"address":"https://orch.example","runners":[` + discoveryTestRecord + `]}]`
 
 func testSource(id, endpoint string) Source {
-	return Source{NodeID: id, URL: endpoint + "/discovery", ServiceURL: "https://orch.example", ProxyURLTemplate: "https://{proxy}.apps.example", AuthMode: AuthCloudflare, Lifecycle: "active", Ready: true, Generation: 1, VerifiedGeneration: 1, CredentialRef: "ref-" + id, CredentialVersion: 1}
+	return Source{NodeID: id, URL: endpoint + "/discovery", ServiceURL: "https://orch.example", ProxyURLTemplate: "https://{proxy}.apps.example", AuthMode: AuthBearer, Lifecycle: "active", Ready: true, Generation: 1, VerifiedGeneration: 1}
 }
 func testFleet(t *testing.T, b *simulatedDiscoveryBackend, servers ...*httptest.Server) (*Manager, *bytes.Buffer) {
 	t.Helper()
 	var logs bytes.Buffer
-	f, err := New(Config{RefreshInterval: 5 * time.Minute, ReconcileInterval: time.Minute, MaxFailedRefreshes: 6, Grants: []string{"127.0.0.1", "::1"}}, Dependencies{Store: b, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	f, err := New(Config{RefreshInterval: 5 * time.Minute, ReconcileInterval: time.Minute, MaxFailedRefreshes: 6, Grants: []string{"127.0.0.1", "::1"}}, Dependencies{Store: b, SignToken: func(source Source) (string, error) { return "test-bearer-" + source.NodeID, nil }, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +73,7 @@ func fleetBody(f *Manager) string {
 
 func TestFleetIdentityAndPartialPublication(t *testing.T) {
 	source := testSource("one", "https://source.example")
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
 	var inventory atomic.Value
 	bad := `{"url":"http://10.43.0.7/private?token=sentinel","app":"broken","observed_at":"2000-01-01T00:00:00Z"}`
@@ -107,8 +90,8 @@ func TestFleetIdentityAndPartialPublication(t *testing.T) {
 		}
 	}
 	reconcileFleet(t, f)
-	if !f.Status().Sources[0].PublicationBlocked || len(b.acknowledgements) != 1 {
-		t.Fatal("filtered runner blocked credential acknowledgement or lacked diagnostics")
+	if !f.Status().Sources[0].PublicationBlocked {
+		t.Fatal("filtered runner lacked diagnostics")
 	}
 	// Canonical identity values must be exactly those a JSON consumer receives.
 	for _, identity := range []string{
@@ -126,24 +109,23 @@ func TestFleetIdentityAndPartialPublication(t *testing.T) {
 	// A new version still needs the right owning address. App-level routing
 	// errors then affect publication, rather than predecessor credential cleanup.
 	b.sources[0].Generation, b.sources[0].VerifiedGeneration = 2, 2
-	b.sources[0].CredentialVersion, b.sources[0].CredentialRef = 2, "new-ref"
-	b.credentials["new-ref"] = Credential{"new-client", "new-secret"}
 	inventory.Store(`[{"address":"https://wrong.example","runners":[` + discoveryTestRecord + `]}]`)
 	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 1 {
-		t.Fatal("wrong owning address acknowledged replacement credential")
+	f.collector.Refresh(t.Context(), false)
+	if !f.Status().Sources[0].PublicationBlocked {
+		t.Fatal("wrong owning address was published")
 	}
 	inventory.Store(`[{"address":"https://orch.example","runners":[` + discoveryTestRecord + `,` + bad + `]}]`)
 	f.collector.Refresh(t.Context(), false)
 	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 2 || b.acknowledgements[1].CredentialVersion != 2 || !f.Status().Sources[0].PublicationBlocked || fleetBody(f) != want {
-		t.Fatal("filtered runner stalled replacement acknowledgement or changed valid sibling")
+	if !f.Status().Sources[0].PublicationBlocked || fleetBody(f) != want {
+		t.Fatal("filtered runner changed a valid sibling")
 	}
 }
 
-func TestFleetAcknowledgementRequiresDecodedReplacementCredential(t *testing.T) {
+func TestFleetMalformedReplacementRetainsThenEvictsAndRecovers(t *testing.T) {
 	source := testSource("one", "https://source.example")
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"old-client", "old-secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
 	var body atomic.Value
 	body.Store(discoveryTestInventory)
@@ -152,49 +134,41 @@ func TestFleetAcknowledgementRequiresDecodedReplacementCredential(t *testing.T) 
 	})
 	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
-	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 1 || b.acknowledgements[0].CredentialVersion != 1 {
-		t.Fatal("initial v1 collection was not acknowledged")
-	}
 	original := f.collector.Snapshots()[0].QueriedAt
-	body.Store("<html>Access login</html>")
-	b.sources[0].Generation = 2
-	b.sources[0].VerifiedGeneration = 2
-	b.sources[0].CredentialVersion = 2
-	b.sources[0].CredentialRef = "new-ref"
-	b.credentials["new-ref"] = Credential{"new-client", "new-secret"}
+	body.Store("<html>upstream error</html>")
+	b.sources[0].Generation, b.sources[0].VerifiedGeneration = 2, 2
 	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
-	if len(b.acknowledgements) != 1 || f.Status().Sources[0].State != "retained" || f.collector.Snapshots()[0].QueriedAt != original {
-		t.Fatal("HTTP 200 login HTML acknowledged v2 or changed retained v1 observation")
-	}
-	f.acknowledge(t.Context())
-	for _, ack := range b.acknowledgements {
-		if ack.CredentialVersion == 2 {
-			t.Fatal("retained v1 snapshot acknowledged invalid v2 collection")
-		}
+	if f.Status().Sources[0].State != "retained" || f.collector.Snapshots()[0].QueriedAt != original {
+		t.Fatal("invalid replacement changed retained observation")
 	}
 	for range 6 {
 		f.collector.Refresh(t.Context(), false)
 		reconcileFleet(t, f)
 	}
-	for _, ack := range b.acknowledgements {
-		if ack.CredentialVersion == 2 {
-			t.Fatal("evicted snapshot acknowledged invalid v2 collection")
-		}
+	if f.Status().Sources[0].State != "evicted" {
+		t.Fatal("invalid replacement did not evict")
 	}
 	body.Store(discoveryTestInventory)
 	f.collector.Refresh(t.Context(), false)
-	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 2 || b.acknowledgements[1].CredentialVersion != 2 {
-		t.Fatal("successful replacement was not acknowledged")
+	if f.Status().Sources[0].State != "healthy" {
+		t.Fatal("replacement did not recover")
 	}
 }
 
-func TestFleetRotationDuringPollDoesNotAcknowledgeOldCredential(t *testing.T) {
+func TestFleetSignerRotationDuringPollAndSignerFailure(t *testing.T) {
 	source := testSource("one", "https://source.example")
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"old-client", "old-secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
+	var signing atomic.Value
+	signing.Store("old-bearer")
+	f.transport.signToken = func(Source) (string, error) {
+		raw := signing.Load().(string)
+		if raw == "" {
+			return "", errors.New("signing unavailable")
+		}
+		return raw, nil
+	}
 	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	var allowNew atomic.Bool
@@ -204,8 +178,8 @@ func TestFleetRotationDuringPollDoesNotAcknowledgeOldCredential(t *testing.T) {
 			<-release
 		}
 		status, body := 200, discoveryTestInventory
-		if r.Header.Get("CF-Access-Client-Secret") == "new-secret" && !allowNew.Load() {
-			status, body = 403, "denied"
+		if r.Header.Get("Authorization") == "Bearer new-bearer" && !allowNew.Load() {
+			status, body = 401, "denied"
 		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
@@ -213,49 +187,43 @@ func TestFleetRotationDuringPollDoesNotAcknowledgeOldCredential(t *testing.T) {
 	done := make(chan struct{})
 	go func() { f.collector.Refresh(t.Context(), false); close(done) }()
 	<-started
-	b.sources[0].Generation, b.sources[0].VerifiedGeneration, b.sources[0].CredentialVersion = 2, 2, 2
-	b.sources[0].CredentialRef = "replacement"
-	b.credentials["replacement"] = Credential{"new-client", "new-secret"}
-	reconcileFleet(t, f)
+	signing.Store("new-bearer")
 	close(release)
 	<-done
-	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
-	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 0 || f.Status().Sources[0].State != "retained" {
-		t.Fatal("old response or denied replacement acknowledged a credential")
+	if f.Status().Sources[0].State != "retained" {
+		t.Fatal("denied replacement lost retained inventory")
 	}
 	allowNew.Store(true)
 	f.collector.Refresh(t.Context(), false)
-	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 1 || b.acknowledgements[0].CredentialVersion != 2 {
-		t.Fatal("decoded replacement was not acknowledged")
+	if f.Status().Sources[0].State != "healthy" {
+		t.Fatal("new signer did not recover without source reconciliation")
 	}
-	delete(b.credentials, "replacement")
-	reconcileFleet(t, f)
+	before := calls.Load()
+	signing.Store("")
 	f.collector.Refresh(t.Context(), false)
-	if f.Status().Sources[0].CredentialAvailable || f.Status().Sources[0].State != "retained" {
-		t.Fatal("missing credential did not fail closed")
+	if calls.Load() != before || f.Status().Sources[0].State != "retained" {
+		t.Fatal("signer failure did not fail closed")
 	}
 }
 
 func TestFleetSourceAuthenticationAndLosslessAggregate(t *testing.T) {
-	b := &simulatedDiscoveryBackend{credentials: map[string]Credential{}}
+	b := &simulatedDiscoveryBackend{}
 	var calls atomic.Int32
 	var servers []*httptest.Server
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprint(i)
-		pair := Credential{ClientID: "client-sentinel-" + id, ClientSecret: "secret-sentinel-" + id}
+		bearer := "test-bearer-" + id
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls.Add(1)
 			if r.URL.Path != "/discovery" {
 				t.Error("unexpected request path")
 			}
 			if i == 2 {
-				if r.Header.Get("CF-Access-Client-Id") != "" || r.Header.Get("CF-Access-Client-Secret") != "" {
+				if r.Header.Get("Authorization") != "" {
 					t.Error("unauthenticated source received credentials")
 				}
-			} else if r.Header.Get("CF-Access-Client-Id") != pair.ClientID || r.Header.Get("CF-Access-Client-Secret") != pair.ClientSecret {
+			} else if r.Header.Get("Authorization") != "Bearer "+bearer {
 				t.Error("wrong source credential")
 				w.WriteHeader(403)
 				return
@@ -266,9 +234,6 @@ func TestFleetSourceAuthenticationAndLosslessAggregate(t *testing.T) {
 		source := testSource(id, server.URL)
 		if i == 2 {
 			source.AuthMode = AuthNone
-			source.CredentialRef = ""
-		} else {
-			b.credentials[source.CredentialRef] = pair
 		}
 		b.sources = append(b.sources, source)
 		servers = append(servers, server)
@@ -296,9 +261,6 @@ func TestFleetSourceAuthenticationAndLosslessAggregate(t *testing.T) {
 	}
 	if calls.Load() != 3 {
 		t.Fatal("HTTP reads or metadata caused extra polling", calls.Load())
-	}
-	if len(b.acknowledgements) != 2 {
-		t.Fatal("protected source acknowledgements missing")
 	}
 	status := f.Status()
 	if len(status.Sources) != 3 || status.Sources[0].State != "healthy" || status.Sources[0].NewestObservation == nil {
@@ -346,7 +308,7 @@ func TestFleetFailuresEvictionEmptyAndRecovery(t *testing.T) {
 	}))
 	defer server.Close()
 	source := testSource("one", server.URL)
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b, server)
 	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
@@ -354,7 +316,7 @@ func TestFleetFailuresEvictionEmptyAndRecovery(t *testing.T) {
 	for i, test := range []struct {
 		status int
 		body   string
-	}{{401, "Access denied"}, {403, "Access denied"}, {302, "login"}, {200, "<html>login</html>"}, {200, strings.Repeat(" ", shared.MaxBody+1)}, {200, "null"}} {
+	}{{401, "unauthorized"}, {403, "unauthorized"}, {302, "login"}, {200, "<html>login</html>"}, {200, strings.Repeat(" ", shared.MaxBody+1)}, {200, "null"}} {
 		mu.Lock()
 		status, body = test.status, test.body
 		mu.Unlock()
@@ -393,7 +355,7 @@ func TestFleetSelectionLifecycleAndStoreFailure(t *testing.T) {
 	defer server.Close()
 	source := testSource("one", server.URL)
 	source.Generation, source.VerifiedGeneration = 5, 5
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b, server)
 	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
@@ -430,14 +392,11 @@ func TestFleetSelectionLifecycleAndStoreFailure(t *testing.T) {
 	b.sources[0].Ready = true
 	b.mu.Unlock()
 	reconcileFleet(t, f)
-	if len(f.collector.Snapshots()) != 0 || f.Status().Sources[0].Acknowledged {
-		t.Fatal("node-only replacement reused predecessor cache or acknowledgement")
+	if len(f.collector.Snapshots()) != 0 {
+		t.Fatal("node-only replacement reused predecessor cache")
 	}
 	f.collector.Refresh(t.Context(), false)
 	reconcileFleet(t, f)
-	if len(b.acknowledgements) != 2 || b.acknowledgements[1].NodeID != "new-node" {
-		t.Fatal("node-only replacement did not receive its own acknowledgement")
-	}
 	b.mu.Lock()
 	b.sources[0].NodeID = "unverified-node"
 	b.sources[0].URL = "https://unverified.example/discovery"
@@ -490,7 +449,7 @@ func TestFleetWorkerStartsEmptyAndClosesPendingWork(t *testing.T) {
 	}))
 	defer server.Close()
 	synctest.Test(t, func(t *testing.T) {
-		b := &simulatedDiscoveryBackend{credentials: map[string]Credential{}}
+		b := &simulatedDiscoveryBackend{}
 		f, _ := testFleet(t, b, server)
 		f.transport.base.(*http.Transport).DisableKeepAlives = true
 		reconcileFleet(t, f)
@@ -501,7 +460,6 @@ func TestFleetWorkerStartsEmptyAndClosesPendingWork(t *testing.T) {
 		source := testSource("one", server.URL)
 		b.mu.Lock()
 		b.sources = []Source{source}
-		b.credentials[source.CredentialRef] = Credential{"client", "secret"}
 		b.mu.Unlock()
 		reconcileFleet(t, f)
 		synctest.Wait()
@@ -538,7 +496,7 @@ func TestFleetReplacementFencesInFlightResult(t *testing.T) {
 	}))
 	defer server.Close()
 	source := testSource("one", server.URL)
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b, server)
 	reconcileFleet(t, f)
 	done := make(chan struct{})
@@ -551,7 +509,7 @@ func TestFleetReplacementFencesInFlightResult(t *testing.T) {
 	reconcileFleet(t, f)
 	close(release)
 	<-done
-	if len(f.collector.Snapshots()) != 0 || len(b.acknowledgements) != 0 {
+	if len(f.collector.Snapshots()) != 0 {
 		t.Fatal("replacement accepted predecessor in-flight result")
 	}
 }
@@ -560,7 +518,7 @@ func TestFleetBlockedAndUnverifiedSources(t *testing.T) {
 	source := testSource("one", "https://source.example")
 	source.Ready = false
 	source.VerifiedGeneration = 0
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
 	reconcileFleet(t, f)
 	if f.Status().Sources[0].Selected {

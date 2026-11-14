@@ -23,23 +23,14 @@ type endpointRoundTrip func(*http.Request) (*http.Response, error)
 
 func (fn endpointRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
 
-// This fixture models edge Service Auth separately from origin ingress. Real
-// Cloudflare JWT enforcement remains part of the release gate.
-func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accepted map[string]string) *http.Client {
+// This fixture models cloudflared routing and ingress bearer rejection.
+// The actual controller is exercised by machineconfig's Traefik tests.
+func endpointFixture(t *testing.T, state RoutingState, node http.Handler) *http.Client {
 	t.Helper()
-	rules := ingressFor(state, Config{CloudflareTeamName: "team"}, "audience")
+	rules := ingressFor(state)
 	return &http.Client{Transport: endpointRoundTrip(func(req *http.Request) (*http.Response, error) {
 		w := httptest.NewRecorder()
 		host := strings.ToLower(req.URL.Hostname())
-		if host == endpointHost(state.DiscoveryURL) {
-			secret, ok := accepted[req.Header.Get("CF-Access-Client-Id")]
-			if !ok || secret != req.Header.Get("CF-Access-Client-Secret") {
-				w.WriteHeader(401)
-				return w.Result(), nil
-			}
-		} else if req.Header.Get("CF-Access-Client-Id") != "" || req.Header.Get("CF-Access-Client-Secret") != "" {
-			t.Error("credentials sent outside protected hosts")
-		}
 		for _, rule := range rules {
 			if rule.Hostname != "" && rule.Hostname != host && !(strings.HasPrefix(rule.Hostname, "*.") && strings.HasSuffix(host, rule.Hostname[1:])) {
 				continue
@@ -58,12 +49,6 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 			clone := req.Clone(req.Context())
 			clone.RequestURI = ""
 			if rule.OriginRequest != nil {
-				if access := rule.OriginRequest.Access; access != nil {
-					if !access.Required || len(access.Audience) != 1 || access.Audience[0] != "audience" || host != endpointHost(state.DiscoveryURL) {
-						t.Error("invalid discovery audience")
-					}
-					clone.Header.Set("Cf-Access-Jwt-Assertion", "edge-assertion")
-				}
 				clone.Host = rule.OriginRequest.HTTPHostHeader
 				if clone.Host != endpointHost(PrivateOrchestrator) {
 					t.Error("origin Host not rewritten")
@@ -80,7 +65,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 
 func TestReadinessRequiresPublicAPIProtectedDiscoveryAndIsolation(t *testing.T) {
 	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
-	creds := AccessCredential{ClientID: "current", ClientSecret: "secret", Bearer: "valid-bearer"}
+	creds := "valid-bearer"
 	node := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != endpointHost(PrivateOrchestrator) {
 			w.WriteHeader(404)
@@ -97,7 +82,7 @@ func TestReadinessRequiresPublicAPIProtectedDiscoveryAndIsolation(t *testing.T) 
 		}
 		w.WriteHeader(404)
 	})
-	client := endpointFixture(t, state, node, map[string]string{"current": "secret"})
+	client := endpointFixture(t, state, node)
 	seen := map[string]bool{}
 	transport := client.Transport
 	client.Transport = endpointRoundTrip(func(req *http.Request) (*http.Response, error) {
@@ -126,16 +111,16 @@ func TestReadinessRequiresPublicAPIProtectedDiscoveryAndIsolation(t *testing.T) 
 			t.Fatal("ordinary API rejection was confused with edge normalization", path, err)
 		}
 	}
-	// Access rejection must not conceal a broken public API route.
+	// Discovery authentication rejection must not conceal a broken API route.
 	bad := endpointFixture(t, state, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/discovery" {
 			_ = json.NewEncoder(w).Encode([]map[string]string{{"address": state.ServiceURL}})
 		} else {
 			w.WriteHeader(401)
 		}
-	}), map[string]string{"current": "secret"})
+	}))
 	if err := verifyEndpointClient(t.Context(), state, creds, bad); err == nil {
-		t.Fatal("Access rejection concealed broken API routing")
+		t.Fatal("Discovery rejection concealed broken API routing")
 	}
 	redirected := false
 	redirect := &http.Client{Transport: endpointRoundTrip(func(req *http.Request) (*http.Response, error) {
@@ -167,9 +152,6 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 	}
 	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Cf-Access-Jwt-Assertion") != "" || strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=") {
-			t.Error("edge credentials reached application")
-		}
 		if r.URL.Path == "/echo" {
 			_ = json.NewEncoder(w).Encode(r.Header)
 			return
@@ -191,7 +173,7 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			if err := os.WriteFile(runners, []byte(fmt.Sprintf("[[Runners]]\nID = \"app-fixture\"\nApp = \"fixture\"\nRunnerURL = %q\nMode = \"persistent\"\nProxy = true\nCapacity = 2\n\n[[Runners]]\nID = \"app-echo\"\nApp = \"echo\"\nRunnerURL = %q\nMode = \"single-shot\"\nProxy = true\nCapacity = 2\n", app.URL, app.URL)), 0600); err != nil {
 				t.Fatal(err)
 			}
-			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"CF-Access-*\", \"Livepeer-Session-*\", \"X-Forwarded-*\"]\nExcludedCookies = [\"CF_Authorization\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
+			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"Livepeer-Session-*\", \"X-Forwarded-*\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
 			configPath := filepath.Join(directory, "config.toml")
 			if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 				t.Fatal(err)
@@ -225,9 +207,8 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			}
 			target, _ := url.Parse("http://" + address)
 			private := httputil.NewSingleHostReverseProxy(target)
-			accepted := map[string]string{"current": "secret"}
-			client := endpointFixture(t, state, private, accepted)
-			creds := AccessCredential{ClientID: "current", ClientSecret: "secret", Bearer: "valid-bearer"}
+			client := endpointFixture(t, state, private)
+			creds := "valid-bearer"
 			for _, host := range []string{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:8443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "foreign.invalid"} {
 				response, err := client.Get("https://" + host + "/apps/app-fixture/session")
 				if err != nil {
@@ -292,11 +273,9 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 				t.Fatal("public stop failed", response.StatusCode)
 			}
 			req, _ := http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
-			req.Header.Set("Cf-Access-Jwt-Assertion", "caller-supplied")
 			req.Header.Set("Livepeer-Session-Extra", "caller-supplied")
 			req.Header.Set("X-Forwarded-Extra", "caller-supplied")
-			req.Header.Add("Cookie", "CF_Authorization=edge-cookie; session=app-cookie")
-			req.Header.Add("Cookie", "CF_Authorization=duplicate-edge-cookie")
+			req.Header.Add("Cookie", "session=app-cookie")
 			req.Header.Set("Authorization", "Bearer app-authorization")
 			response, err = client.Do(req)
 			if err != nil {
@@ -308,12 +287,12 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 				t.Fatal("public application echo failed", response.StatusCode)
 			}
 			for name := range headers {
-				if strings.HasPrefix(strings.ToLower(name), "cf-access-") || strings.HasPrefix(strings.ToLower(name), "livepeer-session-") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+				if strings.HasPrefix(strings.ToLower(name), "livepeer-session-") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
 					t.Fatal("excluded header reached application", name)
 				}
 			}
 			if headers.Get("Cookie") != "session=app-cookie" || headers.Get("Authorization") != "Bearer app-authorization" {
-				t.Fatal("application authentication was lost or Access cookie leaked", headers)
+				t.Fatal("application authentication was lost", headers)
 			}
 		})
 	}

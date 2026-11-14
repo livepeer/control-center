@@ -43,7 +43,7 @@ func TestAppReconcilerReportOrderingAndDuplicateFreshness(t *testing.T) {
 }
 
 func TestTerminalConnectorSurvivesOnlyPendingAppCleanup(t *testing.T) {
-	for _, compromise := range []string{"none", "access", "connector"} {
+	for _, compromise := range []string{"none", "connector"} {
 		t.Run(compromise, func(t *testing.T) {
 			s, f := tunnelTestServer(t)
 			adminA(t, s)
@@ -71,7 +71,7 @@ func TestTerminalConnectorSurvivesOnlyPendingAppCleanup(t *testing.T) {
 			driveTunnels(t, s)
 			retained, _, err := s.loadTunnel(t.Context(), c["node_id"])
 			if compromise != "none" {
-				if err != nil || !retained.CleanupComplete || len(f.resources) != 0 || count(t, s, `SELECT count(*) FROM lpcc.access_credentials WHERE revoked_at IS NULL`) != 0 {
+				if err != nil || !retained.CleanupComplete || len(f.resources) != 0 {
 					t.Fatal("known compromise did not override app cleanup hold", retained, err)
 				}
 				return

@@ -7,8 +7,7 @@ import (
 )
 
 // RoutingState is the non-secret desired-state input. Only the bundle
-// reconciler renders it. A source generation changes when its URL or credential
-// reference changes; transport health alone does not replace a Collector source.
+// reconciler renders it. A source generation changes when its endpoint changes; transport health alone does not replace a Collector source.
 type RoutingState struct {
 	IngressVersion       int                   `json:"ingress_version"`
 	CertificatePackID    string                `json:"certificate_pack_id,omitempty"`
@@ -16,7 +15,6 @@ type RoutingState struct {
 	EndpointGeneration   int64                 `json:"endpoint_generation"`
 	AccountID            string                `json:"account_id"`
 	ZoneID               string                `json:"zone_id"`
-	TeamName             string                `json:"team_name"`
 	RotationReason       string                `json:"rotation_reason,omitempty"`
 	TunnelID             string                `json:"tunnel_id"`
 	ServiceURL           string                `json:"service_url"`
@@ -27,7 +25,6 @@ type RoutingState struct {
 	ProviderVersion      int64                 `json:"provider_version"`
 	CredentialGeneration int64                 `json:"credential_generation"`
 	SourceGeneration     int64                 `json:"source_generation"`
-	AccessVersion        int64                 `json:"access_version"`
 	Resources            map[string]CFResource `json:"resources"`
 	ReadyGeneration      int64                 `json:"ready_generation"`
 	Ready                bool                  `json:"ready"`
@@ -36,43 +33,31 @@ type RoutingState struct {
 	Reason               string                `json:"reason"`
 	CleanupComplete      bool                  `json:"cleanup_complete"`
 	ConnectorRevoked     bool                  `json:"connector_revoked,omitempty"`
-	Quarantined          bool                  `json:"quarantined,omitempty"`
 	AppliedIngress       []IngressRule         `json:"applied_ingress,omitempty"`
 	RotateTunnel         bool                  `json:"rotate_tunnel,omitempty"`
 	TokenFingerprint     string                `json:"token_fingerprint,omitempty"`
 	RotationStarted      bool                  `json:"rotation_started,omitempty"`
 	Compromised          bool                  `json:"compromised,omitempty"`
-	RotateAccess         bool                  `json:"rotate_access,omitempty"`
-	CompromisedAccess    bool                  `json:"compromised_access,omitempty"`
 }
 
 // CFResource stores an operation intent before any create. Pending operations
 // with an unknown outcome are discovered by ownership before they can be retried.
 type CFResource struct {
-	Kind              string    `json:"kind"`
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Host              string    `json:"host,omitempty"`
-	Pending           bool      `json:"pending,omitempty"`
-	Audience          string    `json:"audience,omitempty"`
-	Target            string    `json:"target,omitempty"`
-	Proxied           bool      `json:"proxied,omitempty"`
-	Absent            bool      `json:"absent,omitempty"`
-	ObservedAbsent    bool      `json:"observed_absent,omitempty"`
-	Watch             bool      `json:"watch,omitempty"`
-	AttemptAt         time.Time `json:"attempt_at,omitempty"`
-	Attempts          int       `json:"attempts,omitempty"`
-	AuditAfter        time.Time `json:"audit_after,omitempty"`
-	CreationTarget    string    `json:"creation_target,omitempty"`
-	OperationVersion  int64     `json:"operation_version,omitempty"`
-	CredentialVersion int64     `json:"credential_version,omitempty"`
-	Duration          string    `json:"duration,omitempty"`
-}
-
-type AccessCredential struct {
-	Bearer       string `json:"-"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	Kind             string    `json:"kind"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Host             string    `json:"host,omitempty"`
+	Pending          bool      `json:"pending,omitempty"`
+	Target           string    `json:"target,omitempty"`
+	Proxied          bool      `json:"proxied,omitempty"`
+	Absent           bool      `json:"absent,omitempty"`
+	ObservedAbsent   bool      `json:"observed_absent,omitempty"`
+	Watch            bool      `json:"watch,omitempty"`
+	AttemptAt        time.Time `json:"attempt_at,omitempty"`
+	Attempts         int       `json:"attempts,omitempty"`
+	AuditAfter       time.Time `json:"audit_after,omitempty"`
+	CreationTarget   string    `json:"creation_target,omitempty"`
+	OperationVersion int64     `json:"operation_version,omitempty"`
 }
 
 type DiscoverySource struct {
@@ -84,8 +69,6 @@ type DiscoverySource struct {
 	Ready              bool   `json:"ready"`
 	Blocked            bool   `json:"blocked"`
 	Generation         int64  `json:"generation"`
-	CredentialRef      string `json:"credential_ref"`
-	CredentialVersion  int64  `json:"credential_version"`
 	Reason             string `json:"reason"`
 	RotationReason     string `json:"rotation_reason,omitempty"`
 	VerifiedGeneration int64  `json:"verified_generation"`
@@ -97,9 +80,8 @@ type TunnelProvider interface {
 	CertificateProvider
 	Find(context.Context, CFResource) ([]CFResource, error)
 	FindOwned(context.Context, CFResource) ([]CFResource, error)
-	Create(context.Context, CFResource, string) (CFResource, *AccessCredential, time.Time, error)
+	Create(context.Context, CFResource, string) (CFResource, error)
 	Configure(context.Context, string, []IngressRule) (int64, error)
-	Protect(context.Context, CFResource, []string) error
 	ConnectorToken(context.Context, string) (string, error)
 	RotateConnector(context.Context, string) error
 	Delete(context.Context, CFResource, string) error

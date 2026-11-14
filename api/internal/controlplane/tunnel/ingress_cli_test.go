@@ -11,7 +11,7 @@ import (
 )
 
 // Optional account-free validation against the actual pinned parser/matcher.
-// This does not exercise the forwarded request, Cloudflare edge or Access.
+// This does not exercise the forwarded request, Cloudflare edge.
 func TestPinnedCloudflaredIngress(t *testing.T) {
 	binary := os.Getenv("CLOUDFLARED_BINARY")
 	if binary == "" {
@@ -21,7 +21,7 @@ func TestPinnedCloudflaredIngress(t *testing.T) {
 	if e != nil || !strings.Contains(string(v), "version 2026.10.7 ") {
 		t.Fatal("requires pinned cloudflared", e)
 	}
-	rules := ingressFor(RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "audience")
+	rules := ingressFor(RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState)
 	data, _ := json.Marshal(map[string]any{"ingress": rules})
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if e := os.WriteFile(path, data, 0600); e != nil {

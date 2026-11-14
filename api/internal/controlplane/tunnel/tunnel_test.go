@@ -1,10 +1,8 @@
 package tunnel
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,7 +48,6 @@ func (f *recoveryCloudflare) find(r CFResource, ownedOnly bool) ([]CFResource, e
 		}
 		if !r.Watch {
 			if ok {
-				r.Audience = v.Audience
 				r.Target = v.Target
 				r.Proxied = v.Proxied
 				r.Pending = false
@@ -60,13 +57,12 @@ func (f *recoveryCloudflare) find(r CFResource, ownedOnly bool) ([]CFResource, e
 		}
 	}
 	for _, v := range f.resources {
-		if !ownedOnly && r.ID == "" && (r.Kind == "app" || r.Kind == "dns") && v.Kind == r.Kind && v.Host == r.Host && v.Name != r.Name {
+		if !ownedOnly && r.ID == "" && r.Kind == "dns" && v.Kind == r.Kind && v.Host == r.Host && v.Name != r.Name {
 			return nil, ErrResourceConflict
 		}
 		if v.Kind == r.Kind && v.Name == r.Name && v.Host == r.Host {
 			copy := r
 			copy.ID = v.ID
-			copy.Audience = v.Audience
 			copy.Target = v.Target
 			copy.Proxied = v.Proxied
 			copy.Pending = false
@@ -75,29 +71,25 @@ func (f *recoveryCloudflare) find(r CFResource, ownedOnly bool) ([]CFResource, e
 	}
 	return found, nil
 }
-func (f *recoveryCloudflare) Create(_ context.Context, r CFResource, target string) (CFResource, *AccessCredential, time.Time, error) {
+func (f *recoveryCloudflare) Create(_ context.Context, r CFResource, target string) (CFResource, error) {
 	r.ID = uuid.New().String()
 	r.Pending = false
 	f.creates[r.Kind]++
-	if r.Kind == "app" {
-		r.Audience = "aud-" + r.ID
-	}
+
 	if r.Kind == "dns" {
 		r.Target = target + ".cfargotunnel.com"
 		r.Proxied = true
 	}
 	f.resources[r.ID] = r
-	if r.Kind == "token" {
-		return r, &AccessCredential{ClientID: "client-" + r.ID, ClientSecret: "secret-" + r.ID}, time.Now().Add(24 * time.Hour), nil
-	}
-	return r, nil, time.Time{}, nil
+
+	return r, nil
 }
 func (f *recoveryCloudflare) Delete(_ context.Context, r CFResource, _ string) error {
 	delete(f.resources, r.ID)
 	return nil
 }
 func TestTunnelIngressContract(t *testing.T) {
-	rules := ingressFor(RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState, Config{CloudflareBaseDomain: "example.invalid", CloudflareTeamName: "team"}, "aud")
+	rules := ingressFor(RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState)
 	match := func(host, path string) IngressRule {
 		for _, r := range rules {
 			hostOK := r.Hostname == "" || r.Hostname == host || strings.HasPrefix(r.Hostname, "*.") && strings.HasSuffix(host, r.Hostname[1:])
@@ -119,7 +111,7 @@ func TestTunnelIngressContract(t *testing.T) {
 	}
 	for _, path := range []string{"/apps/a/session", "/apps/a/session/b/stop", "/apps/a/session/b/payment", "/refresh-payment"} {
 		rule := match(api, path)
-		if rule.Service != machineconfig.PrivateIngressAPI || rule.OriginRequest == nil || rule.OriginRequest.Access != nil || rule.OriginRequest.HTTPHostHeader != endpointHost(PrivateOrchestrator) {
+		if rule.Service != machineconfig.PrivateIngressAPI || rule.OriginRequest == nil || rule.OriginRequest.HTTPHostHeader != endpointHost(PrivateOrchestrator) {
 			t.Fatalf("missing client path %s", path)
 		}
 	}
@@ -136,10 +128,6 @@ func TestTunnelIngressContract(t *testing.T) {
 	if rule := match(app, "/v1/completions"); rule.Service != machineconfig.PrivateIngressApps || rule.OriginRequest != nil {
 		t.Fatal("proxy Host was not preserved")
 	}
-	protected := match("discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "/discovery")
-	if protected.OriginRequest == nil || !protected.OriginRequest.Access.Required || protected.OriginRequest.Access.Audience[0] != "aud" {
-		t.Fatal("discovery not audience protected")
-	}
 	if match("alias.example.invalid", "/discovery").Service != "http_status:404" {
 		t.Fatal("alias bypass")
 	}
@@ -147,30 +135,6 @@ func TestTunnelIngressContract(t *testing.T) {
 		if r.Service != machineconfig.PrivateIngressAPI && r.Service != machineconfig.PrivateIngressDiscovery && r.Service != machineconfig.PrivateIngressApps && !strings.HasPrefix(r.Service, "http_status:") {
 			t.Fatal("direct app ingress")
 		}
-	}
-}
-func TestAccessKeyringBindingAndRotation(t *testing.T) {
-	k, e := parseAccessKeyring(`{"current":"a","keys":{"a":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)) + `"}}`)
-	if e != nil {
-		t.Fatal(e)
-	}
-	ref := "access/node/1"
-	secret := AccessCredential{ClientID: "id", ClientSecret: "high-entropy-secret"}
-	id, b, e := k.seal(ref, secret)
-	if e != nil || bytes.Contains(b, []byte(secret.ClientSecret)) {
-		t.Fatal("plaintext secret", e)
-	}
-	if v, e := k.open(id, ref, b); e != nil || v != secret {
-		t.Fatal(e)
-	}
-	for _, wrong := range []string{"access/other/1", "access/node/2"} {
-		if _, e := k.open(id, wrong, b); e == nil {
-			t.Fatal("credential reference substitution")
-		}
-	}
-	b[len(b)-1] ^= 1
-	if _, e := k.open(id, ref, b); e == nil {
-		t.Fatal("accepted ciphertext tampering")
 	}
 }
 func TestCloudflareClientBoundsAndRedaction(t *testing.T) {
@@ -260,7 +224,7 @@ func TestCloudflareDNSRecordEnvelopes(t *testing.T) {
 	defer server.Close()
 	c := &cloudflareHTTP{client: server.Client(), base: server.URL, params: Config{CloudflareZoneID: "zone"}}
 	r := CFResource{Kind: "dns", Name: "owned-node-dns", Host: "api.example.invalid"}
-	created, _, _, e := c.Create(t.Context(), r, "tunnel-id")
+	created, e := c.Create(t.Context(), r, "tunnel-id")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -297,13 +261,8 @@ func claimTestTunnel(t *testing.T) (*Manager, *recoveryCloudflare, *tunnelLease)
 		t.Fatal(err)
 	}
 	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
-	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	fake := newRecoveryCloudflare()
-	s := New(Config{CloudflareBaseDomain: "fleet.example.invalid", CloudflareAccessLifetime: 24 * time.Hour,
-		CloudflareKeyring: `{"current":"one","keys":{"one":"` + key + `"}}`}, Dependencies{DB: db, Provider: fake, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	if err := s.ConfigureCredentials(); err != nil {
-		t.Fatal(err)
-	}
+	s := New(Config{CloudflareBaseDomain: "fleet.example.invalid"}, Dependencies{DB: db, Provider: fake, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	l, err := s.claimTunnel(t.Context(), m)
 	if err != nil {
 		t.Fatal(err)
@@ -349,23 +308,18 @@ func TestLeaseFencingOnRetirement(t *testing.T) {
 }
 
 func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
-	for _, kind := range []string{"tunnel", "token"} {
+	for _, kind := range []string{"tunnel", "dns"} {
 		t.Run(kind, func(t *testing.T) {
-			s, f, l := claimTestTunnel(t)
+			_, f, l := claimTestTunnel(t)
 			m := l.Machine
 			var e error
 			defer l.finish(t.Context(), false)
 			key := kind
-			if kind == "token" {
-				key = "token-1"
-			}
+
 			// Durable intent with no provider effect covers crash-before-send and a
 			// lost response whose create never took effect.
 			r := CFResource{Kind: kind, Name: resourceName(m, key), Pending: true, AttemptAt: time.Now().Add(-time.Hour), Attempts: 1, OperationVersion: 1}
-			if kind == "token" {
-				r.CredentialVersion = 1
-				r.Duration = "24h0m0s"
-			}
+
 			l.state.Resources[key] = r
 			if e = l.save(t.Context()); e != nil {
 				t.Fatal(e)
@@ -377,13 +331,7 @@ func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
 			if selected.ID == "" || !selected.Watch || f.creates[kind] != 1 {
 				t.Fatal(selected, f.creates)
 			}
-			var original AccessCredential
-			if kind == "token" {
-				original, e = s.ResolveAccessCredential(t.Context(), credentialRef(m.NodeID, 1))
-				if e != nil {
-					t.Fatal(e)
-				}
-			}
+
 			late := selected
 			late.ID = "000-late-result"
 			f.resources[late.ID] = late
@@ -394,12 +342,7 @@ func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
 			if again.ID != selected.ID || len(f.resources) != 1 {
 				t.Fatal("late result replaced selected identity", again, f.resources)
 			}
-			if kind == "token" {
-				current, e := s.ResolveAccessCredential(t.Context(), credentialRef(m.NodeID, 1))
-				if e != nil || current != original {
-					t.Fatal("immutable secret changed", e)
-				}
-			}
+
 			if e = l.retireResource(t.Context(), key); e != nil {
 				t.Fatal(e)
 			}
@@ -423,82 +366,14 @@ func TestCreateRecoveryRetainsSelectionAndAbsentWatch(t *testing.T) {
 	}
 }
 
-type lostTokenCheckpoint struct {
-	*recoveryCloudflare
-	afterCreate func()
-	lostDelete  bool
-}
-
-func (f *lostTokenCheckpoint) Create(ctx context.Context, r CFResource, target string) (CFResource, *AccessCredential, time.Time, error) {
-	created, secret, expiry, e := f.recoveryCloudflare.Create(ctx, r, target)
-	if r.Kind == "token" && f.afterCreate != nil {
-		f.afterCreate()
-		f.afterCreate = nil
-	}
-	return created, secret, expiry, e
-}
-func (f *lostTokenCheckpoint) Delete(ctx context.Context, r CFResource, target string) error {
-	if e := f.recoveryCloudflare.Delete(ctx, r, target); e != nil {
-		return e
-	}
-	if r.Kind == "token" && f.lostDelete {
-		f.lostDelete = false
-		return &ProviderError{Ambiguous: true}
-	}
-	return nil
-}
-func TestAccessSecretCheckpointAndStrandedDeletionRecovery(t *testing.T) {
-	s, base, l := claimTestTunnel(t)
-	m := l.Machine
-	var e error
-	f := &lostTokenCheckpoint{recoveryCloudflare: base, lostDelete: true}
-	l.provider = f
-	f.afterCreate = func() {
-		execSQL(t, s.db, `UPDATE lpcc.machine_states SET revision=revision+1 WHERE node_id=$1`, m.NodeID)
-	}
-	if _, e = l.ensure(t.Context(), "token-1", "token", "", ""); !errors.Is(e, errTunnelFenced) {
-		t.Fatal("failed checkpoint accepted", e)
-	}
-	if count(t, s, `SELECT count(*) FROM lpcc.access_credentials`) != 0 {
-		t.Fatal("secret committed without selected resource")
-	}
-	l.finish(t.Context(), false)
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET next_attempt_at=now()`)
-	l, e = s.claimTunnel(t.Context(), m)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer l.finish(t.Context(), false)
-	l.provider = f
-	r := l.state.Resources["token-1"]
-	r.AttemptAt = time.Now().Add(-time.Hour)
-	l.state.Resources["token-1"] = r
-	if e = l.save(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	if _, e = l.ensure(t.Context(), "token-1", "token", "", ""); e == nil {
-		t.Fatal("lost deletion response not injected")
-	}
-	// The provider has deleted the stranded token, but the worker never saved
-	// that observation. Retrying the persisted operation must still converge.
-	selected, e := l.ensure(t.Context(), "token-1", "token", "", "")
-	if e != nil {
-		t.Fatal(e)
-	}
-	var bound string
-	if e = s.db.QueryRow(`SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND version=1`, m.NodeID).Scan(&bound); e != nil || bound != selected.ID || len(base.resources) != 1 {
-		t.Fatal("resource/secret binding did not converge", bound, selected, e)
-	}
-}
-
-type policyDeleteFailure struct {
+type routeDeleteFailure struct {
 	*recoveryCloudflare
 	fail  bool
 	after bool
 }
 
-func (f *policyDeleteFailure) Delete(ctx context.Context, r CFResource, target string) error {
-	if f.fail && r.Kind == "policy" {
+func (f *routeDeleteFailure) Delete(ctx context.Context, r CFResource, target string) error {
+	if f.fail && r.Kind == "dns" {
 		f.fail = false
 		if f.after {
 			if e := f.recoveryCloudflare.Delete(ctx, r, target); e != nil {
@@ -515,25 +390,25 @@ func TestSupersededCreateHandoffSurvivesCleanupFailure(t *testing.T) {
 			s, base, l := claimTestTunnel(t)
 			m := l.Machine
 			var e error
-			key := "g1-policy"
-			old := CFResource{Kind: "policy", Name: resourceName(m, key), Host: "app-id", Pending: true, Attempts: 1, OperationVersion: 1, CreationTarget: "token-a"}
+			key := "g1-dns"
+			old := CFResource{Kind: "dns", Name: resourceName(m, key), Host: "host.example.invalid", Pending: true, Attempts: 1, OperationVersion: 1, CreationTarget: "tunnel-a"}
 			l.state.Resources[key] = old
 			if e = l.save(t.Context()); e != nil {
 				t.Fatal(e)
 			}
 			providerOld := old
-			providerOld.ID = "old-policy"
+			providerOld.ID = "old-dns"
 			providerOld.Pending = false
 			base.resources[providerOld.ID] = providerOld
-			l.provider = &policyDeleteFailure{recoveryCloudflare: base, fail: true, after: after}
-			if _, e = l.ensure(t.Context(), key, "policy", "app-id", "token-b"); e == nil {
+			l.provider = &routeDeleteFailure{recoveryCloudflare: base, fail: true, after: after}
+			if _, e = l.ensure(t.Context(), key, "dns", "host.example.invalid", "tunnel-b"); e == nil {
 				t.Fatal("cleanup failure not injected")
 			}
 			persisted, _, e := s.Load(t.Context(), m.NodeID)
 			if e != nil {
 				t.Fatal(e)
 			}
-			if persisted.Resources[key].Absent || persisted.Resources[key].CreationTarget != "token-b" || !persisted.Resources["retired:"+old.Name].Absent {
+			if persisted.Resources[key].Absent || persisted.Resources[key].CreationTarget != "tunnel-b" || !persisted.Resources["retired:"+old.Name].Absent {
 				t.Fatal("handoff was not atomic", persisted.Resources)
 			}
 			l.finish(t.Context(), true)
@@ -543,11 +418,11 @@ func TestSupersededCreateHandoffSurvivesCleanupFailure(t *testing.T) {
 				t.Fatal(e)
 			}
 			defer l.finish(t.Context(), false)
-			selected, e := l.ensure(t.Context(), key, "policy", "app-id", "token-b")
+			selected, e := l.ensure(t.Context(), key, "dns", "host.example.invalid", "tunnel-b")
 			if e != nil {
 				t.Fatal(e)
 			}
-			if selected.OperationVersion != 2 || selected.ID == "old-policy" || len(base.resources) != 1 {
+			if selected.OperationVersion != 2 || selected.ID == "old-dns" || len(base.resources) != 1 {
 				t.Fatal("replacement did not converge", selected, base.resources)
 			}
 		})
@@ -559,18 +434,59 @@ func TestRollbackReusesUnselectedOwnedOperation(t *testing.T) {
 	m := l.Machine
 	var e error
 	defer l.finish(t.Context(), false)
-	old := CFResource{Kind: "app", Name: resourceName(m, "g1-app"), Host: "discovery.example.invalid", Pending: true, Attempts: 1, OperationVersion: 1}
-	l.state.Resources["g1-app"] = old
+	old := CFResource{Kind: "dns", Name: resourceName(m, "g1-dns"), Host: "discovery.example.invalid", Pending: true, Attempts: 1, OperationVersion: 1}
+	l.state.Resources["g1-dns"] = old
 	if e = l.save(t.Context()); e != nil {
 		t.Fatal(e)
 	}
 	observed := old
-	observed.ID = "late-app"
-	observed.Audience = "aud"
+	observed.ID = "late-dns"
 	observed.Pending = false
 	f.resources[observed.ID] = observed
-	r, e := l.ensure(t.Context(), "g3-app", "app", old.Host, "")
-	if e != nil || r.ID != observed.ID || r.Name != old.Name || f.creates["app"] != 0 {
+	r, e := l.ensure(t.Context(), "g3-dns", "dns", old.Host, "")
+	if e != nil || r.ID != observed.ID || r.Name != old.Name || f.creates["dns"] != 0 {
 		t.Fatal("rollback lost unselected ownership", r, e)
+	}
+}
+
+func (f *recoveryCloudflare) Route(_ context.Context, r CFResource, target string) error {
+	r.Target = target + ".cfargotunnel.com"
+	r.Proxied = true
+	f.resources[r.ID] = r
+	return nil
+}
+
+func TestUnsupportedRoutingRequiresExternalMigration(t *testing.T) {
+	for _, raw := range []string{`{"resources":{"legacy":{"kind":"unsupported"}}}`, `{"applied_ingress":[{"originRequest":{"unsupported":{"required":true}}}]}`} {
+		if !errors.Is(requireMigratedRouting([]byte(raw)), errRoutingMigrationRequired) {
+			t.Fatal("unsupported persisted routing accepted")
+		}
+	}
+	if err := requireMigratedRouting([]byte(`{"resources":{"tunnel":{"kind":"tunnel"}},"applied_ingress":[{"originRequest":{"httpHostHeader":"private:8935"}}]}`)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnmigratedRoutingDoesNotBlockOtherMachines(t *testing.T) {
+	s, _, lease := claimTestTunnel(t)
+	bad := lease.Machine.NodeID
+	lease.Release(t.Context())
+	execSQL(t, s.db, `DELETE FROM lpcc.machines WHERE node_id=$1`, bad)
+	const unsupported = `{"resources":{"legacy":{"kind":"unsupported","id":"owned-legacy"}}}`
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=$2,next_attempt_at=now() WHERE node_id=$1`, bad, unsupported)
+	healthy := strings.Repeat("b", 26)
+	execSQL(t, s.db, `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at) SELECT $1,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version,now() FROM lpcc.enrollments WHERE node_id=$2`, healthy, bad)
+	// No provider call is valid: the unsupported machine must be held, and the
+	// other retired enrollment has no external resources to remove.
+	s.provider = struct{ TunnelProvider }{}
+	if err := s.Reconcile(t.Context()); err != nil {
+		t.Fatal("one machine blocked fleet reconciliation", err)
+	}
+	state, _, err := s.Load(t.Context(), healthy)
+	if err != nil || !state.CleanupComplete {
+		t.Fatal("other machine did not reconcile", state, err)
+	}
+	if count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE node_id=$1 AND state=$2::jsonb`, bad, unsupported) != 1 {
+		t.Fatal("unmigrated provider state was converted")
 	}
 }

@@ -192,7 +192,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	if !safe || (!retained && state.Lifecycle != "active") || state.TunnelID == "" || state.IngressDigest == "" || state.RotateTunnel || state.Compromised || (m.Terminal && state.CompromisedAccess) || state.Quarantined || state.ConnectorRevoked {
+	if !safe || (!retained && state.Lifecycle != "active") || state.TunnelID == "" || state.IngressDigest == "" || state.RotateTunnel || state.Compromised || state.ConnectorRevoked {
 		fail(w, 409, "secure configuration is not applied")
 		return
 	}
@@ -208,7 +208,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 	}
 	latest, _, e := s.loadTunnel(r.Context(), m.NodeID)
 	stillRetained, retainErr := s.retainedConnector(r.Context(), m)
-	if e != nil || retainErr != nil || (m.Terminal && (!stillRetained || latest.CompromisedAccess)) || (!stillRetained && latest.Lifecycle != "active") || latest.TunnelID != state.TunnelID || latest.CredentialGeneration != state.CredentialGeneration || latest.RotateTunnel || latest.Compromised || latest.Quarantined || latest.ConnectorRevoked {
+	if e != nil || retainErr != nil || (m.Terminal && !stillRetained) || (!stillRetained && latest.Lifecycle != "active") || latest.TunnelID != state.TunnelID || latest.CredentialGeneration != state.CredentialGeneration || latest.RotateTunnel || latest.Compromised || latest.ConnectorRevoked {
 		fail(w, 409, "tunnel changed during credential retrieval")
 		return
 	}

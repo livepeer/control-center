@@ -503,8 +503,8 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, err := provider.Exec(`INSERT INTO lpcc.access_credentials(node_id,version,provider_id,key_id,ciphertext,expires_at) VALUES($1,1,'fixture','fixture',decode('00','hex'),now()+interval '1 hour')`, c["node_id"]); err != nil {
-		t.Fatal("receipt blocked credential foreign-key check", err)
+	if _, err := provider.Exec(`SELECT 1 FROM lpcc.enrollments WHERE node_id=$1 FOR KEY SHARE`, c["node_id"]); err != nil {
+		t.Fatal("receipt blocked enrollment key-share check", err)
 	}
 	if err := provider.Commit(); err != nil {
 		t.Fatal(err)

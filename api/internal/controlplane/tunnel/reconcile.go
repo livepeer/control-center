@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
-	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"net/http"
 	"net/url"
 	"sort"
@@ -45,9 +44,6 @@ func (s *Manager) Run(ctx context.Context, interval time.Duration, after func())
 func (s *Manager) Reconcile(ctx context.Context) error {
 	if s.provider == nil {
 		return nil
-	}
-	if e := s.ReencryptAccessCredentials(ctx); e != nil {
-		return e
 	}
 	rows, e := s.db.QueryContext(ctx, `SELECT e.node_id,e.install_dir,e.k3s_version,e.credential_version,e.retired_at IS NOT NULL FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL OR EXISTS(SELECT FROM lpcc.machines m WHERE m.node_id=e.node_id)`)
 	if e != nil {
@@ -86,6 +82,11 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 		}
 		pass, cancel := context.WithTimeout(ctx, 60*time.Second)
 		l, e := s.claimTunnel(pass, m)
+		if errors.Is(e, errRoutingMigrationRequired) {
+			cancel()
+			s.logger.Error("machine routing requires external migration", "node_id", m.NodeID, "reason", "routing_migration_required")
+			continue
+		}
 		if errors.Is(e, sql.ErrNoRows) {
 			cancel()
 			continue
@@ -141,8 +142,8 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 			return e
 		}
 	}
-	if l.state.AccountID != p.CloudflareAccountID || l.state.ZoneID != p.CloudflareZoneID || l.state.TeamName != p.CloudflareTeamName {
-		return errors.New("retire the previous provider scope before changing account, zone or team")
+	if l.state.AccountID != p.CloudflareAccountID || l.state.ZoneID != p.CloudflareZoneID {
+		return errors.New("retire the previous provider scope before changing account or zone")
 	}
 	desired := RoutingFor(l.Machine.NodeID, p.CloudflareBaseDomain)
 	if l.state.Target != "" && l.state.Target != desired.ServiceURL {
@@ -186,49 +187,14 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 			return e
 		}
 	}
-	tokenKey := "token-" + strconv.FormatInt(l.state.AccessVersion, 10)
-	token := l.state.Resources[tokenKey] // Validated by credential maintenance above.
 	discoveryHost := endpointHost(l.state.DiscoveryURL)
-	app, e := l.ensure(ctx, prefix+"app", "app", discoveryHost, "")
-	if e != nil {
-		return l.protectionFailure(ctx, e)
-	}
-	if app.Audience == "" {
-		return errors.New("access application audience is missing")
-	}
-	policy, e := l.ensure(ctx, prefix+"policy", "policy", app.ID, token.ID)
-	if e != nil {
-		return e
-	}
-	tokens, e := l.s.activeAccessIDs(ctx, l.Machine)
-	if e != nil {
-		return e
-	}
-	if e = l.protectPolicy(ctx, policy, tokens); e != nil {
-		return e
-	}
-	l.credentialPoliciesReady(len(tokens))
-	rules := ingressFor(l.state.RoutingState, p, app.Audience)
-	// Keep predecessor discovery hosts protected throughout endpoint replacement.
-	keys := make([]string, 0, len(l.state.Resources))
-	for key := range l.state.Resources {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		r := l.state.Resources[key]
-		if r.Kind == "app" && !r.Absent && !strings.HasPrefix(key, prefix) && r.ID != "" && r.Audience != "" {
-			previous := []IngressRule{{Hostname: r.Host, Path: `^/discovery$`, Service: machineconfig.PrivateIngressDiscovery, OriginRequest: protectedOrigin(p, r.Audience)}, {Hostname: r.Host, Service: "http_status:404"}}
-			rules = append(previous, rules...)
-		}
-	}
+	rules := ingressFor(l.state.RoutingState)
 	version, e := l.provider.Configure(ctx, tunnel.ID, rules)
 	if e != nil {
 		return e
 	}
 	l.state.IngressDigest = ingressHash(rules)
 	l.state.AppliedIngress = rules
-	l.state.Quarantined = false
 	l.state.ProviderVersion = version
 	l.state.Reason = "runtime_pending"
 	if e = l.save(ctx); e != nil {
@@ -265,15 +231,12 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 			return e
 		}
 	}
-	credential, e := l.s.ResolveAccessCredential(ctx, credentialRef(l.Machine.NodeID, l.state.AccessVersion))
+	if l.s.signDiscovery == nil {
+		return errors.New("discovery signer is unavailable")
+	}
+	credential, e := l.s.signDiscovery(l.Machine.NodeID)
 	if e != nil {
 		return e
-	}
-	if l.s.signDiscovery != nil {
-		credential.Bearer, e = l.s.signDiscovery(l.Machine.NodeID)
-		if e != nil {
-			return e
-		}
 	}
 	verify := l.s.endpointVerifier
 	if verify == nil {
@@ -300,53 +263,13 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 }
 
 // Security maintenance is independent of adapter freshness and endpoint rollout.
-// It operates only on this enrollment's already-owned tunnel/protection state.
-func (l *tunnelLease) maintainCredentials(ctx context.Context) (result error) {
-	defer func() {
-		if result == nil || errors.Is(result, errTunnelFenced) {
-			return
-		}
-		if l.state.RotationReason == "access_credential_expired" {
-			return
-		}
-		if l.state.RotateTunnel || l.state.RotationStarted {
-			l.state.RotationReason = "connector_rotation_failed"
-		} else if l.state.RotationReason != "" || l.state.CompromisedAccess || l.state.RotateAccess {
-			l.state.RotationReason = "access_rotation_failed"
-		}
-	}()
-	if e := l.rotateConnector(ctx); e != nil {
-		return e
+// It operates only on this enrollment's already-owned tunnel state.
+func (l *tunnelLease) maintainCredentials(ctx context.Context) error {
+	err := l.rotateConnector(ctx)
+	if err != nil && !errors.Is(err, errTunnelFenced) {
+		l.state.RotationReason = "connector_rotation_failed"
 	}
-	if e := l.retireAcknowledgedCredentials(ctx); e != nil {
-		return e
-	}
-	if e := l.prepareAccessRotation(ctx); e != nil {
-		return e
-	}
-	if _, e := l.ensure(ctx, "token-"+strconv.FormatInt(l.state.AccessVersion, 10), "token", "", ""); e != nil {
-		return e
-	}
-	ids, e := l.s.activeAccessIDs(ctx, l.Machine)
-	if e != nil {
-		return e
-	}
-	protected, e := l.applyAccessPolicies(ctx, ids)
-	if e != nil {
-		return e
-	}
-	if protected {
-		l.credentialPoliciesReady(len(ids))
-		return l.restoreProtectedIngress(ctx)
-	}
-	return nil
-}
-
-func (l *tunnelLease) credentialPoliciesReady(tokens int) {
-	l.state.RotationReason = ""
-	if tokens > 1 {
-		l.state.RotationReason = "rotation_ack_pending"
-	}
+	return err
 }
 
 func (l *tunnelLease) rotateConnector(ctx context.Context) error {
@@ -391,146 +314,31 @@ func (l *tunnelLease) rotateConnector(ctx context.Context) error {
 	l.state.RotationStarted = false
 	l.state.Compromised = false
 	l.state.TokenFingerprint = ""
+	l.state.RotationReason = ""
 	l.state.Ready = false
 	if l.state.Lifecycle == "removed" {
 		l.state.ConnectorRevoked = true
 	}
 	return l.save(ctx)
 }
-func (l *tunnelLease) prepareAccessRotation(ctx context.Context) error {
-	var expires time.Time
-	var revoked bool
-	e := l.s.db.QueryRowContext(ctx, `SELECT expires_at,revoked_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND version=$2`, l.Machine.NodeID, l.state.AccessVersion).Scan(&expires, &revoked)
-	missing := errors.Is(e, sql.ErrNoRows)
-	if e != nil && !missing {
-		return e
-	}
-	if !missing && !expires.After(time.Now()) {
-		l.state.RotationReason = "access_credential_expired"
-	}
-	if l.state.CompromisedAccess {
-		if l.state.RotationReason != "access_credential_expired" {
-			l.state.RotationReason = "access_rotation_pending"
-		}
-		if e = l.save(ctx); e != nil {
-			return e
-		}
-		if e = l.retireAccessTokens(ctx, false); e != nil {
-			return e
-		}
-		return l.advanceAccessVersion(ctx)
-	}
-	if l.state.RotationReason == "access_credential_expired" {
-		if e = l.save(ctx); e != nil {
-			return e
-		}
-	}
-	if e = l.retireAccessTokens(ctx, true); e != nil {
-		return e
-	}
-	if missing || !revoked && time.Until(expires) > l.s.params.CloudflareRotateBefore && !l.state.RotateAccess {
-		return nil
-	}
-	var count int
-	if e = l.s.db.QueryRowContext(ctx, `SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND revoked_at IS NULL AND expires_at>now()`, l.Machine.NodeID).Scan(&count); e != nil {
-		return e
-	}
-	if count > 1 {
-		l.state.RotationReason = "rotation_ack_pending"
-		return nil
-	}
-	if l.state.RotationReason != "access_credential_expired" {
-		l.state.RotationReason = "access_rotation_pending"
-	}
-	return l.advanceAccessVersion(ctx)
-}
-
-func (l *tunnelLease) advanceAccessVersion(ctx context.Context) error {
-	l.state.AccessVersion++
-	l.state.SourceGeneration++
-	l.state.Ready = false
-	l.state.RotateAccess = false
-	l.state.CompromisedAccess = false
-	return l.save(ctx)
-}
-
-func (l *tunnelLease) retireAccessTokens(ctx context.Context, expiredOnly bool) error {
-	for key, r := range l.state.Resources {
-		if r.Kind != "token" || r.Absent {
-			continue
-		}
-		if expiredOnly {
-			var expired bool
-			if e := l.s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.access_credentials WHERE node_id=$1 AND version=$2 AND (expires_at<=now() OR revoked_at IS NOT NULL))`, l.Machine.NodeID, r.CredentialVersion).Scan(&expired); e != nil {
-				return e
-			}
-			if !expired {
-				continue
-			}
-		}
-		if e := l.retireResource(ctx, key); e != nil {
-			return e
-		}
-	}
-	return nil
-}
-func (s *Manager) activeAccessIDs(ctx context.Context, m Machine) ([]string, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY version`, m.NodeID)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if e = rows.Scan(&id); e != nil {
-			return nil, e
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
 func (l *tunnelLease) retirePreviousEndpoints(ctx context.Context) error {
-	ack, e := l.accessAcknowledged(ctx)
-	if e != nil || !ack {
-		return e
-	}
 	prefix := "g" + strconv.FormatInt(l.state.EndpointGeneration, 10) + "-"
 	var keys []string
 	for key, r := range l.state.Resources {
-		if r.Kind != "token" && r.Kind != "tunnel" && !r.Absent && !strings.HasPrefix(key, prefix) {
+		if r.Kind == "dns" && !r.Absent && !strings.HasPrefix(key, prefix) {
 			keys = append(keys, key)
 		}
 	}
-	if len(keys) == 0 {
-		return l.releaseCertificates(ctx, wildcardHost(l.state.ProxyURLTemplate))
-	}
 	sort.Strings(keys)
-	app := l.state.Resources[prefix+"app"]
-	rules := ingressFor(l.state.RoutingState, l.s.params, app.Audience)
-	version, e := l.provider.Configure(ctx, l.state.TunnelID, rules)
-	if e != nil {
-		return e
-	}
-	l.state.ProviderVersion = version
-	l.state.IngressDigest = ingressHash(rules)
-	l.state.AppliedIngress = rules
-	l.state.Quarantined = false
-	for _, kind := range []string{"dns", "policy", "app"} {
-		for _, key := range keys {
-			r, exists := l.state.Resources[key]
-			if !exists || r.Kind != kind {
-				continue
-			}
-			if e = l.retireResource(ctx, key); e != nil {
-				return e
-			}
+	for _, key := range keys {
+		if err := l.retireResource(ctx, key); err != nil {
+			return err
 		}
 	}
 	return l.releaseCertificates(ctx, wildcardHost(l.state.ProxyURLTemplate))
 }
 func (l *tunnelLease) cleanup(ctx context.Context) error {
-	if !l.state.Compromised && !l.state.CompromisedAccess && !l.state.ConnectorRevoked {
+	if !l.state.Compromised && !l.state.ConnectorRevoked {
 		pending, err := machineapps.Pending(ctx, l.s.db, l.Machine.NodeID)
 		if err != nil {
 			return err
@@ -591,7 +399,7 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 			}
 		}
 	}
-	for _, kind := range []string{"dns", "tunnel", "policy", "app", "token"} {
+	for _, kind := range []string{"dns", "tunnel"} {
 		var keys []string
 		for key, r := range l.state.Resources {
 			if r.Kind == kind {
@@ -605,9 +413,6 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 			}
 		}
 	}
-	if _, e := l.s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE node_id=$1`, l.Machine.NodeID); e != nil {
-		return e
-	}
 	if err := l.releaseCertificates(ctx, ""); err != nil {
 		return err
 	}
@@ -616,7 +421,7 @@ func (l *tunnelLease) cleanup(ctx context.Context) error {
 	return l.save(ctx)
 }
 
-func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, credential AccessCredential) error {
+func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, credential string) error {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()
@@ -624,8 +429,8 @@ func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, crede
 	return verifyEndpointClient(ctx, state, credential, client)
 }
 
-func verifyEndpointClient(ctx context.Context, state RoutingState, credential AccessCredential, client *http.Client) error {
-	// Only the exact discovery HTTPS origin may receive an Access credential.
+func verifyEndpointClient(ctx context.Context, state RoutingState, credential string, client *http.Client) error {
+	// Only the configured discovery HTTPS origin may receive the bearer.
 	discoveryHost := endpointHost(state.DiscoveryURL)
 	for _, raw := range []string{state.ServiceURL, state.DiscoveryURL} {
 		u, err := url.Parse(raw)
@@ -637,24 +442,18 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 	copy := *client
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	client = &copy
-	get := func(raw, method string, auth bool, bearer bool) (int, json.RawMessage, error) {
+	get := func(raw, method string, auth bool) (int, json.RawMessage, error) {
 		req, e := http.NewRequestWithContext(ctx, method, raw, nil)
 		if e != nil {
 			return 0, nil, e
 		}
 		if auth {
-			if req.URL.User != nil || req.URL.Scheme != "https" || req.URL.Host != discoveryHost || credential.ClientID == "" || credential.ClientSecret == "" {
+			if req.URL.User != nil || req.URL.Scheme != "https" || req.URL.Host != discoveryHost || credential == "" {
 				return 0, nil, errors.New("request is outside protected endpoint scope")
 			}
-			req.Header.Set("CF-Access-Client-Id", credential.ClientID)
-			req.Header.Set("CF-Access-Client-Secret", credential.ClientSecret)
-			if bearer {
-				if credential.Bearer == "" {
-					return 0, nil, errors.New("discovery bearer unavailable")
-				}
-				req.Header.Set("Authorization", "Bearer "+credential.Bearer)
-			}
+			req.Header.Set("Authorization", "Bearer "+credential)
 		}
+
 		res, e := client.Do(req)
 		if e != nil {
 			return 0, nil, errors.New("HTTPS endpoint unavailable")
@@ -669,7 +468,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 		}
 		return res.StatusCode, b, nil
 	}
-	code, b, e := get(state.DiscoveryURL, "GET", true, true)
+	code, b, e := get(state.DiscoveryURL, "GET", true)
 	if e != nil || code != 200 {
 		return errors.New("authorized discovery is not ready")
 	}
@@ -679,29 +478,25 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 	if json.Unmarshal(b, &records) != nil || len(records) != 1 || records[0].Address != state.ServiceURL {
 		return errors.New("discovery address mismatch")
 	}
-	code, _, e = get(state.DiscoveryURL, "GET", true, false)
+	code, _, e = get(state.DiscoveryURL, "GET", false)
 	if e != nil || code != 401 {
 		return errors.New("discovery ingress bearer protection is not verified")
 	}
-	originalBearer := credential.Bearer
-	credential.Bearer += "invalid"
-	code, _, e = get(state.DiscoveryURL, "GET", true, true)
-	credential.Bearer = originalBearer
+	originalBearer := credential
+	credential += "invalid"
+	code, _, e = get(state.DiscoveryURL, "GET", true)
+	credential = originalBearer
 	if e != nil || code != 401 {
 		return errors.New("invalid discovery bearer was not rejected")
-	}
-	code, _, _ = get(state.DiscoveryURL, "GET", false, false)
-	if code != 401 && code != 403 {
-		return errors.New("discovery is not Access protected")
 	}
 	// This route accepts POST only. GET exercises public Node routing
 	// without reserving a session or requiring an installed app.
 	apiProbe := strings.TrimRight(state.ServiceURL, "/") + "/apps/lpcc-readiness/session"
-	code, _, e = get(apiProbe, "GET", false, false)
+	code, _, e = get(apiProbe, "GET", false)
 	if e != nil || code != http.StatusMethodNotAllowed {
 		return errors.New("public API is not ready")
 	}
-	code, _, e = get(strings.TrimSuffix(state.DiscoveryURL, "/discovery")+"/apps/lpcc-readiness/session", "GET", true, true)
+	code, _, e = get(strings.TrimSuffix(state.DiscoveryURL, "/discovery")+"/apps/lpcc-readiness/session", "GET", true)
 	if e != nil || code != 404 {
 		return errors.New("discovery route isolation is not verified")
 	}
@@ -730,7 +525,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 			}
 			u.Path = probe.Path
 			u.RawPath = probe.RawPath
-			code, _, e = get(u.String(), method, false, false)
+			code, _, e = get(u.String(), method, false)
 			if e != nil || code != 404 && !(check.allowBadRequest && code == 400) {
 				return fmt.Errorf("public route isolation is not verified")
 			}

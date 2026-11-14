@@ -34,7 +34,6 @@ services:
       - jwt-signing-key.pem
       - machine-token-secret
       - cloudflare-token
-      - collector-access-keyring.json
       - secrets-metadata-token
       - onchain-webhook-auth
     healthcheck:
@@ -171,8 +170,6 @@ secrets:
     file: ./secrets/machine-token-secret
   cloudflare-token:
     file: ./secrets/cloudflare-token
-  collector-access-keyring.json:
-    file: ./secrets/collector-access-keyring.json
   cloudflare-tunnel-token:
     file: ./secrets/cloudflare-tunnel-token
   secrets-metadata-token:

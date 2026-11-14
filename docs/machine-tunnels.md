@@ -3,19 +3,20 @@
 Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
 connector starts cloudflared, which forwards to private Traefik ingress, then Node;
 Node routes application traffic to private workloads. Client API and app hostnames
-are public through the tunnel; discovery requires both Cloudflare Access and an ingress bearer token in Stage 1.
+are public through the tunnel; discovery requires a machine-bound ingress bearer
+token.
 
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
 
-See the [two-stage authentication rollout](discovery-auth-rollout.md) for signing configuration and separate existing-resource migrations.
+See the [authentication rollout](discovery-auth-rollout.md) for signing
+configuration, key rotation and existing-resource migrations.
 
 ## Infrastructure and enablement
 
-Supply account and zone IDs, a dedicated base domain, Zero Trust team, scoped
-backend API credential, token lifetime/rotation window, observation TTL, drain
-deadline, quotas with overlapping-token/hostname headroom, and all fleet node
-and management address exclusions. Use the [required API token permissions](../api/internal/controlplane/tunnel/README.md#cloudflare-api-token-permissions)
+Supply account and zone IDs, a dedicated base domain, a scoped backend API
+credential, observation TTL, drain deadline, hostname and certificate quota
+headroom, and all fleet node and management address exclusions. Use the [required API token permissions](../api/internal/controlplane/tunnel/README.md#cloudflare-api-token-permissions)
 when creating the backend credential. The generated network policy assumes
 Runtime's fixed Pod/Service ranges. Verify actual
 CNI/DNAT behavior; update exclusions before introducing any new network ranges
@@ -46,9 +47,10 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
 
 | Class | Delivery / storage | Consumers |
 | --- | --- | --- |
-| Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel/Access and zone DNS/certificate write permissions | Control Center only |
+| Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel and zone DNS/certificate write permissions | Control Center only |
 | Machine Tunnel token | Provider API → authenticated Control Center endpoint → management agent's scoped Unix socket → private tmpfs file mode 0600 | cloudflared process only |
-| Discovery Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Discovery Collector |
+| Discovery signing private key | Local private read-only `JWTSigningPrivateKeyFile` mount | Control Center only |
+| Discovery verification public keys | Generated ConfigMap, independently rolled out | Runtime ingress-auth |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
 the `flux-system/livepeer-service-auth` Secret. Only the management agent mounts
@@ -56,18 +58,9 @@ its token. The connector uses its own socket and has no Kubernetes API credentia
 App Reconciler reports through a separate socket. Protect Kubernetes Secrets and
 backups at deployment.
 
-Use independently generated random 32-byte keys, base64 encoded:
-
-```json
-{"current":"<KEY_ID>","keys":{"<KEY_ID>":"<BASE64_32_BYTES>"}}
-```
-
-Back it up separately from database ciphertext. Add a new key, select it as
-current, and restart Control Center; reconciliation re-encrypts existing rows.
-Retain old keys until re-encryption and backup retention obligations are met.
-Keep credentials out of bundles, ConfigMaps, command arguments, URLs, logs,
-audit bodies and metric labels. Protect process memory and core dumps. Replace
-backend credentials by controlled restart.
+Keep private signing material and provisioning credentials out of bundles,
+ConfigMaps, command arguments, URLs, logs and metric labels. The public key map
+is safe to distribute; private material stays with Control Center.
 
 The connector fetches a fresh token before each start. Kubernetes restarts it
 when needed; token rotation replaces it. Starting it requires Control Center and
@@ -91,9 +84,9 @@ diagnosis and recovery.
 
 ## Reconciliation and recovery
 
-The worker provisions the tunnel, Access application and Service Auth policy,
-then installs audience-validating discovery ingress before publishing routes. Node
-configuration changes drain before replacement; an expired deadline requires
+The worker provisions the tunnel and private ingress routing. It waits for the
+current ingress configuration digest, Runtime readiness and connector readiness
+before publishing routes. Node configuration changes drain before replacement; an expired deadline requires
 intervention. Connector token changes replace its Deployment.
 
 After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
@@ -110,9 +103,9 @@ hostPort or hostNetwork to generated workloads.
 
 If provisioning has an uncertain outcome or an ownership conflict, inventory
 provider resources before retrying. Delete only proven-owned duplicates; do not
-adopt resources by name or discard retirement records. Restore externally deleted
-or unsafe Access protection before publishing routes. The last valid artifact and
-verified ingress survive transient provider failures. Account, zone or team changes
+adopt resources by name or discard retirement records. Restore authenticated
+ingress before publishing routes. The last valid artifact and verified ingress
+survive transient provider failures. Account or zone changes
 require retiring the previous scope first.
 
 ## Rotation and removal
@@ -121,7 +114,7 @@ Existing administrator authentication/auditing protects:
 
 ```text
 POST /api/admin/machines/<NODE_ID>/tunnel/rotate
-{"kind":"connector|access","compromised":false}
+{"kind":"connector","compromised":false}
 
 POST /api/admin/machines/<NODE_ID>/drain/retry
 {"generation":<EXPIRED_GENERATION>}
@@ -133,18 +126,15 @@ DELETE /api/admin/machines/<NODE_ID>
 The administrator fleet response supplies the node ID. Connector rotation keeps
 the tunnel UUID, advances token generation and replaces the process. Compromise
 rotation also disconnects existing connectors: rotation alone leaves established
-connections active. Access rotation overlaps versions until successful Collector
-acknowledgement; compromise revokes predecessors immediately. Expiry and
-security rotations proceed even when Runtime is offline; `RotationReason`
-reports rotation separately from observation expiry. See
-[Access service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
+connections active. Follow the [signing-key rotation procedure](discovery-auth-rollout.md#subsequent-key-rotation)
+for public-key distribution and retention. Signing and ingress verification work
+without the secrets service.
 
 Ordinary removal withdraws readiness and waits for draining. An expired drain
 deadline remains blocked even if a late completion arrives. An administrator can
 start a fresh drain with `drain/retry`, or deliberately remove with `force:true`.
 Deletion denies token delivery, installs deny-only ingress, revokes connector
-authentication before disconnecting, deletes DNS/tunnel resources before Access protection,
-and revokes source tokens.
+authentication before disconnecting, deletes owned DNS and tunnel resources.
 Cleanup proceeds even with the machine offline. Retired-node cleanup cannot
 delete a replacement node's routes or certificates.
 

@@ -76,8 +76,8 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 	if e := appInput(r, &in); e != nil {
 		return nil, e
 	}
-	if in.Kind != "connector" && in.Kind != "access" {
-		return nil, problem(400, "invalid_rotation", "Choose connector or access rotation.")
+	if in.Kind != "connector" {
+		return nil, problem(400, "invalid_rotation", "Choose connector rotation.")
 	}
 	node := r.PathValue("node_id")
 	return func(ctx context.Context, tx *sql.Tx, _ UserIdentity) (AdminChange, error) {
@@ -102,13 +102,8 @@ func (s *Server) prepareTunnelRotation(r *http.Request, _ UserIdentity) (AdminAp
 			return AdminChange{}, problem(409, "tunnel_inactive", "Tunnel is not active.")
 		}
 		previous := string(b)
-		if in.Kind == "connector" {
-			state.RotateTunnel = true
-			state.Compromised = state.Compromised || in.Compromised
-		} else {
-			state.RotateAccess = true
-			state.CompromisedAccess = state.CompromisedAccess || in.Compromised
-		}
+		state.RotateTunnel = true
+		state.Compromised = state.Compromised || in.Compromised
 		state.Ready = false
 		b, _ = json.Marshal(state)
 		changed := previous != string(b)
