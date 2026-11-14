@@ -124,6 +124,7 @@ func TestTOMLConfig(t *testing.T) {
 	files := map[string]string{
 		"connection": "postgres://example:[PG_PASSWORD]@localhost/test",
 		"metadata":   strings.Repeat("m", 32),
+		"webhook":    strings.Repeat("w", 32),
 		"password":   "p@ss word", "enrollment": strings.Repeat("a", 32), "machine": strings.Repeat("b", 32),
 		"config.toml": `PGConnstrFile = "connection"
 PGPasswordFile = "password"
@@ -136,6 +137,10 @@ SupabasePublishableKey = "public-key"
 RuntimeImage = "registry.invalid/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ConfigReconcileInterval = "75s"
 DefaultAdminEmail = "first@example.invalid"
+RuntimeNodeImage = "registry.invalid/node@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+OnchainConfigFile = "onchain.json"
+OnchainSecretsDir = "/run/onchain-rpc"
+OnchainWebhookSecretFile = "webhook"
 `,
 	}
 	for name, contents := range files {
@@ -149,10 +154,10 @@ DefaultAdminEmail = "first@example.invalid"
 	if err := (boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", filepath.Join(dir, "config.toml"), "--listen", "localhost:43000"}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if p.PGConnstr != files["connection"] || p.PGPassword != files["password"] || p.JWTSigningSecret != files["enrollment"] || p.MachineTokenSecret != files["machine"] {
+	if p.PGConnstr != files["connection"] || p.PGPassword != files["password"] || p.JWTSigningSecret != files["enrollment"] || p.MachineTokenSecret != files["machine"] || p.OnchainWebhookSecret != files["webhook"] {
 		t.Fatal("secret files were not resolved relative to TOML")
 	}
-	if p.SupabaseURL != "https://auth.example" || p.SupabasePublishableKey != "public-key" || p.ConfigReconcileInterval != 75*time.Second || p.PublicAPIURL != "https://public.example" || p.Listen != "localhost:43000" {
+	if p.Mode != "onchain" || p.SupabaseURL != "https://auth.example" || p.SupabasePublishableKey != "public-key" || p.ConfigReconcileInterval != 75*time.Second || p.PublicAPIURL != "https://public.example" || p.Listen != "localhost:43000" {
 		t.Fatal("configuration fields were not loaded")
 	}
 
@@ -169,7 +174,7 @@ DefaultAdminEmail = "first@example.invalid"
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
-	for _, name := range []string{"CONTROL_CENTER_CONFIG", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL"} {
+	for _, name := range []string{"CONTROL_CENTER_CONFIG", "CONTROL_CENTER_MODE", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL"} {
 		t.Setenv(name, "")
 	}
 }
@@ -200,6 +205,7 @@ func TestConfigValidation(t *testing.T) {
 		change func(*Params)
 		want   string
 	}{
+		{func(p *Params) { p.Mode = "" }, "onchain mode requires"},
 		{func(p *Params) { p.SecretsURL = "" }, "SecretsURL"},
 		{func(p *Params) { p.SecretsMetadataToken = "" }, "secrets metadata credentials"},
 		{func(p *Params) { p.JWTSigningSecret = "short" }, "jwt-signing-secret"},

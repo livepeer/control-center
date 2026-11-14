@@ -38,7 +38,7 @@ type Params struct {
 	PublicAPIURL             string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
 	SupabaseURL              string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
 	SupabasePublishableKey   string        `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
-	Mode                     string        `env:"CONTROL_CENTER_MODE" default:"offchain" alts:"offchain,onchain" descr:"Fixed deployment payment mode"`
+	Mode                     string        `env:"CONTROL_CENTER_MODE" default:"onchain" alts:"offchain,onchain" descr:"Fixed deployment payment mode"`
 	OnchainConfigFile        string        `optional:"true" basepath:"source" descr:"Control Center onchain configuration template JSON"`
 	OnchainSecretsDir        string        `optional:"true" descr:"Owner-only immutable RPC secret versions directory"`
 	OnchainWebhookSecret     string        `secret:"true" optional:"true"`
@@ -108,10 +108,10 @@ func (p Params) PreValidate() error {
 	if p.Mode != "" && p.Mode != "offchain" && p.Mode != "onchain" {
 		return errors.New("mode must be offchain or onchain")
 	}
-	if p.Mode == "onchain" && (p.OnchainConfigFile == "" || p.OnchainSecretsDir == "" || len(p.OnchainWebhookSecret) < 32 || p.RuntimeNodeImage == "") {
+	if p.networkMode() == "onchain" && (p.OnchainConfigFile == "" || p.OnchainSecretsDir == "" || len(p.OnchainWebhookSecret) < 32 || p.RuntimeNodeImage == "") {
 		return errors.New("onchain mode requires a configuration template, RPC secrets, webhook credential, and pinned Node image")
 	}
-	if p.Mode != "onchain" && p.OnchainConfigFile != "" {
+	if p.networkMode() == "offchain" && p.OnchainConfigFile != "" {
 		return errors.New("offchain mode cannot use an onchain configuration template")
 	}
 	if _, e := p.enrollmentKeys(); e != nil {
