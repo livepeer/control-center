@@ -112,9 +112,9 @@ services:
       SECRETS_SIGNING_KEY_FILE: /private/signing-key
       SECRETS_IDENTITY_KEY_FILE: /private/identity-key.pem
       SECRETS_ENCRYPTION_KEY_FILE: /private/encryption-key.pem
-      CONTROL_METADATA_TOKEN_FILE: /private/control-metadata-token
-      VAULT_TOKEN_FILE: /private/vault-token
-      VAULT_ADDR: https://vault:8200
+      SECRETS_CONTROL_TOKEN_FILE: /private/control-metadata-token
+      SECRETS_VAULT_TOKEN_FILE: /private/vault-token
+      SECRETS_VAULT_URL: https://vault:8200
       SSL_CERT_FILE: /private/ca-bundle.pem
     volumes:
       - ./secrets-service-private:/private:ro
