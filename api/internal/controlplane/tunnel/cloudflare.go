@@ -133,31 +133,20 @@ func sameHosts(a, b []string) bool {
 }
 
 func safeApplication(r CFResource, o cfObject) bool {
-	if len(r.Hosts) == 0 {
+	if r.Host == "" || !o.ServiceAuth401 || len(o.Destinations) != 1 {
 		return false
 	}
-	if !o.ServiceAuth401 || len(o.Destinations) != len(r.Hosts) {
-		return false
-	}
-	hosts := make([]string, 0, len(o.Destinations))
-	for _, d := range o.Destinations {
-		if d.Type != "public" || len(d.Overrides) != 0 {
-			return false
-		}
-		hosts = append(hosts, d.URI)
-	}
-	return sameHosts(hosts, r.Hosts)
+	d := o.Destinations[0]
+	return d.Type == "public" && d.URI == r.Host && len(d.Overrides) == 0
 }
 
 func applicationOverlaps(r CFResource, o cfObject) bool {
-	for _, wanted := range append(slices.Clone(r.Hosts), r.Host) {
-		for _, candidate := range append([]accessDestination{{URI: o.Domain}}, o.Destinations...) {
-			host := strings.ToLower(strings.SplitN(candidate.URI, "/", 2)[0])
-			// Access permits a wildcard within each DNS label, including api-*.
-			pattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(host), `\*`, `[^.]*`) + "$"
-			if regexp.MustCompile(pattern).MatchString(strings.ToLower(wanted)) {
-				return true
-			}
+	for _, candidate := range append([]accessDestination{{URI: o.Domain}}, o.Destinations...) {
+		host := strings.ToLower(strings.SplitN(candidate.URI, "/", 2)[0])
+		// Access permits a wildcard within each DNS label.
+		pattern := "^" + strings.ReplaceAll(regexp.QuoteMeta(host), `\*`, `[^.]*`) + "$"
+		if regexp.MustCompile(pattern).MatchString(strings.ToLower(r.Host)) {
+			return true
 		}
 	}
 	return false
@@ -298,11 +287,7 @@ func (c *cloudflareHTTP) Create(ctx context.Context, r CFResource, tunnel string
 		input["type"] = "self_hosted"
 		input["app_launcher_visible"] = false
 		input["service_auth_401_redirect"] = true
-		destinations := make([]accessDestination, 0, len(r.Hosts))
-		for _, host := range r.Hosts {
-			destinations = append(destinations, accessDestination{Type: "public", URI: host})
-		}
-		input["destinations"] = destinations
+		input["destinations"] = []accessDestination{{Type: "public", URI: r.Host}}
 	case "policy":
 		input["decision"] = "non_identity"
 		input["include"] = []any{map[string]any{"service_token": map[string]string{"token_id": tunnel}}}

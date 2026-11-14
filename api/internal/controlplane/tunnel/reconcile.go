@@ -214,16 +214,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	for _, key := range keys {
 		r := l.state.Resources[key]
 		if r.Kind == "app" && !r.Absent && !strings.HasPrefix(key, prefix) && r.ID != "" && r.Audience != "" {
-			// Old API hosts must precede the current proxy wildcard as well.
-			previous := []IngressRule{}
-			for _, host := range r.Hosts {
-				path := `^/discovery$`
-				if host != r.Host {
-					path = clientPath
-					previous = append(previous, IngressRule{Hostname: host, Path: reservedPath, Service: "http_status:404"})
-				}
-				previous = append(previous, IngressRule{Hostname: host, Path: path, Service: PrivateOrchestrator, OriginRequest: protectedOrigin(p, r.Audience)}, IngressRule{Hostname: host, Service: "http_status:404"})
-			}
+			previous := []IngressRule{{Hostname: r.Host, Path: `^/discovery$`, Service: PrivateOrchestrator, OriginRequest: protectedOrigin(p, r.Audience)}, {Hostname: r.Host, Service: "http_status:404"}}
 			rules = append(previous, rules...)
 		}
 	}
@@ -617,14 +608,13 @@ func (s *Manager) verifyEndpoints(ctx context.Context, state RoutingState, crede
 }
 
 func verifyEndpointClient(ctx context.Context, state RoutingState, credential AccessCredential, client *http.Client) error {
-	// Only these two exact HTTPS origins may receive an Access credential.
-	protected := map[string]bool{}
+	// Only the exact discovery HTTPS origin may receive an Access credential.
+	discoveryHost := endpointHost(state.DiscoveryURL)
 	for _, raw := range []string{state.ServiceURL, state.DiscoveryURL} {
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return errors.New("invalid protected endpoint")
 		}
-		protected[u.Scheme+"://"+u.Host] = true
 	}
 	// Enforce redirect rejection even for injected test transports.
 	copy := *client
@@ -636,7 +626,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 			return 0, nil, e
 		}
 		if auth {
-			if req.URL.User != nil || !protected[req.URL.Scheme+"://"+req.URL.Host] || credential.ClientID == "" || credential.ClientSecret == "" {
+			if req.URL.User != nil || req.URL.Scheme != "https" || req.URL.Host != discoveryHost || credential.ClientID == "" || credential.ClientSecret == "" {
 				return 0, nil, errors.New("request is outside protected endpoint scope")
 			}
 			req.Header.Set("CF-Access-Client-Id", credential.ClientID)
@@ -670,23 +660,19 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 	if code != 401 && code != 403 {
 		return errors.New("discovery is not Access protected")
 	}
-	// This route accepts POST only. GET exercises authenticated Node routing
+	// This route accepts POST only. GET exercises public Node routing
 	// without reserving a session or requiring an installed app.
 	apiProbe := strings.TrimRight(state.ServiceURL, "/") + "/apps/lpcc-readiness/session"
-	code, _, e = get(apiProbe, "GET", true)
-	if e != nil || code != http.StatusMethodNotAllowed {
-		return errors.New("authorized API is not ready")
-	}
 	code, _, e = get(apiProbe, "GET", false)
-	if e != nil || code != 401 && code != 403 {
-		return errors.New("API is not Access protected")
+	if e != nil || code != http.StatusMethodNotAllowed {
+		return errors.New("public API is not ready")
 	}
 	code, _, e = get(strings.TrimSuffix(state.DiscoveryURL, "/discovery")+"/apps/lpcc-readiness/session", "GET", true)
 	if e != nil || code != 404 {
 		return errors.New("discovery route isolation is not verified")
 	}
 	hosts := []string{state.ServiceURL, strings.Replace(state.ProxyURLTemplate, "{proxy}", "lpcc-readiness", 1)}
-	for i, host := range hosts {
+	for _, host := range hosts {
 		for _, check := range []struct {
 			path            string
 			allowBadRequest bool
@@ -710,7 +696,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 			}
 			u.Path = probe.Path
 			u.RawPath = probe.RawPath
-			code, _, e = get(u.String(), method, i == 0)
+			code, _, e = get(u.String(), method, false)
 			if e != nil || code != 404 && !(check.allowBadRequest && code == 400) {
 				return fmt.Errorf("public route isolation is not verified")
 			}

@@ -51,7 +51,6 @@ type CFResource struct {
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
 	Host              string    `json:"host,omitempty"`
-	Hosts             []string  `json:"hosts,omitempty"`
 	Pending           bool      `json:"pending,omitempty"`
 	Audience          string    `json:"audience,omitempty"`
 	Target            string    `json:"target,omitempty"`
