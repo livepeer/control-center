@@ -14,6 +14,7 @@ import (
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/consumer"
 	"github.com/livepeer/control-center/runtime/onchain"
+	protocol "github.com/livepeer/control-center/secrets"
 )
 
 func (s *Server) submissionToken(id string) string {
@@ -39,9 +40,16 @@ func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var bundle []byte
-	e = tx.QueryRowContext(r.Context(), `SELECT c.bundle FROM lpcc.machines m JOIN lpcc.machine_configs c USING(node_id) WHERE m.node_id=$1 AND m.credential_version=$2 FOR UPDATE OF m`, m.NodeID, m.CredentialVersion).Scan(&bundle)
+	var public string
+	e = tx.QueryRowContext(r.Context(), `SELECT c.bundle,k.public_key FROM lpcc.machines m JOIN lpcc.machine_configs c USING(node_id) JOIN lpcc.secret_machines k USING(node_id) WHERE m.node_id=$1 AND m.credential_version=$2 FOR UPDATE OF m,k`, m.NodeID, m.CredentialVersion).Scan(&bundle, &public)
 	if e != nil {
 		fail(w, 409, "configuration or enrollment changed")
+		return
+	}
+	pub, e := protocol.PublicKey(public)
+	endpoint := strings.TrimRight(s.params.PublicAPIURL, "/") + "/v1/nodes/" + m.NodeID + "/onchain/credentials"
+	if e != nil || !in.Verify(pub, m.NodeID, m.CredentialVersion, endpoint, s.currentTime()) {
+		fail(w, 403, "runtime launch proof required")
 		return
 	}
 	metadata, _, e := machineconfig.ReadApplied(bundle)

@@ -18,6 +18,7 @@ import (
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/transport"
+	protocol "github.com/livepeer/control-center/secrets"
 )
 
 const observationTTL = 30 * time.Second
@@ -66,6 +67,8 @@ type Request struct {
 	Launch
 	OnchainGeneration int64  `json:"onchain_generation"`
 	ConfigDigest      string `json:"config_digest"`
+	IssuedAt          int64  `json:"issued_at"`
+	Signature         []byte `json:"signature"`
 }
 
 type Grant struct {
@@ -91,6 +94,7 @@ type Integration struct {
 	Kube             transport.KubernetesReader
 	Desired          func() (contract.Metadata, bool)
 	StateFile        string
+	SigningKeyFile   string
 	mu               sync.Mutex
 	fetchOrder       uint64
 	validatedOrder   uint64
@@ -219,7 +223,17 @@ func (i *Integration) fetch(ctx context.Context, launch Launch) (Grant, error) {
 	i.mu.Unlock()
 	var request any
 	if i.Profile == Orchestrator {
-		request = Request{launch, m.Onchain.Generation, m.ConfigDigest}
+		raw, err := os.ReadFile(i.SigningKeyFile)
+		if err != nil {
+			return Grant{}, errors.New("runtime_key_unavailable")
+		}
+		key, err := protocol.ParsePrivate(raw)
+		if err != nil {
+			return Grant{}, errors.New("runtime_key_invalid")
+		}
+		proof := Request{Launch: launch, OnchainGeneration: m.Onchain.Generation, ConfigDigest: m.ConfigDigest}
+		proof.Sign(key, m.NodeID, m.CredentialVersion, i.Control.Base+"/"+i.Profile.endpoint(), time.Now())
+		request = proof
 	}
 	b, _, err := i.Control.Request(ctx, i.Profile.endpoint(), request, 16384)
 	if err != nil {

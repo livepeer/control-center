@@ -229,7 +229,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 	second := enroll(t, s, ownerA, strings.Repeat("b", 64))
 	enroll(t, s, ownerB, strings.Repeat("c", 64))
 	foreign, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerB, testOrchestrator(ownerB), time.Now())
-	conflict := request(t, s, "POST", "/v1/nodes/register", foreign, map[string]string{"fingerprint": strings.Repeat("a", 64), "hostname": "attacker", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1"})
+	conflict := request(t, s, "POST", "/v1/nodes/register", foreign, registrationBody(ownerB, strings.Repeat("a", 64), foreign))
 	if conflict.Code != 409 {
 		t.Fatal(conflict.Code)
 	}
@@ -318,7 +318,7 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 func TestRegistrationFailureIsAtomic(t *testing.T) {
 	s := newTestServer(t)
 	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
-	body := map[string]string{"fingerprint": strings.Repeat("a", 64), "hostname": "worker", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1"}
+	body := registrationBody(ownerA, strings.Repeat("a", 64), token)
 	s.build = func(machineconfig.Desired) ([]byte, string, error) { return nil, "", errors.New("generation failed") }
 	if w := request(t, s, "POST", "/v1/nodes/register", token, body); w.Code != 503 {
 		t.Fatal(w.Code)

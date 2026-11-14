@@ -125,6 +125,11 @@ versions for held workloads and rollback. Configuration changes use the
 normal app and session drain flow. Inspect configuration, local admission and
 handoff health separately in **Runtime status**. Redeemer owns confirmation.
 
+Grant requests require a fresh signature from the enrolled runtime key after
+the Pod is checked. The key is installed with management credentials before
+secrets setup. Onchain grants do not contact the secrets service; registrations
+without a runtime key are refused.
+
 Removing a machine can leave pending tickets unredeemed. Forced removal revokes
 submission grants and stops Node early. Keep
 Node's durable data, including a consistent backup of `/data/onchain.sqlite`

@@ -60,6 +60,7 @@ install_machine_secret() {
     --from-file="token=$INSTALL_DIR/credentials/service-token" \
     --from-file="config-url=$INSTALL_DIR/credentials/config-url" \
     --from-file="identity.json=$INSTALL_DIR/credentials/identity.json" \
+    --from-file="runtime-key.pem=$INSTALL_DIR/credentials/secrets/key.pem" \
     --dry-run=client -o yaml | kube apply -f -
   kube -n flux-system create secret generic livepeer-runner-bootstrap \
     --from-file="secret=$INSTALL_DIR/credentials/runner-bootstrap.secret" \
@@ -158,8 +159,8 @@ transition_credentials() {
       --config <(printf 'header = "Authorization: Bearer %s"\n' "$ENROLLMENT_TOKEN") \
       --data-binary @<(printf '%s' "$request") "$api/v1/nodes/$NODE_ID/credentials/refresh") || die 'HTTPS credential refresh failed; transition remains suspended'
   else
-    request=$(jq -nc --rawfile management_proof "$INSTALL_DIR/credentials/service-token" --arg fingerprint "$fingerprint" --arg hostname "$(hostname)" --arg install_dir "$INSTALL_DIR" \
-      --arg version "$(cat "$INSTALL_DIR/state/k3s-version")" '{management_proof:$management_proof,fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$version}')
+    request=$(jq -nc --arg fingerprint "$fingerprint" --arg hostname "$(hostname)" --arg install_dir "$INSTALL_DIR" \
+      --arg version "$(cat "$INSTALL_DIR/state/k3s-version")" '{fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$version}')
     request=$(jq -c --arg public "$SECRET_PUBLIC" --rawfile signature <(registration_key_proof <<< "$request") '.+{public_key:$public,signature:$signature}' <<< "$request")
     response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --proto '=https' \
       --write-out '\n%{http_code}' --request POST --header 'Content-Type: application/json' \
@@ -193,10 +194,7 @@ transition_credentials() {
   printf '%s' "$NODE_ID" | atomic_write "$INSTALL_DIR/credentials/node-id"
   save_identity
   if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then
-    local preserve_unencrypted=0
-    if [[ -d "$INSTALL_DIR/k3s/server" ]] && ! grep -q '^secrets-encryption: true$' "$INSTALL_DIR/config/k3s.yaml"; then preserve_unencrypted=1; fi
     render_template "$SCRIPT_DIR/config/k3s.yaml" "$INSTALL_DIR/config/k3s.yaml"
-    if (( preserve_unencrypted )); then sed -i '/^secrets-encryption: true$/d' "$INSTALL_DIR/config/k3s.yaml"; fi
     kube label "$cluster_node" "livepeer.io/node-id=$NODE_ID" --overwrite
   fi
   stage_manifests
@@ -249,7 +247,6 @@ prepare_secrets_enrollment() {
   command -v openssl >/dev/null || die 'install openssl before enrollment'
   initialize_installation
   install -d -m 0700 "$INSTALL_DIR/credentials/secrets"
-  if [[ ! -d "$INSTALL_DIR/k3s/server" ]]; then printf '1' | atomic_write "$INSTALL_DIR/credentials/secrets/new-cluster"; fi
   if [[ ! -f "$INSTALL_DIR/credentials/secrets/key.pem" ]]; then replace_secrets_key; fi
   SECRET_PUBLIC=$(openssl pkey -in "$INSTALL_DIR/credentials/secrets/key.pem" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 -w0)
   if [[ -n "$SETUP_TOKEN" ]]; then install_setup_cleanup; printf '%s' "$SETUP_TOKEN" | atomic_write "$INSTALL_DIR/credentials/secrets/setup"; fi
@@ -330,7 +327,7 @@ secrets_management_proof() {
 }
 
 enroll_secrets() {
-  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt nonce anchor candidate headers signature management_proof
+  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt nonce anchor candidate headers signature management_proof replaced=0
   [[ -f "$target/setup" ]] || return 0
   local payload exp padded
   payload=$(cut -d. -f2 "$target/setup")
@@ -341,8 +338,8 @@ enroll_secrets() {
   # Encryption readiness is established from K3s, never from a page-load grant.
   local encryption_status
   encryption_status=$("$INSTALL_DIR/bin/k3s" secrets-encrypt status --data-dir "$INSTALL_DIR/k3s" 2>/dev/null) || encryption_status=''
-  if ! grep -q 'Encryption Status: Enabled' <<< "$encryption_status" || { [[ ! -f "$target/new-cluster" ]] && ! grep -q 'reencrypt_finished' <<< "$encryption_status"; }; then
-    log 'Secrets enrollment pending: enable and verify K3s secrets encryption, then rerun this command.'
+  if ! grep -q 'Encryption Status: Enabled' <<< "$encryption_status"; then
+    log 'Secrets enrollment pending: K3s secrets encryption is not enabled.'
     return 0
   fi
   endpoint=$(cat "$target/url")
@@ -350,7 +347,7 @@ enroll_secrets() {
   anchor=$(secrets_service_pin)
   if [[ -n "$anchor" && $(jq -r '.origin' <<< "$anchor") != "$endpoint" ]]; then die 'secrets service origin differs from the installed trust anchor'; fi
   setup_token=$(cat "$target/setup")
-  for attempt in 1 2; do
+  for attempt in {1..12}; do
     nonce=$(openssl rand -hex 32)
     management_proof=$(secrets_management_proof "$nonce")
     request=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --arg nonce "$nonce" --rawfile signature <(secrets_key_proof "$NODE_ID") --arg proof "$management_proof" '{node_id:$node,public_key:$public,nonce:$nonce,signature:$signature,management_proof:$proof,encryption_ready:true}')
@@ -366,12 +363,15 @@ enroll_secrets() {
     if [[ -n "$anchor" ]] && ! verify_secrets_response "$anchor" "$request" "$setup_token" "$status" "$response" "$signature"; then
       log 'Secrets enrollment pending: service signature unavailable or invalid.'; return 0
     fi
-    if [[ "$status" == 409 && "$attempt" == 1 ]] && [[ $(jq -r '.code // empty' <<< "$response") == identity_reset_required ]]; then
+    if [[ "$status" == 409 && "$replaced" == 0 ]] && [[ $(jq -r '.code // empty' <<< "$response") == identity_reset_required ]]; then
       # A pinned reply was verified; first enrollment still trusts HTTPS.
       # Save the replacement before registration so interruptions reuse it.
       replace_secrets_key
+      replaced=1
       continue
     fi
+    # Capability reports may arrive after management Pods become ready.
+    if [[ "$status" == 503 && "$attempt" -lt 12 ]]; then sleep 5; continue; fi
     break
   done
   if [[ "$status" == 401 ]]; then rm -f -- "$target/setup"; log 'Secrets setup grant expired or revoked; generate a fresh enrollment command.'; return 0; fi
@@ -389,14 +389,14 @@ enroll_secrets() {
   kube label namespace livepeer-apps livepeer.io/managed-secrets=true --overwrite
   printf '1' | atomic_write "$public/managed"
   chown -R 65532:65532 "$public"
+  # An owner-authorized key reset must also update the onchain request signer.
+  install_machine_secret
   rm -f -- "$target/setup"
 }
 
 secrets_service_pin() {
   local target="$INSTALL_DIR/credentials/secrets"
   if [[ -s "$target/service.json" ]]; then jq -cS . "$target/service.json"
-  elif [[ -s "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json" ]]; then
-    jq -cS '.service // empty' "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json"
   fi
 }
 
