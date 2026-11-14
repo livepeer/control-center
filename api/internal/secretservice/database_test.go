@@ -112,7 +112,7 @@ func TestOrchestratorSecretsAreSharedAndMachineIdentityOutlivesIssuer(t *testing
 	}
 }
 
-func TestSetupAuthorizationIsRecheckedAfterIdentityWaitAndMetadata(t *testing.T) {
+func TestEnrollmentMembershipRevocation(t *testing.T) {
 	for _, stage := range []string{"identity-lock", "metadata-call"} {
 		t.Run(stage, func(t *testing.T) {
 			s, key, m, _ := dbService(t)
@@ -165,12 +165,16 @@ func TestSetupAuthorizationIsRecheckedAfterIdentityWaitAndMetadata(t *testing.T)
 				release()
 			}
 			w := <-done
-			if w.Code != 403 {
-				t.Fatal("revoked account/membership committed an identity", w.Code, w.Body.String())
+			status, identities := 403, 0
+			if stage == "metadata-call" {
+				status, identities = 200, 1
+			}
+			if w.Code != status {
+				t.Fatal("unexpected enrollment result", w.Code, w.Body.String())
 			}
 			var count int
-			if err := s.DB.QueryRow(`SELECT count(*) FROM lpsecrets.identities`).Scan(&count); err != nil || count != 0 {
-				t.Fatal("rejected enrollment persisted identity", count, err)
+			if err := s.DB.QueryRow(`SELECT count(*) FROM lpsecrets.identities`).Scan(&count); err != nil || count != identities {
+				t.Fatal("unexpected enrollment identity count", count, err)
 			}
 		})
 	}

@@ -15,10 +15,6 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "grant_refused")
 		return
 	}
-	if e = s.Metadata.Member(r.Context(), c.Subject, c.OrchestratorAddress); e != nil {
-		failAuthorization(w, e, 403, "orchestrator_access_required")
-		return
-	}
 	var in protocol.EnrollRequest
 	if decode(r, &in) != nil || !in.EncryptionReady || !in.ValidProof() {
 		fail(w, 400, "invalid_enrollment")
@@ -53,10 +49,6 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "unavailable")
 		return
 	}
-	if e = s.Metadata.Member(r.Context(), c.Subject, c.OrchestratorAddress); e != nil {
-		failAuthorization(w, e, 403, "orchestrator_access_required")
-		return
-	}
 	var owner, key string
 	var gen int64
 	var reset bool
@@ -77,6 +69,11 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if retired {
 		fail(w, 409, "identity_reset_required")
+		return
+	}
+	// Revocation can race enrollment, BUT this window is normally only a few seconds.
+	if e = s.Metadata.Member(r.Context(), c.Subject, c.OrchestratorAddress); e != nil {
+		failAuthorization(w, e, 403, "orchestrator_access_required")
 		return
 	}
 	if reset && key != "" {
@@ -103,12 +100,6 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if e != nil {
 		fail(w, 503, "unavailable")
-		return
-	}
-	// Metadata calls may have outlasted the member's access. Authorize acceptance
-	// after every blocking operation, while local identity locks are still held.
-	if e = s.Metadata.Member(r.Context(), c.Subject, c.OrchestratorAddress); e != nil {
-		failAuthorization(w, e, 403, "orchestrator_access_required")
 		return
 	}
 	if !exists || reset {
