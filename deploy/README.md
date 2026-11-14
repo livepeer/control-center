@@ -1,14 +1,16 @@
 # Staging deployment
 
 Docker Compose runs the Go API, built web UI with Caddy, persistent image
-registry, and Cloudflare Tunnel connector. PostgreSQL and authentication use the
-Supabase project selected in the private `config.toml`.
+registry, operator secrets service, Vault, and Cloudflare Tunnel connector.
+PostgreSQL and authentication use the Supabase project selected in the private
+`config.toml`.
 
 | Hostname | Origin | Routes |
 | --- | --- | --- |
 | `controlcenter.livepeer.live` | `http://localhost:33812` | UI, `/auth/callback`, `/bootstrap.sh`, versioned `/bootstrap/releases/*`, same-origin `/api/*` proxy |
 | `controlcenter-api.livepeer.live` | `http://localhost:43812` | API, `/v1/*`, `/discovery` |
 | `controlcenter-registry.livepeer.live` | `http://localhost:53812` | Read-only OCI registry `/v2/*` |
+| `controlcenter-secrets.livepeer.live` | `http://localhost:23812` | Operator secrets API |
 
 The application ports and the registry upload port `63812` bind only to
 `127.0.0.1`. The cloudflared container uses host networking so the configured
@@ -37,6 +39,9 @@ administrator signs in using the verified address in `DefaultAdminEmail`.
 
 The Compose network enables IPv6 because direct Supabase database endpoints can
 be IPv6-only. The host needs working IPv6 egress for such an endpoint.
+
+Prepare the required [operator secrets service and Vault](../docs/operator-secrets.md#deployment)
+before starting the complete deployment. They use the same Compose file.
 
 From this directory:
 

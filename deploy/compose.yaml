@@ -79,6 +79,53 @@ services:
     volumes:
       - registry-data:/var/lib/registry
 
+  secrets:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.secrets
+    env_file: ./secrets-service.env
+    ports:
+      - 127.0.0.1:23812:8080
+    environment:
+      SECRETS_LISTEN: ':8080'
+      SECRETS_DATABASE_URL_FILE: /private/database-url
+      SECRETS_SIGNING_KEY_FILE: /private/signing-key
+      SECRETS_IDENTITY_KEY_FILE: /private/identity-key.pem
+      SECRETS_ENCRYPTION_KEY_FILE: /private/encryption-key.pem
+      CONTROL_METADATA_TOKEN_FILE: /private/control-metadata-token
+      VAULT_TOKEN_FILE: /private/vault-token
+      VAULT_ADDR: https://vault:8200
+      SSL_CERT_FILE: /private/ca-bundle.pem
+    volumes:
+      - ./secrets-service-private:/private:ro
+    depends_on:
+      vault:
+        condition: service_healthy
+
+  vault:
+    <<: *service
+    # HashiCorp Vault 2.2.1.
+    image: hashicorp/vault@sha256:962a92876e168d68eaaa24b0b8b49bbce1cb63024060a67bba95cd158a366fc2
+    user: "65532:65532"
+    entrypoint: [vault]
+    command: [server, "-config=/vault/config/server.hcl"]
+    environment:
+      VAULT_ADDR: https://127.0.0.1:8200
+      VAULT_CACERT: /vault/tls/ca.pem
+    ports:
+      - 127.0.0.1:28200:8200
+    volumes:
+      - /opt/controlcenter-secrets/vault/config:/vault/config:ro
+      - /opt/controlcenter-secrets/vault/tls:/vault/tls:ro
+      - /opt/controlcenter-secrets/vault/data:/vault/data
+    healthcheck:
+      test: [CMD, vault, status]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
   cloudflared:
     <<: *service
     image: cloudflare/cloudflared:2026.10.7
