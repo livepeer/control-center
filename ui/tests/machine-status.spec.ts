@@ -42,10 +42,8 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example', secrets_url: secretsURL } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
-    if (path === '/api/me') return route.fulfill({ json: { user_id: user, is_admin: state.admin } })
-    if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
+    if (path === '/api/admin/overview') return route.fulfill({ json: { user_id: user, is_admin: state.admin, administrators: [], machines: [listedMachine] } })
     if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], onchain_mode: 'offchain', next_after_name: null } })
-    if (path === '/api/admin/machines') return route.fulfill({ json: { machines: [listedMachine] } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [listedMachine, { ...machine, node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker', }] } })
     if (path.startsWith('/api/admin/machines/') && path.endsWith('/apps')) return route.fulfill({ json: { assignments: [], apps_generation: 2, published_generation: 1, next_after_revision_id: null, last_config_fetch_at: null } })
     if (path.endsWith('/status')) {

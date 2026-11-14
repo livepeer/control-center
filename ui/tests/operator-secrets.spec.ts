@@ -39,7 +39,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
    case '/api/operator/config':expect(req.headers().authorization).toBe(`Bearer ${session.access_token}`);return route.fulfill({json:{public_api_url:'https://api.example',secrets_url:origin}})
    case '/api/bootstrap-token':return route.fulfill({json:{token:'control.grant.signature',expires_at:new Date(expiry*1000).toISOString()}})
    case '/api/machines':return route.fulfill({json:{machines:[]}})
-   case '/api/me':return route.fulfill({json:{user_id:session.user.id,is_admin:false}})
+   case '/api/admin/overview':return route.fulfill({json:{user_id:session.user.id,is_admin:false,administrators:[],machines:[]}})
    case '/api/operator/apps':if(appReads++===0){await initialApps;return route.fulfill({status:503,json:{error:'unavailable'}})}return route.fulfill({json:{apps:[{name:'provider',aliases:[{name:'provider-alias'}],secrets:[{name:'API_TOKEN',secret:secret.name,key:secret.key},{name:'SECOND_TOKEN',secret:secret.name,key:'another-key'}],machines:['owner-machine'],denied,generation:denied?1:0}]}})
    case '/api/operator/apps/provider/policy':denied=req.postDataJSON().denied;return route.fulfill({json:{generation:1}})
    default:return route.fulfill({status:404,json:{error:'unexpected'}})
@@ -157,7 +157,7 @@ async function operatorFixture(page: Page, trusted = true) {
    case '/api/operator/config':return route.fulfill({json:{public_api_url:'https://api.example',secrets_url:origin}})
    case '/api/bootstrap-token':return route.fulfill({json:{token:'control.grant.signature',expires_at:new Date(expiry*1000).toISOString()}})
    case '/api/machines':return route.fulfill({json:{machines:[]}})
-   case '/api/me':return route.fulfill({json:{user_id:session.user.id,is_admin:false}})
+   case '/api/admin/overview':return route.fulfill({json:{user_id:session.user.id,is_admin:false,administrators:[],machines:[]}})
    case '/api/operator/apps':return route.fulfill(state.failApps ? {status:503,json:{error:'unavailable'}} : {json:{apps:state.apps}})
    case '/api/operator/apps/provider/policy': {
     state.apps[0].denied = req.postDataJSON().denied; state.apps[0].generation++

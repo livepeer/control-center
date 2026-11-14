@@ -14,7 +14,7 @@ function session(id: string) {
 }
 
 async function setup(page: Page, initialAdmin = true) {
-  const state = { admin: initialAdmin, meStatus: 200, rejectMutation: false, gatewayError: null as { status: number; body: string } | null, missingAccount: false, grants: [grantA] as (typeof grantA | typeof grantB)[], holdFleet: false, heldFleet: null as Route | null, holdMe: false, heldMe: null as Route | null, posted: null as unknown }
+  const state = { admin: initialAdmin, overviewStatus: 200, rejectMutation: false, gatewayError: null as { status: number; body: string } | null, missingAccount: false, grants: [grantA] as (typeof grantA | typeof grantB)[], holdOverview: false, heldOverview: null as Route | null, overviewRequests: 0, legacyReads: 0, posted: null as unknown }
   await page.addInitScript(({ saved }) => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
     // Model an already-resolving response whose completion survives abort.
@@ -30,15 +30,13 @@ async function setup(page: Page, initialAdmin = true) {
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932', secrets_url: secretsURL } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture-enrollment', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
-    if (path === '/api/me') {
-      if (state.holdMe) { state.heldMe = route; return }
-      return route.fulfill({ status: state.meStatus, json: state.meStatus === 200 ? { user_id: actor, is_admin: actor === a && state.admin } : { error: 'Capability service unavailable.' } })
+    if (['/api/me', '/api/admin/administrators', '/api/admin/machines'].includes(path) && route.request().method() === 'GET') state.legacyReads++
+    if (path === '/api/admin/overview') {
+      state.overviewRequests++
+      if (state.holdOverview) { state.heldOverview = route; return }
+      return route.fulfill({ status: state.overviewStatus, json: state.overviewStatus === 200 ? { user_id: actor, is_admin: actor === a && state.admin, administrators: state.grants, machines: [fleet] } : { error: 'Capability service unavailable.' } })
     }
     if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], payment_mode: 'offchain', next_after_name: null } })
-    if (path === '/api/admin/machines') {
-      if (state.holdFleet) { state.heldFleet = route; return }
-      return route.fulfill({ json: { machines: [fleet] } })
-    }
     if (route.request().method() !== 'GET') {
       if (state.gatewayError) return route.fulfill({ ...state.gatewayError, contentType: 'text/html' })
       if (state.rejectMutation) { state.admin = false; return route.fulfill({ status: 403, json: { error: 'Administrator access is required.' } }) }
@@ -52,7 +50,7 @@ async function setup(page: Page, initialAdmin = true) {
     }
     return route.fulfill({ json: { administrators: state.grants } })
   })
-  const capability = page.waitForResponse(response => response.url().endsWith('/api/me'))
+  const capability = page.waitForResponse(response => response.url().endsWith('/api/admin/overview'))
   await mockSecrets(page)
   await page.goto('/')
   await (await capability).finished()
@@ -88,7 +86,7 @@ test('admin can grant and revoke another account, but self-revocation is disable
 test('capability outage clears privileged data while preserving the owner console', async ({ page }) => {
   const state = await setup(page)
   await expect(page.getByText('private-fleet-machine')).toBeVisible()
-  state.meStatus = 503
+  state.overviewStatus = 503
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Grant access' })).toHaveCount(0)
@@ -96,18 +94,18 @@ test('capability outage clears privileged data while preserving the owner consol
   await expect(page.getByRole('heading', { name: 'Your machines', level: 2 })).toBeVisible()
 })
 
-test('late fleet success cannot restore data after same-session authorization loss', async ({ page }) => {
+test('late overview success cannot restore data after same-session authorization loss', async ({ page }) => {
   const state = await setup(page)
   await expect(page.getByText('private-fleet-machine')).toBeVisible()
-  state.holdFleet = true
+  state.holdOverview = true
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect.poll(() => state.heldFleet !== null).toBe(true)
+  await expect.poll(() => state.heldOverview !== null).toBe(true)
   state.rejectMutation = true
   await page.getByLabel('Existing account email').fill('b@example.invalid')
   await page.getByRole('button', { name: 'Grant access' }).click()
   await expect(page.getByRole('heading', { name: 'Administration', exact: true })).toHaveCount(0)
-  const late = page.waitForResponse(response => response.url().endsWith('/api/admin/machines'))
-  await state.heldFleet!.fulfill({ json: { machines: [{ ...fleet, hostname: 'obsolete-secret' }] } })
+  const late = page.waitForResponse(response => response.url().endsWith('/api/admin/overview'))
+  await state.heldOverview!.fulfill({ json: { user_id: a, is_admin: true, administrators: [grantA], machines: [{ ...fleet, hostname: 'obsolete-secret' }] } })
   await (await late).finished(); await settled(page)
   await expect(page.getByText('obsolete-secret')).toHaveCount(0)
   await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
@@ -116,17 +114,17 @@ test('late fleet success cannot restore data after same-session authorization lo
 test('a delayed capability response from a previous account is ignored', async ({ page }) => {
   const state = await setup(page)
   await expect(page.getByText('private-fleet-machine')).toBeVisible()
-  state.holdMe = true
+  state.holdOverview = true
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect.poll(() => state.heldMe !== null).toBe(true)
-  state.holdMe = false
+  await expect.poll(() => state.heldOverview !== null).toBe(true)
+  state.holdOverview = false
   await page.evaluate(saved => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
     new BroadcastChannel('sb-auth-auth-token').postMessage({ event: 'SIGNED_IN', session: saved })
   }, session(b))
   await expect(page.locator('.account-email')).toHaveText('b@example.invalid')
-  const late = page.waitForResponse(response => response.url().endsWith('/api/me'))
-  await state.heldMe!.fulfill({ json: { user_id: a, is_admin: true } })
+  const late = page.waitForResponse(response => response.url().endsWith('/api/admin/overview'))
+  await state.heldOverview!.fulfill({ json: { user_id: a, is_admin: true, administrators: [grantA], machines: [fleet] } })
   await (await late).finished(); await settled(page)
   await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Administration', exact: true })).toHaveCount(0)
@@ -137,23 +135,23 @@ test('grant errors remain visible after inventory refresh', async ({ page }) => 
   await expect(page.getByText('private-fleet-machine')).toBeVisible()
   state.missingAccount = true
   await page.getByLabel('Existing account email').fill('missing@example.invalid')
-  const refreshed = page.waitForResponse(response => response.url().endsWith('/api/admin/administrators') && response.request().method() === 'GET')
+  const refreshed = page.waitForResponse(response => response.url().endsWith('/api/admin/overview') && response.request().method() === 'GET')
   await page.getByRole('button', { name: 'Grant access' }).click()
   await (await refreshed).finished(); await settled(page)
   await expect(page.getByRole('alert')).toContainText('No eligible confirmed account')
   await expect(page.getByRole('button', { name: 'Grant access' })).toBeEnabled()
 })
 
-test('sign-out ignores a pending fleet response', async ({ page }) => {
+test('sign-out ignores a pending overview response', async ({ page }) => {
   const state = await setup(page)
   await expect(page.getByText('private-fleet-machine')).toBeVisible()
-  state.holdFleet = true
+  state.holdOverview = true
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect.poll(() => state.heldFleet !== null).toBe(true)
+  await expect.poll(() => state.heldOverview !== null).toBe(true)
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByLabel('Email address')).toBeVisible()
-  const late = page.waitForResponse(response => response.url().endsWith('/api/admin/machines'))
-  await state.heldFleet!.fulfill({ json: { machines: [fleet] } })
+  const late = page.waitForResponse(response => response.url().endsWith('/api/admin/overview'))
+  await state.heldOverview!.fulfill({ json: { user_id: a, is_admin: true, administrators: [grantA], machines: [fleet] } })
   await (await late).finished(); await settled(page)
   await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
 })
@@ -162,14 +160,41 @@ for (const status of [401,403,503]) {
   test(`non-JSON ${status} mutation error clears controls before capability refresh finishes`, async ({ page }) => {
     const state = await setup(page)
     await expect(page.getByText('private-fleet-machine')).toBeVisible()
-    state.holdMe = true
+    state.holdOverview = true
     state.gatewayError = { status, body: status === 401 ? '' : '<h1>Gateway error</h1>' }
     await page.getByLabel('Existing account email').fill('b@example.invalid')
     await page.getByRole('button', { name: 'Grant access' }).click()
-    await expect.poll(() => state.heldMe !== null).toBe(true)
+    await expect.poll(() => state.heldOverview !== null).toBe(true)
     await expect(page.getByRole('button', { name: 'Grant access' })).toHaveCount(0)
     await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
     if (status === 503) await expect(page.getByRole('alert')).toContainText('The request failed. Please try again.')
-    await state.heldMe!.fulfill({ json: { user_id: a, is_admin: false } })
+    await state.heldOverview!.fulfill({ json: { user_id: a, is_admin: false } })
   })
 }
+
+for (const status of [401, 403]) {
+  test(`denied ${status} overview clears privileged data`, async ({ page }) => {
+    const state = await setup(page)
+    await expect(page.getByText('private-fleet-machine')).toBeVisible()
+    state.overviewStatus = status
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await expect(page.getByRole('heading', { name: 'Administration', exact: true })).toHaveCount(0)
+    await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
+  })
+}
+
+test('each timer poll uses one overview request and clears data after revocation', async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page)
+  await expect(page.getByText('private-fleet-machine')).toBeVisible()
+  const before = state.overviewRequests
+  const refreshed = page.waitForResponse(response => response.url().endsWith('/api/admin/overview'))
+  await page.clock.fastForward(5000)
+  await (await refreshed).finished(); await settled(page)
+  expect(state.overviewRequests).toBe(before + 1)
+  expect(state.legacyReads).toBe(0)
+  state.admin = false
+  await page.clock.fastForward(5000)
+  await expect(page.getByText('private-fleet-machine')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Grant access' })).toHaveCount(0)
+})

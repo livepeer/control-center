@@ -38,7 +38,7 @@ async function setup(page: Page, { signedIn = true, empty = false } = {}) {
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example', mode: 'offchain', secrets_url: secretsURL } })
     if (path === '/api/operator/apps') return route.fulfill({ json: { apps: [] } })
     if (path === '/api/orchestrators') return route.fulfill({ json: { orchestrators: state.groups } })
-    if (path === '/api/me') return route.fulfill({ json: { user_id: user, is_admin: false } })
+    if (path === '/api/admin/overview') return route.fulfill({ json: { user_id: user, is_admin: false, administrators: [], machines: [] } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'bootstrap-fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path.endsWith('/members') && req.method() === 'GET') {

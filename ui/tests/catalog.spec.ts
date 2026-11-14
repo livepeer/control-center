@@ -12,7 +12,7 @@ async function authenticate(page: Page, saved: ReturnType<typeof session>, event
   await page.evaluate(({ saved, event }) => { localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved)); new BroadcastChannel('sb-auth-auth-token').postMessage({ event, session: saved }) }, { saved, event })
 }
 async function setup(page: Page, existing = false, paginated = false) {
-  const state = { admin: true, hold: false, held: null as Route | null, reject: 0, published: null as unknown, conflict: false, head: revisionId, holdCapability: '' as '' | 'me' | 'fleet', heldCapability: null as Route | null, capabilityRequests: 0, createdName: 'example', holdHistory: false, heldHistory: null as Route | null, holdMutation: false, heldMutations: [] as Route[] }
+  const state = { admin: true, hold: false, held: null as Route | null, reject: 0, published: null as unknown, conflict: false, head: revisionId, holdCapability: false, heldCapability: null as Route | null, capabilityRequests: 0, createdName: 'example', holdHistory: false, heldHistory: null as Route | null, holdMutation: false, heldMutations: [] as Route[] }
   const revision = { revision_id: revisionId, name: 'example', source_toml: 'name="example"', definition: { name: 'example' }, digest: 'sha256:published', revision: paginated ? 2 : 1, lifecycle: { version: 1, retired_at: null }, published_at: '2026-11-06T00:00:00Z', published_by: id }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
@@ -26,14 +26,12 @@ async function setup(page: Page, existing = false, paginated = false) {
     if (p === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture-public' } })
     if (p === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932', secrets_url: secretsURL } })
     if (p === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
-    if (p === '/api/me') {
+    if (p === '/api/admin/overview') {
       state.capabilityRequests++
-      if (state.holdCapability === 'me') { state.heldCapability = route; return }
+      if (state.holdCapability) { state.heldCapability = route; return }
       const actor = route.request().headers().authorization?.includes(session().access_token.split('.')[1]) ? id : '22222222-2222-4222-8222-222222222222'
-      return route.fulfill({ json: { user_id: actor, is_admin: state.admin && actor === id } })
+      return route.fulfill({ json: { user_id: actor, is_admin: state.admin && actor === id, administrators: [], machines: [] } })
     }
-    if (p === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
-    if (p === '/api/admin/machines' && state.holdCapability === 'fleet') { state.heldCapability = route; return }
     if (p.endsWith('/machines')) return route.fulfill({ json: { machines: [] } })
     if (p === '/api/admin/apps/validate') {
       if (state.hold) { state.held = route; return }
@@ -71,25 +69,25 @@ async function setup(page: Page, existing = false, paginated = false) {
 test('catalog draft survives capability refresh and same-account token renewal', async ({ page }) => {
   await setup(page)
   await page.getByLabel('New app TOML').fill('private draft')
-  const checked = page.waitForResponse(r => r.url().endsWith('/api/me'))
+  const checked = page.waitForResponse(r => r.url().endsWith('/api/admin/overview'))
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await (await checked).finished()
   await expect(page.getByLabel('New app TOML')).toHaveValue('private draft')
   await authenticate(page, session('renewed'))
   await expect(page.getByLabel('New app TOML')).toHaveValue('private draft')
 })
-for (const stage of ['me', 'fleet'] as const) {
-  test(`renewal during pending ${stage} refresh resumes authority polling`, async ({ page }) => {
+for (const lateFailure of [false, true]) {
+  test(`renewal during pending overview ignores obsolete ${lateFailure ? 'failure' : 'capability'} response`, async ({ page }) => {
     const state = await setup(page)
     await page.getByLabel('New app TOML').fill('private draft')
-    state.holdCapability = stage
+    state.holdCapability = true
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
     await expect.poll(() => !!state.heldCapability).toBe(true)
     const requests = state.capabilityRequests
-    state.holdCapability = ''
+    state.holdCapability = false
     await authenticate(page, session('renewed'))
     await expect.poll(() => state.capabilityRequests).toBeGreaterThan(requests)
-    await state.heldCapability!.fulfill(stage === 'me' ? { json: { user_id: id, is_admin: false } } : { status: 503, json: { error: 'Obsolete outage' } })
+    await state.heldCapability!.fulfill(lateFailure ? { status: 503, json: { error: 'Obsolete outage' } } : { json: { user_id: id, is_admin: false, administrators: [], machines: [] } })
     await expect(page.getByLabel('New app TOML')).toHaveValue('private draft')
     state.admin = false
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))

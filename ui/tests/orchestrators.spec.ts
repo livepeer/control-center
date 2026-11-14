@@ -33,7 +33,7 @@ async function setup(page: Page, { empty = false, admin = false, hold = false, s
     if(path==='/api/orchestrators'&&req.method()==='POST') {const body=req.postDataJSON() as Record<string,string>;state.claims.push(body);const claimed=(body.address||'0x0000000000000000000000000000000000000000').toLowerCase();state.groups=[...state.groups,{address:claimed,display_name:''}];return route.fulfill({status:201,json:{address:claimed}})}
     if(path==='/api/orchestrators'){state.membershipTokens.push(req.headers().authorization);return route.fulfill(state.fail?{status:503,json:{error:'Membership service unavailable.'}}:{json:{orchestrators:state.groups}})}
     if(path==='/api/operator/config')return route.fulfill({json:{public_api_url:'https://api.example',mode,secrets_url:'https://secrets.test'}})
-    if(path==='/api/me')return route.fulfill({json:{user_id:req.headers().authorization===`Bearer ${session(otherUser).access_token}`?otherUser:user,is_admin:admin}})
+    if(path==='/api/admin/overview')return route.fulfill({json:{user_id:req.headers().authorization===`Bearer ${session(otherUser).access_token}`?otherUser:user,is_admin:admin,administrators:[],machines:[]}})
     if(path.startsWith('/api/admin/'))return route.fulfill({json:{administrators:[],machines:[],apps:[]}})
     if(path==='/api/bootstrap-token'){
       state.controlGrants++
