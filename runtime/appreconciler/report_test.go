@@ -9,6 +9,7 @@ import (
 	"github.com/livepeer/control-center/runtime/internal/testutil"
 	"github.com/livepeer/control-center/schema"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -56,35 +57,38 @@ func TestReceiptsDiscardSupersededAndBindFailuresToExactAttempt(t *testing.T) {
 }
 
 func TestReportRetriesUnchangedAndRefreshesAtCadence(t *testing.T) {
-	c, input, _, _, r, now := fixtureController(t)
-	tick(t, c)
-	tick(t, c)
-	if len(r.reports) != 1 {
-		t.Fatal("sent duplicate status every tick")
-	}
-	r.statusFail = true
-	input.value.Metadata.AppsError = "unsupported_instance_mode"
-	if c.Tick(t.Context()) == nil {
-		t.Fatal("fixture report did not fail")
-	}
-	failed := r.reports[len(r.reports)-1]
-	*now = now.Add(time.Second)
-	_ = c.Tick(t.Context())
-	if r.reports[len(r.reports)-1].Sequence != failed.Sequence {
-		t.Fatal("delivery retry became a fresh observation")
-	}
-	r.statusFail = false
-	tick(t, c)
-	count := len(r.reports)
-	tick(t, c)
-	if len(r.reports) != count {
-		t.Fatal("acknowledged report retried immediately")
-	}
-	*now = now.Add(31 * time.Second)
-	tick(t, c)
-	if len(r.reports) != count+1 || r.reports[len(r.reports)-1].Sequence <= failed.Sequence {
-		t.Fatal("status observation was not refreshed")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c, input, _, _, r, _ := fixtureController(t)
+		c.Now = time.Now
+		tick(t, c)
+		tick(t, c)
+		if len(r.reports) != 1 {
+			t.Fatal("sent duplicate status every tick")
+		}
+		r.statusFail = true
+		input.value.Metadata.AppsError = "unsupported_instance_mode"
+		if c.Tick(t.Context()) == nil {
+			t.Fatal("fixture report did not fail")
+		}
+		failed := r.reports[len(r.reports)-1]
+		time.Sleep(time.Second)
+		_ = c.Tick(t.Context())
+		if r.reports[len(r.reports)-1].Sequence != failed.Sequence {
+			t.Fatal("delivery retry became a fresh observation")
+		}
+		r.statusFail = false
+		tick(t, c)
+		count := len(r.reports)
+		tick(t, c)
+		if len(r.reports) != count {
+			t.Fatal("acknowledged report retried immediately")
+		}
+		time.Sleep(31 * time.Second)
+		tick(t, c)
+		if len(r.reports) != count+1 || r.reports[len(r.reports)-1].Sequence <= failed.Sequence {
+			t.Fatal("status observation was not refreshed")
+		}
+	})
 }
 
 func TestIdleOwnerAndClockFaultDoNotInventWorkProof(t *testing.T) {
@@ -186,13 +190,14 @@ func TestAssignmentRefusalIsSpecificBeforeInstanceCreation(t *testing.T) {
 }
 
 func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
 	synctest.Test(t, func(t *testing.T) {
 		c, _, k, _, reports, _ := fixtureController(t)
 		c.Now = time.Now
 		c.Probes = NewProbes()
-		c.Probes.Client.Transport = reviewRoundTripper(func(*http.Request) (*http.Response, error) {
-			return nil, errors.New("probe unavailable")
-		})
+		c.Probes.Address = func(*Instance) string { return server.URL }
+		c.Probes.Client.Transport = &http.Transport{DisableKeepAlives: true}
 		registerApps(t, c, k)
 		synctest.Wait()
 		now := time.Now()

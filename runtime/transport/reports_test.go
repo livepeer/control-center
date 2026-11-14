@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -149,21 +150,23 @@ func (s delayedReport) Request(ctx context.Context, _ string, payload any, _ int
 }
 
 func TestIndependentComponentReportersDoNotBlockEachOther(t *testing.T) {
-	directory := t.TempDir()
-	sink := delayedReport{make(chan struct{}), make(chan struct{})}
-	runtime := &Reports{Client: sink, Directory: directory}
-	connector := &Reports{Client: sink, Directory: directory}
-	done := make(chan struct{})
-	go func() { defer close(done); _, _, _ = runtime.Request(t.Context(), "status", sample(time.Now()), 100) }()
-	<-sink.entered
-	defer func() { close(sink.release); <-done }()
-	value := sample(time.Now())
-	value["component"] = "connector"
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	if _, _, err := connector.Request(ctx, "status", value, 100); err != nil {
-		t.Fatal("runtime transmission blocked connector evidence", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		directory := t.TempDir()
+		sink := delayedReport{make(chan struct{}), make(chan struct{})}
+		runtime := &Reports{Client: sink, Directory: directory}
+		connector := &Reports{Client: sink, Directory: directory}
+		done := make(chan struct{})
+		go func() { defer close(done); _, _, _ = runtime.Request(t.Context(), "status", sample(time.Now()), 100) }()
+		<-sink.entered
+		defer func() { close(sink.release); <-done }()
+		value := sample(time.Now())
+		value["component"] = "connector"
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if _, _, err := connector.Request(ctx, "status", value, 100); err != nil {
+			t.Fatal("runtime transmission blocked connector evidence", err)
+		}
+	})
 }
 
 func TestReportsRetryOrderingRejectionBlocksNewSamples(t *testing.T) {

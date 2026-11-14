@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -77,33 +78,36 @@ func TestIssuanceHasNoStorageOrVaultDependency(t *testing.T) {
 	}
 }
 func TestGrantExpiryAudienceScopeAndRollover(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	s := New(nil, Config{SigningKey: strings.Repeat("a", 32), SigningKeyID: "a"})
-	s.Now = func() time.Time { return now }
-	raw, _, e := s.Grant(testUser, testOwner)
-	if e != nil {
-		t.Fatal(e)
-	}
-	s.Config.SigningKeys = map[string]string{"a": s.Config.SigningKey}
-	s.Config.SigningKeyID = "b"
-	s.Config.SigningKey = strings.Repeat("b", 32)
-	if _, e = s.grant(raw, false); e != nil {
-		t.Fatal("old key rejected", e)
-	}
-	now = now.Add(time.Hour)
-	if _, e = s.grant(raw, false); e == nil {
-		t.Fatal("expired grant accepted")
-	}
-	if _, e = s.grant(raw, true); e != nil {
-		t.Fatal("revocation cannot inspect signed expiry", e)
-	}
-	c := claims{jwt.RegisteredClaims{Issuer: issuer, Subject: "11111111-1111-4111-8111-111111111111", Audience: jwt.ClaimStrings{"other"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now), ID: ident()}, "machines:enroll", testOwner}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
-	token.Header["kid"] = "b"
-	bad, _ := token.SignedString([]byte(s.Config.SigningKey))
-	if _, e = s.grant(bad, true); e == nil {
-		t.Fatal("wrong audience accepted")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC().Truncate(time.Second)
+		s := New(nil, Config{SigningKey: strings.Repeat("a", 32), SigningKeyID: "a"})
+		s.Now = time.Now
+		raw, _, e := s.Grant(testUser, testOwner)
+		if e != nil {
+			t.Fatal(e)
+		}
+		s.Config.SigningKeys = map[string]string{"a": s.Config.SigningKey}
+		s.Config.SigningKeyID = "b"
+		s.Config.SigningKey = strings.Repeat("b", 32)
+		if _, e = s.grant(raw, false); e != nil {
+			t.Fatal("old key rejected", e)
+		}
+		time.Sleep(time.Hour)
+		now = time.Now()
+		if _, e = s.grant(raw, false); e == nil {
+			t.Fatal("expired grant accepted")
+		}
+		if _, e = s.grant(raw, true); e != nil {
+			t.Fatal("revocation cannot inspect signed expiry", e)
+		}
+		c := claims{jwt.RegisteredClaims{Issuer: issuer, Subject: "11111111-1111-4111-8111-111111111111", Audience: jwt.ClaimStrings{"other"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now), ID: ident()}, "machines:enroll", testOwner}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
+		token.Header["kid"] = "b"
+		bad, _ := token.SignedString([]byte(s.Config.SigningKey))
+		if _, e = s.grant(bad, true); e == nil {
+			t.Fatal("wrong audience accepted")
+		}
+	})
 }
 func TestMalformedAndCredentialBearingBodiesAreNotEchoed(t *testing.T) {
 	s := New(nil, Config{})

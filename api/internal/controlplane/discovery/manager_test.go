@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	shared "github.com/livepeer/node/discovery/shared"
@@ -488,44 +489,40 @@ func TestFleetWorkerStartsEmptyAndClosesPendingWork(t *testing.T) {
 		io.WriteString(w, discoveryTestInventory)
 	}))
 	defer server.Close()
-	b := &simulatedDiscoveryBackend{credentials: map[string]Credential{}}
-	f, _ := testFleet(t, b, server)
-	reconcileFleet(t, f)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { f.collector.Run(ctx, time.Hour); close(done) }()
-	source := testSource("one", server.URL)
-	b.mu.Lock()
-	b.sources = []Source{source}
-	b.credentials[source.CredentialRef] = Credential{"client", "secret"}
-	b.mu.Unlock()
-	reconcileFleet(t, f)
-	deadline := time.After(2 * time.Second)
-	for len(f.collector.Snapshots()) == 0 {
-		select {
-		case <-deadline:
+	synctest.Test(t, func(t *testing.T) {
+		b := &simulatedDiscoveryBackend{credentials: map[string]Credential{}}
+		f, _ := testFleet(t, b, server)
+		f.transport.base.(*http.Transport).DisableKeepAlives = true
+		reconcileFleet(t, f)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { f.collector.Run(ctx, time.Hour); close(done) }()
+		source := testSource("one", server.URL)
+		b.mu.Lock()
+		b.sources = []Source{source}
+		b.credentials[source.CredentialRef] = Credential{"client", "secret"}
+		b.mu.Unlock()
+		reconcileFleet(t, f)
+		synctest.Wait()
+		if len(f.collector.Snapshots()) == 0 {
 			t.Fatal("new source did not wake initially empty worker")
-		case <-time.After(time.Millisecond):
 		}
-	}
-	f.collector.Refresh(ctx, false) // Join the initial refresh before starting another.
-	block.Store(true)
-	refreshDone := make(chan struct{})
-	go func() { f.collector.Refresh(ctx, false); close(refreshDone) }()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("request did not start")
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not cancel and join pending collection")
-	}
-	<-refreshDone
-	f.collector.Refresh(t.Context(), false) // Closed collectors cannot restart.
+		f.collector.Refresh(ctx, false) // Join the initial refresh before starting another.
+		block.Store(true)
+		refreshDone := make(chan struct{})
+		go func() { f.collector.Refresh(ctx, false); close(refreshDone) }()
+		<-started
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("worker did not cancel and join pending collection")
+		}
+		<-refreshDone
+		f.collector.Refresh(t.Context(), false) // Closed collectors cannot restart.
+	})
 }
 
 func TestFleetReplacementFencesInFlightResult(t *testing.T) {
