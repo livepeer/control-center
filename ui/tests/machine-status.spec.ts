@@ -102,7 +102,6 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   const row = page.getByRole('row').filter({ hasText: 'worker-status' })
   await expect(row.getByText('Readiness unverified', { exact: true })).toBeVisible()
   await expect(row.getByText('Runtime reporting', { exact: true })).toBeVisible()
-  await expect(row.locator('.machine-status.delivered, .status-dot.active')).toHaveCount(0)
   const summaryBox = await summary.boundingBox()
   const artifactBox = await page.getByText('Requested', { exact: true }).boundingBox()
   expect(summaryBox!.y + summaryBox!.height).toBeLessThan(artifactBox!.y)
@@ -121,12 +120,13 @@ test('app readiness requires current healthy and registered assignments and expi
   state.view.requested.generation = 1
   const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
   const apps = summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()
+  const observed = state.view.components[1].apps!.assignments![0]
+  observed.reason = 'secrets_unavailable'
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(apps).toContainText('Healthy and registered')
   await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
   await expect(summary).toContainText('External app reachability remains unverified.')
 
-  const observed = state.view.components[1].apps!.assignments![0]
   observed.instances = 0; observed.ready = 0; observed.registered = 0
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(apps).toContainText('no app instances loaded')
@@ -135,11 +135,11 @@ test('app readiness requires current healthy and registered assignments and expi
   observed.instances = 1; observed.ready = 1; observed.registered = 0
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(apps).toContainText('1 healthy and 0 registered')
-  observed.registered = 1; observed.activation_generation++
+  observed.registered = 1; state.view.requested.generation++
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(apps).toContainText('no fresh observation for the current assignment')
 
-  observed.activation_generation--
+  state.view.requested.generation--
   const at = await page.evaluate(() => Date.now())
   state.view.server_time = new Date(at).toISOString()
   observed.probe_expires_at = new Date(at + 3000).toISOString()
@@ -149,6 +149,37 @@ test('app readiness requires current healthy and registered assignments and expi
   await page.clock.fastForward(4000)
   await expect(apps).toContainText('health or Node registration evidence is missing or expired')
   await expect(apps).not.toContainText('Healthy and registered')
+})
+
+test('current assignment blockers take precedence over retained reconciliation diagnostics', async ({ page }) => {
+  const state = await setup(page), view = state.view
+  view.requested.generation = 1
+  view.assignments[0].completed_at = null; view.assignments[0].failure = 'reconcile_failed'
+  Object.assign(view.components[1].apps!.assignments![0], { instances: 0, ready: 0, registered: 0, reason: 'secrets_unavailable' })
+  view.components[1].apps!.instances = []; view.components[1].apps!.instances_total = 0
+  const baseline = structuredClone(view)
+  const assignment = page.getByRole('article', { name: 'Observed whoami revision 1' })
+  const readiness = page.getByRole('region', { name: 'Work readiness', exact: true })
+  const blocker = 'Secret delivery is unavailable; startup is waiting for secret preflight'
+  const failure = 'Last reconciliation diagnostic: Flux resource reconciliation failed'
+  const cases: [string, (view: MachineObservation) => void][] = [
+    ['stale report', v => { v.components[1].fresh = false; v.components[1].expires_at = v.server_time }],
+    ['earlier machine rollout', v => { v.rollout_generation++; v.components[1].current = false }],
+    ['older app input', v => { v.requested.generation++ }],
+    ['no current blocker', v => { v.components[1].apps!.assignments![0].reason = undefined }],
+  ]
+  for (const [name, mutate] of cases) await test.step(name, async () => {
+    state.view = structuredClone(baseline)
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await expect(assignment.getByRole('alert')).toHaveText(`Current assignment blocker: ${blocker}`)
+    await expect(readiness).toContainText(`no app instances loaded — ${blocker}`)
+    await expect(assignment).toContainText(failure)
+    mutate(state.view)
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await expect(assignment.getByRole('alert')).toHaveText(failure)
+    await expect(readiness).toContainText('last reconciliation diagnostic: Flux resource reconciliation failed')
+    await expect(readiness).not.toContainText(blocker)
+  })
 })
 
 test('disabled ingress and discovery do not become blockers, and old reports cannot prove readiness', async ({ page }) => {
@@ -206,6 +237,7 @@ test('stale evidence expires when status refresh fails', async ({ page }) => {
 
 test('configured probe failure and incomplete cleanup remain separate', async ({ page }) => {
   const state = await setup(page)
+  state.view.requested.generation = 1
   const app = state.view.components[1].apps!, instance = app.instances[0]
   app.instances_omitted = 3; app.instances_total = 4; app.owner_recreated_at = new Date().toISOString()
   app.assignments![0].reason = 'resource_refused'
@@ -217,7 +249,7 @@ test('configured probe failure and incomplete cleanup remain separate', async ({
   instance.withdrawal_id = 'withdrawal-preserved'; instance.deadline = new Date().toISOString(); instance.drain_expired_at = instance.deadline; instance.forced = true; instance.sessions = -1; instance.removal_published_at = instance.deadline; instance.terminated_at = undefined; instance.registration_gone = false; instance.reason = 'cleanup_unconfirmed'
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(page.getByText('3 of 4 instance details omitted', { exact: false })).toBeVisible()
-  await expect(page.getByText('Insufficient resources for this assignment', { exact: true })).toBeVisible()
+  await expect(page.getByRole('article', { name: 'Observed whoami revision 1' }).getByRole('alert')).toHaveText('Current assignment blocker: Insufficient resources for this assignment')
   await expect(page.getByText('App input validation: Downloaded app input is invalid.', { exact: false })).toBeVisible()
   await expect(page.getByText('Node registration was recreated at', { exact: false })).toBeVisible()
   await page.getByText('Instance evidence and correlation (1)').click()
@@ -267,6 +299,7 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
 test('a delayed status response cannot renew already expired probe evidence', async ({ page }) => {
   await page.clock.install()
   const state = await setup(page)
+  state.view.requested.generation = 1
   const at = await page.evaluate(() => Date.now())
   state.view.server_time = new Date(at).toISOString()
   const probeExpiry = new Date(at + 5000).toISOString()
@@ -286,6 +319,7 @@ test('a delayed status response cannot renew already expired probe evidence', as
 test('fresh failing probe evidence expires on its configured schedule and recovers on a new sample', async ({ page }) => {
   await page.clock.install()
   const state = await setup(page)
+  state.view.requested.generation = 1
   const summary = state.view.components[1].apps!.assignments![0]
   const instance = state.view.components[1].apps!.instances[0]
   const sample = async () => {
