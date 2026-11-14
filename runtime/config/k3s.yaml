@@ -10,7 +10,6 @@ service-cidr: 10.43.0.0/16
 disable:
   - traefik
   - servicelb
-  - metrics-server
 kubelet-arg:
   - "root-dir=@INSTALL_DIR@/kubelet"
 

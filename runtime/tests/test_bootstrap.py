@@ -783,10 +783,10 @@ class FirewallTests(TempTest):
         self.assertTrue(rules.startswith('delete table inet livepeer_bootstrap\n'))
         self.assertNotIn('flush ruleset', rules)
         self.assertIn('iifname "lo" accept', rules)
-        self.assertIn('ip saddr 10.42.0.0/16 tcp dport 6443 accept', rules)
+        self.assertIn('ip saddr 10.42.0.0/16 tcp dport { 6443, 10250 } accept', rules)
         self.assertIn('ct direction reply', rules)
         self.assertLess(rules.index('iifname "lp-gvisor0" drop'),
-                        rules.index('ip saddr 10.42.0.0/16 tcp dport 6443 accept'))
+                        rules.index('ip saddr 10.42.0.0/16 tcp dport { 6443, 10250 } accept'))
 
     def test_missing_policy_does_not_change_firewall(self):
         nft = self.root / 'nft'

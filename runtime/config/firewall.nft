@@ -7,8 +7,9 @@ table inet livepeer_bootstrap {
     # Workload replies to incoming probes/requests are allowed; new host access is not.
     iifname "lp-gvisor0" ct direction reply ct state established,related accept
     iifname "lp-gvisor0" drop
-    # Service traffic is DNATed to the node API before the input hook.
-    iifname { "cni0", "flannel.1" } ip saddr 10.42.0.0/16 tcp dport 6443 accept
+    # System Pods need the node API and metrics-server needs the kubelet.
+    # Service traffic is DNATed before the input hook.
+    iifname { "cni0", "flannel.1" } ip saddr 10.42.0.0/16 tcp dport { 6443, 10250 } accept
     tcp dport { 2379, 2380, 6443, 6444, 8935, 8936, 10010, 10249, 10250, 10256, 10257, 10259, 20241 } drop
     udp dport 8472 drop
   }
