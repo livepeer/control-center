@@ -21,6 +21,13 @@ services:
       target: api
     volumes:
       - ./config.toml:/etc/controlcenter/config.toml:ro
+      - type: bind
+        source: ./onchain.json
+        target: /etc/controlcenter/onchain.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./secrets/onchain-rpc:/run/onchain-rpc:ro
     secrets:
       - pg-connstr
       - pg-password
@@ -29,12 +36,24 @@ services:
       - cloudflare-token
       - collector-access-keyring.json
       - secrets-metadata-token
+      - onchain-webhook-auth
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:43812/readyz]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
+    stop_grace_period: 30s
+
+  redeemer:
+    <<: *service
+    image: ${LIVEPEER_REDEEMER_IMAGE:?Set a digest-pinned compatible Node image}
+    user: "65532:65532"
+    command: [redeemer, --config, /etc/livepeer/redeemer.toml]
+    volumes:
+      - ./redeemer.toml:/etc/livepeer/redeemer.toml:ro
+      - redeemer-data:/home/livepeer/.lpData
+      - ./secrets/redeemer:/run/redeemer:ro
     stop_grace_period: 30s
 
   web:
@@ -158,9 +177,12 @@ secrets:
     file: ./secrets/cloudflare-tunnel-token
   secrets-metadata-token:
     file: ./secrets-service-private/control-metadata-token
+  onchain-webhook-auth:
+    file: ./secrets/onchain-webhook-auth
 
 volumes:
   registry-data:
+  redeemer-data:
 
 networks:
   default:

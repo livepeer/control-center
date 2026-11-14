@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/contract"
@@ -274,46 +275,49 @@ func (f *integrationFixture) report(t *testing.T, ready bool, token, version int
 
 func TestGrantAssociationSurvivesAgentRestartButRequiresFreshEvidence(t *testing.T) {
 	f := fixture(t)
-	first := f.launch(t, "a")
-	b, _ := os.ReadFile(f.i.StateFile)
-	if strings.Contains(string(b), first.Token) || strings.Contains(string(b), strings.Repeat("b", 64)) {
-		t.Fatal("credential persisted")
-	}
-	f.report(t, false, first.TokenGeneration, 0)
-	observation := Observation{Association: first.Association, Ready: true, ProviderVersion: 10}
-	if operation(t, f.i, "tunnel/observation", observation).Code != 200 {
-		t.Fatal("observation refused")
-	}
-	f.report(t, true, 2, 10)
-	old := f.i
-	f.i = &Integration{Control: old.Control, Kube: old.Kube, Desired: old.Desired, StateFile: old.StateFile}
-	f.i.Restore()
-	f.report(t, false, 2, 0)
-	if operation(t, f.i, "tunnel/observation", observation).Code != 200 {
-		t.Fatal("surviving process could not revalidate")
-	}
-	f.report(t, true, 2, 10)
-	if f.fetched != 1 || f.pod.container != "containerd://first" {
-		t.Fatal("agent restart changed the connector")
-	}
-	// Kubernetes still describes the predecessor while a new PID 1 fetches its grant.
-	second := f.launch(t, "c")
-	if second.Token == first.Token || second.ProcessID == first.ProcessID {
-		t.Fatal("restart reused a process grant")
-	}
-	if operation(t, f.i, "tunnel/observation", observation).Code != http.StatusConflict {
-		t.Fatal("old launch could attest new process")
-	}
-	observation = Observation{Association: second.Association, Ready: true, ProviderVersion: 9}
-	operation(t, f.i, "tunnel/observation", observation)
-	f.report(t, false, 2, 9)
-	observation.ProviderVersion = 10
-	operation(t, f.i, "tunnel/observation", observation)
-	f.report(t, true, 2, 10)
-	f.pod.container = "containerd://restarted"
-	f.report(t, true, 2, 10) // Catching-up API status cannot strand the healthy process.
-	f.i.observation.observedAt = time.Now().Add(-2 * observationTTL)
-	f.report(t, false, 2, 0)
+	f.i.Control.Client.Transport.(*http.Transport).DisableKeepAlives = true
+	synctest.Test(t, func(t *testing.T) {
+		first := f.launch(t, "a")
+		b, _ := os.ReadFile(f.i.StateFile)
+		if strings.Contains(string(b), first.Token) || strings.Contains(string(b), strings.Repeat("b", 64)) {
+			t.Fatal("credential persisted")
+		}
+		f.report(t, false, first.TokenGeneration, 0)
+		observation := Observation{Association: first.Association, Ready: true, ProviderVersion: 10}
+		if operation(t, f.i, "tunnel/observation", observation).Code != 200 {
+			t.Fatal("observation refused")
+		}
+		f.report(t, true, 2, 10)
+		old := f.i
+		f.i = &Integration{Control: old.Control, Kube: old.Kube, Desired: old.Desired, StateFile: old.StateFile}
+		f.i.Restore()
+		f.report(t, false, 2, 0)
+		if operation(t, f.i, "tunnel/observation", observation).Code != 200 {
+			t.Fatal("surviving process could not revalidate")
+		}
+		f.report(t, true, 2, 10)
+		if f.fetched != 1 || f.pod.container != "containerd://first" {
+			t.Fatal("agent restart changed the connector")
+		}
+		// Kubernetes still describes the predecessor while a new PID 1 fetches its grant.
+		second := f.launch(t, "c")
+		if second.Token == first.Token || second.ProcessID == first.ProcessID {
+			t.Fatal("restart reused a process grant")
+		}
+		if operation(t, f.i, "tunnel/observation", observation).Code != http.StatusConflict {
+			t.Fatal("old launch could attest new process")
+		}
+		observation = Observation{Association: second.Association, Ready: true, ProviderVersion: 9}
+		operation(t, f.i, "tunnel/observation", observation)
+		f.report(t, false, 2, 9)
+		observation.ProviderVersion = 10
+		operation(t, f.i, "tunnel/observation", observation)
+		f.report(t, true, 2, 10)
+		f.pod.container = "containerd://restarted"
+		f.report(t, true, 2, 10) // Catching-up API status cannot strand the healthy process.
+		time.Sleep(2 * observationTTL)
+		f.report(t, false, 2, 0)
+	})
 }
 
 func TestGrantFetchFencesConcurrentSecurityAndProcessChanges(t *testing.T) {

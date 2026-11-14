@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/appbundle"
@@ -351,54 +352,62 @@ func TestWithdrawalRetainsSessionsAndRequiresExactExclusionBeforeFinalizer(t *te
 	}
 }
 func TestDeadlinePublishesWithoutNodeAndKeepsCleanupUnconfirmed(t *testing.T) {
-	c, input, k, o, r, now := fixtureController(t)
-	registerApps(t, c, k)
-	s := c.Journal.View()
-	for _, i := range s.Instances {
-		o.sessions[i.AppID] = []string{"busy"}
-	}
-	input.value.Metadata.DrainRequested = true
-	input.value.Metadata.DrainTarget = artifact.Digest([]byte("maintenance"))
-	input.value.Metadata.DrainDeadline = now.Add(5 * time.Second)
-	tick(t, c)
-	deadline := c.Journal.View().Instances[instanceIDs(&s)[0]].Deadline
-	o.down = true
-	*now = now.Add(6 * time.Second)
-	k.fail = true
-	if c.Tick(context.Background()) == nil {
-		t.Fatal("ignored publisher failure")
-	}
-	s = c.Journal.View()
-	for _, i := range s.Instances {
-		if i.Phase != "retired" || !i.Forced || !i.Deadline.Equal(deadline) || i.Reason != "cleanup_unconfirmed" {
-			t.Fatal("deadline lost", i)
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		c, input, k, o, r, _ := fixtureController(t)
+		c.Now = time.Now
+		c.Probes = NewProbes()
+		c.Probes.Address = func(*Instance) string { return server.URL }
+		c.Probes.Client.Transport = &http.Transport{DisableKeepAlives: true}
+		registerApps(t, c, k)
+		s := c.Journal.View()
+		for _, i := range s.Instances {
+			o.sessions[i.AppID] = []string{"busy"}
 		}
-	}
-	k.fail = false
-	_ = c.Tick(context.Background())
-	s = c.Journal.View()
-	if len(s.Snapshots[s.Published].Included) != 0 || k.releases != 0 {
-		t.Fatal("forced exclusion was not independently published")
-	}
-	k.apply(c)
-	_ = c.Tick(context.Background())
-	_ = c.Tick(context.Background())
-	if r.reports[len(r.reports)-1].Drained {
-		t.Fatal("claimed Node cleanup from pod absence")
-	}
-	o.down = false
-	o.sessions = map[string][]string{}
-	o.unregisterFail = true
-	_ = c.Tick(context.Background())
-	_ = c.Tick(context.Background())
-	if !c.Journal.View().Identity.Retiring {
-		t.Fatal("lost retirement tombstone")
-	}
-	o.unregisterFail = false
-	tick(t, c)
-	if !r.reports[len(r.reports)-1].Drained || o.unregisters < 2 {
-		t.Fatal("did not retry final retirement")
-	}
+		input.value.Metadata.DrainRequested = true
+		input.value.Metadata.DrainTarget = artifact.Digest([]byte("maintenance"))
+		input.value.Metadata.DrainDeadline = time.Now().Add(5 * time.Second)
+		tick(t, c)
+		deadline := c.Journal.View().Instances[instanceIDs(&s)[0]].Deadline
+		o.down = true
+		time.Sleep(6 * time.Second)
+		k.fail = true
+		if c.Tick(context.Background()) == nil {
+			t.Fatal("ignored publisher failure")
+		}
+		s = c.Journal.View()
+		for _, i := range s.Instances {
+			if i.Phase != "retired" || !i.Forced || !i.Deadline.Equal(deadline) || i.Reason != "cleanup_unconfirmed" {
+				t.Fatal("deadline lost", i)
+			}
+		}
+		k.fail = false
+		_ = c.Tick(context.Background())
+		s = c.Journal.View()
+		if len(s.Snapshots[s.Published].Included) != 0 || k.releases != 0 {
+			t.Fatal("forced exclusion was not independently published")
+		}
+		k.apply(c)
+		_ = c.Tick(context.Background())
+		_ = c.Tick(context.Background())
+		if r.reports[len(r.reports)-1].Drained {
+			t.Fatal("claimed Node cleanup from pod absence")
+		}
+		o.down = false
+		o.sessions = map[string][]string{}
+		o.unregisterFail = true
+		_ = c.Tick(context.Background())
+		_ = c.Tick(context.Background())
+		if !c.Journal.View().Identity.Retiring {
+			t.Fatal("lost retirement tombstone")
+		}
+		o.unregisterFail = false
+		tick(t, c)
+		if !r.reports[len(r.reports)-1].Drained || o.unregisters < 2 {
+			t.Fatal("did not retry final retirement")
+		}
+	})
 }
 
 func TestPendingInstancesDoNotRetireOwnerAndRetirementAlwaysRetries(t *testing.T) {
@@ -433,47 +442,55 @@ func TestPendingInstancesDoNotRetireOwnerAndRetirementAlwaysRetries(t *testing.T
 }
 
 func TestRegressedIntentDoesNotBlockCommittedDrain(t *testing.T) {
-	c, input, k, o, r, now := fixtureController(t)
-	registerApps(t, c, k)
-	s := c.Journal.View()
-	timeout := time.Duration(0)
-	for _, i := range s.Instances {
-		o.sessions[i.AppID] = []string{"busy"}
-		timeout = time.Second
-	}
-	set := testutil.Assignment(t)
-	set.Generation++
-	set.Entries[0].Generation++
-	set.Entries[0].Desired = "absent"
-	set.Entries[0].Replicas = 0
-	set.Entries[0].StartAllowed = false
-	set.Entries[0].Revision = nil
-	input.set(t, set)
-	input.value.Metadata.DrainDeadline = now.Add(timeout)
-	tick(t, c)
-	digest := c.Journal.View().Payload.Index.IntentDigest
-	input.set(t, testutil.Assignment(t))
-	*now = now.Add(timeout + time.Second)
-	if c.Tick(t.Context()) == nil {
-		t.Fatal("accepted regressed input")
-	}
-	s = c.Journal.View()
-	if s.Payload.Index.IntentDigest != digest || len(s.Snapshots[s.Published].Included) != 0 {
-		t.Fatal("regression replaced accepted intent or blocked deadline exclusion")
-	}
-	k.apply(c)
-	o.sessions = map[string][]string{}
-	for n := 0; n < 3; n++ {
-		_ = c.Tick(t.Context())
-	}
-	for _, i := range c.Journal.View().Instances {
-		if i.Phase != "removed" || !i.RegistrationGone {
-			t.Fatal("regressed input blocked accepted cleanup", i)
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		c, input, k, o, r, _ := fixtureController(t)
+		c.Now = time.Now
+		c.Probes = NewProbes()
+		c.Probes.Address = func(*Instance) string { return server.URL }
+		c.Probes.Client.Transport = &http.Transport{DisableKeepAlives: true}
+		registerApps(t, c, k)
+		s := c.Journal.View()
+		timeout := time.Duration(0)
+		for _, i := range s.Instances {
+			o.sessions[i.AppID] = []string{"busy"}
+			timeout = time.Second
 		}
-	}
-	if r.reports[len(r.reports)-1].Apps.Reason != "input_regression" {
-		t.Fatal("missing input fault diagnostic")
-	}
+		set := testutil.Assignment(t)
+		set.Generation++
+		set.Entries[0].Generation++
+		set.Entries[0].Desired = "absent"
+		set.Entries[0].Replicas = 0
+		set.Entries[0].StartAllowed = false
+		set.Entries[0].Revision = nil
+		input.set(t, set)
+		input.value.Metadata.DrainDeadline = time.Now().Add(timeout)
+		tick(t, c)
+		digest := c.Journal.View().Payload.Index.IntentDigest
+		input.set(t, testutil.Assignment(t))
+		time.Sleep(timeout + time.Second)
+		if c.Tick(t.Context()) == nil {
+			t.Fatal("accepted regressed input")
+		}
+		s = c.Journal.View()
+		if s.Payload.Index.IntentDigest != digest || len(s.Snapshots[s.Published].Included) != 0 {
+			t.Fatal("regression replaced accepted intent or blocked deadline exclusion")
+		}
+		k.apply(c)
+		o.sessions = map[string][]string{}
+		for n := 0; n < 3; n++ {
+			_ = c.Tick(t.Context())
+		}
+		for _, i := range c.Journal.View().Instances {
+			if i.Phase != "removed" || !i.RegistrationGone {
+				t.Fatal("regressed input blocked accepted cleanup", i)
+			}
+		}
+		if r.reports[len(r.reports)-1].Apps.Reason != "input_regression" {
+			t.Fatal("missing input fault diagnostic")
+		}
+	})
 }
 func TestUnavailableInputAndStateLossNeverPublishEmpty(t *testing.T) {
 	c, input, k, _, _, _ := fixtureController(t)
@@ -753,187 +770,195 @@ func TestBootstrapOutageRemovalWaitsForNode(t *testing.T) {
 }
 
 func TestLostBootstrapRetainsOldOwnerUntilNodeAbsence(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
 	for _, expired := range []bool{false, true} {
 		t.Run(map[bool]string{false: "natural", true: "maintenance-expired"}[expired], func(t *testing.T) {
-			c, input, k, _, reports, now := fixtureController(t)
-			type nodeOwner struct {
-				credential string
-				apps       map[string]bool
-			}
-			var mu sync.Mutex
-			owners := map[string]*nodeOwner{}
-			rejectHeartbeats, unexpectedHeartbeats := false, 0
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				defer mu.Unlock()
-				if r.URL.Path != "/runners/heartbeat" {
-					id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/runners/"), "/unregister")
-					existing := owners[id]
-					if existing == nil {
-						w.WriteHeader(http.StatusNotFound)
-						return
-					}
-					if r.Header.Get("Authorization") != existing.credential {
-						w.WriteHeader(http.StatusUnauthorized)
-						return
-					}
-					delete(owners, id)
-					return
+			synctest.Test(t, func(t *testing.T) {
+				c, input, k, _, reports, _ := fixtureController(t)
+				c.Now = time.Now
+				c.Probes = NewProbes()
+				c.Probes.Address = func(*Instance) string { return server.URL }
+				c.Probes.Client.Transport = &http.Transport{DisableKeepAlives: true}
+				type nodeOwner struct {
+					credential string
+					apps       map[string]bool
 				}
-				if rejectHeartbeats {
-					unexpectedHeartbeats++
-					http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
-					return
-				}
-				var req runner.HeartbeatRequest
-				json.NewDecoder(r.Body).Decode(&req)
-				existing := owners[req.RunnerID]
-				bootstrap := existing == nil
-				if bootstrap {
-					existing = &nodeOwner{credential: "issued-" + req.RunnerID, apps: map[string]bool{}}
-					owners[req.RunnerID] = existing
-				} else if r.Header.Get("Authorization") != existing.credential {
-					w.WriteHeader(401)
-					return
-				}
-				response := runner.HeartbeatResponse{RunnerID: req.RunnerID, Apps: []runner.HeartbeatAppStatus{}, HeartbeatTTL: "1h", HeartbeatInterval: "1h"}
-				if bootstrap {
-					response.HeartbeatSecret = existing.credential
-				} else {
-					response.Seq = new(req.Seq)
-				}
-				for n, app := range req.Apps {
-					id := app.ID
-					if id == "" {
-						id = fmt.Sprintf("app-%s-%d", req.RunnerID, n)
-					}
-					existing.apps[id] = true
-					response.Apps = append(response.Apps, runner.HeartbeatAppStatus{ID: id, Status: app.Status, SessionIDs: []string{}})
-				}
-				json.NewEncoder(w).Encode(response)
-			})
-			var lose atomic.Bool
-			lose.Store(true)
-			client := &http.Client{Transport: reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
-				w := httptest.NewRecorder()
-				handler.ServeHTTP(w, req)
-				resp, err := w.Result(), error(nil)
-				if err == nil && req.URL.Path == "/runners/heartbeat" && lose.Swap(false) {
-					resp.Body.Close()
-					return nil, errors.New("lost bootstrap response")
-				}
-				return resp, err
-			})}
-			o, _ := NewSDKOwner("http://node.invalid", "bootstrap", client)
-			defer o.Close(context.Background())
-			c.Owner = o
-			tick(t, c)
-			k.apply(c)
-			if c.Tick(t.Context()) == nil {
-				t.Fatal("fixture did not lose bootstrap response")
-			}
-			oldID := c.Journal.View().Identity.RunnerID
-			mu.Lock()
-			oldApps := len(owners[oldID].apps)
-			mu.Unlock()
-			if oldApps == 0 {
-				t.Fatal("fixture did not retain Node registrations")
-			}
-			set := *input.value.Payload.Intent
-			set.Generation++
-			set.Entries[0] = set.Entries[0].Absent()
-			set.Entries[0].Generation++
-			input.set(t, set)
-			for n := 0; n < 7; n++ {
-				_ = c.Tick(t.Context())
-				k.apply(c)
-			}
-			if c.Journal.View().Identity.RunnerID != oldID {
-				t.Fatal("abandoned unresolved owner identity")
-			}
-			for _, i := range c.Journal.View().Instances {
-				if !i.RegistrationPending || i.RegistrationGone {
-					t.Fatal("discarded potentially submitted registration", i)
-				}
-			}
-			for _, r := range reports.receipts {
-				if r.Phase == "removed" {
+				var mu sync.Mutex
+				owners := map[string]*nodeOwner{}
+				rejectHeartbeats, unexpectedHeartbeats := false, 0
+				handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					mu.Lock()
-					remaining := len(owners[oldID].apps)
-					mu.Unlock()
-					if remaining > 0 {
-						t.Fatalf("reported removed while abandoned owner still has %d registrations", remaining)
+					defer mu.Unlock()
+					if r.URL.Path != "/runners/heartbeat" {
+						id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/runners/"), "/unregister")
+						existing := owners[id]
+						if existing == nil {
+							w.WriteHeader(http.StatusNotFound)
+							return
+						}
+						if r.Header.Get("Authorization") != existing.credential {
+							w.WriteHeader(http.StatusUnauthorized)
+							return
+						}
+						delete(owners, id)
+						return
 					}
+					if rejectHeartbeats {
+						unexpectedHeartbeats++
+						http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					var req runner.HeartbeatRequest
+					json.NewDecoder(r.Body).Decode(&req)
+					existing := owners[req.RunnerID]
+					bootstrap := existing == nil
+					if bootstrap {
+						existing = &nodeOwner{credential: "issued-" + req.RunnerID, apps: map[string]bool{}}
+						owners[req.RunnerID] = existing
+					} else if r.Header.Get("Authorization") != existing.credential {
+						w.WriteHeader(401)
+						return
+					}
+					response := runner.HeartbeatResponse{RunnerID: req.RunnerID, Apps: []runner.HeartbeatAppStatus{}, HeartbeatTTL: "1h", HeartbeatInterval: "1h"}
+					if bootstrap {
+						response.HeartbeatSecret = existing.credential
+					} else {
+						response.Seq = new(req.Seq)
+					}
+					for n, app := range req.Apps {
+						id := app.ID
+						if id == "" {
+							id = fmt.Sprintf("app-%s-%d", req.RunnerID, n)
+						}
+						existing.apps[id] = true
+						response.Apps = append(response.Apps, runner.HeartbeatAppStatus{ID: id, Status: app.Status, SessionIDs: []string{}})
+					}
+					json.NewEncoder(w).Encode(response)
+				})
+				var lose atomic.Bool
+				lose.Store(true)
+				client := &http.Client{Transport: reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
+					w := httptest.NewRecorder()
+					handler.ServeHTTP(w, req)
+					resp, err := w.Result(), error(nil)
+					if err == nil && req.URL.Path == "/runners/heartbeat" && lose.Swap(false) {
+						resp.Body.Close()
+						return nil, errors.New("lost bootstrap response")
+					}
+					return resp, err
+				})}
+				o, _ := NewSDKOwner("http://node.invalid", "bootstrap", client)
+				defer o.Close(context.Background())
+				c.Owner = o
+				tick(t, c)
+				k.apply(c)
+				if c.Tick(t.Context()) == nil {
+					t.Fatal("fixture did not lose bootstrap response")
 				}
-			}
-
-			// Recreate the SDK adapter with the same journal while the unknown owner lives.
-			_ = o.Close(context.Background())
-			restored, err := NewSDKOwner("http://node.invalid", "bootstrap", client)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer restored.Close(context.Background())
-			c.Owner = restored
-			if c.Tick(t.Context()) == nil {
-				t.Fatal("restart ignored old owner's 401")
-			}
-			if c.Journal.View().Identity.RunnerID != oldID {
-				t.Fatal("restart forgot unresolved identity")
-			}
-			deadline := now.Add(time.Minute)
-			if expired {
-				input.value.Metadata.DrainRequested = true
-				input.value.Metadata.DrainTarget = artifact.Digest([]byte("maintenance"))
-				input.value.Metadata.DrainDeadline = deadline
-				input.value.Metadata.Generation++
-				*now = deadline.Add(time.Second)
+				oldID := c.Journal.View().Identity.RunnerID
+				mu.Lock()
+				oldApps := len(owners[oldID].apps)
+				mu.Unlock()
+				if oldApps == 0 {
+					t.Fatal("fixture did not retain Node registrations")
+				}
+				set := *input.value.Payload.Intent
+				set.Generation++
+				set.Entries[0] = set.Entries[0].Absent()
+				set.Entries[0].Generation++
+				input.set(t, set)
 				for n := 0; n < 7; n++ {
 					_ = c.Tick(t.Context())
 					k.apply(c)
 				}
+				if c.Journal.View().Identity.RunnerID != oldID {
+					t.Fatal("abandoned unresolved owner identity")
+				}
 				for _, i := range c.Journal.View().Instances {
-					if i.Phase != "removed" || !i.Forced || i.RegistrationGone || !i.RegistrationPending || !i.DrainExpiredAt.Equal(deadline) {
-						t.Fatal("expired cleanup lost its unresolved registration", i)
+					if !i.RegistrationPending || i.RegistrationGone {
+						t.Fatal("discarded potentially submitted registration", i)
 					}
 				}
-			}
-			// Simulate Node expiry; only its subsequent unregister 404 authorizes recovery.
-			mu.Lock()
-			delete(owners, oldID)
-			rejectHeartbeats = true
-			mu.Unlock()
-			for n := 0; n < 8; n++ {
-				tick(t, c)
-				k.apply(c)
-			}
-			if c.Journal.View().Identity.RunnerID != "" {
-				t.Fatal("did not finish retirement after old-owner absence")
-			}
-			found := false
-			for _, r := range reports.receipts {
-				found = found || r.Phase == "removed"
-			}
-			if !found {
-				t.Fatal("cleanup never completed after confirmed absence")
-			}
-			mu.Lock()
-			attempts := unexpectedHeartbeats
-			mu.Unlock()
-			if attempts != 0 {
-				t.Fatal("created another owner to prove an absent owner's cleanup", attempts)
-			}
-			if expired {
-				preserved := false
-				for _, report := range reports.reports {
-					for _, i := range report.Apps.Instances {
-						preserved = preserved || (i.RegistrationGone && i.Forced && i.DrainExpiredAt.Equal(deadline))
+				for _, r := range reports.receipts {
+					if r.Phase == "removed" {
+						mu.Lock()
+						remaining := len(owners[oldID].apps)
+						mu.Unlock()
+						if remaining > 0 {
+							t.Fatalf("reported removed while abandoned owner still has %d registrations", remaining)
+						}
 					}
 				}
-				if !preserved {
-					t.Fatal("late Node absence erased maintenance expiry")
+
+				// Recreate the SDK adapter with the same journal while the unknown owner lives.
+				_ = o.Close(context.Background())
+				restored, err := NewSDKOwner("http://node.invalid", "bootstrap", client)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
+				defer restored.Close(context.Background())
+				c.Owner = restored
+				if c.Tick(t.Context()) == nil {
+					t.Fatal("restart ignored old owner's 401")
+				}
+				if c.Journal.View().Identity.RunnerID != oldID {
+					t.Fatal("restart forgot unresolved identity")
+				}
+				deadline := time.Now().Add(time.Minute)
+				if expired {
+					input.value.Metadata.DrainRequested = true
+					input.value.Metadata.DrainTarget = artifact.Digest([]byte("maintenance"))
+					input.value.Metadata.DrainDeadline = deadline
+					input.value.Metadata.Generation++
+					time.Sleep(time.Until(deadline) + time.Second)
+					for n := 0; n < 7; n++ {
+						_ = c.Tick(t.Context())
+						k.apply(c)
+					}
+					for _, i := range c.Journal.View().Instances {
+						if i.Phase != "removed" || !i.Forced || i.RegistrationGone || !i.RegistrationPending || !i.DrainExpiredAt.Equal(deadline) {
+							t.Fatal("expired cleanup lost its unresolved registration", i)
+						}
+					}
+				}
+				// Simulate Node expiry; only its subsequent unregister 404 authorizes recovery.
+				mu.Lock()
+				delete(owners, oldID)
+				rejectHeartbeats = true
+				mu.Unlock()
+				for n := 0; n < 8; n++ {
+					tick(t, c)
+					k.apply(c)
+				}
+				if c.Journal.View().Identity.RunnerID != "" {
+					t.Fatal("did not finish retirement after old-owner absence")
+				}
+				found := false
+				for _, r := range reports.receipts {
+					found = found || r.Phase == "removed"
+				}
+				if !found {
+					t.Fatal("cleanup never completed after confirmed absence")
+				}
+				mu.Lock()
+				attempts := unexpectedHeartbeats
+				mu.Unlock()
+				if attempts != 0 {
+					t.Fatal("created another owner to prove an absent owner's cleanup", attempts)
+				}
+				if expired {
+					preserved := false
+					for _, report := range reports.reports {
+						for _, i := range report.Apps.Instances {
+							preserved = preserved || (i.RegistrationGone && i.Forced && i.DrainExpiredAt.Equal(deadline))
+						}
+					}
+					if !preserved {
+						t.Fatal("late Node absence erased maintenance expiry")
+					}
+				}
+			})
 		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/appbundle"
@@ -51,38 +52,42 @@ func cacheBundle(t *testing.T, store artifact.Store, m contract.Metadata, files 
 
 func TestDownloadsDoNotHoldPublishedAuthorityOrObservationReporting(t *testing.T) {
 	f := newFixture(t)
-	if err := f.source.Sync(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	f.source.Control.Client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/config") {
-			close(entered)
-			select {
-			case <-release:
-			case <-r.Context().Done():
-				return nil, r.Context().Err()
+	base := &http.Transport{DisableKeepAlives: true}
+	f.source.Control.Client.Transport = base
+	synctest.Test(t, func(t *testing.T) {
+		if err := f.source.Sync(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		entered, release := make(chan struct{}), make(chan struct{})
+		f.source.Control.Client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/config") {
+				close(entered)
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
 			}
+			return base.RoundTrip(r)
+		})
+		done := make(chan error, 1)
+		go func() { done <- f.source.Sync(t.Context()) }()
+		<-entered
+		defer func() {
+			close(release)
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}()
+		if _, ok := f.source.Desired(); !ok {
+			t.Fatal("slow fetch revoked valid delivered authority")
 		}
-		return http.DefaultTransport.RoundTrip(r)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if err := f.source.Report(ctx); err != nil {
+			t.Fatal("download blocked reporting", err)
+		}
 	})
-	done := make(chan error, 1)
-	go func() { done <- f.source.Sync(t.Context()) }()
-	<-entered
-	defer func() {
-		close(release)
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	}()
-	if _, ok := f.source.Desired(); !ok {
-		t.Fatal("slow fetch revoked valid delivered authority")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	if err := f.source.Report(ctx); err != nil {
-		t.Fatal("download blocked reporting", err)
-	}
 }
 
 func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {

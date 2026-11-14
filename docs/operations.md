@@ -109,13 +109,10 @@ in the fleet to assign them. See the [app registry guide](app-registry.md).
 
 ## Onchain operation
 
-Configure the redeemer and secret mounts using [deployment setup](../deploy/README.md#onchain-setup).
-Set `Mode = "onchain"` and `OnchainConfigFile` before first startup. Use
-[onchain.example.json](../deploy/onchain.example.json) as the Control Center
-template. Control Center fills in each claimed orchestrator address as the
-recipient when a machine registers and automatically reconciles template
-changes. App catalog prices remain authoritative; every advertised onchain
-app needs a positive USD `hour` or `fixed` price.
+Onchain is the default. Follow [deployment setup](../deploy/README.md#install).
+Control Center fills in each claimed orchestrator address as the recipient
+when a machine registers and automatically reconciles template changes. Every
+advertised onchain app needs a positive USD `hour` or `fixed` catalog price.
 
 Provision a new immutable `rpc_secret` file for RPC rotation; the configured
 reference is the SHA-256 of its exact bytes, including a final newline. The API

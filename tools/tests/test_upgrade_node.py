@@ -443,11 +443,6 @@ class UpgradeTests(unittest.TestCase):
         with patch.object(self.job, 'container', return_value=current), self.assertRaisesRegex(ValueError, 'redeemer must use'):
             self.job.check_redeemer()
         self.assertFalse(any('up' in args for args in self.docker.calls))
-        onchain = self.deploy / 'compose.onchain.yaml'
-        job = upgrade.Upgrade(self.root, self.deploy, [self.deploy / 'compose.yaml', onchain],
-                              self.deploy / '.env', self.docker)
-        self.assertIn(onchain, job.compose)
-        self.assertEqual(job.compose[-2:], ['--profile', 'onchain'])
 
     def test_publish_uses_manifest_digest_and_reuses_verified_existing_build(self):
         manifest = {'config': {'digest': 'sha256:config'}, 'layers': [{'digest': 'sha256:layer'}]}

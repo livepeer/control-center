@@ -43,8 +43,8 @@ flowchart LR
 Each managed host runs Runtime on K3s. Its management agent polls Control Center
 for desired configuration and reports applied state. Flux deploys workloads; the
 App Reconciler manages app instances and their registration with Livepeer Node,
-which owns sessions, capacity, and private proxying to app Pods. The bundled
-Runtime starts Node in offchain mode.
+which owns sessions, capacity, and private proxying to app Pods.
+Deployments are onchain by default and Control Center configures each orchestrator automatically.
 
 ```mermaid
 flowchart TB

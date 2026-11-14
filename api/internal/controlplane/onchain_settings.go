@@ -26,7 +26,7 @@ const zeroAddress = "0x0000000000000000000000000000000000000000"
 
 func (p Params) networkMode() string {
 	if p.Mode == "" {
-		return "offchain"
+		return "onchain"
 	}
 	return p.Mode
 }

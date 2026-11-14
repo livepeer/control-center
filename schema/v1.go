@@ -74,7 +74,7 @@ type Health struct {
 type Readiness struct {
 	Type             string  `json:"type" default:"tcp" alts:"http,tcp"`
 	Path             *string `json:"path"`
-	Interval         string  `json:"interval" default:"5s" pattern:"^(0|[1-9][0-9]*)s$"`
+	Interval         string  `json:"interval" default:"10s" pattern:"^(0|[1-9][0-9]*)s$"`
 	Timeout          string  `json:"timeout" default:"2s" pattern:"^(0|[1-9][0-9]*)s$"`
 	FailureThreshold int     `json:"failure_threshold" default:"3" min:"1" max:"10"`
 }

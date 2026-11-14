@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/transport"
@@ -31,7 +32,7 @@ type nativeNode struct {
 	catchup                     bool
 }
 
-func (n *nativeNode) serve(w http.ResponseWriter, r *http.Request) {
+func (n *nativeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if r.URL.Path == "/runners/owner/unregister" {
@@ -106,21 +107,35 @@ func (n *nativeNode) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewEncoder(w).Encode(resp)
 }
-func nativeFixture(t *testing.T) (*SDKOwner, *nativeNode, OwnerRequest, OwnerHooks, chan Observation) {
+func nativeFixture(t *testing.T, servers ...*httptest.Server) (*SDKOwner, *nativeNode, OwnerRequest, OwnerHooks, chan Observation) {
 	t.Helper()
-	n := &nativeNode{apps: map[string]runner.HeartbeatAppStatus{}}
-	srv := httptest.NewServer(http.HandlerFunc(n.serve))
-	t.Cleanup(srv.Close)
+	var srv *httptest.Server
+	if len(servers) > 0 {
+		srv = servers[0]
+	} else {
+		srv = httptest.NewServer(&nativeNode{apps: map[string]runner.HeartbeatAppStatus{}})
+		t.Cleanup(srv.Close)
+	}
+	n := srv.Config.Handler.(*nativeNode)
 	o, err := NewSDKOwner(srv.URL, "bootstrap", transport.HTTPClient())
 	if err != nil {
 		t.Fatal(err)
 	}
+	o.client.Transport = &http.Transport{DisableKeepAlives: true}
 	t.Cleanup(func() { o.Close(context.Background()) })
 	e := Registration{InstanceID: "one", PodUID: "pod", Options: runner.AppOptions{App: "app", RunnerURL: "http://immutable.invalid:8080", Status: "not-ready", Mode: "persistent"}}
 	req := OwnerRequest{Identity: Identity{RunnerID: "owner"}, Entries: []Registration{e}, Tracked: []Registration{e}}
 	events := make(chan Observation, 1024)
 	hooks := OwnerHooks{Observe: func(o Observation) error { events <- o; return nil }}
 	return o, n, req, hooks, events
+}
+
+func nativeSynctest(t *testing.T, test func(*testing.T, *httptest.Server)) {
+	t.Helper()
+	// Accept runs outside the bubble so HTTP does not hold the virtual clock open.
+	server := httptest.NewServer(&nativeNode{apps: map[string]runner.HeartbeatAppStatus{}})
+	defer server.Close()
+	synctest.Test(t, func(t *testing.T) { test(t, server) })
 }
 func awaitObservation(t *testing.T, ch <-chan Observation, p func(Observation) bool) Observation {
 	t.Helper()
@@ -139,119 +154,126 @@ func awaitObservation(t *testing.T, ch <-chan Observation, p func(Observation) b
 	}
 }
 func TestNativeOwnerSequenceZeroMembershipAndRetirement(t *testing.T) {
-	o, n, r, h, ch := nativeFixture(t)
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
-	if first.Request.Apps[0].ID != "assigned-0" || first.Sequence != 0 || first.Credential != "issued" || first.Entries[0].Options.ID == "" {
-		t.Fatal("lost zero sequence or assigned identity", first)
-	}
-	n.mu.Lock()
-	n.busy = true
-	n.mu.Unlock()
-	e := first.Entries[0]
-	e.WithdrawalID = "withdrawal"
-	e.WithdrawnAt = time.Now()
-	r.Entries = []Registration{}
-	r.Tracked = []Registration{e}
-	r.Identity = o.Accepted()
-	current := o.current
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	if o.current != current {
-		t.Fatal("membership update replaced loop")
-	}
-	draining := awaitObservation(t, ch, func(o Observation) bool {
-		return len(o.Withdrawals) > 0 && len(o.Apps) > 0 && o.Apps[0].Status == "draining"
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, n, r, h, ch := nativeFixture(t, server)
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+		if first.Request.Apps[0].ID != "assigned-0" || first.Sequence != 0 || first.Credential != "issued" || first.Entries[0].Options.ID == "" {
+			t.Fatal("lost zero sequence or assigned identity", first)
+		}
+		n.mu.Lock()
+		n.busy = true
+		n.mu.Unlock()
+		e := first.Entries[0]
+		e.WithdrawalID = "withdrawal"
+		e.WithdrawnAt = time.Now()
+		r.Entries = []Registration{}
+		r.Tracked = []Registration{e}
+		r.Identity = o.Accepted()
+		current := o.current
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		if o.current != current {
+			t.Fatal("membership update replaced loop")
+		}
+		draining := awaitObservation(t, ch, func(o Observation) bool {
+			return len(o.Withdrawals) > 0 && len(o.Apps) > 0 && o.Apps[0].Status == "draining"
+		})
+		if len(draining.Entries) != 0 {
+			t.Fatal("retained apps copied into submitted membership")
+		}
+		if err := o.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		n.mu.Lock()
+		count := n.unregisters
+		n.mu.Unlock()
+		if count != 0 {
+			t.Fatal("routine shutdown unregistered owner")
+		}
+		// Restore final empty membership with the issued identity.
+		r.Identity = o.Accepted()
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		n.mu.Lock()
+		n.busy = false
+		n.failUnregister = 1
+		n.mu.Unlock()
+		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
+		if err := o.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if err := o.Unregister(t.Context(), r.Identity); err == nil {
+			t.Fatal("failed unregister was not retained")
+		}
+		if err := o.Unregister(t.Context(), r.Identity); err != nil {
+			t.Fatal(err)
+		}
 	})
-	if len(draining.Entries) != 0 {
-		t.Fatal("retained apps copied into submitted membership")
-	}
-	if err := o.Close(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	n.mu.Lock()
-	count := n.unregisters
-	n.mu.Unlock()
-	if count != 0 {
-		t.Fatal("routine shutdown unregistered owner")
-	}
-	// Restore final empty membership with the issued identity.
-	r.Identity = o.Accepted()
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	n.mu.Lock()
-	n.busy = false
-	n.failUnregister = 1
-	n.mu.Unlock()
-	awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
-	if err := o.Close(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if err := o.Unregister(t.Context(), r.Identity); err == nil {
-		t.Fatal("failed unregister was not retained")
-	}
-	if err := o.Unregister(t.Context(), r.Identity); err != nil {
-		t.Fatal(err)
-	}
 }
 func TestNativeOwnerCatchupAndIndependentHealth(t *testing.T) {
-	o, n, r, h, ch := nativeFixture(t)
-	n.catchup = true
-	var ready atomic.Bool
-	ready.Store(true)
-	r.Entries[0].Options.Status = "ready"
-	h.Eligibility = func(Registration) (bool, bool) { return true, ready.Load() }
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.Sequence == 8 })
-	ready.Store(false)
-	o.Refresh()
-	awaitObservation(t, ch, func(o Observation) bool { return len(o.Apps) > 0 && o.Apps[0].Status == "not-ready" })
-	// A health refresh cannot put an omitted app back into membership.
-	r.Tracked = first.Entries
-	r.Tracked[0].WithdrawalID = "withdrawal"
-	r.Tracked[0].WithdrawnAt = time.Now()
-	r.Entries = []Registration{}
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	ready.Store(true)
-	o.Refresh()
-	awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, n, r, h, ch := nativeFixture(t, server)
+		n.catchup = true
+		var ready atomic.Bool
+		ready.Store(true)
+		r.Entries[0].Options.Status = "ready"
+		h.Eligibility = func(Registration) (bool, bool) { return true, ready.Load() }
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.Sequence == 8 })
+		ready.Store(false)
+		o.Refresh()
+		awaitObservation(t, ch, func(o Observation) bool { return len(o.Apps) > 0 && o.Apps[0].Status == "not-ready" })
+		// A health refresh cannot put an omitted app back into membership.
+		r.Tracked = first.Entries
+		r.Tracked[0].WithdrawalID = "withdrawal"
+		r.Tracked[0].WithdrawnAt = time.Now()
+		r.Entries = []Registration{}
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		ready.Store(true)
+		o.Refresh()
+		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
+	})
 }
 func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
-	o, n, r, h, ch := nativeFixture(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	client := *o.client
-	client.Transport = reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
-		once.Do(func() { close(entered); <-release })
-		return http.DefaultTransport.RoundTrip(req)
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, n, r, h, ch := nativeFixture(t, server)
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		client := *o.client
+		base := client.Transport
+		client.Transport = reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
+			once.Do(func() { close(entered); <-release })
+			return base.RoundTrip(req)
+		})
+		o.client = &client
+		result := make(chan error, 1)
+		go func() { result <- o.Sync(context.Background(), r, h) }()
+		<-entered
+		// Simulate an independent health update while Start is in flight.
+		o.mu.Lock()
+		o.request.Entries[0].Options.Status = "not-ready"
+		_ = o.setAppsLocked()
+		o.mu.Unlock()
+		close(release)
+		if err := <-result; err != nil {
+			t.Fatal(err)
+		}
+		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if len(n.requests) < 2 || n.requests[1].Apps[0].ID != "assigned-0" {
+			t.Fatal("assigned ID lost across SetApps", n.requests)
+		}
 	})
-	o.client = &client
-	result := make(chan error, 1)
-	go func() { result <- o.Sync(context.Background(), r, h) }()
-	<-entered
-	// Simulate an independent health update while Start is in flight.
-	o.mu.Lock()
-	o.request.Entries[0].Options.Status = "not-ready"
-	_ = o.setAppsLocked()
-	o.mu.Unlock()
-	close(release)
-	if err := <-result; err != nil {
-		t.Fatal(err)
-	}
-	awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if len(n.requests) < 2 || n.requests[1].Apps[0].ID != "assigned-0" {
-		t.Fatal("assigned ID lost across SetApps", n.requests)
-	}
 }
 
 type reviewRoundTripper func(*http.Request) (*http.Response, error)
@@ -295,113 +317,123 @@ func TestNativePersistenceFailureExitsWithoutCloseDeadlock(t *testing.T) {
 }
 
 func TestNativeAuthenticationRecoveryDowngradesBeforeBootstrapRetry(t *testing.T) {
-	o, n, r, h, ch := nativeFixture(t)
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
-	r.Entries[0].Options.Status = "ready"
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.Apps[0].Status == "ready" })
-	current := o.current
-	n.mu.Lock()
-	n.rejectAuth = true
-	n.issued = "rotated"
-	n.mu.Unlock()
-	recovery := awaitObservation(t, ch, func(o Observation) bool { return o.Bootstrap && o.Credential == "rotated" })
-	if recovery.Entries[0].Options.Status != "not-ready" || recovery.PreviousCredential != "issued" {
-		t.Fatal("bootstrap retried stale readiness or lost credential lineage", recovery)
-	}
-	confirmed := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.Credential == "rotated" })
-	if confirmed.Sequence != 0 || o.current != current {
-		t.Fatal("credential recovery replaced loop or lost sequence-zero confirmation")
-	}
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, n, r, h, ch := nativeFixture(t, server)
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+		r.Entries[0].Options.Status = "ready"
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.Apps[0].Status == "ready" })
+		current := o.current
+		n.mu.Lock()
+		n.rejectAuth = true
+		n.issued = "rotated"
+		n.mu.Unlock()
+		recovery := awaitObservation(t, ch, func(o Observation) bool { return o.Bootstrap && o.Credential == "rotated" })
+		if recovery.Entries[0].Options.Status != "not-ready" || recovery.PreviousCredential != "issued" {
+			t.Fatal("bootstrap retried stale readiness or lost credential lineage", recovery)
+		}
+		confirmed := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.Credential == "rotated" })
+		if confirmed.Sequence != 0 || o.current != current {
+			t.Fatal("credential recovery replaced loop or lost sequence-zero confirmation")
+		}
+	})
 }
 
 func TestNativeBootstrapCannotUseStaleReadySync(t *testing.T) {
-	o, _, r, h, ch := nativeFixture(t)
-	r.Identity.Credential = "issued"
-	r.Entries[0].Options.ID = "app"
-	r.Entries[0].Options.Status = "ready"
-	h.Eligibility = func(Registration) (bool, bool) { return true, true }
-	// After a 401 the SDK clears its credential before retrying bootstrap.
-	// An intervening Sync may still carry the old confirmed, ready snapshot.
-	value, err := runner.New(runner.Options{OrchestratorURL: o.base, BootstrapSecret: o.bootstrap, RunnerID: "owner", DisableUnregisterOnClose: true, OnHeartbeat: o.heartbeat})
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.current, o.lineage = value, "issued"
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	if err := value.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	bootstrap := awaitObservation(t, ch, func(o Observation) bool { return o.Bootstrap })
-	if bootstrap.Request.Apps[0].Status != "not-ready" || bootstrap.PreviousCredential != "issued" {
-		t.Fatal("stale Sync restored admission during bootstrap", bootstrap)
-	}
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, _, r, h, ch := nativeFixture(t, server)
+		r.Identity.Credential = "issued"
+		r.Entries[0].Options.ID = "app"
+		r.Entries[0].Options.Status = "ready"
+		h.Eligibility = func(Registration) (bool, bool) { return true, true }
+		// After a 401 the SDK clears its credential before retrying bootstrap.
+		// An intervening Sync may still carry the old confirmed, ready snapshot.
+		value, err := runner.New(runner.Options{OrchestratorURL: o.base, BootstrapSecret: o.bootstrap, RunnerID: "owner", DisableUnregisterOnClose: true, HTTPClient: o.client, OnHeartbeat: o.heartbeat})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.current, o.lineage = value, "issued"
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		if err := value.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		bootstrap := awaitObservation(t, ch, func(o Observation) bool { return o.Bootstrap })
+		if bootstrap.Request.Apps[0].Status != "not-ready" || bootstrap.PreviousCredential != "issued" {
+			t.Fatal("stale Sync restored admission during bootstrap", bootstrap)
+		}
+	})
 }
 
 func TestNativeFailedStartReconstructsRunner(t *testing.T) {
-	o, n, r, h, ch := nativeFixture(t)
-	n.failStart = 1
-	if err := o.Sync(t.Context(), r, h); err == nil {
-		t.Fatal("startup failure hidden")
-	}
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal("could not retry failed Start with a new runner", err)
-	}
-	awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, n, r, h, ch := nativeFixture(t, server)
+		n.failStart = 1
+		if err := o.Sync(t.Context(), r, h); err == nil {
+			t.Fatal("startup failure hidden")
+		}
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal("could not retry failed Start with a new runner", err)
+		}
+		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+	})
 }
 
 func TestRejectedAdditionCannotBlockTerminalOmission(t *testing.T) {
-	o, n, r, h, ch := nativeFixture(t)
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
-	old := first.Entries[0]
-	old.WithdrawalID = "withdrawal"
-	old.WithdrawnAt = time.Now()
-	next := old
-	next.InstanceID = "next"
-	next.Registered = false
-	next.WithdrawalID = ""
-	next.WithdrawnAt = time.Time{}
-	next.Options.ID = "r-next-0"
-	next.Options.RunnerURL = "http://rejected.invalid:8080"
-	n.mu.Lock()
-	n.rejectEndpoint = next.Options.RunnerURL
-	n.mu.Unlock()
-	r.Entries = []Registration{next}
-	r.Tracked = []Registration{old, next}
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	observation := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
-	if len(observation.Withdrawals) != 1 || observation.Withdrawals[0].InstanceID != old.InstanceID {
-		t.Fatal("rejected addition masked withdrawal context", observation)
-	}
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, n, r, h, ch := nativeFixture(t, server)
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+		old := first.Entries[0]
+		old.WithdrawalID = "withdrawal"
+		old.WithdrawnAt = time.Now()
+		next := old
+		next.InstanceID = "next"
+		next.Registered = false
+		next.WithdrawalID = ""
+		next.WithdrawnAt = time.Time{}
+		next.Options.ID = "r-next-0"
+		next.Options.RunnerURL = "http://rejected.invalid:8080"
+		n.mu.Lock()
+		n.rejectEndpoint = next.Options.RunnerURL
+		n.mu.Unlock()
+		r.Entries = []Registration{next}
+		r.Tracked = []Registration{old, next}
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		observation := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
+		if len(observation.Withdrawals) != 1 || observation.Withdrawals[0].InstanceID != old.InstanceID {
+			t.Fatal("rejected addition masked withdrawal context", observation)
+		}
+	})
 }
 
 func TestNativeStaleSyncPreservesAssignedID(t *testing.T) {
-	o, _, r, h, ch := nativeFixture(t)
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
-	// r represents a controller snapshot captured before the callback saved its ID.
-	at := time.Now()
-	if err := o.Sync(t.Context(), r, h); err != nil {
-		t.Fatal(err)
-	}
-	next := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.At.After(at) })
-	if next.Request.Apps[0].ID != first.Entries[0].Options.ID {
-		t.Fatalf("stale Sync erased assigned ID: next submitted %q, want %q", next.Request.Apps[0].ID, first.Entries[0].Options.ID)
-	}
+	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+		o, _, r, h, ch := nativeFixture(t, server)
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		first := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
+		// r represents a controller snapshot captured before the callback saved its ID.
+		at := time.Now()
+		if err := o.Sync(t.Context(), r, h); err != nil {
+			t.Fatal(err)
+		}
+		next := awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && o.At.After(at) })
+		if next.Request.Apps[0].ID != first.Entries[0].Options.ID {
+			t.Fatalf("stale Sync erased assigned ID: next submitted %q, want %q", next.Request.Apps[0].ID, first.Entries[0].Options.ID)
+		}
+	})
 }
 
 func TestNativeCredentiallessRetirementRequiresNodeAbsence(t *testing.T) {
@@ -442,95 +474,92 @@ func TestNativeRestoredMembershipRejectionPreservesSibling(t *testing.T) {
 		{"capacity", http.StatusServiceUnavailable, "app capacity reached"},
 	} {
 		t.Run(rejection.name, func(t *testing.T) {
-			oldOwner, node, r, hooks, events := nativeFixture(t)
-			controller, _, _, _, _, _ := fixtureController(t)
-			controller.Now = nil
-			if err := controller.Journal.Update(func(s *State) error {
-				s.Identity = r.Identity
-				s.Instances["one"] = &Instance{ID: "one", PodUID: "pod"}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			observe := hooks.Observe
-			hooks.Observe = func(o Observation) error {
-				if err := controller.observe(o); err != nil {
-					return err
+			nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
+				oldOwner, node, r, hooks, events := nativeFixture(t, server)
+				controller, _, _, _, _, _ := fixtureController(t)
+				controller.Now = nil
+				if err := controller.Journal.Update(func(s *State) error {
+					s.Identity = r.Identity
+					s.Instances["one"] = &Instance{ID: "one", PodUID: "pod"}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
 				}
-				return observe(o)
-			}
-			hooks.Failure = controller.failed
-			if err := oldOwner.Sync(t.Context(), r, hooks); err != nil {
-				t.Fatal(err)
-			}
-			first := awaitObservation(t, events, func(o Observation) bool { return o.Accepted })
-			if err := oldOwner.Close(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			saved := oldOwner.Accepted()
-			known := first.Entries[0]
-			added := known
-			added.InstanceID, added.PodUID = "new-instance", "new-pod"
-			added.Registered = false
-			added.Options.ID = "r-new-instance-0"
-			added.Options.RunnerURL = "http://rejected.invalid:8080"
-			node.mu.Lock()
-			node.rejectEndpoint = added.Options.RunnerURL
-			node.mu.Unlock()
-			client := &http.Client{Transport: reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
-				resp, err := http.DefaultTransport.RoundTrip(req)
-				if err == nil && resp.StatusCode == http.StatusBadRequest {
-					resp.Body.Close()
-					w := httptest.NewRecorder()
-					w.WriteHeader(rejection.status)
-					fmt.Fprint(w, rejection.body)
-					return w.Result(), nil
+				observe := hooks.Observe
+				hooks.Observe = func(o Observation) error {
+					if err := controller.observe(o); err != nil {
+						return err
+					}
+					return observe(o)
 				}
-				return resp, err
-			})}
-			restored, err := NewSDKOwner(oldOwner.base, "bootstrap", client)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer restored.Close(context.Background())
-			r.Identity, r.Entries, r.Tracked = saved, []Registration{known, added}, []Registration{known, added}
-			at := time.Now()
-			if err := restored.Sync(t.Context(), r, hooks); err == nil {
-				t.Fatal("expected membership rejection")
-			}
-			if restored.Accepted().Credential != "" {
-				t.Fatal("restored IDs implied a fresh accepted snapshot")
-			}
-			if err := restored.Sync(t.Context(), r, hooks); err != nil {
-				t.Fatal(err)
-			}
-			obs := awaitObservation(t, events, func(o Observation) bool { return o.Accepted && o.At.After(at) })
-			if len(obs.Request.Apps) != 1 || obs.Request.Apps[0].ID != known.Options.ID {
-				t.Fatalf("rejected addition erased restored sibling: %+v", obs.Request.Apps)
-			}
-			// Observe runs before the partial-rejection diagnostic. Wait for both,
-			// so the test cannot pass before a later callback clears the proof.
-			kept := false
-			for end := time.Now().Add(3 * time.Second); time.Now().Before(end); {
+				hooks.Failure = controller.failed
+				if err := oldOwner.Sync(t.Context(), r, hooks); err != nil {
+					t.Fatal(err)
+				}
+				first := awaitObservation(t, events, func(o Observation) bool { return o.Accepted })
+				if err := oldOwner.Close(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				saved := oldOwner.Accepted()
+				known := first.Entries[0]
+				added := known
+				added.InstanceID, added.PodUID = "new-instance", "new-pod"
+				added.Registered = false
+				added.Options.ID = "r-new-instance-0"
+				added.Options.RunnerURL = "http://rejected.invalid:8080"
+				node.mu.Lock()
+				node.rejectEndpoint = added.Options.RunnerURL
+				node.mu.Unlock()
+				base := oldOwner.client.Transport
+				client := &http.Client{Transport: reviewRoundTripper(func(req *http.Request) (*http.Response, error) {
+					resp, err := base.RoundTrip(req)
+					if err == nil && resp.StatusCode == http.StatusBadRequest {
+						resp.Body.Close()
+						w := httptest.NewRecorder()
+						w.WriteHeader(rejection.status)
+						fmt.Fprint(w, rejection.body)
+						return w.Result(), nil
+					}
+					return resp, err
+				})}
+				restored, err := NewSDKOwner(oldOwner.base, "bootstrap", client)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer restored.Close(context.Background())
+				r.Identity, r.Entries, r.Tracked = saved, []Registration{known, added}, []Registration{known, added}
+				at := time.Now()
+				if err := restored.Sync(t.Context(), r, hooks); err == nil {
+					t.Fatal("expected membership rejection")
+				}
+				if restored.Accepted().Credential != "" {
+					t.Fatal("restored IDs implied a fresh accepted snapshot")
+				}
+				if err := restored.Sync(t.Context(), r, hooks); err != nil {
+					t.Fatal(err)
+				}
+				obs := awaitObservation(t, events, func(o Observation) bool { return o.Accepted && o.At.After(at) })
+				if len(obs.Request.Apps) != 1 || obs.Request.Apps[0].ID != known.Options.ID {
+					t.Fatalf("rejected addition erased restored sibling: %+v", obs.Request.Apps)
+				}
+				// Observe runs before the partial-rejection diagnostic. Wait for both,
+				// so the test cannot pass before a later callback clears the proof.
+				synctest.Wait()
 				controller.mu.Lock()
 				p, exists := controller.proofs[known.InstanceID]
-				kept = exists && p.App.ID == known.Options.ID && controller.fault != ""
+				kept := exists && p.App.ID == known.Options.ID && controller.fault != ""
 				controller.mu.Unlock()
-				if kept {
-					break
+				if !kept {
+					t.Fatal("partial rejection discarded the fresh sibling observation")
 				}
-				time.Sleep(time.Millisecond)
-			}
-			if !kept {
-				t.Fatal("partial rejection discarded the fresh sibling observation")
-			}
-			if err := restored.Close(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			controller.failed(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: "node_unavailable"})
-			if len(controller.proofs) != 0 {
-				t.Fatal("ordinary failure retained readiness proof")
-			}
+				if err := restored.Close(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				controller.failed(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: "node_unavailable"})
+				if len(controller.proofs) != 0 {
+					t.Fatal("ordinary failure retained readiness proof")
+				}
+			})
 		})
 	}
 }

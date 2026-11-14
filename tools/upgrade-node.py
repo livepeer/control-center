@@ -187,8 +187,6 @@ class Upgrade:
             self.compose += ['-f', path]
         if env_file:
             self.compose += ['--env-file', env_file.resolve()]
-        if self.deploy / 'compose.onchain.yaml' in self.files:
-            self.compose += ['--profile', 'onchain']
 
     def inspect(self, kind, reference):
         result = json.loads(self.run('docker', kind, 'inspect', reference))
@@ -365,7 +363,7 @@ class Upgrade:
         service = self.model['services'].get('redeemer')
         if not enabled and not service:
             return
-        require(service is not None, 'onchain deployment requires its existing Compose overlay')
+        require(service is not None, 'onchain deployment requires a redeemer service')
         image = service['image']
         require(re.fullmatch(IMAGE, image), 'LIVEPEER_REDEEMER_IMAGE must be digest-pinned')
         current = self.container('redeemer')

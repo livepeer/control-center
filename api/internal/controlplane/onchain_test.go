@@ -84,7 +84,10 @@ func TestOnchainCredentialsRequireBoundRuntimeProofWhileSecretsUnavailable(t *te
 }
 
 func TestAutomaticOnchainConfigurationAndUpdates(t *testing.T) {
-	s, c, machine := onchainMachine(t)
+	s := newTestServer(t)
+	c := onchainSettings(t, s)
+	s.params.Mode = ""
+	machine := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	node := machine["node_id"]
 	loaded, err := loadOnchain(t.Context(), s.db, node)
 	if err != nil || loaded.Recipient != c.Recipient || loaded.Generation != 1 {
