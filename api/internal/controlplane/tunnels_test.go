@@ -232,7 +232,7 @@ func reportRuntime(t *testing.T, s *Server, c map[string]string, component strin
 	if e == nil {
 		gen = state.Generation
 	}
-	r := tunnel.MachineReport{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, K3sVersion: m.K3sVersion, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
+	r := tunnel.MachineReport{IngressReady: ready, IngressConfigDigest: desiredConfiguration(s, m, &state).IngressConfigDigest(), NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: component, Generation: gen, K3sVersion: m.K3sVersion, ConfigDigest: machineconfig.Digest(desiredConfiguration(s, m, &state)), HTTPS: true, Ready: ready, ProviderVersion: state.ProviderVersion, TokenGeneration: state.CredentialGeneration, Reason: "ready"}
 	if component == "connector" {
 		r.ConnectorObservedAt = time.Now().UTC()
 		r.ConnectorExpiresAt = r.ConnectorObservedAt.Add(time.Minute)
@@ -358,7 +358,7 @@ func TestNodeIdentityRetirementAndRefresh(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
 	state := readyTunnel(t, s, c)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
+	jwt, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	in := map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("d", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1}
 	refreshPath := "/v1/nodes/" + c["node_id"] + "/credentials/refresh"
 	w := request(t, s, "POST", refreshPath, jwt, in)

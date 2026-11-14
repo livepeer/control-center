@@ -14,6 +14,7 @@ import (
 )
 
 type Config struct {
+	IngressPublicKeys       []byte
 	APIURL                  string
 	Connector               ConnectorConfig
 	DrainTimeout, StatusTTL time.Duration
@@ -61,7 +62,7 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 		cancel()
 	}
 
-	d := Desired{Onchain: p, OnchainError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
+	d := Desired{IngressPublicKeys: s.config.IngressPublicKeys, Onchain: p, OnchainError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
 	if p.Onchain() && s.store.DB != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		r, at, e := s.store.Report(ctx, m, "runtime")
@@ -232,7 +233,7 @@ func (s *Manager) planManagement(ctx context.Context, m Machine, record *Record)
 	s.holdUpgrade(ctx, m, &record.State)
 	record.RolloutReason = "lifecycle_observation_failed"
 	if old.IngressDigest != "" {
-		exposure = &Exposure{TunnelID: old.TunnelID, ServiceURL: old.ServiceURL, ProxyURLTemplate: old.ProxyURLTemplate, DiscoveryURL: old.DiscoveryURL, IngressDigest: old.IngressDigest, CredentialGeneration: old.TokenGeneration, ProviderVersion: old.ProviderVersion}
+		exposure = &Exposure{IngressVersion: old.IngressVersion, TunnelID: old.TunnelID, ServiceURL: old.ServiceURL, ProxyURLTemplate: old.ProxyURLTemplate, DiscoveryURL: old.DiscoveryURL, IngressDigest: old.IngressDigest, CredentialGeneration: old.TokenGeneration, ProviderVersion: old.ProviderVersion}
 	} else {
 		exposure = nil
 	}

@@ -12,7 +12,7 @@ metadata:
 rules:
 - apiGroups: [kustomize.toolkit.fluxcd.io]
   resources: [kustomizations]
-  resourceNames: [livepeer, livepeer-upgrade-plan, livepeer-node, livepeer-connector, livepeer-app-reconciler, livepeer-upgrade-controller]
+  resourceNames: [livepeer, livepeer-upgrade-plan, livepeer-node, livepeer-connector, livepeer-app-reconciler, livepeer-upgrade-controller, livepeer-ingress]
   verbs: [get]
 - apiGroups: [apps]
   resources: [deployments]
@@ -60,7 +60,7 @@ metadata:
 rules:
 - apiGroups: [apps]
   resources: [deployments]
-  resourceNames: [orchestrator]
+  resourceNames: [orchestrator, ingress-auth]
   verbs: [get]
 - apiGroups: ['']
   resources: [pods]

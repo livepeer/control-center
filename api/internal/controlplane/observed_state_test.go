@@ -103,6 +103,13 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 	software := []contract.SoftwareIdentity{{Component: "runtime", Scope: "running", Version: "v1", Commit: strings.Repeat("a", 40)}, {Component: "gvisor", Scope: "installed", Version: "release-observed", RecordedAt: &recordedAt}}
 	runtimeReport := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime", Generation: m.Generation, Reason: "applying", Software: software})
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], runtimeReport), 200)
+	runtimeReport = currentReport(t, s, m.NodeID, runtimeReport)
+	for _, digest := range []string{"invalid", strings.Repeat("A", 64), strings.Repeat("a", 63)} {
+		runtimeReport.IngressConfigDigest = digest
+		requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], runtimeReport), 400)
+	}
+	runtimeReport.IngressReady, runtimeReport.IngressConfigDigest = true, strings.Repeat("e", 64)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/status", c["token"], runtimeReport), 200)
 	path := "/v1/nodes/" + m.NodeID + "/status"
 	requireStatus(t, request(t, s, "POST", path, c["token"], report), 200)
 	read := "/api/machines/" + m.NodeID + "/status"
@@ -113,8 +120,8 @@ func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, component := range v.Components {
-		if component.Component == "runtime" && (!component.Fresh || !reflect.DeepEqual(component.Software, software)) {
-			t.Fatal("lost software or original installation timestamp", w.Body.String())
+		if component.Component == "runtime" && (!component.Fresh || !reflect.DeepEqual(component.Software, software) || !component.IngressReady || component.IngressConfigDigest != runtimeReport.IngressConfigDigest) {
+			t.Fatal("lost software, timestamp or ingress evidence", w.Body.String())
 		}
 	}
 	if len(v.Assignments) != 1 || v.Assignments[0].Generation != a.Generation || v.Delivered == nil || v.Delivered.AppsDigest != m.AppsDigest || v.ExternalReachability != "unverified" {
@@ -266,7 +273,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	r.ReportVersion = 0
 	r.Sequence = 0
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 409)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
+	jwt, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	w = request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("a", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
 	requireStatus(t, w, 200)
 	credential := credentials(t, w.Body.Bytes())

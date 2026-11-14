@@ -214,6 +214,8 @@ write_host_configuration() {
   render_template "$SCRIPT_DIR/config/gvisor.conflist" "$INSTALL_DIR/config/gvisor-cni/10-gvisor.conflist"
   render_template "$SCRIPT_DIR/config/runsc.toml" "$INSTALL_DIR/config/runsc.toml"
   render_template "$SCRIPT_DIR/config/containerd.tmpl" "$containerd_config"
+  install -d -m 0755 "$INSTALL_DIR/k3s/server/manifests"
+  render_template "$SCRIPT_DIR/config/traefik.yaml" "$INSTALL_DIR/k3s/server/manifests/livepeer-traefik-config.yaml"
   render_template "$SCRIPT_DIR/config/k3s.yaml" "$INSTALL_DIR/config/k3s.yaml"
   render_template "$SCRIPT_DIR/config/kubelet.conf" "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d/10-livepeer.conf"
   render_template "$SCRIPT_DIR/config/livepeer-k3s.service" "$INSTALL_DIR/systemd/$UNIT"

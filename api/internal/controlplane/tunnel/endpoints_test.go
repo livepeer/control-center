@@ -3,6 +3,7 @@ package tunnel
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"io"
 	"net"
 	"net/http"
@@ -50,6 +51,10 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 				w.WriteHeader(404)
 				return w.Result(), nil
 			}
+			if rule.Service == machineconfig.PrivateIngressDiscovery && req.Header.Get("Authorization") != "Bearer valid-bearer" {
+				w.WriteHeader(401)
+				return w.Result(), nil
+			}
 			clone := req.Clone(req.Context())
 			clone.RequestURI = ""
 			if rule.OriginRequest != nil {
@@ -75,7 +80,7 @@ func endpointFixture(t *testing.T, state RoutingState, node http.Handler, accept
 
 func TestReadinessRequiresPublicAPIProtectedDiscoveryAndIsolation(t *testing.T) {
 	state := RoutingFor("vkvkvkvkvkvkuaaaaaaaaaaaaa", "example.invalid").RoutingState
-	creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
+	creds := AccessCredential{ClientID: "current", ClientSecret: "secret", Bearer: "valid-bearer"}
 	node := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != endpointHost(PrivateOrchestrator) {
 			w.WriteHeader(404)
@@ -222,7 +227,7 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			private := httputil.NewSingleHostReverseProxy(target)
 			accepted := map[string]string{"current": "secret"}
 			client := endpointFixture(t, state, private, accepted)
-			creds := AccessCredential{ClientID: "current", ClientSecret: "secret"}
+			creds := AccessCredential{ClientID: "current", ClientSecret: "secret", Bearer: "valid-bearer"}
 			for _, host := range []string{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "discovery-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "api-wrongsuffix.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid.", "nested.valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid:8443", "valid-app.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "foreign.invalid"} {
 				response, err := client.Get("https://" + host + "/apps/app-fixture/session")
 				if err != nil {

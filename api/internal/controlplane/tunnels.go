@@ -12,6 +12,7 @@ import (
 type TunnelParams = tunnel.Config
 
 func (s *Server) newTunnelManager(deps tunnel.Dependencies) *tunnel.Manager {
+	deps.SignDiscovery = s.signDiscovery
 	deps.DB, deps.Logger, deps.Configurations = s.db, s.logger, s.configs
 	return tunnel.New(s.params.TunnelParams, deps)
 }

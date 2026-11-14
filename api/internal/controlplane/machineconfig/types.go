@@ -47,6 +47,7 @@ func InitialState(terminal bool) State {
 
 // Exposure contains only the routing facts consumed by configuration rendering.
 type Exposure struct {
+	IngressVersion                                                      int
 	TunnelID, ServiceURL, ProxyURLTemplate, DiscoveryURL, IngressDigest string
 	CredentialGeneration, ProviderVersion                               int64
 }
@@ -57,6 +58,7 @@ type ConnectorConfig struct {
 }
 
 type Desired struct {
+	IngressPublicKeys      []byte
 	ManagedSecrets         bool
 	SecretsEncryptionReady bool
 	Onchain                onchain.Config
@@ -84,7 +86,9 @@ var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{
 func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }
 
 type Report struct {
-	Software []contract.SoftwareIdentity `json:"software,omitempty"`
+	IngressConfigDigest string                      `json:"ingress_config_digest,omitempty"`
+	IngressReady        bool                        `json:"ingress_ready,omitempty"`
+	Software            []contract.SoftwareIdentity `json:"software,omitempty"`
 
 	Onchain             *onchain.Observation    `json:"onchain,omitempty"`
 	ObserverID          string                  `json:"observer_id,omitempty"`

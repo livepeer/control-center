@@ -62,7 +62,7 @@ func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, err
 		lease.Release(ctx)
 		return nil, err
 	}
-	if !l.Machine.Terminal && l.state.ServiceURL == "" {
+	if !l.Machine.Terminal && l.state.ServiceURL == "" && l.state.TunnelID == "" {
 		l.state.RoutingState = RoutingFor(m.NodeID, s.params.CloudflareBaseDomain).RoutingState
 		initialized = true
 	}

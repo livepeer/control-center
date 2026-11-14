@@ -11,7 +11,7 @@ import (
 )
 
 func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
-	m := Desired{Machine: Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}, Exposure: &Exposure{TunnelID: "tunnel", ServiceURL: "https://machine.example", IngressDigest: "ingress", CredentialGeneration: 4, ProviderVersion: 8}}
+	m := Desired{IngressPublicKeys: []byte(`{"1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`), Machine: Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), Connector: ConnectorConfig{Image: "registry.invalid/connector@sha256:" + strings.Repeat("b", 64)}, State: State{Lifecycle: "active"}, Exposure: &Exposure{IngressVersion: 1, ProxyURLTemplate: "https://{proxy}.node.example", DiscoveryURL: "https://discovery.node.example/discovery", TunnelID: "tunnel", ServiceURL: "https://machine.example", IngressDigest: "ingress", CredentialGeneration: 4, ProviderVersion: 8}}
 	build := func(m Desired) map[string][]byte {
 		data, _, err := Build(m)
 		if err != nil {

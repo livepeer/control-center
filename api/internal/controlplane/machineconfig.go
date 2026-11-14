@@ -11,11 +11,15 @@ import (
 )
 
 func exposure(r tunnel.RoutingState) *machineconfig.Exposure {
-	return &machineconfig.Exposure{TunnelID: r.TunnelID, ServiceURL: r.ServiceURL, ProxyURLTemplate: r.ProxyURLTemplate, DiscoveryURL: r.DiscoveryURL, IngressDigest: r.IngressDigest, CredentialGeneration: r.CredentialGeneration, ProviderVersion: r.ProviderVersion}
+	return &machineconfig.Exposure{IngressVersion: r.IngressVersion, TunnelID: r.TunnelID, ServiceURL: r.ServiceURL, ProxyURLTemplate: r.ProxyURLTemplate, DiscoveryURL: r.DiscoveryURL, IngressDigest: r.IngressDigest, CredentialGeneration: r.CredentialGeneration, ProviderVersion: r.ProviderVersion}
 }
 func (s *Server) newConfigurationManager() *machineconfig.Manager {
 	p := s.params
-	return machineconfig.New(machineconfig.Config{APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
+	var public []byte
+	if p.jwtKey != nil {
+		public = p.jwtKey.Keys.JSON()
+	}
+	return machineconfig.New(machineconfig.Config{IngressPublicKeys: public, APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
 		Onchain: func(ctx context.Context, m machineconfig.Machine) (onchain.Config, error) {
 			var c onchain.Config
 			var err error

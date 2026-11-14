@@ -61,9 +61,9 @@ func TestInvitationTokenValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := *base
 			mutate(&c)
-			token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
+			token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c)
 			token.Header["kid"] = s.params.signingKeyID()
-			raw, err := token.SignedString([]byte(s.params.JWTSigningSecret))
+			raw, err := token.SignedString(s.params.jwtKey.Private)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -74,21 +74,22 @@ func TestInvitationTokenValidation(t *testing.T) {
 	}
 	for _, kind := range []string{"signature", "kid", "missing kid", "algorithm"} {
 		t.Run(kind, func(t *testing.T) {
-			token := jwt.NewWithClaims(jwt.SigningMethodHS256, base)
+			token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, base)
 			token.Header["kid"] = s.params.signingKeyID()
-			secret := s.params.JWTSigningSecret
+			var secret any = s.params.jwtKey.Private
 			switch kind {
 			case "signature":
-				secret = strings.Repeat("x", 32)
+				secret = testJWTKey(3).Private
 			case "kid":
 				token.Header["kid"] = "unknown"
 			case "missing kid":
 				delete(token.Header, "kid")
 			case "algorithm":
 				token = jwt.NewWithClaims(jwt.SigningMethodHS384, base)
+				secret = []byte("rejected legacy HMAC key")
 				token.Header["kid"] = s.params.signingKeyID()
 			}
-			bad, _ := token.SignedString([]byte(secret))
+			bad, _ := token.SignedString(secret)
 			if _, err := s.verifyInvitation(bad); err == nil {
 				t.Fatal("invalid signature accepted")
 			}
@@ -116,9 +117,7 @@ func TestInvitationTokenValidation(t *testing.T) {
 			t.Fatal("other token used for invitation")
 		}
 	}
-	oldKey := s.params.JWTSigningSecret
-	s.params.JWTSigningKeyID, s.params.JWTSigningSecret = "next", strings.Repeat("n", 32)
-	s.params.JWTVerificationKeys = `{"1":"` + oldKey + `"}`
+	testRotateJWT(&s.params, 2, "next")
 	if _, err := s.verifyInvitation(raw); err != nil {
 		t.Fatal("retained key refused", err)
 	}

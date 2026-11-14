@@ -2,8 +2,7 @@
 
 This package manages Cloudflare resources, credentials, ingress protection, and
 external readiness for machine tunnels. On the machine, `cloudflared` opens an
-outbound connection to Cloudflare and forwards directly to the private Node
-service. Node routes application traffic to private workloads.
+outbound connection to Cloudflare and forwards to private Traefik ingress, then Node. Node routes application traffic to private workloads.
 
 Each tunnel belongs to a machine enrollment. Credential refresh preserves the
 enrollment and tunnel; deletion and re-enrollment create a new enrollment.
@@ -14,12 +13,14 @@ stable hostnames.
 | --- | --- |
 | `api.<node>.<domain>` | Public orchestrator client API routes |
 | `*.<node>.<domain>` | Application traffic |
-| `discovery.<node>.<domain>/discovery` | Discovery, protected by Access |
+| `discovery.<node>.<domain>/discovery` | Discovery, protected by Access and ingress bearer auth |
 
 The API host allows only reserve, stop/payment and payment refresh controls.
 API and discovery forward with the private Node Host; application hosts preserve
 the original Host. Discovery, runner, metrics, health and Trickle paths are denied
 on API and app hosts; unknown hosts and unmatched API paths return 404.
+
+See the [two-stage authentication rollout](../../../../docs/discovery-auth-rollout.md) for signing configuration and separate existing-resource migrations.
 
 ## Cloudflare API token permissions
 

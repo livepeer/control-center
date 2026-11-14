@@ -16,12 +16,13 @@ SupabasePublishableKey = "replace-with-publishable-key"
 # see docs/operations.md. This does not create credentials or replace grants.
 # DefaultAdminEmail = "admin@example.com"
 
-# Generate each once: openssl rand -hex 32 | tr -d '\n'
+# Generate the Ed25519 signing key once: openssl genpkey -algorithm ED25519
+# See docs/discovery-auth-rollout.md for mounted key configuration and rotation.
 # Keep stable. Changing MachineTokenSecret invalidates installed credentials.
-JWTSigningSecretFile = "secrets/jwt-signing-secret"
+JWTSigningPrivateKeyFile = "secrets/jwt-signing-key.pem"
 # Keep old key IDs and keys in this JSON file for one-hour grants and 24-hour invitations.
 # JWTSigningKeyID = "2"
-# JWTVerificationKeysFile = "/private/enrollment-verification-keys.json"
+# JWTVerificationPublicKeysFile = "/private/jwt-verification-public-keys.json"
 MachineTokenSecretFile = "secrets/machine-token-secret"
 
 Listen = "localhost:41932"

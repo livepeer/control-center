@@ -37,6 +37,7 @@ type attempt struct {
 }
 type transport struct {
 	base      http.RoundTripper
+	signToken func(Source) (string, error)
 	selection atomic.Pointer[authorizationSnapshot]
 	mu        sync.Mutex
 }
@@ -132,6 +133,14 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	default:
 		finish(0, "credential_unavailable")
 		return nil, errors.New("discovery authentication mode is invalid")
+	}
+	if t.signToken != nil && auth.source.AuthMode != AuthNone {
+		bearer, err := t.signToken(auth.source)
+		if err != nil || bearer == "" {
+			finish(0, "credential_unavailable")
+			return nil, errors.New("discovery bearer is unavailable")
+		}
+		clone.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	resp, err := t.base.RoundTrip(clone)
 	if err != nil {

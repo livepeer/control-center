@@ -1,12 +1,14 @@
 # Machine tunnels and protected discovery
 
 Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
-connector starts cloudflared, which forwards directly to the private Node service;
+connector starts cloudflared, which forwards to private Traefik ingress, then Node;
 Node routes application traffic to private workloads. Client API and app hostnames
-are public through the tunnel; discovery requires Cloudflare Access.
+are public through the tunnel; discovery requires both Cloudflare Access and an ingress bearer token in Stage 1.
 
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
+
+See the [two-stage authentication rollout](discovery-auth-rollout.md) for signing configuration and separate existing-resource migrations.
 
 ## Infrastructure and enablement
 

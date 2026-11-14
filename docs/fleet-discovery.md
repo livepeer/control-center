@@ -20,8 +20,7 @@ service or Node release.
 
 Keep Access credentials, the keyring and provisioning tokens out of bundles,
 ConfigMaps, application environments, browser responses, logs and command flags.
-Every machine's raw `/discovery` must remain behind Cloudflare Access Service
-Auth. Public app hosts and direct origins must deny discovery and management
+Every machine's raw `/discovery` requires an ingress bearer token and, in Stage 1, Cloudflare Access Service Auth. See the [rollout](discovery-auth-rollout.md) for local Ed25519 signing, public-key distribution, and separate migrations. Public app hosts and direct origins must deny discovery and management
 access. See the [machine tunnel runbook](machine-tunnels.md) for credential
 protection, rotation, removal and rollback.
 

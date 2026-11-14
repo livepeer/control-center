@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"net/http"
 	"net/url"
 	"sort"
@@ -132,6 +133,9 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 func (l *tunnelLease) provision(ctx context.Context) error {
 	p := l.s.params
 	existingTunnel := l.state.TunnelID != ""
+	if existingTunnel && l.state.IngressVersion != 1 {
+		return errors.New("existing machine requires the separate ingress migration")
+	}
 	if existingTunnel {
 		if e := l.maintainCredentials(ctx); e != nil {
 			return e
@@ -214,7 +218,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	for _, key := range keys {
 		r := l.state.Resources[key]
 		if r.Kind == "app" && !r.Absent && !strings.HasPrefix(key, prefix) && r.ID != "" && r.Audience != "" {
-			previous := []IngressRule{{Hostname: r.Host, Path: `^/discovery$`, Service: PrivateOrchestrator, OriginRequest: protectedOrigin(p, r.Audience)}, {Hostname: r.Host, Service: "http_status:404"}}
+			previous := []IngressRule{{Hostname: r.Host, Path: `^/discovery$`, Service: machineconfig.PrivateIngressDiscovery, OriginRequest: protectedOrigin(p, r.Audience)}, {Hostname: r.Host, Service: "http_status:404"}}
 			rules = append(previous, rules...)
 		}
 	}
@@ -241,6 +245,12 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Ready = false
 		return l.save(ctx)
 	}
+	expectedIngress := l.desired(l.state).IngressConfigDigest()
+	if expectedIngress == "" || !runtime.IngressReady || runtime.IngressConfigDigest != expectedIngress {
+		l.state.Ready = false
+		l.state.Reason = "ingress_pending"
+		return l.save(ctx)
+	}
 	connector, at, e := l.s.report(ctx, l.Machine, "connector")
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return e
@@ -259,6 +269,12 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	if l.s.signDiscovery != nil {
+		credential.Bearer, e = l.s.signDiscovery(l.Machine.NodeID)
+		if e != nil {
+			return e
+		}
+	}
 	verify := l.s.endpointVerifier
 	if verify == nil {
 		verify = l.s.verifyEndpoints
@@ -271,6 +287,7 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	l.state.Ready = p.CloudflareIngressApproved
 	l.state.ReadyGeneration = l.state.Generation
 	l.state.VerifiedAt = time.Now().UTC()
+	l.state.IngressAuthDigest = l.desired(l.state).IngressConfigDigest()
 	l.state.Reason = "ingress_validation_required"
 	if l.state.Ready {
 		l.state.Reason = "ready"
@@ -620,7 +637,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 	copy := *client
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	client = &copy
-	get := func(raw, method string, auth bool) (int, json.RawMessage, error) {
+	get := func(raw, method string, auth bool, bearer bool) (int, json.RawMessage, error) {
 		req, e := http.NewRequestWithContext(ctx, method, raw, nil)
 		if e != nil {
 			return 0, nil, e
@@ -631,6 +648,12 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 			}
 			req.Header.Set("CF-Access-Client-Id", credential.ClientID)
 			req.Header.Set("CF-Access-Client-Secret", credential.ClientSecret)
+			if bearer {
+				if credential.Bearer == "" {
+					return 0, nil, errors.New("discovery bearer unavailable")
+				}
+				req.Header.Set("Authorization", "Bearer "+credential.Bearer)
+			}
 		}
 		res, e := client.Do(req)
 		if e != nil {
@@ -646,7 +669,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 		}
 		return res.StatusCode, b, nil
 	}
-	code, b, e := get(state.DiscoveryURL, "GET", true)
+	code, b, e := get(state.DiscoveryURL, "GET", true, true)
 	if e != nil || code != 200 {
 		return errors.New("authorized discovery is not ready")
 	}
@@ -656,18 +679,29 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 	if json.Unmarshal(b, &records) != nil || len(records) != 1 || records[0].Address != state.ServiceURL {
 		return errors.New("discovery address mismatch")
 	}
-	code, _, _ = get(state.DiscoveryURL, "GET", false)
+	code, _, e = get(state.DiscoveryURL, "GET", true, false)
+	if e != nil || code != 401 {
+		return errors.New("discovery ingress bearer protection is not verified")
+	}
+	originalBearer := credential.Bearer
+	credential.Bearer += "invalid"
+	code, _, e = get(state.DiscoveryURL, "GET", true, true)
+	credential.Bearer = originalBearer
+	if e != nil || code != 401 {
+		return errors.New("invalid discovery bearer was not rejected")
+	}
+	code, _, _ = get(state.DiscoveryURL, "GET", false, false)
 	if code != 401 && code != 403 {
 		return errors.New("discovery is not Access protected")
 	}
 	// This route accepts POST only. GET exercises public Node routing
 	// without reserving a session or requiring an installed app.
 	apiProbe := strings.TrimRight(state.ServiceURL, "/") + "/apps/lpcc-readiness/session"
-	code, _, e = get(apiProbe, "GET", false)
+	code, _, e = get(apiProbe, "GET", false, false)
 	if e != nil || code != http.StatusMethodNotAllowed {
 		return errors.New("public API is not ready")
 	}
-	code, _, e = get(strings.TrimSuffix(state.DiscoveryURL, "/discovery")+"/apps/lpcc-readiness/session", "GET", true)
+	code, _, e = get(strings.TrimSuffix(state.DiscoveryURL, "/discovery")+"/apps/lpcc-readiness/session", "GET", true, true)
 	if e != nil || code != 404 {
 		return errors.New("discovery route isolation is not verified")
 	}
@@ -696,7 +730,7 @@ func verifyEndpointClient(ctx context.Context, state RoutingState, credential Ac
 			}
 			u.Path = probe.Path
 			u.RawPath = probe.RawPath
-			code, _, e = get(u.String(), method, false)
+			code, _, e = get(u.String(), method, false, false)
 			if e != nil || code != 404 && !(check.allowBadRequest && code == 400) {
 				return fmt.Errorf("public route isolation is not verified")
 			}

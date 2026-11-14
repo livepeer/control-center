@@ -39,22 +39,22 @@ const ownerB = "22222222-2222-4222-8222-222222222222"
 const ownerC = "33333333-3333-4333-8333-333333333333"
 
 func testParams() Params {
-	return Params{Mode: "offchain", SecretsURL: "https://secrets.example", SecretsMetadataToken: strings.Repeat("m", 32), RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), RuntimeNodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64), RuntimeConnectorImage: "registry.invalid/connector@sha256:" + strings.Repeat("c", 64), AppStopSignals: true, JWTSigningSecret: strings.Repeat("a", 32), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
+	return Params{Mode: "offchain", SecretsURL: "https://secrets.example", SecretsMetadataToken: strings.Repeat("m", 32), RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), RuntimeNodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64), RuntimeConnectorImage: "registry.invalid/connector@sha256:" + strings.Repeat("c", 64), AppStopSignals: true, jwtKey: testJWTKey(1), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
 }
 
 func TestEnrollmentAuthorization(t *testing.T) {
 	p := testParams()
-	good, _, err := signEnrollment(p.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
+	good, _, err := p.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if owner, err := verifyEnrollment(p.JWTSigningSecret, good); err != nil || owner != ownerA {
+	if owner, err := testVerifyEnrollment(p, good); err != nil || owner != ownerA {
 		t.Fatal(owner, err)
 	}
-	expired, _, _ := signEnrollment(p.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now().Add(-2*time.Hour))
+	expired, _, _ := p.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now().Add(-2*time.Hour))
 	for name, raw := range map[string]string{"expired": expired, "modified": good + "x", "malformed": "nope"} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
+			if _, err := testVerifyEnrollment(p, raw); err == nil {
 				t.Fatal("accepted invalid JWT")
 			}
 		})
@@ -68,16 +68,16 @@ func TestEnrollmentAuthorization(t *testing.T) {
 	} {
 		claims := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(time.Now()), ID: "fixture-grant", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
 		change(&claims)
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 		token.Header["kid"] = p.signingKeyID()
-		raw, _ := token.SignedString([]byte(p.JWTSigningSecret))
-		if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
+		raw, _ := token.SignedString(p.jwtKey.Private)
+		if _, err := testVerifyEnrollment(p, raw); err == nil {
 			t.Fatal("accepted wrong claims")
 		}
 	}
 	claims := jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}
-	raw, _ := jwt.NewWithClaims(jwt.SigningMethodHS384, claims).SignedString([]byte(p.JWTSigningSecret))
-	if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
+	raw, _ := jwt.NewWithClaims(jwt.SigningMethodHS384, claims).SignedString([]byte(p.jwtKey.Private))
+	if _, err := testVerifyEnrollment(p, raw); err == nil {
 		t.Fatal("accepted wrong signing algorithm")
 	}
 }
@@ -228,7 +228,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 	}
 	second := enroll(t, s, ownerA, strings.Repeat("b", 64))
 	enroll(t, s, ownerB, strings.Repeat("c", 64))
-	foreign, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerB, testOrchestrator(ownerB), time.Now())
+	foreign, _, _ := s.params.signEnrollment(ownerB, testOrchestrator(ownerB), time.Now())
 	conflict := request(t, s, "POST", "/v1/nodes/register", foreign, registrationBody(ownerB, strings.Repeat("a", 64), foreign))
 	if conflict.Code != 409 {
 		t.Fatal(conflict.Code)
@@ -263,7 +263,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 		}
 	}
 	// Enrollment authorization expiry has no effect on durable machine credentials.
-	expired, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now().Add(-2*time.Hour))
+	expired, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now().Add(-2*time.Hour))
 	if w := request(t, s, "POST", "/v1/nodes/register", expired, nil); w.Code != 401 {
 		t.Fatal(w.Code)
 	}
@@ -317,7 +317,7 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 
 func TestRegistrationFailureIsAtomic(t *testing.T) {
 	s := newTestServer(t)
-	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
+	token, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	body := registrationBody(ownerA, strings.Repeat("a", 64), token)
 	s.build = func(machineconfig.Desired) ([]byte, string, error) { return nil, "", errors.New("generation failed") }
 	if w := request(t, s, "POST", "/v1/nodes/register", token, body); w.Code != 503 {

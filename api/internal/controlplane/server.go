@@ -66,6 +66,7 @@ type Server struct {
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
+	_ = p.loadJWTKeys() // Serve startup validates this; direct embeddings fail closed when keys are unavailable.
 	s := &Server{db: db, params: p, logger: logger, build: machineconfig.Build, reconcileWake: make(chan struct{}, 1), client: &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

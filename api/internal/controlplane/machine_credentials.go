@@ -235,7 +235,7 @@ func (s *Server) machineStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "status does not match enrollment")
 		return
 	}
-	if (report.BundleSHA256 != "" && !fingerprintPattern.MatchString(report.BundleSHA256)) || (report.ConfigDigest != "" && !fingerprintPattern.MatchString(report.ConfigDigest)) {
+	if (report.BundleSHA256 != "" && !fingerprintPattern.MatchString(report.BundleSHA256)) || (report.ConfigDigest != "" && !fingerprintPattern.MatchString(report.ConfigDigest)) || (report.IngressConfigDigest != "" && !fingerprintPattern.MatchString(report.IngressConfigDigest)) {
 		fail(w, 400, "invalid status digest")
 		return
 	}

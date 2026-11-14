@@ -79,6 +79,9 @@ func addSystemWorkloads(files map[string][]byte, m Desired) error {
 		if files[prefix+"runtime.json"] == nil {
 			continue
 		}
+		if prefix != "" {
+			files[prefix+"system/ingress/kustomization.yaml"] = kustomize()
+		}
 		files[prefix+"system/node/network.yaml"] = []byte(nodeNetwork())
 		if effectiveOnchain(m).Onchain() {
 			files[prefix+"management/app-reconciler.yaml"] = append(files[prefix+"management/app-reconciler.yaml"], []byte("\n---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: {name: orchestrator-onchain-egress, namespace: livepeer}\nspec:\n  podSelector: {matchLabels: {app: orchestrator}}\n  policyTypes: [Egress]\n  egress:\n"+onchainNetwork(effectiveOnchain(m)))...)
@@ -98,6 +101,7 @@ func addSystemWorkloads(files map[string][]byte, m Desired) error {
 			name, path, dependency string
 			wait                   bool
 		}{
+			{"livepeer-ingress", "system/ingress", "livepeer", true},
 			{"livepeer-node", "system/node", "livepeer", false},
 			{"livepeer-connector", "system/connector", "livepeer", false},
 			{"livepeer-app-reconciler", "system/app-reconciler", "livepeer", false},

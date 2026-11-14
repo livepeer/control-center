@@ -55,7 +55,7 @@ func New(config Config, deps Dependencies) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	t := &transport{base: base}
+	t := &transport{base: base, signToken: deps.SignToken}
 	f := &Manager{transport: t, backend: deps.Store, logger: logger, interval: config.RefreshInterval,
 		selectionInterval: config.ReconcileInterval, instanceID: uuid.New().String()}
 	if own, err := url.Parse(config.OwnURL); err == nil && own.Host != "" {

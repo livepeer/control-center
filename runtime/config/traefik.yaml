@@ -1,0 +1,57 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata: {name: traefik, namespace: kube-system}
+spec:
+  valuesContent: |-
+    service:
+      spec:
+        type: ClusterIP
+    ingressClass:
+      name: livepeer
+      isDefaultClass: false
+    providers:
+      kubernetesIngress:
+        enabled: false
+      kubernetesCRD:
+        enabled: true
+        ingressClass: livepeer
+        namespaces: [livepeer]
+        allowCrossNamespace: false
+    ports:
+      traefik:
+        port: 9000
+        expose: {default: false}
+      web:
+        expose: {default: false}
+      websecure:
+        expose: {default: false}
+      livepeer-api:
+        port: 8080
+        exposedPort: 8080
+        expose: {default: true}
+      livepeer-discovery:
+        port: 8081
+        exposedPort: 8081
+        expose: {default: true}
+      livepeer-apps:
+        port: 8082
+        exposedPort: 8082
+        expose: {default: true}
+        transport:
+          respondingTimeouts:
+            readTimeout: 0s
+    ingressRoute:
+      dashboard:
+        enabled: false
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-ingress, namespace: kube-system}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: traefik}}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: flux-system}}
+      podSelector: {matchLabels: {app: livepeer-tunnel}}
+    ports: [{protocol: TCP, port: 8080}, {protocol: TCP, port: 8081}, {protocol: TCP, port: 8082}]

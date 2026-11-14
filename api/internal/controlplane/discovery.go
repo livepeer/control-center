@@ -39,7 +39,7 @@ func (s *Server) ConfigureDiscovery() error {
 	if err := s.tunnels.ConfigureCredentials(); err != nil {
 		return err
 	}
-	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger})
+	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger, SignToken: func(source fleet.Source) (string, error) { return s.signDiscovery(source.NodeID) }})
 	if err != nil {
 		return err
 	}
@@ -104,4 +104,11 @@ func (s discoveryStore) Resolve(ctx context.Context, ref string) (fleet.Credenti
 func (s discoveryStore) Acknowledge(ctx context.Context, source fleet.Source) error {
 	return s.server.tunnels.AcknowledgeDiscovery(ctx, tunnel.DiscoverySource{NodeID: source.NodeID,
 		URL: source.URL, Generation: source.Generation, CredentialRef: source.CredentialRef, CredentialVersion: source.CredentialVersion})
+}
+
+func (s *Server) signDiscovery(node string) (string, error) {
+	if s.params.jwtKey == nil {
+		return "", errors.New("JWT signing key is unavailable")
+	}
+	return s.params.jwtKey.Discovery(s.params.signingKeyID(), node, s.currentTime())
 }

@@ -327,7 +327,7 @@ func (c *cloudflareHTTP) Create(ctx context.Context, r CFResource, tunnel string
 			}
 			expiry = o.CreatedAt.Add(duration)
 		}
-		return r, &AccessCredential{o.ClientID, o.ClientSecret}, expiry, nil
+		return r, &AccessCredential{ClientID: o.ClientID, ClientSecret: o.ClientSecret}, expiry, nil
 	}
 	return r, nil, time.Time{}, nil
 }

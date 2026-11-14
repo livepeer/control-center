@@ -54,11 +54,7 @@ func TestControlGrantRevocationRolloverAndExpiry(t *testing.T) {
 			t.Fatal("issuance persisted state", table, n)
 		}
 	}
-	oldKey := s.params.JWTSigningSecret
-	s.params.JWTSigningKeyID = "next"
-	s.params.JWTSigningSecret = strings.Repeat("z", 32)
-	retained, _ := json.Marshal(map[string]string{"1": oldKey})
-	s.params.JWTVerificationKeys = string(retained)
+	testRotateJWT(&s.params, 2, "next")
 	// A previously issued grant survives rollover and remains reusable.
 	for _, fingerprint := range []string{strings.Repeat("1", 64), strings.Repeat("2", 64)} {
 		requireStatus(t, request(t, s, "POST", "/v1/nodes/register", token, registrationBody(ownerA, fingerprint, token)), 200)
@@ -184,11 +180,11 @@ func TestEnrollmentRequiresKeyID(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, kid := range []any{nil, "", 123, "unknown"} {
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
+		token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c)
 		if kid != nil {
 			token.Header["kid"] = kid
 		}
-		raw, err := token.SignedString([]byte(p.JWTSigningSecret))
+		raw, err := token.SignedString(p.jwtKey.Private)
 		if err != nil {
 			t.Fatal(err)
 		}

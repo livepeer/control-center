@@ -37,6 +37,7 @@ type Dependencies struct {
 	Store     Store
 	Logger    *slog.Logger
 	Transport http.RoundTripper
+	SignToken func(Source) (string, error)
 }
 
 // Store projects authoritative managed state; it is not another editable fleet list.

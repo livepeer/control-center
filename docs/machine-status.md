@@ -48,7 +48,12 @@ observation time:
 - **Requested, delivered or downloaded differ:** inspect the delivery failure and
   Runtime adapter logs. Retained last-good app input keeps its original identity.
 - **No instance exists:** inspect the assignment's resource refusal or cleanup
-  prerequisite. Another assignment can still be healthy.
+  prerequisite. Fresh reports for the current input, assignment generation and
+  activation show the current startup blocker before any retained reconciliation
+  diagnostic. Secret delivery being unavailable does not establish that a secret
+  is missing. Artifact stages retain their original identities; an applied
+  artifact alone does not clear a reported reconciliation failure. Another
+  assignment can still be healthy.
 - **Image, startup, isolation or probe failure:** inspect the failure, Pod UID,
   configured check and startup deadline in the instance details.
 - **Node registration or protocol failure:** inspect the request failure and

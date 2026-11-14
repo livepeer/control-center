@@ -169,6 +169,7 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 		current = cache(formatInt(int64(n)), 0)
 	}
 	applied, attempted, orphan := cache("applied", 3*time.Hour), cache("attempted", 3*time.Hour), cache("orphan", 4*time.Hour)
+	ingressApplied, ingressAttempted := cache("ingress-applied", 3*time.Hour), cache("ingress-attempted", 3*time.Hour)
 	republished := cache("republished", 4*time.Hour)
 	if err := artifact.AtomicWrite(filepath.Join(f.source.Store.Directory, republished[7:]+".seen"), []byte(republished), 0600); err != nil {
 		t.Fatal(err)
@@ -176,6 +177,9 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 	f.kube.reply = func(path string) any {
 		if path == fluxPath+"livepeer-node" {
 			return map[string]any{"status": map[string]any{"lastAppliedRevision": applied, "lastAttemptedRevision": attempted}}
+		}
+		if path == fluxPath+"livepeer-ingress" {
+			return map[string]any{"status": map[string]any{"lastAppliedRevision": ingressApplied, "lastAttemptedRevision": ingressAttempted}}
 		}
 		return nil
 	}
@@ -186,7 +190,7 @@ func TestCacheRetainsPeerAppliedAndAttemptedInputs(t *testing.T) {
 	}
 	f.kube.err = nil
 	f.source.gc(t.Context(), current)
-	for _, digest := range []string{applied, attempted, republished} {
+	for _, digest := range []string{applied, attempted, ingressApplied, ingressAttempted, republished} {
 		if _, err := f.source.Store.Get(digest); err != nil {
 			t.Fatal("peer input collected", err)
 		}

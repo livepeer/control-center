@@ -283,6 +283,31 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		}
 		return nil
 	}
+	ingressReady, ingressDigest := false, ""
+	if m.IngressConfigDigest != "" {
+		ingressApplied, _ := s.applied(ctx, "livepeer-ingress", digest)
+		var auth struct {
+			Spec struct {
+				Template struct {
+					Metadata struct {
+						Annotations map[string]string `json:"annotations"`
+					} `json:"metadata"`
+				} `json:"template"`
+			} `json:"spec"`
+			Metadata struct {
+				Generation int64 `json:"generation"`
+			} `json:"metadata"`
+			Status struct {
+				ObservedGeneration int64 `json:"observedGeneration"`
+				UpdatedReplicas    int   `json:"updatedReplicas"`
+				ReadyReplicas      int   `json:"readyReplicas"`
+			} `json:"status"`
+		}
+		if s.Kube.Request(ctx, http.MethodGet, "/apis/apps/v1/namespaces/livepeer/deployments/ingress-auth", nil, &auth) == nil {
+			ingressDigest = auth.Spec.Template.Metadata.Annotations["livepeer.io/ingress-config-sha256"]
+			ingressReady = ingressApplied && ingressDigest == m.IngressConfigDigest && auth.Status.ObservedGeneration == auth.Metadata.Generation && auth.Status.UpdatedReplicas == 1 && auth.Status.ReadyReplicas == 1
+		}
+	}
 	ready := false
 	actual := ""
 	podUID := ""
@@ -366,7 +391,7 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		reporter = s.Control
 	}
 	payload := map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
-		"bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": observedAt, "software": s.software(ctx, s.NodeName)}
+		"ingress_ready": ingressReady, "ingress_config_digest": ingressDigest, "bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": observedAt, "software": s.software(ctx, s.NodeName)}
 	if s.Onchain != nil {
 		payload["onchain"] = s.Onchain(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)
 	}
@@ -390,7 +415,7 @@ func readBounded(resp *http.Response, limit int64) ([]byte, error) {
 func (s *Source) gc(ctx context.Context, current string) {
 	pins := map[string]bool{current: true}
 	names := []string{"livepeer", "livepeer-upgrade-plan"}
-	for _, c := range []string{"node", "connector", "app-reconciler", "upgrade-controller"} {
+	for _, c := range []string{"node", "connector", "ingress", "app-reconciler", "upgrade-controller"} {
 		names = append(names, "livepeer-"+c)
 	}
 	for _, name := range names {
