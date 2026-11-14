@@ -4,7 +4,6 @@ metadata:
   name: livepeer-apps
   labels:
     livepeer.io/managed-apps: 'true'
-@MANAGED_SECRETS_LABEL@
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.37
   annotations:
@@ -198,7 +197,7 @@ spec:
     namespaceSelector: {matchLabels: {livepeer.io/managed-apps: 'true'}}
     resourceRules: [{apiGroups: [''], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods]}]
   validations:
-  - expression: "request.operation != 'CREATE' || !('livepeer.io/managed-secrets' in namespaceObject.metadata.labels) || object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == object.metadata.name))"
+  - expression: "request.operation != 'CREATE' || object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == object.metadata.name))"
     message: Managed app Pods may reference only their own incarnation Secret.
   - expression: "has(object.metadata.labels) && 'livepeer.io/instance' in object.metadata.labels && object.metadata.labels['livepeer.io/instance'] == object.metadata.name && object.metadata.name.matches('^lp-app-[0-9a-f]{20}-[0-9a-f]{32}$')"
     message: App Pods require an immutable per-incarnation identity.

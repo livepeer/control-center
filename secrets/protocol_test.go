@@ -25,20 +25,6 @@ func TestEncryptionAndBinding(t *testing.T) {
 		t.Fatal("plaintext")
 	}
 }
-func TestEnrollmentEnvelope(t *testing.T) {
-	v, e := Join("a.b.c", "d.e.f")
-	if e != nil {
-		t.Fatal(e)
-	}
-	p, e := Split(v)
-	if e != nil || p.Control != "a.b.c" || p.Setup != "d.e.f" {
-		t.Fatal(p, e)
-	}
-	if _, e = Split("lpcc1.bad"); e == nil {
-		t.Fatal("invalid envelope")
-	}
-}
-
 func TestOrchestratorAddress(t *testing.T) {
 	address := "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
 	got, err := OrchestratorAddress("0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD")

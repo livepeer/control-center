@@ -14,6 +14,8 @@ type secretView struct {
 	Deleted  bool  `json:"deleted"`
 }
 
+const maxSecretsPerOrchestrator = 100
+
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	owner := operatorActor(r).Address
 	rows, e := s.DB.QueryContext(r.Context(), `SELECT id::text,name,key,COALESCE(head::text,''),revision,deleted FROM lpsecrets.secrets WHERE orchestrator_address=$1 ORDER BY name,key LIMIT 1000`, owner)
@@ -54,9 +56,26 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// Serialize reservations across members and service replicas, including when
+	// this orchestrator has no secret rows to lock yet.
+	if _, e = tx.ExecContext(r.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1,17021))`, owner); e != nil {
+		fail(w, 503, "unavailable")
+		return
+	}
 	v := secretView{Binding: protocol.Binding{Owner: owner, Name: in.Name, Key: in.Key, Version: ident()}}
 	e = tx.QueryRowContext(r.Context(), `SELECT id::text,revision FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted FOR UPDATE`, owner, in.Name, in.Key).Scan(&v.ID, &v.Revision)
 	if errors.Is(e, sql.ErrNoRows) && in.Revision == 0 {
+		// Tombstones count too: deleting a reservation must not allow unbounded
+		// durable metadata growth by repeatedly reserving the same reference.
+		var count int
+		if e = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM lpsecrets.secrets WHERE orchestrator_address=$1`, owner).Scan(&count); e != nil {
+			fail(w, 503, "unavailable")
+			return
+		}
+		if count >= maxSecretsPerOrchestrator {
+			fail(w, 409, "secret_limit_reached")
+			return
+		}
 		v.ID = ident()
 		v.Revision = 1
 		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.secrets(id,orchestrator_address,name,key) VALUES($1,$2,$3,$4)`, v.ID, owner, in.Name, in.Key)
@@ -305,8 +324,7 @@ func assignmentDenied(m protocol.Machine, revision string) bool {
 	return false
 }
 
-// Only a current tombstone is authoritative deletion; an unprovisioned value
-// blocks starts without withdrawing healthy consumers during adoption.
+// A reference awaiting upload blocks new starts; a deleted reference also drains consumers.
 func missingSecret(ctx context.Context, tx *sql.Tx, owner, name, key string) (string, error) {
 	var deleted, live bool
 	e := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND deleted), EXISTS(SELECT FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted)`, owner, name, key).Scan(&deleted, &live)

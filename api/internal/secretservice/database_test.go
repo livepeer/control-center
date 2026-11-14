@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"github.com/livepeer/control-center/api/internal/testdb"
 	"github.com/livepeer/control-center/schema"
 	protocol "github.com/livepeer/control-center/secrets"
@@ -805,14 +806,6 @@ func TestEnrollmentRequiresProofAndForwardsBinding(t *testing.T) {
 			}
 		}
 	}
-	// Legacy enrollment bodies are refused rather than forwarded.
-	raw, _ := json.Marshal(in)
-	var legacy map[string]any
-	_ = json.Unmarshal(raw, &legacy)
-	legacy["management_token"] = testMachineCredential
-	if w := call(t, s, "/v1/machines/enroll", "POST", grant, legacy, nil); w.Code != 400 {
-		t.Fatal("legacy field accepted", w.Code)
-	}
 	forwarded := false
 	m.after = func(binding *protocol.MachineBinding) error {
 		forwarded = binding != nil && binding.Owner == testOwner && binding.Nonce == in.Nonce && binding.ManagementProof == in.ManagementProof
@@ -820,5 +813,73 @@ func TestEnrollmentRequiresProofAndForwardsBinding(t *testing.T) {
 	}
 	if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 200 || !forwarded {
 		t.Fatal("binding not forwarded intact", w.Code, w.Body.String())
+	}
+}
+
+func TestSecretLimit(t *testing.T) {
+	for _, owner := range []string{testOwner, "0x0000000000000000000000000000000000000000"} {
+		t.Run(owner, func(t *testing.T) {
+			s, _, metadata, _ := dbService(t)
+			metadata.membership = func(_, _ string) error { return nil }
+			if _, err := s.DB.Exec(`INSERT INTO lpsecrets.secrets(id,orchestrator_address,name,key)
+ SELECT gen_random_uuid(),$1,'lp-app-provider','seed-' || n FROM generate_series(1,99) n`, owner); err != nil {
+				t.Fatal(err)
+			}
+			reserve := func(service *Service, address, key string, revision int) *httptest.ResponseRecorder {
+				return call(t, service, "/v1/secrets/reserve?orchestrator_address="+address, "POST", "operator",
+					map[string]any{"name": "lp-app-provider", "key": key, "expected_revision": revision}, nil)
+			}
+			replica := New(s.DB, s.Config)
+			replica.HTTP, replica.Metadata = s.HTTP, s.Metadata
+			start := make(chan struct{})
+			results := make(chan *httptest.ResponseRecorder, 20)
+			for i := range cap(results) {
+				go func() {
+					<-start
+					service := s
+					if i%2 == 1 {
+						service = replica
+					}
+					results <- reserve(service, owner, fmt.Sprintf("race-%d", i), 0)
+				}()
+			}
+			close(start)
+			accepted := 0
+			var binding secretView
+			for range cap(results) {
+				w := <-results
+				if w.Code == 200 {
+					accepted++
+					if err := json.Unmarshal(w.Body.Bytes(), &binding); err != nil {
+						t.Fatal(err)
+					}
+				} else if w.Code != 409 || !strings.Contains(w.Body.String(), `"code":"secret_limit_reached"`) {
+					t.Error("unexpected quota response", w.Code, w.Body.String())
+				}
+			}
+			if accepted != 1 {
+				t.Fatal("last slot admitted", accepted, "requests")
+			}
+			if w := reserve(s, owner, binding.Key, 1); w.Code != 200 {
+				t.Fatal("existing entry could not be updated at capacity", w.Code, w.Body.String())
+			}
+			other := "0x2222222222222222222222222222222222222222"
+			if w := reserve(s, other, binding.Key, 0); w.Code != 200 {
+				t.Fatal("another orchestrator shared the quota", w.Code, w.Body.String())
+			}
+			w := call(t, s, "/v1/secrets/"+binding.ID+"?orchestrator_address="+owner, "DELETE", "operator", map[string]int{"expected_revision": 1}, nil)
+			if w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			if w = reserve(s, owner, binding.Key, 0); w.Code != 409 || !strings.Contains(w.Body.String(), `"code":"secret_limit_reached"`) {
+				t.Fatal("deletion freed quota", w.Code, w.Body.String())
+			}
+			var entries, versions, audits int
+			if err := s.DB.QueryRow(`SELECT (SELECT count(*) FROM lpsecrets.secrets WHERE orchestrator_address=$1),
+ (SELECT count(*) FROM lpsecrets.versions v JOIN lpsecrets.secrets s ON s.id=v.secret_id WHERE s.orchestrator_address=$1),
+ (SELECT count(*) FROM lpsecrets.audit WHERE orchestrator_address=$1)`, owner).Scan(&entries, &versions, &audits); err != nil || entries != 100 || versions != 0 || audits != 1 {
+				t.Fatal("quota rejection changed stored data", entries, versions, audits, err)
+			}
+		})
 	}
 }

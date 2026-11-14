@@ -14,8 +14,6 @@ import (
 )
 
 type SecretResolver interface {
-	Enabled() bool
-	MarkManaged() error
 	Activate(context.Context) error
 	IdentityReady() bool
 	VersionsAll(context.Context, []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error)
@@ -35,7 +33,17 @@ func request(a schema.AppAssignment) protocol.ResolveRequest {
 	return protocol.ResolveRequest{RevisionID: a.RevisionID, Generation: a.Generation, Activation: a.ActivationGeneration, Digest: a.Digest}
 }
 func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
-	if d == nil || !d.Client.Enabled() || now.Before(d.Next) {
+	if d == nil {
+		return
+	}
+	if !d.Client.IdentityReady() {
+		d.Targets = map[string]protocol.VersionSet{}
+		d.Faults = map[string]string{}
+		d.identityFault(s, "secrets_unavailable")
+		d.Next, d.failures = time.Time{}, 0
+		return
+	}
+	if now.Before(d.Next) {
 		return
 	}
 	identityFailed := false
@@ -76,7 +84,7 @@ func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
 	}
 	requests := []protocol.ResolveRequest{}
 	for _, a := range s.Payload.Intent.Entries {
-		if a.Desired == "present" && d.Managed(a) {
+		if a.Desired == "present" && needsSecrets(a) {
 			requests = append(requests, request(a))
 		}
 	}
@@ -111,7 +119,7 @@ func secretFault(e error) string {
 func (d *SecretDelivery) identityFault(s State, reason string) {
 	if s.Payload.Intent != nil {
 		for _, a := range s.Payload.Intent.Entries {
-			if d.Managed(a) {
+			if needsSecrets(a) {
 				d.Faults[a.RevisionID] = reason
 			}
 		}
@@ -153,7 +161,7 @@ func preparationReason(e error) string {
 }
 
 // AdmissionReady checks the live guard before activation and every new start.
-const ownSecretRule = "request.operation != 'CREATE' || !('livepeer.io/managed-secrets' in namespaceObject.metadata.labels) || object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == object.metadata.name))"
+const ownSecretRule = "request.operation != 'CREATE' || object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == object.metadata.name))"
 
 func (d *SecretDelivery) AdmissionReady(ctx context.Context) error {
 	var ns struct {
@@ -164,7 +172,7 @@ func (d *SecretDelivery) AdmissionReady(ctx context.Context) error {
 	if e := d.Kube.Request(ctx, "GET", "/api/v1/namespaces/livepeer-apps", nil, &ns); e != nil {
 		return e
 	}
-	if ns.Metadata.Labels["livepeer.io/managed-secrets"] != "true" {
+	if ns.Metadata.Labels["livepeer.io/managed-apps"] != "true" {
 		return protocol.ErrUnavailable
 	}
 	var policy struct {
@@ -202,8 +210,8 @@ func (d *SecretDelivery) AdmissionReady(ctx context.Context) error {
 	}
 	return nil
 }
-func (d *SecretDelivery) Managed(a schema.AppAssignment) bool {
-	return d != nil && d.Client.Enabled() && a.Revision != nil && len(a.Revision.Definition.Container.Secrets) > 0
+func needsSecrets(a schema.AppAssignment) bool {
+	return a.Revision != nil && len(a.Revision.Definition.Container.Secrets) > 0
 }
 func (d *SecretDelivery) Prepare(ctx context.Context, a schema.AppAssignment, i *Instance) error {
 	target, ok := d.Targets[a.RevisionID]
@@ -432,11 +440,11 @@ func centralSecretTransition(s State, a schema.AppAssignment) bool {
 // StageRotation prepares a successor before its healthy source is withdrawn.
 // Its resource name is journaled first; retries reconcile the same immutable Secret.
 func (d *SecretDelivery) StageRotation(ctx context.Context, c *Controller, s State) error {
-	if d == nil || !d.Client.Enabled() || s.Payload.Intent == nil {
+	if d == nil || s.Payload.Intent == nil {
 		return nil
 	}
 	for _, a := range s.Payload.Intent.Entries {
-		if a.Desired != "present" || !d.Managed(a) || centralSecretTransition(s, a) {
+		if a.Desired != "present" || !needsSecrets(a) || centralSecretTransition(s, a) {
 			continue
 		}
 		target, ok := d.Targets[a.RevisionID]
@@ -489,7 +497,7 @@ func (d *SecretDelivery) StageRotation(ctx context.Context, c *Controller, s Sta
 }
 
 func (c *Controller) collectSecrets(ctx context.Context) error {
-	if c.Secrets == nil || !c.Secrets.Client.Enabled() {
+	if c.Secrets == nil {
 		return nil
 	}
 	st := c.Journal.View()

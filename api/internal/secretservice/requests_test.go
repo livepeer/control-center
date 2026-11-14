@@ -183,7 +183,7 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 	defer func() { http.DefaultTransport = previous }()
 	dir := t.TempDir()
 	raw, _ := json.Marshal(id.Identity)
-	for name, data := range map[string][]byte{"key.pem": protocol.PrivatePEM(key), "identity.json": raw, "url": []byte(edge.URL), "managed": []byte("1")} {
+	for name, data := range map[string][]byte{"key.pem": protocol.PrivatePEM(key), "identity.json": raw, "url": []byte(edge.URL)} {
 		if e := os.WriteFile(filepath.Join(dir, name), data, 0600); e != nil {
 			t.Fatal(e)
 		}

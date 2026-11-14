@@ -1,3 +1,4 @@
+import { mockSecrets, secretsURL } from './secrets-fixture'
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 
@@ -22,7 +23,7 @@ async function setup(page: Page) {
     const path = new URL(route.request().url()).pathname, method = route.request().method()
     if (path === '/api/orchestrators') return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
-    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:5173' } })
+    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:5173', secrets_url: secretsURL } })
     if (path === '/api/me') return route.fulfill({ json: { user_id: owner, is_admin: state.admin } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
@@ -53,6 +54,7 @@ async function setup(page: Page) {
     }
     return route.fulfill({ status: 404, json: { error: 'Not found' } })
   })
+  await mockSecrets(page)
   await page.goto('/')
   await page.getByRole('button', { name: 'Manage apps for worker-apps' }).click()
   return state

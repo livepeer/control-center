@@ -30,7 +30,7 @@ func (c *Controller) collect(view View, now time.Time) error {
 			wanted[g.Key] = true
 		}
 		for id, i := range s.Instances {
-			if i.Phase != "removed" || !i.RegistrationGone || i.SecretPrepared || (c.Secrets != nil && c.Secrets.Client.Enabled() && !i.SecretCleanupDone) {
+			if i.Phase != "removed" || !i.RegistrationGone || i.SecretPrepared || (c.Secrets != nil && !i.SecretCleanupDone) {
 				continue
 			}
 			if wanted[i.Group.Key] && s.Heads[i.Group.Key] == id {

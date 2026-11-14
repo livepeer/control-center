@@ -150,7 +150,7 @@ secrets_management_proof "$3"
 
     def test_only_authenticated_replies_can_change_saved_credentials(self):
         grant = 'header.' + base64.urlsafe_b64encode(json.dumps({'exp': int(time.time()) + 3600}).encode()).decode().rstrip('=') + '.signature'
-        for mode, replaced, removed in [('missing-credential', False, False), ('invalid-credential', False, False), ('missing409', False, False), ('missing401', False, False), ('forged409', False, False), ('replay409', False, False), ('signed409', True, False), ('signed401', False, True), ('initial200', False, True), ('retry200', True, True), ('initial-forged200', False, False), ('changed200', False, False)]:
+        for mode, replaced, removed in [('missing-credential', False, False), ('invalid-credential', False, False), ('missing409', False, False), ('missing401', False, False), ('forged409', False, False), ('replay409', False, False), ('signed409', True, False), ('signed401', False, True), ('initial200', False, True), ('retry200', True, True), ('initial-forged200', False, False), ('changed200', False, False), ('initial-zero200', False, True)]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 target = root / 'credentials/secrets'
@@ -181,7 +181,7 @@ count = root / 'calls'; n = int(count.read_text()) + 1 if count.exists() else 1;
 request = sys.stdin.read()
 status = 200 if mode.endswith('200') else 401 if mode.endswith('401') else 409 if n == 1 else 503
 if mode == 'retry200': status = 409 if n == 1 else 503 if n == 2 else 200
-identity = {'node_id': json.loads(request)['node_id'], 'orchestrator_address': '0x1111111111111111111111111111111111111111', 'generation': 1, 'service': json.loads((root / 'trust.json').read_text())}
+identity = {'node_id': json.loads(request)['node_id'], 'orchestrator_address': '0x' + ('0' if mode == 'initial-zero200' else '1') * 40, 'generation': 1, 'service': json.loads((root / 'trust.json').read_text())}
 if mode == 'changed200': identity['service']['public_key'] = base64.b64encode(bytes(32)).decode()
 body = json.dumps(identity if status == 200 else {'code': 'identity_reset_required' if status == 409 else 'grant_refused' if status == 401 else 'unavailable'}, separators=(',', ':')) + '\n'
 hash = lambda value: hashlib.sha256(value.encode()).hexdigest()
@@ -228,7 +228,7 @@ enroll_secrets
                 self.assertEqual((target / 'setup').exists(), not removed)
                 if saved_bytes is not None:
                     self.assertEqual(saved.read_bytes(), saved_bytes)
-                elif mode == 'initial200':
+                elif mode in ('initial200', 'initial-zero200'):
                     self.assertEqual(json.loads(saved.read_text()), json.loads(pin))
                 else:
                     self.assertFalse(saved.exists())

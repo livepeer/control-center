@@ -24,7 +24,6 @@ import (
 
 const MaxValue = 64 << 10
 const MaxInjected = 256 << 10
-const EnvelopePrefix = "lpcc1."
 const DefaultURL = "https://controlcenter-secrets.livepeer.live"
 
 var ErrInvalid = errors.New("invalid_secret")
@@ -35,37 +34,6 @@ type Sensitive []byte
 
 func (Sensitive) String() string   { return "[redacted]" }
 func (Sensitive) GoString() string { return "[redacted]" }
-
-type Enrollment struct {
-	Version int    `json:"version"`
-	Control string `json:"control"`
-	Setup   string `json:"setup"`
-}
-
-func Join(control, setup string) (string, error) {
-	if control == "" || setup == "" {
-		return "", ErrInvalid
-	}
-	b, _ := json.Marshal(Enrollment{1, control, setup})
-	return EnvelopePrefix + base64.RawURLEncoding.EncodeToString(b), nil
-}
-func Split(raw string) (Enrollment, error) {
-	if !strings.HasPrefix(raw, EnvelopePrefix) {
-		if len(strings.Split(raw, ".")) == 3 {
-			return Enrollment{Control: raw}, nil
-		}
-		return Enrollment{}, ErrInvalid
-	}
-	b, e := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(raw, EnvelopePrefix))
-	if e != nil || len(b) > 16384 {
-		return Enrollment{}, ErrInvalid
-	}
-	var v Enrollment
-	if json.Unmarshal(b, &v) != nil || v.Version != 1 || v.Control == "" || v.Setup == "" {
-		return Enrollment{}, ErrInvalid
-	}
-	return v, nil
-}
 
 type Binding struct {
 	Owner   string `json:"orchestrator_address"`

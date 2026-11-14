@@ -1,3 +1,4 @@
+import { mockSecrets, secretsURL } from './secrets-fixture'
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 
@@ -26,7 +27,7 @@ async function setup(page: Page, initialAdmin = true) {
     if (path === '/api/orchestrators') return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
     const actor = route.request().headers().authorization === `Bearer ${session(b).access_token}` ? b : a
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture-public' } })
-    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932' } })
+    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932', secrets_url: secretsURL } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture-enrollment', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/machines') return route.fulfill({ json: { machines: [] } })
     if (path === '/api/me') {
@@ -52,6 +53,7 @@ async function setup(page: Page, initialAdmin = true) {
     return route.fulfill({ json: { administrators: state.grants } })
   })
   const capability = page.waitForResponse(response => response.url().endsWith('/api/me'))
+  await mockSecrets(page)
   await page.goto('/')
   await (await capability).finished()
   await settled(page)

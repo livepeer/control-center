@@ -35,7 +35,7 @@ Usage: bootstrap-livepeer.sh [--install-dir /opt/livepeer] [--check-only]
 
 Enroll with the configured Livepeer API and install K3s, gVisor, Flux,
 system-upgrade-controller, and the offchain Livepeer Node orchestrator.
-Set LIVEPEER_ENROLLMENT_TOKEN to a one-hour JWT for enrollment or credential changes.
+Set LIVEPEER_ENROLLMENT_TOKEN to the combined enrollment token from the console.
 LIVEPEER_API_URL defaults to https://controlcenter-api.livepeer.live.
 The API must be reachable from this host and its pods.
 
@@ -43,7 +43,7 @@ The API must be reachable from this host and its pods.
                       Use letters, digits, underscores, hyphens, dots, slashes.
   --check-only        Read-only eligibility checks; no authentication or install.
   --status            Show local installation progress without changing anything.
-  --refresh-credentials  Refresh via a fresh owner JWT and HTTPS, preserving identity.
+  --refresh-credentials  Refresh via a fresh enrollment token and HTTPS, preserving identity.
   --reenroll           Enroll a removed installation as a new lifetime; retain data.
   -h, --help          Show this help without requiring root.
 

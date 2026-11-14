@@ -45,5 +45,5 @@ DiscoveryMaxFailedRefreshes = 6
 # OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
 
 # Independent operator secrets service; see docs/operator-secrets.md.
-# SecretsURL = "https://controlcenter-secrets.livepeer.live"
-# SecretsMetadataTokenFile = "/run/secrets/secrets-metadata-token"
+SecretsURL = "https://controlcenter-secrets.livepeer.live"
+SecretsMetadataTokenFile = "/run/secrets/secrets-metadata-token"

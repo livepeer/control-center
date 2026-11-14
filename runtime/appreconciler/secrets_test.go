@@ -19,19 +19,17 @@ import (
 )
 
 type fakeSecretResolver struct {
-	set         protocol.VersionSet
-	err         error
-	enabled     bool
-	activateErr error
+	set           protocol.VersionSet
+	err           error
+	identityReady bool
+	activateErr   error
 }
 
-func (f *fakeSecretResolver) Enabled() bool      { return f.enabled }
-func (f *fakeSecretResolver) MarkManaged() error { f.enabled = true; return nil }
 func (f *fakeSecretResolver) Versions(context.Context, protocol.ResolveRequest) (protocol.VersionSet, error) {
 	return f.set, f.err
 }
 func (f *fakeSecretResolver) Activate(context.Context) error { return f.activateErr }
-func (f *fakeSecretResolver) IdentityReady() bool            { return f.enabled }
+func (f *fakeSecretResolver) IdentityReady() bool            { return f.identityReady }
 func (f *fakeSecretResolver) VersionsAll(_ context.Context, in []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error) {
 	sets := map[string]protocol.VersionSet{}
 	faults := map[string]string{}
@@ -80,7 +78,7 @@ func TestSecretPreparationIsDirectCollisionFreeAndRetryable(t *testing.T) {
 		version.Values = append(version.Values, protocol.Resolved{Ciphertext: encrypted, DataKey: key})
 	}
 	version.Digest = protocol.VersionDigest(version.Values)
-	resolver := &fakeSecretResolver{set: version, enabled: true}
+	resolver := &fakeSecretResolver{set: version, identityReady: true}
 	var created map[string]any
 	posts := 0
 	kube := secretKube(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -154,19 +152,27 @@ func TestSecretPreparationIsDirectCollisionFreeAndRetryable(t *testing.T) {
 	}
 }
 
-func TestManagedStartsWaitForAuthorizationAndPreparationFailureKeepsSource(t *testing.T) {
-	c, _, cluster, _, _, _, resolver, set := secretController(t, 1, nil)
-	resolver.enabled = false
-	resolver.err = protocol.ErrUnavailable
+func TestSecretStartsWaitForAuthorizationAndPreparationFailureKeepsSource(t *testing.T) {
+	c, input, cluster, _, _, _, resolver, set := secretController(t, 1, nil)
+	input.value.Metadata.ManagedSecrets = false
 	d := c.Secrets
+	c.Secrets = nil
 	tick(t, c)
-	if !resolver.enabled || len(c.Journal.View().Instances) != 0 {
-		t.Fatal("first managed input bypassed the authorization gate")
+	if len(c.Journal.View().Instances) != 0 {
+		t.Fatal("missing secrets client bypassed authorization")
+	}
+	c.Secrets = d
+	resolver.identityReady = false
+	resolver.activateErr = protocol.ErrUnavailable
+	tick(t, c)
+	if len(c.Journal.View().Instances) != 0 {
+		t.Fatal("pending enrollment bypassed authorization")
 	}
 	v := regressionVersion(t, set, "v1")
+	resolver.identityReady = true
+	resolver.activateErr = nil
 	resolver.err = nil
 	resolver.set = v
-	d.Next = time.Time{}
 	tick(t, c)
 	cluster.apply(c)
 	tick(t, c)
@@ -266,7 +272,7 @@ func secretKube(h http.Handler) *transport.Kube {
 		var value any
 		switch r.URL.Path {
 		case "/api/v1/namespaces/livepeer-apps":
-			value = map[string]any{"metadata": map[string]any{"labels": map[string]string{"livepeer.io/managed-secrets": "true"}}}
+			value = map[string]any{"metadata": map[string]any{"labels": map[string]string{"livepeer.io/managed-apps": "true"}}}
 		case "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/livepeer-app-pods":
 			value = map[string]any{"spec": map[string]any{"failurePolicy": "Fail", "validations": []map[string]string{{"expression": ownSecretRule}}}}
 		case "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/livepeer-app-pods":
@@ -304,7 +310,7 @@ func secretController(t *testing.T, replicas int, h http.Handler) (*Controller, 
 	set.Entries[0].Replicas = replicas
 	input.set(t, set)
 	input.value.Metadata.ManagedSecrets = true
-	resolver := &fakeSecretResolver{enabled: true, set: regressionVersion(t, set, "v1")}
+	resolver := &fakeSecretResolver{identityReady: true, set: regressionVersion(t, set, "v1")}
 	k := secretKube(h)
 	c.Secrets = &SecretDelivery{Client: resolver, Kube: k}
 	return c, input, cluster, owner, reports, now, resolver, set
@@ -336,7 +342,7 @@ func regressionVersion(t *testing.T, set schema.AppAssignmentSetV1, id string, r
 func TestRegressionPreparationCrashThenRotationMustRecover(t *testing.T) {
 	set, p := regressionSecretFixture(t)
 	v1 := regressionVersion(t, set, "v1")
-	resolver := &fakeSecretResolver{enabled: true, set: v1}
+	resolver := &fakeSecretResolver{identityReady: true, set: v1}
 	var existing map[string]any
 	kube := secretKube(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "DELETE" {
@@ -379,7 +385,7 @@ func TestRegressionCollectRemovedUncommittedPreparation(t *testing.T) {
 		}
 		w.WriteHeader(200)
 	}))
-	c.Secrets = &SecretDelivery{Client: &fakeSecretResolver{enabled: true}, Kube: kube}
+	c.Secrets = &SecretDelivery{Client: &fakeSecretResolver{identityReady: true}, Kube: kube}
 	if e := c.Journal.Update(func(s *State) error {
 		s.Instances["pending"] = &Instance{ID: "pending", Name: "lp-app-pending", Phase: "removed", SecretPrepared: false}
 		return nil
@@ -405,7 +411,7 @@ func TestRegressionSettledStartAfterMustAllowRotation(t *testing.T) {
 	}
 	files, name, _ := p.Instantiate(p.Index.Groups[0], strings.Repeat("a", 32))
 	v := regressionVersion(t, set, "v2")
-	resolver := &fakeSecretResolver{enabled: true, set: v}
+	resolver := &fakeSecretResolver{identityReady: true, set: v}
 	kube := secretKube(nil)
 	d := &SecretDelivery{Client: resolver, Kube: kube, Targets: map[string]protocol.VersionSet{a.RevisionID: v}}
 	c.Secrets = d
@@ -468,7 +474,7 @@ func TestRegressionVaultWaitMustNotStarveLifecycleInput(t *testing.T) {
 	c, input, k, _, _, now := fixtureController(t)
 	set, p := regressionSecretFixture(t)
 	v := regressionVersion(t, set, "v2")
-	slow := &regressionSlowResolver{fakeSecretResolver{enabled: true, set: v}}
+	slow := &regressionSlowResolver{fakeSecretResolver{identityReady: true, set: v}}
 	c.Secrets = &SecretDelivery{Client: slow, Kube: secretKube(nil), Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: v}, Next: now.Add(time.Hour)}
 	counter := &regressionCountingInput{base: input}
 	c.Input = counter
@@ -520,7 +526,7 @@ func TestRapidRotationCollectsSupersededPreparation(t *testing.T) {
 	input.set(t, set)
 	input.value.Metadata.ManagedSecrets = true
 	version := func(id string, revision int64) protocol.VersionSet { return regressionVersion(t, set, id, revision) }
-	resolver := &fakeSecretResolver{enabled: true, set: version("v1", 1)}
+	resolver := &fakeSecretResolver{identityReady: true, set: version("v1", 1)}
 	secrets := map[string]map[string]any{}
 	kube := secretKube(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
@@ -601,7 +607,7 @@ func TestCancelledPreparationCleanupContinuesThroughOutage(t *testing.T) {
 		}
 		w.WriteHeader(200)
 	}))
-	c.Secrets = &SecretDelivery{Client: &fakeSecretResolver{enabled: true}, Kube: kube, Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: latest}}
+	c.Secrets = &SecretDelivery{Client: &fakeSecretResolver{identityReady: true}, Kube: kube, Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: latest}}
 	if e := c.Journal.Update(func(s *State) error {
 		s.Payload = payload
 		s.Instances["source"] = &Instance{ID: "source", Phase: "withdrawing"}

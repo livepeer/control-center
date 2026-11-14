@@ -6,6 +6,8 @@ secrets and app policies; the orchestrator address owns resources and user IDs
 identify audit actors. Control Center manages assignments and sees names, but
 not values or runtime private keys.
 
+Each orchestrator can have at most 100 secrets. Deleted keys still count towards this limit.
+
 The browser encrypts each value with a random data key. The service stores the
 ciphertext and uses Vault Transit to encrypt, or **wrap**, that key for storage.
 For an authorized runtime, the service asks Vault to unwrap the key and
@@ -113,7 +115,7 @@ encryption.
    docker compose -f deploy/compose.secrets.yaml up --build -d
    ```
 
-The service applies PostgreSQL migrations on startup.
+The service applies PostgreSQL migrations on startup. See [orchestrator provisioning](operations.md#orchestrators).
 
 To inspect or apply migrations separately, run the service image with
 `SECRETS_DATABASE_URL_FILE` configured. With the Compose deployment above:
@@ -125,7 +127,7 @@ docker compose -f deploy/compose.secrets.yaml \
   run --rm --no-deps secrets migrate up
 ```
 
-Use `migrate down` to roll back reversible future migrations.
+Use `migrate down` to roll back the latest migration; this can delete data.
 
 ## Application behavior
 
@@ -156,6 +158,5 @@ a compromised runtime key, use member-authorized
 `POST /v1/machines/{node}/reset`, then enroll again. To revoke access without
 resetting identity, use `POST /v1/machines/{node}/revoke`.
 
-Upgrade Control Center, the secrets service, installer and runtime together,
-then rerun enrollment to install the pin. Existing clusters must first complete
-[K3s secrets encryption](https://docs.k3s.io/cli/secrets-encrypt).
+A member's departure and routine management credential refresh preserve the
+runtime identity. Machine retirement and explicit identity revocation disable it.

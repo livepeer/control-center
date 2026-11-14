@@ -89,7 +89,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		fault = "clock_uncertain"
 	}
 	status := contract.AppStatus{SecretsProtocol: 1, StagedDigest: s.Staged, PublishedDigest: s.Published, AppliedDigest: s.Applied, Reason: fault, Instances: []contract.InstanceStatus{}, OwnerRecreatedAt: s.OwnerRecreatedAt}
-	status.ManagedSecrets = s.Metadata.ManagedSecrets || (c.Secrets != nil && c.Secrets.Client.Enabled())
+	status.ManagedSecrets = s.Metadata.ManagedSecrets
 	status.SecretsEncryptionReady = s.Metadata.SecretsEncryptionReady
 	if c.Secrets != nil {
 		status.SecretsIdentityReady = c.Secrets.Client.IdentityReady()
