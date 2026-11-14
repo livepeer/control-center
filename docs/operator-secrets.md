@@ -128,6 +128,10 @@ running Vault and its network. For a fresh setup, work from `deploy/`:
    docker compose up -d --build --wait
    ```
 
+In existing `secrets-service.env` files, rename `CONTROL_API_URL` to
+`SECRETS_CONTROL_URL`, `SUPABASE_URL` to `SECRETS_SUPABASE_URL`, and
+`SUPABASE_PUBLISHABLE_KEY` to `SECRETS_SUPABASE_KEY`.
+
 The service applies PostgreSQL migrations on startup. See
 [orchestrator provisioning](operations.md#orchestrators). To inspect migrations,
 run `docker compose run --rm --no-deps secrets migrate status`; use `migrate up`
