@@ -94,6 +94,37 @@ test('machine apps assign, scale and replace only after cleanup', async ({ page 
   await expect.poll(() => state.assignments[1].desired).toBe('absent')
 })
 
+test('assignment errors show field details and clear them on retry', async ({ page }) => {
+  await setup(page)
+  const fields = [
+    { path: 'apps[0].price.amount', code: 'invalid_field', message: 'Onchain Node apps require a positive price.' },
+    { path: 'apps[1].price.amount', code: 'invalid_field', message: 'Onchain Node apps require a positive price.' },
+  ]
+  let rejection: { status: number; json: { error: string; code: string; fields?: typeof fields } } | null = {
+    status: 400,
+    json: { error: "Correct the definition's field errors.", code: 'invalid_definition', fields },
+  }
+  await page.route(`**${base}/${r2}`, route => rejection ? route.fulfill(rejection) : route.fallback())
+  await page.getByLabel('Catalog app for machine').selectOption('whoami')
+  const assign = page.getByRole('button', { name: 'Assign selected revision', exact: true })
+  await assign.click()
+  const alert = page.getByRole('alert').filter({ hasText: "Correct the definition's field errors." })
+  await expect(alert).toBeVisible()
+  await expect(alert.getByRole('listitem')).toHaveText(fields.map(f => `${f.path}: ${f.message}`))
+
+  rejection = { status: 409, json: { error: 'Assignment changed. Refresh before retrying.', code: 'assignment_conflict' } }
+  await assign.click()
+  const conflict = page.getByRole('alert').filter({ hasText: 'Assignment changed. Refresh before retrying.' })
+  await expect(conflict).toBeVisible()
+  await expect(conflict.getByRole('listitem')).toHaveCount(0)
+
+  rejection = null
+  await assign.click()
+  await expect(page.getByText('Pending Runtime completion', { exact: true })).toBeVisible()
+  await expect(conflict).toHaveCount(0)
+  await expect(alert).toHaveCount(0)
+})
+
 test('revocation unmounts app panel and ignores late assignment responses', async ({ page }) => {
   const state = await setup(page)
   await expect(page.getByText('No app assignments.', { exact: true })).toBeVisible()
