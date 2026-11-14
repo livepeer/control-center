@@ -18,6 +18,7 @@ services:
   api:
     volumes:
       - ./secrets/onchain-rpc:/run/onchain-rpc:ro
+      - ./onchain.json:/etc/controlcenter/onchain.json:ro
     secrets:
       - onchain-webhook-auth
 secrets:

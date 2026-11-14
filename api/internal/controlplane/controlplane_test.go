@@ -103,7 +103,7 @@ func newTestServer(t *testing.T) *Server {
 	if _, err := db.Exec(`INSERT INTO auth.users(id,email,email_confirmed_at) VALUES($1,'a@example.invalid',now()),($2,'b@example.invalid',now())`, ownerA, ownerB); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO lpcc.orchestrators(address) VALUES($1),($2);`, orchA, orchB); err != nil {
+	if _, err := db.Exec(`INSERT INTO lpcc.orchestrators(address,claimed_by_user_id) VALUES($1,$2),($3,$4);`, orchA, ownerA, orchB, ownerB); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO lpcc.orchestrator_memberships(user_id,orchestrator_address) VALUES($1,$2),($3,$4)`, ownerA, orchA, ownerB, orchB); err != nil {

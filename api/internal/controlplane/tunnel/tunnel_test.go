@@ -290,12 +290,12 @@ func claimTestTunnel(t *testing.T) (*Manager, *recoveryCloudflare, *tunnelLease)
 	execSQL(t, db, `INSERT INTO auth.users(id) VALUES($1)`, owner)
 	m := Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1", CredentialVersion: 1}
 	owner = "0x1111111111111111111111111111111111111111"
-	execSQL(t, db, `INSERT INTO lpcc.orchestrators(address) VALUES($1)`, owner)
-	err := db.QueryRow(`INSERT INTO lpcc.machines(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,'test',$4,$5,1,true) RETURNING node_id::text`, m.NodeID, owner, strings.Repeat("a", 64), m.InstallDir, m.K3sVersion).Scan(&m.NodeID)
+	execSQL(t, db, `INSERT INTO lpcc.orchestrators(address,claimed_by_user_id) VALUES($1,$2)`, owner, "11111111-1111-4111-8111-111111111111")
+	err := db.QueryRow(`INSERT INTO lpcc.machines(node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,'test',$5,$6,1,true) RETURNING node_id::text`, m.NodeID, owner, "11111111-1111-4111-8111-111111111111", strings.Repeat("a", 64), m.InstallDir, m.K3sVersion).Scan(&m.NodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
+	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	fake := newRecoveryCloudflare()
 	s := New(Config{CloudflareBaseDomain: "fleet.example.invalid", CloudflareAccessLifetime: 24 * time.Hour,

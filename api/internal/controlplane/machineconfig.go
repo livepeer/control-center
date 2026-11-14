@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/livepeer/control-center/runtime/onchain"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
@@ -16,10 +17,17 @@ func (s *Server) newConfigurationManager() *machineconfig.Manager {
 	p := s.params
 	return machineconfig.New(machineconfig.Config{APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
 		Onchain: func(ctx context.Context, m machineconfig.Machine) (onchain.Config, error) {
+			var c onchain.Config
+			var err error
 			if m.Fingerprint != "" {
-				return loadInstallationOnchain(ctx, s.db, "$1", m.Fingerprint)
+				c, err = loadInstallationOnchain(ctx, s.db, "$1", m.Fingerprint)
+			} else {
+				c, err = loadOnchain(ctx, s.db, m.NodeID)
 			}
-			return loadOnchain(ctx, s.db, m.NodeID)
+			if err == nil && s.params.networkMode() == "onchain" && !c.Onchain() {
+				return c, errors.New("onchain configuration is missing")
+			}
+			return c, err
 		},
 		Exposure: func(raw json.RawMessage) (*machineconfig.Exposure, error) {
 			var r tunnel.RoutingState
