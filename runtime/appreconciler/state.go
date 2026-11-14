@@ -52,7 +52,6 @@ type Instance struct {
 	SecretCleanupDone   bool                `json:"secret_cleanup_done,omitempty"`
 	SecretVersion       string              `json:"secret_version,omitempty"`
 	SecretPrepared      bool                `json:"secret_prepared,omitempty"`
-	SecretApproval      int64               `json:"secret_approval_generation,omitempty"`
 	SecretPolicy        int64               `json:"secret_policy_generation,omitempty"`
 	ID                  string              `json:"id"`
 	Group               appbundle.Group     `json:"group"`

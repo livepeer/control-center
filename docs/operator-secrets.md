@@ -125,46 +125,12 @@ Use `migrate down` to roll back reversible future migrations.
 
 ## Application behavior
 
+Apps are provisioned only when their required secrets are available.
+You can save values on the Secrets screen before an app is running.
 Applications declare secret references in `container.secrets`; the runtime
-provides values as environment variables. When saving a secret, choose an **App**
-to save the value and grant that app access to the secret and key together.
-Choose **Workspace only** to save without changing app access. For an existing
-value, use **Grant access** under **Secrets → App access**.
-
-A grant covers that app and secret/key across future revisions and environment
-variable mappings. Another app or secret/key needs an explicit grant. Assignment
-and scheduling changes do not grant access. Rotating a value or adding a grant
-preserves existing app access.
-
-The independent secrets service stores workspace grants. Requests use the
-operator bearer session, so the Control Center backend receiving it and the
-browser code it serves are trusted. **Deny** requires the secrets service and
-revokes all app grants before requesting removal of its instances. **Deny
-scheduling** preserves grants; it and **Allow scheduling** work during a secrets
-service outage. Saving or granting does not enable scheduling: choose **Allow
-scheduling** to resume a denied app. After revocation and regrant, previous
-instances must drain, even if values are unchanged; offline machines enforce this
-when they reconnect.
-
-Owner-authenticated clients can use the secrets service's `GET /v1/app-approvals`
-and `PUT /v1/app-approvals/{name}`. Use the GET response's workspace-wide
-`generation` as the PUT's `expected_generation`, and supply `secrets` as an array
-of `{secret, key}` pairs to grant access, or `denied: true` to revoke it. To save
-and grant atomically, include `app_name` and `expected_approval_generation` in
-`PUT /v1/secrets/{id}`. A stale approval generation rejects both the value and
-the grant; read again before retrying.
-
-Upgrade runtimes before granting access. Older runtimes receive
-`secrets_denied`, and their running secret-using instances drain. Upgrade preserves
-values and identities, but existing values, assignments and app-name policies do
-not grant access. Existing instances must drain before restarting with app grants,
-even with multiple replicas on one machine; this initial transition can interrupt
-availability. Coordinate machines to limit disruption. Offline machines enforce
-the transition when they reconnect.
-
-When a secret changes, affected app instances are replaced one at a time,
-waiting for each replacement to become ready. A single-instance app has downtime
-during this process.
+provides values as environment variables. When a secret changes, affected app
+instances are replaced one at a time, waiting for each replacement to become
+ready. A single-instance app has downtime during this process.
 
 Running instances continue during a service or Vault outage. Starting or
 restarting an instance that needs secrets requires current authorization.

@@ -187,7 +187,6 @@ type Machine struct {
 // SecretConsumer permits deletion observation for pinned cleanup work, never
 // value resolution or authorization of another incarnation.
 type SecretConsumer struct {
-	AppName    string                     `json:"app_name"`
 	RevisionID string                     `json:"revision_id"`
 	References []schema.SecretEnvironment `json:"references"`
 }
@@ -216,26 +215,12 @@ type Identity struct {
 	Service    *ServiceTrust `json:"service,omitempty"`
 }
 
-type SecretReference struct {
-	Secret string `json:"secret"`
-	Key    string `json:"key"`
-}
-
-type RuntimeConsumer struct {
-	RevisionID string `json:"revision_id"`
-	// Accepted from older senders; app grants do not use a consumer digest.
-	Digest             string `json:"digest,omitempty"`
-	Name               string `json:"name"`
-	ApprovalGeneration int64  `json:"approval_generation"`
-}
-
 type ResolveRequest struct {
-	ApprovalProtocol int    `json:"approval_protocol"`
-	RevisionID       string `json:"revision_id"`
-	Generation       int64  `json:"generation"`
-	Activation       int64  `json:"activation_generation"`
-	Digest           string `json:"digest"`
-	Expected         string `json:"expected_version_set,omitempty"`
+	RevisionID string `json:"revision_id"`
+	Generation int64  `json:"generation"`
+	Activation int64  `json:"activation_generation"`
+	Digest     string `json:"digest"`
+	Expected   string `json:"expected_version_set,omitempty"`
 }
 
 // DeliveryRequest binds a fresh recipient key to the signed resolve request.
@@ -250,7 +235,6 @@ type Resolved struct {
 	SealedKey Sensitive `json:"sealed_key,omitempty"`
 }
 type VersionSet struct {
-	ApprovalGeneration int64          `json:"approval_generation"`
 	NodeID             string         `json:"node_id"`
 	IdentityGeneration int64          `json:"identity_generation"`
 	PolicyGeneration   int64          `json:"policy_generation"`

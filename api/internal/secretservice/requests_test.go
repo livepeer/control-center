@@ -192,11 +192,7 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 	definition.Container.Secrets = []schema.SecretEnvironment{{Name: "API_TOKEN", Secret: "lp-app-provider", Key: "token"}}
 	canonical, _ := schema.CanonicalBytes(definition)
 	assignment := schema.AppAssignment{RevisionRef: schema.RevisionRef{RevisionID: "22222222-2222-4222-8222-222222222222", Digest: schema.Digest(canonical)}, Generation: 1, ActivationGeneration: 1, Desired: "present", StartAllowed: true, Revision: &schema.ResolvedRevision{Definition: definition}}
-
-	assignment.Revision = &schema.ResolvedRevision{RevisionRef: assignment.RevisionRef, Name: assignment.Revision.Definition.Name, AppVersion: assignment.Revision.Definition.AppVersion, Revision: 1, SchemaVersion: 1, CanonicalFormat: schema.CanonicalFormat, Definition: assignment.Revision.Definition}
 	m.machine.Assignments = []schema.AppAssignment{assignment}
-	approveAssignment(t, s, assignment, 0)
-
 	binding := protocol.Binding{Owner: testOwner, ID: ident(), Name: "lp-app-provider", Key: "token", Version: ident()}
 	encrypted, dek, e := protocol.Encrypt(binding, []byte("proxy-confidential-value"))
 	if e != nil {
@@ -212,7 +208,7 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 	if _, e = s.DB.Exec(`INSERT INTO lpsecrets.versions(id,secret_id,base_revision,nonce,ciphertext,wrapped_key) VALUES($1,$2,1,$3,$4,$5)`, binding.Version, binding.ID, encrypted.Nonce, encrypted.Ciphertext, wrapped); e != nil {
 		t.Fatal(e)
 	}
-	in := protocol.ResolveRequest{ApprovalProtocol: 1, RevisionID: assignment.RevisionID, Generation: 1, Activation: 1, Digest: assignment.Digest}
+	in := protocol.ResolveRequest{RevisionID: assignment.RevisionID, Generation: 1, Activation: 1, Digest: assignment.Digest}
 	for range 2 {
 		values, e := client.Resolve(t.Context(), in)
 		if e != nil || len(values.Values) != 1 {
@@ -254,13 +250,13 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 		case "forged-denial":
 			forged.Store(true)
 		}
-		if _, _, e := client.VersionsAll(t.Context(), nil, nil); !errors.Is(e, protocol.ErrUnavailable) {
+		if _, _, e := client.VersionsAll(t.Context(), nil); !errors.Is(e, protocol.ErrUnavailable) {
 			t.Fatal("proof rejection became permanent identity denial", fault, e)
 		}
 		offset.Store(0)
 		replay.Store(false)
 		forged.Store(false)
-		if _, _, e := client.VersionsAll(t.Context(), nil, nil); e != nil {
+		if _, _, e := client.VersionsAll(t.Context(), nil); e != nil {
 			t.Fatal("fresh proof could not recover", fault, e)
 		}
 	}
@@ -272,7 +268,7 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 				t.Fatal(w.Code, w.Body.String())
 			}
 		}
-		if _, _, e := client.VersionsAll(t.Context(), nil, nil); !errors.Is(e, protocol.ErrDenied) {
+		if _, _, e := client.VersionsAll(t.Context(), nil); !errors.Is(e, protocol.ErrDenied) {
 			t.Fatal("ineligible identity authorized through proxy", fault, e)
 		}
 	}

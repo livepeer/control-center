@@ -286,15 +286,11 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	canonical, _ := schema.CanonicalBytes(def)
 	ref := schema.RevisionRef{RevisionID: "22222222-2222-4222-8222-222222222222", Digest: schema.Digest(canonical)}
 	a := schema.AppAssignment{RevisionRef: ref, Generation: 1, ActivationGeneration: 1, Desired: "present", StartAllowed: true, Replicas: 1, Revision: &schema.ResolvedRevision{Definition: def}}
-
-	a.Revision = &schema.ResolvedRevision{RevisionRef: a.RevisionRef, Name: a.Revision.Definition.Name, AppVersion: a.Revision.Definition.AppVersion, Revision: 1, SchemaVersion: 1, CanonicalFormat: schema.CanonicalFormat, Definition: a.Revision.Definition}
 	m.machine.Assignments = []schema.AppAssignment{a}
-	approveAssignment(t, s, a, 0)
-
-	request := protocol.ResolveRequest{ApprovalProtocol: 1, RevisionID: a.RevisionID, Generation: 1, Activation: 1, Digest: a.Digest}
+	request := protocol.ResolveRequest{RevisionID: a.RevisionID, Generation: 1, Activation: 1, Digest: a.Digest}
 	checkFault := func(in protocol.ResolveRequest, want string) {
 		t.Helper()
-		w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []protocol.ResolveRequest{in}}, identity)
+		w := call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{in}}, identity)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+want+`"`) {
 			t.Fatal(w.Code, w.Body.String())
 		}
@@ -434,10 +430,10 @@ func TestHeadlessEncryptedUploadResolveDelete(t *testing.T) {
 	if w.Code != 409 {
 		t.Fatal("deleted value resolved", w.Code)
 	}
-	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: a.RevisionID, AppName: def.Name, References: def.Container.Secrets}}
+	m.machine.Consumers = []protocol.SecretConsumer{{RevisionID: "44444444-4444-4444-8444-444444444444", References: def.Container.Secrets}}
 	before = vault.calls.Load()
-	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []protocol.ResolveRequest{}}, identity)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+a.RevisionID+`":"secret_missing"`) || vault.calls.Load() != before {
+	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []protocol.ResolveRequest{}}, identity)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"44444444-4444-4444-8444-444444444444":"secret_missing"`) || vault.calls.Load() != before {
 		t.Fatal("cleanup observation missing or accessed Transit", w.Code, w.Body.String())
 	}
 	var n int
@@ -545,7 +541,7 @@ func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
 			var id protocol.Identity
 			_ = json.Unmarshal(w.Body.Bytes(), &id)
 			identity := &testIdentity{Identity: id, key: key}
-			if w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []any{}}, identity); w.Code != 503 {
+			if w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, identity); w.Code != 503 {
 				t.Fatal("pending identity authorized resolution", w.Code)
 			}
 			// A retry after a lost response preserves the binding and remains pending.
@@ -582,7 +578,7 @@ func TestResetSurvivesLostRemoteResponse(t *testing.T) {
 	restarted := New(s.DB, s.Config)
 	restarted.Metadata = metadata
 	restarted.HTTP = s.HTTP
-	if w := call(t, restarted, "/v1/runtime/batch", "POST", "", map[string]any{"approval_protocol": 1, "assignments": []any{}}, old); w.Code != 403 {
+	if w := call(t, restarted, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, old); w.Code != 403 {
 		t.Fatal("old identity revived", w.Code)
 	}
 	if w := call(t, restarted, "/v1/machines/"+node+"/reset", "POST", "operator", nil, nil); w.Code != 200 {
@@ -617,117 +613,4 @@ func TestOwnerCanResetPendingBindingWithoutCommittedIdentity(t *testing.T) {
 	}
 	_, replacement, _ := ed25519.GenerateKey(rand.Reader)
 	enrolled(t, s, replacement, m)
-}
-
-func stagedSecret(t *testing.T, s *Service, vault *testTransit, name, key string, revision int64) protocol.Ciphertext {
-	t.Helper()
-	w := call(t, s, "/v1/secrets/reserve", "POST", "operator", map[string]any{"name": name, "key": key, "expected_revision": revision}, nil)
-	var binding protocol.Binding
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &binding) != nil {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	encrypted, dek, e := protocol.Encrypt(binding, []byte("stored-value"))
-	if e != nil {
-		t.Fatal(e)
-	}
-	encrypted.WrappedKey, e = vault.Wrap(t.Context(), testOwner, dek)
-	clear(dek)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = s.DB.Exec(`UPDATE lpsecrets.versions SET wrapped_key=$1 WHERE id=$2`, encrypted.WrappedKey, binding.Version); e != nil {
-		t.Fatal(e)
-	}
-	return encrypted
-}
-func TestSavingForAppAtomicallyGrantsStableAccess(t *testing.T) {
-	s, key, m, vault := dbService(t)
-	identity := enrolled(t, s, key, m)
-	a := approvalAssignment(t)
-	ref := a.Revision.Definition.Container.Secrets[0]
-	m.machine.Assignments = []schema.AppAssignment{a}
-	upload := func(value protocol.Ciphertext, generation int64) *httptest.ResponseRecorder {
-		return call(t, s, "/v1/secrets/"+value.ID, "PUT", "operator", struct {
-			protocol.Ciphertext
-			App      string `json:"app_name"`
-			Expected int64  `json:"expected_approval_generation"`
-		}{value, a.Revision.Name, generation}, nil)
-	}
-	first := stagedSecret(t, s, vault, ref.Secret, ref.Key, 0)
-	if w := upload(first, 0); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	access := func() ownerAccess {
-		t.Helper()
-		w := call(t, s, "/v1/app-approvals", "GET", "operator", nil, nil)
-		var p ownerAccess
-		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &p) != nil {
-			t.Fatal(w.Code, w.Body.String())
-		}
-		return p
-	}
-	if p := access(); p.Generation != 1 || p.grant(a.Revision.Name) == nil || p.grant(a.Revision.Name).Generation != 1 {
-		t.Fatal("save did not grant app access", p)
-	}
-	// The same binding remains approved across a new app revision and env mapping.
-	a.RevisionID = "33333333-3333-4333-8333-333333333333"
-	a.Revision.Definition.Container.Secrets[0].Name = "REMAPPED"
-	canonical, _ := schema.CanonicalBytes(a.Revision.Definition)
-	a.Digest = schema.Digest(canonical)
-	a.Revision.RevisionRef = a.RevisionRef
-	m.machine.Assignments = []schema.AppAssignment{a}
-	in := protocol.ResolveRequest{ApprovalProtocol: 1, RevisionID: a.RevisionID, Digest: a.Digest, Generation: 1, Activation: 1}
-	w := call(t, s, "/v1/runtime/versions", "POST", "", in, identity)
-	var set protocol.VersionSet
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &set) != nil || set.ApprovalGeneration != 1 {
-		t.Fatal("revision update needed consent", w.Code, w.Body.String())
-	}
-	// A conflict in the value write also rolls back the prospective grant.
-	failed := stagedSecret(t, s, vault, ref.Secret, "other", 0)
-	if _, e := s.DB.Exec(`UPDATE lpsecrets.secrets SET revision=revision+1 WHERE id=$1`, failed.ID); e != nil {
-		t.Fatal(e)
-	}
-	if w = upload(failed, 1); w.Code != 409 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if p := access(); p.Generation != 1 || len(p.grant(a.Revision.Name).Secrets) != 1 {
-		t.Fatal("failed value write changed access", p)
-	}
-	// A denial accepted while a value is staged cannot be undone by the stale save.
-	replacement := stagedSecret(t, s, vault, ref.Secret, ref.Key, 2)
-	w = call(t, s, "/v1/app-approvals/"+a.Revision.Name, "PUT", "operator", map[string]any{"denied": true, "expected_generation": 1}, nil)
-	if w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if w = upload(replacement, 1); w.Code != 409 || !strings.Contains(w.Body.String(), "approval_conflict") {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	var head string
-	var revision int64
-	if e := s.DB.QueryRow(`SELECT head::text,revision FROM lpsecrets.secrets WHERE id=$1`, first.ID).Scan(&head, &revision); e != nil || head != first.Version || revision != 2 {
-		t.Fatal("stale save committed a value", head, revision, e)
-	}
-	if p := access(); p.Generation != 2 || p.grant(a.Revision.Name) != nil {
-		t.Fatal("stale save restored consent", p)
-	}
-	// A fresh explicit save regrants; additional bindings preserve that app epoch.
-	if w = upload(replacement, 2); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	next := stagedSecret(t, s, vault, ref.Secret, "extra", 0)
-	if w = upload(next, 3); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if p := access(); p.Generation != 4 || p.grant(a.Revision.Name).Generation != 3 || len(p.grant(a.Revision.Name).Secrets) != 2 {
-		t.Fatal("extending consent changed its epoch", p)
-	}
-	rotated := stagedSecret(t, s, vault, ref.Secret, ref.Key, 3)
-	if w = upload(rotated, 4); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	approveAssignment(t, s, a, 5)
-	if p := access(); p.Generation != 6 || p.grant(a.Revision.Name).Generation != 3 || len(p.grant(a.Revision.Name).Secrets) != 2 {
-		t.Fatal("rotation or repeated grant changed consent", p)
-	}
-
 }

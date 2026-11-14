@@ -386,10 +386,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 				if fault == "secrets_denied" || fault == "secret_missing" {
 					desired = false
 				}
-				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretApproval != target.ApprovalGeneration {
-					desired = false
-				}
-				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretVersion != target.Digest && i.SecretApproval == target.ApprovalGeneration {
+				if target, ok := c.Secrets.Targets[i.Group.RevisionID]; ok && (i.SecretPrepared || i.PodUID != "") && i.SecretVersion != target.Digest {
 					a := assignments[i.Group.RevisionID]
 					if !i.PublicationStarted && i.PodUID == "" {
 						// Nothing could have consumed this superseded preparation.
@@ -453,7 +450,11 @@ func (c *Controller) Tick(ctx context.Context) error {
 					s.AssignmentReasons[a.RevisionID] = "onchain_incompatible"
 					continue
 				}
-				if c.Secrets != nil && c.Secrets.Managed(a) {
+				if a.Revision != nil && len(a.Revision.Definition.Container.Secrets) > 0 {
+					if c.Secrets == nil || !c.Secrets.Managed(a) {
+						s.AssignmentReasons[a.RevisionID] = "secrets_unavailable"
+						continue
+					}
 					if _, ok := c.Secrets.Targets[a.RevisionID]; !ok {
 						s.AssignmentReasons[a.RevisionID] = c.Secrets.Faults[a.RevisionID]
 						continue
@@ -506,7 +507,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 				s.Instances[id] = &Instance{ID: id, Group: g, Generation: a.Generation, Definition: a.Revision.Definition, Files: files, Name: name, Phase: "starting", CreatedAt: now}
 				for oldID, next := range s.SecretSuccessors {
 					if next.Group.Key == g.Key && next.Phase == "starting" && next.Generation == a.Generation && next.SecretPrepared {
-						if target, ok := c.Secrets.Targets[a.RevisionID]; ok && target.Digest == next.SecretVersion && target.ApprovalGeneration == next.SecretApproval {
+						if target, ok := c.Secrets.Targets[a.RevisionID]; ok && target.Digest == next.SecretVersion {
 							delete(s.Instances, id)
 							id = next.ID
 							next.Generation = a.Generation
@@ -700,6 +701,9 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 		i := s.Instances[id]
 		if i.Phase == "retired" || i.Phase == "removed" {
 			snapshot.Retired[id] = true
+			continue
+		}
+		if len(i.Definition.Container.Secrets) > 0 && i.PodUID == "" && !i.PublicationStarted && (c.Secrets == nil || !c.Secrets.Client.Enabled()) {
 			continue
 		}
 		if c.Secrets != nil && c.Secrets.Client.Enabled() && len(i.Definition.Container.Secrets) > 0 {

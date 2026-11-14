@@ -141,7 +141,7 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(definition.Container.Secrets) > 0 {
-				out.Consumers = append(out.Consumers, protocol.SecretConsumer{RevisionID: a.RevisionID, AppName: definition.Name, References: definition.Container.Secrets})
+				out.Consumers = append(out.Consumers, protocol.SecretConsumer{RevisionID: a.RevisionID, References: definition.Container.Secrets})
 			}
 		}
 	}

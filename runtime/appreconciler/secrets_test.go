@@ -23,8 +23,6 @@ type fakeSecretResolver struct {
 	err         error
 	enabled     bool
 	activateErr error
-	consumers   []protocol.RuntimeConsumer
-	faults      map[string]string
 }
 
 func (f *fakeSecretResolver) Enabled() bool      { return f.enabled }
@@ -34,13 +32,9 @@ func (f *fakeSecretResolver) Versions(context.Context, protocol.ResolveRequest) 
 }
 func (f *fakeSecretResolver) Activate(context.Context) error { return f.activateErr }
 func (f *fakeSecretResolver) IdentityReady() bool            { return f.enabled }
-func (f *fakeSecretResolver) VersionsAll(_ context.Context, in []protocol.ResolveRequest, consumers []protocol.RuntimeConsumer) (map[string]protocol.VersionSet, map[string]string, error) {
+func (f *fakeSecretResolver) VersionsAll(_ context.Context, in []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error) {
 	sets := map[string]protocol.VersionSet{}
-	f.consumers = consumers
 	faults := map[string]string{}
-	for id, reason := range f.faults {
-		faults[id] = reason
-	}
 	if f.err != nil && f.err.Error() != "secret_missing" && f.err.Error() != "secret_unprovisioned" {
 		return nil, nil, f.err
 	}
@@ -118,14 +112,6 @@ func TestSecretPreparationIsDirectCollisionFreeAndRetryable(t *testing.T) {
 	if !i.SecretPrepared || i.SecretVersion != version.Digest {
 		t.Fatal("preparation state")
 	}
-	if e = delivery.Authorize(t.Context(), *a, i); e != nil {
-		t.Fatal("equal approval epoch refused", e)
-	}
-	resolver.set.ApprovalGeneration++
-	if e = delivery.Authorize(t.Context(), *a, i); e != protocol.ErrDenied {
-		t.Fatal("changed approval authorized publication", e)
-	}
-	resolver.set.ApprovalGeneration--
 	data := created["data"].(map[string]any)
 	if len(data) != 2 {
 		t.Fatal("key collision")
@@ -603,50 +589,40 @@ func TestRapidRotationCollectsSupersededPreparation(t *testing.T) {
 }
 
 func TestCancelledPreparationCleanupContinuesThroughOutage(t *testing.T) {
-	for _, reason := range []string{"version", "approval"} {
-		t.Run(reason, func(t *testing.T) {
-			c, _, _, _, _, _ := fixtureController(t)
-			set, payload := regressionSecretFixture(t)
-			latest := regressionVersion(t, set, "v3")
-			latest.ApprovalGeneration = 1
-			preparedVersion := "superseded"
-			if reason == "approval" {
-				latest.ApprovalGeneration = 2
-				preparedVersion = latest.Digest
-			}
-			attempts := 0
-			kube := secretKube(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				attempts++
-				if attempts == 1 {
-					w.WriteHeader(503)
-					return
-				}
-				w.WriteHeader(200)
-			}))
-			c.Secrets = &SecretDelivery{Client: &fakeSecretResolver{enabled: true}, Kube: kube, Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: latest}}
-			if e := c.Journal.Update(func(s *State) error {
-				s.Payload = payload
-				s.Instances["source"] = &Instance{ID: "source", Phase: "withdrawing"}
-				s.SecretSuccessors = map[string]*Instance{"source": {Name: "lp-app-prepared", Generation: 1, Phase: "starting", Group: payload.Index.Groups[0], SecretPrepared: true, SecretVersion: preparedVersion, SecretApproval: 1}}
-				return nil
-			}); e != nil {
-				t.Fatal(e)
-			}
-			if e := c.collectSecrets(t.Context()); e == nil {
-				t.Fatal("failed deletion was ignored")
-			}
-			if c.Journal.View().SecretSuccessors["source"].Phase != "retired" {
-				t.Fatal("cancellation was not durable")
-			}
-			c.Secrets.Targets = nil
-			c.Secrets.Faults = map[string]string{set.Entries[0].RevisionID: "secrets_unavailable"}
-			if e := c.collectSecrets(t.Context()); e != nil {
-				t.Fatal(e)
-			}
-			if len(c.Journal.View().SecretSuccessors) != 0 || attempts != 2 {
-				t.Fatal("outage lost pending cleanup", attempts)
-			}
-		})
+	c, _, _, _, _, _ := fixtureController(t)
+	set, payload := regressionSecretFixture(t)
+	latest := regressionVersion(t, set, "v3")
+	attempts := 0
+	kube := secretKube(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	c.Secrets = &SecretDelivery{Client: &fakeSecretResolver{enabled: true}, Kube: kube, Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: latest}}
+	if e := c.Journal.Update(func(s *State) error {
+		s.Payload = payload
+		s.Instances["source"] = &Instance{ID: "source", Phase: "withdrawing"}
+		s.SecretSuccessors = map[string]*Instance{"source": {Name: "lp-app-prepared", Generation: 1, Phase: "starting", Group: payload.Index.Groups[0], SecretPrepared: true, SecretVersion: "superseded"}}
+		return nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if e := c.collectSecrets(t.Context()); e == nil {
+		t.Fatal("failed deletion was ignored")
+	}
+	if c.Journal.View().SecretSuccessors["source"].Phase != "retired" {
+		t.Fatal("cancellation was not durable")
+	}
+	c.Secrets.Targets = nil
+	c.Secrets.Faults = map[string]string{set.Entries[0].RevisionID: "secrets_unavailable"}
+	if e := c.collectSecrets(t.Context()); e != nil {
+		t.Fatal(e)
+	}
+	if len(c.Journal.View().SecretSuccessors) != 0 || attempts != 2 {
+		t.Fatal("outage lost pending cleanup", attempts)
 	}
 }
 
@@ -906,73 +882,85 @@ func TestPreparationPreservesConcurrentOwnerWithdrawal(t *testing.T) {
 	}
 }
 
-func TestRenewedApprovalDrainsBeforeRestart(t *testing.T) {
-	for _, oldEpoch := range []int64{0, 1} {
-		t.Run(fmt.Sprint(oldEpoch), func(t *testing.T) {
-			c, _, cluster, owner, _, _, resolver, _ := secretController(t, 1, nil)
-			resolver.set.ApprovalGeneration = oldEpoch
-			secretTicks(t, c, cluster, 6)
-			var old *Instance
-			for _, i := range c.Journal.View().Instances {
-				if i.PodUID != "" {
-					old = i
-				}
+func TestRequiredSecretsBlockProvisioningUntilAvailable(t *testing.T) {
+	for _, mode := range []string{"no-delivery", "disabled", "missing-value", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			c, input, cluster, _, _, _, resolver, set := secretController(t, 1, nil)
+			input.value.Metadata.ManagedSecrets = false
+			delivery := c.Secrets
+			switch mode {
+			case "no-delivery":
+				c.Secrets = nil
+			case "disabled":
+				resolver.enabled = false
+			case "missing-value":
+				resolver.err = fmt.Errorf("secret_unprovisioned")
+			case "unavailable":
+				resolver.err = protocol.ErrUnavailable
 			}
-			if old == nil {
-				t.Fatal("fixture not running")
-			}
-			owner.sessions[old.AppID] = []string{"busy"}
-			resolver.set.ApprovalGeneration = 2
-			c.Secrets.Next = time.Time{}
-			secretTicks(t, c, cluster, 4)
-			state := c.Journal.View()
-			if state.Instances[old.ID].WithdrawalID == "" {
-				t.Fatal("renewal retained old approval")
-			}
-			for id, i := range state.Instances {
-				if id != old.ID && i.PodUID != "" {
-					t.Fatal("renewal started before drain completed")
-				}
-			}
-			// A temporary outage after observing renewal cannot reverse committed withdrawal.
-			resolver.err = protocol.ErrUnavailable
-			c.Secrets.Next = time.Time{}
 			secretTicks(t, c, cluster, 2)
-			if c.Journal.View().Instances[old.ID].WithdrawalID == "" {
-				t.Fatal("outage reversed renewal drain")
+			state := c.Journal.View()
+			if len(state.Instances) != 0 || len(cluster.view.Pods) != 0 || state.AssignmentReasons[set.Entries[0].RevisionID] == "" {
+				t.Fatal("missing secrets allowed provisioning", state.AssignmentReasons)
 			}
+			c.Secrets = delivery
+			resolver.enabled = true
 			resolver.err = nil
-			c.Secrets.Next = time.Time{}
-			owner.sessions[old.AppID] = nil
-			secretTicks(t, c, cluster, 16)
-			found := false
-			for id, i := range c.Journal.View().Instances {
-				if id != old.ID && i.PodUID != "" && i.WithdrawalID == "" {
-					found = i.SecretApproval == 2
+			delivery.Next = time.Time{}
+			secretTicks(t, c, cluster, 4)
+			for _, instance := range c.Journal.View().Instances {
+				if instance.SecretPrepared && instance.PodUID != "" {
+					return
 				}
 			}
-			if !found {
-				t.Fatal("new approval did not restart after cleanup")
-			}
+			t.Fatal("setting required values did not unblock provisioning")
 		})
 	}
 }
 
-func TestAbsentSourceReportsItsApprovalForDrain(t *testing.T) {
-	c, _, _, _, _, now := fixtureController(t)
-	fixture, _ := regressionSecretFixture(t)
-	a := fixture.Entries[0]
-	source := "11111111-1111-4111-8111-111111111111"
-	a.Replacement = &schema.AppReplacement{RevisionID: source, ActivationGeneration: 1, Generation: 2, Replicas: 2}
-	old := &Instance{ID: "old", Definition: a.Revision.Definition, Group: appbundle.Group{RevisionID: source, ActivationGeneration: 1, Slot: 1}, Phase: "running", PodUID: "old-pod", SecretApproval: 1}
-	state := State{Payload: appbundle.Payload{Intent: &schema.AppAssignmentSetV1{Entries: []schema.AppAssignment{a}}}, Instances: map[string]*Instance{old.ID: old}}
-	resolver := &fakeSecretResolver{enabled: true, faults: map[string]string{source: "secrets_denied"}}
-	c.Secrets = &SecretDelivery{Client: resolver, Kube: secretKube(nil)}
-	c.Secrets.Poll(t.Context(), state, *now)
-	if len(resolver.consumers) != 1 || resolver.consumers[0].RevisionID != source || resolver.consumers[0].ApprovalGeneration != 1 || resolver.consumers[0].Name != a.Revision.Definition.Name {
-		t.Fatal("absent source not sent for approval check", resolver.consumers)
-	}
-	if retainRolling(&state, old, c, *now) {
-		t.Fatal("renewal retained the absent source")
+func TestPersistedStartCannotPublishWithoutSecretDelivery(t *testing.T) {
+	for _, mode := range []string{"no-delivery", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			c, input, cluster, _, _, _, resolver, _ := secretController(t, 1, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+			input.value.Metadata.ManagedSecrets = false
+			tick(t, c)
+			var pending *Instance
+			for _, instance := range c.Journal.View().Instances {
+				pending = instance
+			}
+			if pending == nil || pending.SecretPrepared || pending.PublicationStarted {
+				t.Fatal("fixture did not persist an unprepared start", pending)
+			}
+			delivery := c.Secrets
+			if mode == "no-delivery" {
+				c.Secrets = nil
+			} else {
+				resolver.enabled = false
+			}
+			secretTicks(t, c, cluster, 2)
+			state := c.Journal.View()
+			if state.Instances[pending.ID].PublicationStarted || state.Snapshots[state.Published].Included[pending.ID] || len(cluster.view.Pods) != 0 {
+				t.Fatal("persisted start bypassed secret readiness")
+			}
+			c.Secrets = delivery
+			resolver.enabled = true
+			delivery.Kube = secretKube(nil)
+			delivery.Next = time.Time{}
+			secretTicks(t, c, cluster, 4)
+			if instance := c.Journal.View().Instances[pending.ID]; !instance.SecretPrepared || instance.PodUID == "" {
+				t.Fatal("persisted start failed to resume after values became available", instance)
+			}
+			if mode == "no-delivery" {
+				c.Secrets = nil
+			} else {
+				resolver.enabled = false
+			}
+			tick(t, c)
+			state = c.Journal.View()
+			if !state.Snapshots[state.Published].Included[pending.ID] || state.Instances[pending.ID].WithdrawalID != "" {
+				t.Fatal("delivery outage withdrew an already provisioned app")
+			}
+
+		})
 	}
 }

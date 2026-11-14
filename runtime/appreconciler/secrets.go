@@ -18,7 +18,7 @@ type SecretResolver interface {
 	MarkManaged() error
 	Activate(context.Context) error
 	IdentityReady() bool
-	VersionsAll(context.Context, []protocol.ResolveRequest, []protocol.RuntimeConsumer) (map[string]protocol.VersionSet, map[string]string, error)
+	VersionsAll(context.Context, []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error)
 	Versions(context.Context, protocol.ResolveRequest) (protocol.VersionSet, error)
 	Resolve(context.Context, protocol.ResolveRequest) (protocol.VersionSet, error)
 }
@@ -32,7 +32,7 @@ type SecretDelivery struct {
 }
 
 func request(a schema.AppAssignment) protocol.ResolveRequest {
-	return protocol.ResolveRequest{ApprovalProtocol: 1, RevisionID: a.RevisionID, Generation: a.Generation, Activation: a.ActivationGeneration, Digest: a.Digest}
+	return protocol.ResolveRequest{RevisionID: a.RevisionID, Generation: a.Generation, Activation: a.ActivationGeneration, Digest: a.Digest}
 }
 func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
 	if d == nil || !d.Client.Enabled() || now.Before(d.Next) {
@@ -91,13 +91,7 @@ func (d *SecretDelivery) Poll(ctx context.Context, s State, now time.Time) {
 			return
 		}
 	}
-	consumers := []protocol.RuntimeConsumer{}
-	for _, i := range s.Instances {
-		if (i.Phase != "removed" || !i.SecretCleanupDone) && (i.SecretPrepared || i.PodUID != "" || i.PublicationStarted) && len(i.Definition.Container.Secrets) > 0 {
-			consumers = append(consumers, protocol.RuntimeConsumer{RevisionID: i.Group.RevisionID, Name: i.Definition.Name, ApprovalGeneration: i.SecretApproval})
-		}
-	}
-	sets, faults, e := d.Client.VersionsAll(ctx, requests, consumers)
+	sets, faults, e := d.Client.VersionsAll(ctx, requests)
 	if e != nil {
 		d.identityFault(s, secretFault(e))
 		return
@@ -227,7 +221,7 @@ func (d *SecretDelivery) Prepare(ctx context.Context, a schema.AppAssignment, i 
 			clear(v.Values[i].DataKey)
 		}
 	}()
-	if v.NodeID == "" || v.NodeID != target.NodeID || v.IdentityGeneration < target.IdentityGeneration || v.PolicyGeneration < target.PolicyGeneration || v.Assignment.RevisionID != a.RevisionID || v.Assignment.Generation != a.Generation || v.Assignment.Activation != a.ActivationGeneration || v.Assignment.Digest != a.Digest || v.Digest != target.Digest || v.ApprovalGeneration != target.ApprovalGeneration {
+	if v.NodeID == "" || v.NodeID != target.NodeID || v.IdentityGeneration < target.IdentityGeneration || v.PolicyGeneration < target.PolicyGeneration || v.Assignment.RevisionID != a.RevisionID || v.Assignment.Generation != a.Generation || v.Assignment.Activation != a.ActivationGeneration || v.Assignment.Digest != a.Digest || v.Digest != target.Digest {
 		return protocol.ErrInvalid
 	}
 	data := map[string][]byte{}
@@ -348,7 +342,6 @@ func (d *SecretDelivery) Prepare(ctx context.Context, a schema.AppAssignment, i 
 	i.SecretVersion = v.Digest
 	i.SecretPrepared = true
 	i.SecretPolicy = v.PolicyGeneration
-	i.SecretApproval = v.ApprovalGeneration
 	return nil
 }
 func preparationFailed(reason string) bool {
@@ -361,7 +354,6 @@ func mergePreparedSecret(current, prepared *Instance) {
 	current.Files = prepared.Files
 	current.SecretVersion = prepared.SecretVersion
 	current.SecretPolicy = prepared.SecretPolicy
-	current.SecretApproval = prepared.SecretApproval
 	current.SecretPrepared = prepared.SecretPrepared
 	if preparationFailed(current.Reason) {
 		current.Reason = ""
@@ -403,7 +395,7 @@ func (d *SecretDelivery) Authorize(ctx context.Context, a schema.AppAssignment, 
 	if e != nil {
 		return e
 	}
-	if v.Digest != i.SecretVersion || v.PolicyGeneration < i.SecretPolicy || v.ApprovalGeneration != i.SecretApproval {
+	if v.Digest != i.SecretVersion || v.PolicyGeneration < i.SecretPolicy {
 		return protocol.ErrDenied
 	}
 	return nil
@@ -452,7 +444,7 @@ func (d *SecretDelivery) StageRotation(ctx context.Context, c *Controller, s Sta
 			continue
 		}
 		for _, old := range s.Instances {
-			if old.Group.RevisionID != a.RevisionID || old.Phase == "removed" || (!old.SecretPrepared && old.PodUID == "") || old.SecretVersion == target.Digest || old.SecretApproval != target.ApprovalGeneration || old.WithdrawalID != "" {
+			if old.Group.RevisionID != a.RevisionID || old.Phase == "removed" || (!old.SecretPrepared && old.PodUID == "") || old.SecretVersion == target.Digest || old.WithdrawalID != "" {
 				continue
 			}
 			next := s.SecretSuccessors[old.ID]
@@ -530,7 +522,7 @@ func (c *Controller) collectSecrets(ctx context.Context) error {
 		if st.Instances[oldID] == nil {
 			valid = false
 		}
-		if target, observed := c.Secrets.Targets[next.Group.RevisionID]; observed && next.SecretVersion != "" && (next.SecretVersion != target.Digest || (next.SecretPrepared && next.SecretApproval != target.ApprovalGeneration)) {
+		if target, observed := c.Secrets.Targets[next.Group.RevisionID]; observed && next.SecretVersion != "" && next.SecretVersion != target.Digest {
 			valid = false
 		}
 		if fault := c.Secrets.Faults[next.Group.RevisionID]; fault == "secret_missing" || fault == "secrets_denied" {

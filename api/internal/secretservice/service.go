@@ -205,8 +205,6 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runtime/resolve", s.authenticated(s.resolve))
 	mux.HandleFunc("POST /v1/runtime/versions", s.authenticated(s.versions))
 	mux.HandleFunc("POST /v1/runtime/batch", s.authenticated(s.batchVersions))
-	mux.HandleFunc("GET /v1/app-approvals", s.appApprovals)
-	mux.HandleFunc("PUT /v1/app-approvals/{name}", s.setAppApproval)
 	mux.HandleFunc("GET /v1/secrets", s.list)
 	mux.HandleFunc("POST /v1/secrets/reserve", s.reserve)
 	mux.HandleFunc("POST /v1/secrets/{id}/wrap", s.wrap)
