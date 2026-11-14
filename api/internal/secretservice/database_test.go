@@ -99,6 +99,11 @@ func TestOrchestratorSecretsAreSharedAndMachineIdentityOutlivesIssuer(t *testing
 	}
 	grant, _, _ = s.Grant(testUser, testOwner)
 	delete(users, testUser)
+	for _, operation := range []struct{ method, path string }{{"GET", "/v1/secrets"}, {"POST", "/v1/enrollment-grants"}} {
+		if denied := call(t, s, operation.path, operation.method, "operator", nil, nil); denied.Code != 403 {
+			t.Fatal("departed member retained secrets access", denied.Code, denied.Body.String())
+		}
+	}
 	in := enrollmentRequest(m.machine.NodeID, key)
 	if w = call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 403 {
 		t.Fatal("departed issuer could enroll", w.Code)

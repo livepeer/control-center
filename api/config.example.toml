@@ -19,7 +19,7 @@ SupabasePublishableKey = "replace-with-publishable-key"
 # Generate each once: openssl rand -hex 32 | tr -d '\n'
 # Keep stable. Changing MachineTokenSecret invalidates installed credentials.
 JWTSigningSecretFile = "secrets/jwt-signing-secret"
-# Keep the old key ID/key in this JSON file for outstanding one-hour grants.
+# Keep old key IDs and keys in this JSON file for one-hour grants and 24-hour invitations.
 # JWTSigningKeyID = "2"
 # JWTVerificationKeysFile = "/private/enrollment-verification-keys.json"
 MachineTokenSecretFile = "secrets/machine-token-secret"

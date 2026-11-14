@@ -34,19 +34,10 @@ create another workspace.
 
 Configure the [Vault policy](operator-secrets.md#deployment) for each address.
 
-Remove access with:
-
-```sql
-DELETE FROM lpcc.orchestrator_memberships
-WHERE user_id='<USER_UUID>'::uuid
-AND orchestrator_address=lower('<RECIPIENT_ADDRESS>');
-```
-
-Removing a member or deleting their account preserves shared machines, secrets
-and runtime identities, even when no members remain. A grant cannot be used while its issuer lacks
-membership or has a deleted account; rejoining can restore an unexpired grant.
-Only the issuing user can revoke a grant, and revocation lasts until expiry in
-both services.
+Invitation links are issued without stored state, expire after 24 hours, and can
+be accepted once. Member removal and departure are recorded in
+`lpcc.admin_audit_events`. Removing a member preserves associated orchestrators
+and machines. Members cannot leave if no other member remains.
 
 The orchestrator ownership migrations require fresh Control Center and secrets
 service data. They refuse populated ownership-dependent tables. Existing

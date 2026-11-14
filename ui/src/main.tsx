@@ -9,6 +9,7 @@ import { OperatorSecrets, enrollSecretsService, enrollmentEnvelope } from './ope
 import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { OrchestratorWorkspace } from './orchestrators'
+import { clearInvitation, pendingInvitation } from './orchestrator-members'
 import { MachineStatus, MachineReadinessBadge } from './machine-status'
 
 type AuthConfig = { supabase_url: string; supabase_publishable_key: string }
@@ -170,14 +171,14 @@ function MachineConsole({ session, address, authorityFailure }: { session: Sessi
   </>
 }
 
-function Dashboard({ client, session }: { client: SupabaseClient; session: Session }) {
+function Dashboard({ client, session, invitation, dismissInvitation }: { client: SupabaseClient; session: Session; invitation: string | null; dismissInvitation: () => void }) {
   const [logoutProblem, setLogoutProblem] = useState('')
   async function logout() {
     const { error } = await client.auth.signOut()
     if (error) setLogoutProblem(error.message)
   }
   return <div className="console">
-    <OrchestratorWorkspace session={session} header={selector => <header className="topbar"><Brand /><span className="header-divider" />{selector}<div className="account"><span className="avatar">{(session.user.email || 'U')[0].toUpperCase()}</span><span className="account-email">{session.user.email}</span><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={logout}><LogOut size={17} /></button></div></header>}>
+    <OrchestratorWorkspace session={session} invitation={invitation} clearInvitation={dismissInvitation} header={selector => <header className="topbar"><Brand /><span className="header-divider" />{selector}<div className="account"><span className="avatar">{(session.user.email || 'U')[0].toUpperCase()}</span><span className="account-email">{session.user.email}</span><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={logout}><LogOut size={17} /></button></div></header>}>
       {(address, authorityFailure) => <main className="dashboard">
         {logoutProblem && <Notice>{logoutProblem}</Notice>}
         {address && <MachineConsole key={`${session.user.id}:${address}`} session={session} address={address} authorityFailure={authorityFailure} />}
@@ -189,6 +190,15 @@ function Dashboard({ client, session }: { client: SupabaseClient; session: Sessi
 }
 
 function App() {
+  const [invitation, setInvitation] = useState(pendingInvitation)
+  const dismissInvitation = () => { clearInvitation(); setInvitation(null) }
+  useEffect(() => {
+    const receive = () => {
+      if (window.location.pathname === '/invite' && window.location.hash) setInvitation(pendingInvitation())
+    }
+    window.addEventListener('hashchange', receive)
+    return () => window.removeEventListener('hashchange', receive)
+  }, [])
   const [client, setClient] = useState<SupabaseClient | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [ready, setReady] = useState(false)
@@ -223,7 +233,7 @@ function App() {
   }, [])
   if (!ready) return <div className="loading-screen"><Brand /><RefreshCw size={22} className="spin" /><p>Opening your workspace…</p></div>
   if (!client) return <div className="loading-screen"><Brand /><Notice>{problem || 'Configuration unavailable.'}</Notice><button className="button primary" onClick={() => window.location.reload()}>Try again<RefreshCw size={16} /></button></div>
-  return <>{problem && <div className="callback-error"><span>{problem}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setProblem('')}><X size={16} /></button></div>}{session ? <Dashboard key={session.user.id} client={client} session={session} /> : <Login client={client} />}</>
+  return <>{problem && <div className="callback-error"><span>{problem}</span><button className="icon-button" aria-label="Dismiss message" onClick={() => setProblem('')}><X size={16} /></button></div>}{session ? <Dashboard key={session.user.id} client={client} session={session} invitation={invitation} dismissInvitation={dismissInvitation} /> : <Login client={client} />}</>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<App />)
