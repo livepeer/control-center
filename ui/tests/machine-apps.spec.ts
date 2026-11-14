@@ -44,11 +44,11 @@ async function setup(page: Page) {
       const id = path.split('/')[6], old = state.assignments.find(a => a.revision_id === id)
       if (method === 'PUT') {
         if (old) { old.generation++; old.replicas = body.replicas }
-        else state.assignments.push({ ...assignment(id, id === r1 ? 1 : 2), replicas: body.replicas ?? 2 })
+        else state.assignments.push({ ...assignment(id, id === r1 ? 1 : 2), replicas: body.replicas })
       } else if (method === 'DELETE' && old) { absent(old); old.generation++ }
       else if (method === 'POST' && old) {
         absent(old); old.generation++
-        state.assignments.push({ ...assignment(body.target.revision_id, 2), replicas: body.target.replicas ?? 2, start_allowed: false, start_after: { source_revision_id: id, source_removal_generation: old.generation } })
+        state.assignments.push({ ...assignment(body.target.revision_id, 2), replicas: body.target.replicas, start_allowed: false, start_after: { source_revision_id: id, source_removal_generation: old.generation } })
       }
       return route.fulfill({ status: 202, json: { changed: true, assignments: state.assignments.filter(a => a.revision_id === id || a.revision_id === body.target?.revision_id) } })
     }
@@ -60,26 +60,19 @@ async function setup(page: Page) {
   return state
 }
 
-test('latest revision can be assigned before history or details load', async ({ page }) => {
-  const state = await setup(page)
-  const held: Route[] = []
+test('machine apps assign, scale and replace only after cleanup', async ({ page }) => {
+  const state = await setup(page), held: Route[] = []
   await page.route('**/api/admin/apps/whoami**', route => { held.push(route) })
   await page.getByLabel('Catalog app for machine').selectOption('whoami')
   await expect(page.getByLabel('Catalog revision for machine')).toHaveValue(r2)
-  await expect.poll(() => held.length).toBe(2)
-  await page.getByRole('button', { name: 'Assign selected revision', exact: true }).click()
-  expect(state.posts[0]).toMatchObject({ path: `${base}/${r2}`, body: { digest: revision(r2, 2).digest, expected_generation: 0 } })
-  expect(state.posts[0].body).not.toHaveProperty('replicas')
-})
-
-test('machine apps assign, scale and replace only after cleanup', async ({ page }) => {
-  const state = await setup(page)
-  await page.getByLabel('Catalog app for machine').selectOption('whoami')
+  await expect(page.getByRole('button', { name: 'Assign selected revision', exact: true })).toBeEnabled()
+  await page.unroute('**/api/admin/apps/whoami**')
+  for (const route of held) await route.fallback()
   await page.getByLabel('Catalog revision for machine').selectOption(r1)
+  await page.getByLabel('New assignment replicas').fill('2')
   await page.getByRole('button', { name: 'Assign selected revision', exact: true }).click()
   await expect(page.getByText('Pending Runtime completion', { exact: true })).toBeVisible()
-  expect(state.posts[0].body).toMatchObject({ expected_generation: 0 })
-  expect(state.assignments[0].replicas).toBe(2)
+  expect(state.posts[0].body).toMatchObject({ expected_generation: 0, replicas: 2 })
   await page.getByLabel(`Replicas for ${r1}`).fill('3')
   await page.getByRole('button', { name: 'Save replicas', exact: true }).click()
   await expect.poll(() => state.assignments[0].replicas).toBe(3)

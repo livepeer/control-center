@@ -5,6 +5,7 @@ import { api, APIError } from './api'
 type Revision = { revision_id: string; digest: string; name: string; revision: number; app_version: string; lifecycle: { retired_at: string | null }; definition: { name: string; instances: { replicas: number } } }
 type Summary = Pick<Revision, 'revision_id' | 'digest' | 'revision' | 'app_version' | 'lifecycle'>
 type App = { name: string; head: Summary }
+type Selection = Summary & { name: string; definition?: Revision['definition'] }
 type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: 'present' | 'absent'; replicas?: number; revision?: Revision; start_after?: unknown; replacement?: unknown; start_allowed: boolean; completed_at: string | null; failure?: string; observed_at: string | null; created_at: string; actor_id: string }
 type Listing = { assignments: Assignment[]; apps_generation: number; published_generation: number; delivery_error: string | null; next_after_revision_id: string | null; last_config_fetch_at: string | null }
 type Detail = { assignment: Assignment; revision: Revision; history: Assignment[]; next_before_generation: number | null }
@@ -17,8 +18,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
   const [appName, setAppName] = useState('')
   const [revisions, setRevisions] = useState<Summary[]>([])
   const [moreRevisions, setMoreRevisions] = useState<number | null>(null)
-  const [revisionId, setRevisionId] = useState('')
-  const [selected, setSelected] = useState<Revision | null>(null)
+  const [selected, setSelected] = useState<Selection | null>(null)
   const [replicas, setReplicas] = useState<number | undefined>()
   const [counts, setCounts] = useState<Record<string, { value: number; activation: number }>>({})
   const [detail, setDetail] = useState<Detail | null>(null)
@@ -69,18 +69,18 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     setAppName(name)
     if (!before) {
       serial.current.revision = (serial.current.revision || 0) + 1
-      setSelected(null); setRevisionId(''); setReplicas(undefined); setRevisions(head ? [head] : []); setMoreRevisions(null)
+      setSelected(null); setReplicas(undefined); setRevisions(head ? [head] : []); setMoreRevisions(null)
     }
     if (!name) { serial.current.revisions = (serial.current.revisions || 0) + 1; return }
-    if (!before && head) chooseRevision(head.revision_id, name)
+    if (!before && head) chooseRevision(head.revision_id, name, head)
     const selectionTicket = serial.current.revision
     void run('revisions', signal => api<{ revisions: Summary[]; next_before_revision: number | null }>(session, `/api/admin/apps/${encodeURIComponent(name)}` + (before ? `?before_revision=${before}` : ''), { signal }), data => {
       setRevisions(old => before ? [...old, ...data.revisions] : [...data.revisions, ...old.filter(r => !data.revisions.some(next => next.revision_id === r.revision_id))]); setMoreRevisions(data.next_before_revision)
-      if (!before && selectionTicket === serial.current.revision && data.revisions.length && data.revisions[0].revision_id !== head?.revision_id) chooseRevision(data.revisions[0].revision_id, name)
+      if (!before && selectionTicket === serial.current.revision && data.revisions.length && data.revisions[0].revision_id !== head?.revision_id) chooseRevision(data.revisions[0].revision_id, name, data.revisions[0])
     })
   }
-  function chooseRevision(id: string, name = appName) {
-    setRevisionId(id); setSelected(null); setReplicas(undefined)
+  function chooseRevision(id: string, name = appName, revision = revisions.find(r => r.revision_id === id)) {
+    setSelected(revision ? { ...revision, name } : null); setReplicas(undefined)
     if (!id) { serial.current.revision = (serial.current.revision || 0) + 1; return }
     void run('revision', signal => api<Revision>(session, `/api/admin/apps/${encodeURIComponent(name)}/revisions/${id}`, { signal }), data => { setSelected(data); setReplicas(old => old ?? data.definition.instances.replicas) })
   }
@@ -116,10 +116,8 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     if (a.completed_at) return 'Applied — health unverified'
     return 'Pending Runtime completion'
   }
-  const target = revisions.find(r => r.revision_id === revisionId)
-  const selectedAssignment = listing?.assignments.find(a => a.revision_id === revisionId)
-  const validCount = (n: number) => Number.isInteger(n) && n >= 1 && n <= 100
-  const validReplicas = replicas === undefined || validCount(replicas)
+  const selectedAssignment = listing?.assignments.find(a => a.revision_id === selected?.revision_id)
+  const validCount = (n: number | undefined) => n === undefined || Number.isInteger(n) && n >= 1 && n <= 100
   return <section className="machine-apps" aria-labelledby="machine-apps-title">
     <div className="section-heading"><div><h3 id="machine-apps-title">Apps on {machine.hostname}</h3><code>{machine.node_id}</code></div><button className="button" disabled={busy} onClick={() => { load(); loadApps(); if (appName) chooseApp(appName) }}>Refresh assignments</button></div>
     <p className="muted">Revisions stay pinned. Equal replica limits above one roll within the combined limit; other replacements wait for full cleanup. Applied means replica reconciliation completed; health, registration and discoverability are separate.</p>
@@ -127,18 +125,18 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     {listing && <p className="muted">Desired app generation {listing.apps_generation}; published {listing.published_generation}. Last config request: {listing.last_config_fetch_at ? new Date(listing.last_config_fetch_at).toLocaleString() : 'None'}{listing.delivery_error ? ` · Delivery failed: ${listing.delivery_error}` : ''}</p>}
     <div className="catalog-actions">
       <label>Catalog app <select aria-label="Catalog app for machine" value={appName} disabled={busy} onChange={e => chooseApp(e.target.value)}><option value="">Choose an app</option>{apps.map(a => <option key={a.name}>{a.name}</option>)}</select></label>
-      <label>Revision <select aria-label="Catalog revision for machine" value={revisionId} disabled={busy || !appName} onChange={e => chooseRevision(e.target.value)}><option value="">Choose a revision</option>{revisions.map(r => <option key={r.revision_id} value={r.revision_id}>Revision {r.revision} · version {r.app_version || '(unversioned)'}{r.lifecycle.retired_at ? ' (retired)' : ''}</option>)}</select></label>
-      <label>Replicas <input aria-label="New assignment replicas" type="number" min="1" max="100" value={replicas ?? ''} placeholder="App default" disabled={busy || !target} onChange={e => setReplicas(e.target.value === '' ? undefined : Number(e.target.value))} /></label>
-      <button className="button lime" disabled={busy || !listing || !target || !!target.lifecycle.retired_at || !validReplicas || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => target && mutate(`${base}/${target.revision_id}`, 'PUT', { digest: target.digest, expected_generation: selectedAssignment?.generation || 0, replicas })}>Assign selected revision</button>
+      <label>Revision <select aria-label="Catalog revision for machine" value={selected?.revision_id || ''} disabled={busy || !appName} onChange={e => chooseRevision(e.target.value)}><option value="">Choose a revision</option>{revisions.map(r => <option key={r.revision_id} value={r.revision_id}>Revision {r.revision} · version {r.app_version || '(unversioned)'}{r.lifecycle.retired_at ? ' (retired)' : ''}</option>)}</select></label>
+      <label>Replicas <input aria-label="New assignment replicas" type="number" min="1" max="100" value={replicas ?? ''} placeholder="App default" disabled={busy} onChange={e => setReplicas(e.target.value === '' ? undefined : Number(e.target.value))} /></label>
+      <button className="button lime" disabled={busy || !listing || !selected || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${selected.revision_id}`, 'PUT', { digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas })}>Assign selected revision</button>
       {moreApps && <button className="button" disabled={busy} onClick={() => loadApps(moreApps)}>More catalog apps</button>}{moreRevisions && <button className="button" disabled={busy} onClick={() => chooseApp(appName, moreRevisions)}>Older catalog revisions</button>}
     </div>
-    {selected && <details><summary>Inspect selected revision</summary><code>{selected.digest}</code><pre>{JSON.stringify(selected.definition, null, 2)}</pre></details>}
+    {selected?.definition && <details><summary>Inspect selected revision</summary><code>{selected.digest}</code><pre>{JSON.stringify(selected.definition, null, 2)}</pre></details>}
     <ul className="catalog-list">{listing?.assignments.map(a => <li key={a.revision_id}>
       <div><strong>{a.app_name} / revision {a.revision_number}</strong><p>{label(a)}</p><code>{a.revision_id}</code><p className="muted">Desired {a.generation} · activation {a.activation_generation}{a.observed_at ? ` · last observation ${new Date(a.observed_at).toLocaleString()}` : ''}</p></div>
       <div className="catalog-actions"><button className="button" disabled={busy} onClick={() => inspect(a.revision_id)}>Inspect assignment {a.revision_id}</button>
         {present(a) && <><label>Replicas <input aria-label={`Replicas for ${a.revision_id}`} type="number" min="1" max="100" value={count(a)} disabled={busy} onChange={e => setCounts(old => ({ ...old, [a.revision_id]: { value: Number(e.target.value), activation: a.activation_generation } }))} /></label><button className="button" disabled={busy || !validCount(count(a))} onClick={() => mutate(`${base}/${a.revision_id}`, 'PUT', { digest: a.digest, expected_generation: a.generation, replicas: count(a) })}>Save replicas</button>
         <button className="button" disabled={busy} onClick={() => mutate(`${base}/${a.revision_id}`, 'DELETE', { expected_generation: a.generation })}>Remove revision {a.revision?.revision}</button>
-        <button className="button" disabled={busy || !target || target.revision_id === a.revision_id || appName !== a.revision?.name || !!target.lifecycle.retired_at || !validReplicas || !!(a.start_after && !a.start_allowed) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => target && mutate(`${base}/${a.revision_id}/replace`, 'POST', { expected_generation: a.generation, target: { revision_id: target.revision_id, digest: target.digest, expected_generation: selectedAssignment?.generation || 0, replicas } })}>Replace revision {a.revision?.revision}</button></>}
+        <button className="button" disabled={busy || !selected || selected.revision_id === a.revision_id || selected.name !== a.revision?.name || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(a.start_after && !a.start_allowed) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${a.revision_id}/replace`, 'POST', { expected_generation: a.generation, target: { revision_id: selected.revision_id, digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas } })}>Replace revision {a.revision?.revision}</button></>}
       </div>
     </li>)}</ul>
     {listing?.assignments.length === 0 && <p>No app assignments.</p>}{listing?.next_after_revision_id && <button className="button" disabled={busy} onClick={() => load(listing.next_after_revision_id!)}>More assignments</button>}
