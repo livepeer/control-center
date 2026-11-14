@@ -129,6 +129,8 @@ Use `migrate down` to roll back reversible future migrations.
 
 ## Application behavior
 
+Apps are provisioned only when their required secrets are available.
+You can save values on the Secrets screen before an app is running.
 Applications declare secret references in `container.secrets`; the runtime
 provides values as environment variables. When a secret changes, affected app
 instances are replaced one at a time, waiting for each replacement to become
