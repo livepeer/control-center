@@ -34,19 +34,25 @@ create another workspace.
 
 Configure the [Vault policy](operator-secrets.md#deployment) for each address.
 
-Remove access with:
+Open **Members** for the selected orchestrator to invite or remove members, or
+leave. All members have equal permissions, including the original claimant.
+Membership actions cannot remove the last live member; unaccepted invitations
+do not count.
 
-```sql
-DELETE FROM lpcc.orchestrator_memberships
-WHERE user_id='<USER_UUID>'::uuid
-AND orchestrator_address=lower('<RECIPIENT_ADDRESS>');
-```
+Share an invitation link directly with the recipient. They sign in or create an
+account, review the orchestrator and signed-in account, and select **Accept
+invitation**. Signed links expire after 24 hours and can be accepted only once,
+even if the recipient later leaves. The inviter must still be a member at
+acceptance. Creating a link stores no invitation state; acceptance records the
+inviter and recipient and creates an audit event. There is no invitation list or
+individual link cancellation.
 
-Removing a member or deleting their account preserves shared machines, secrets
-and runtime identities, even when no members remain. A grant cannot be used while its issuer lacks
-membership or has a deleted account; rejoining can restore an unexpired grant.
-Only the issuing user can revoke a grant, and revocation lasts until expiry in
-both services.
+Member removal and departure are audited. Removing a member or deleting their
+account preserves shared machines, secrets and runtime identities. A grant
+cannot be used while its issuer lacks membership or has a deleted account;
+rejoining can restore an unexpired grant. Only the issuing user can revoke a
+grant, and revocation lasts until expiry in both services. External Auth account
+deletion and trusted database recovery remain outside the last-member guard.
 
 The orchestrator ownership migrations require fresh Control Center and secrets
 service data. They refuse populated ownership-dependent tables. Existing

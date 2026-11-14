@@ -2,7 +2,7 @@
 PGConnstrFile = "/run/secrets/pg-connstr"
 PGPasswordFile = "/run/secrets/pg-password"
 JWTSigningSecretFile = "/run/secrets/jwt-signing-secret"
-# Keep the old key ID/key in this JSON file for outstanding one-hour grants.
+# Keep old key IDs and keys in this JSON file for one-hour grants and 24-hour invitations.
 # JWTSigningKeyID = "2"
 # JWTVerificationKeysFile = "/private/enrollment-verification-keys.json"
 MachineTokenSecretFile = "/run/secrets/machine-token-secret"

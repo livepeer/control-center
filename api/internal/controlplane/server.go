@@ -109,6 +109,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/orchestrators", s.listOrchestrators)
 	mux.HandleFunc("POST /api/orchestrators/challenge", s.orchestratorChallenge)
 	mux.HandleFunc("POST /api/orchestrators", s.createOrchestrator)
+	mux.HandleFunc("GET /api/orchestrators/{address}/members", s.listMembers)
+	mux.HandleFunc("DELETE /api/orchestrators/{address}/members/{user_id}", s.removeMember)
+	mux.HandleFunc("POST /api/orchestrators/{address}/invitations", s.issueInvitation)
+	mux.HandleFunc("POST /api/orchestrator-invitations/preview", s.previewInvitation)
+	mux.HandleFunc("POST /api/orchestrator-invitations/accept", s.acceptInvitation)
 	mux.HandleFunc("GET /internal/users/{user_id}/orchestrators/{address}", s.orchestratorMembership)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
@@ -203,7 +208,22 @@ func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The chain lookup can outlive membership. Hold authorization through signing
+	// so a committed removal prevents issuance and serializes with consumption.
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.respondError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	if err = lockMembership(r.Context(), tx, owner.ID, address); err != nil {
+		s.respondError(w, err)
+		return
+	}
 	token, expires, err := s.params.signEnrollment(owner.ID, address, s.currentTime())
+	if err == nil {
+		err = tx.Commit()
+	}
 	if err != nil {
 		fail(w, 500, "could not issue enrollment token")
 		return

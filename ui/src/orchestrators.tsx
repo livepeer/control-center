@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { api, APIError } from './api'
+import { InvitationAcceptance, OrchestratorMembers } from './orchestrator-members'
 
 type Orchestrator = { address: string; display_name: string }
-type Props = { session: Session; header: (selector: ReactNode) => ReactNode; children: (address: string | null, authorityFailure: (error: unknown) => void) => ReactNode }
+type Props = { session: Session; invitation: string | null; clearInvitation: () => void; header: (selector: ReactNode) => ReactNode; children: (address: string | null, authorityFailure: (error: unknown) => void) => ReactNode }
 
-export function OrchestratorWorkspace({ session, header, children }: Props) {
+export function OrchestratorWorkspace({ session, invitation, clearInvitation, header, children }: Props) {
   const [orchestrators, setOrchestrators] = useState<Orchestrator[] | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [problem, setProblem] = useState('')
@@ -19,10 +20,12 @@ export function OrchestratorWorkspace({ session, header, children }: Props) {
   const [working, setWorking] = useState(false)
   const [claimProblem, setClaimProblem] = useState('')
   const active = useRef<AbortController | null>(null)
+  const preferredSelection = useRef<string | null>(null)
   const latestSession = useRef(session)
   latestSession.current = session
   const storageKey = `lpcc-orchestrator:${session.user.id}`
   const refresh = useCallback(async (preferred?: string) => {
+    if (preferred) preferredSelection.current = preferred
     active.current?.abort()
     const controller = new AbortController(); active.current = controller
     try {
@@ -34,7 +37,9 @@ export function OrchestratorWorkspace({ session, header, children }: Props) {
       const list = [...data.orchestrators].sort((a,b) => a.address.localeCompare(b.address))
       let saved: string | null = null
       try { saved = localStorage.getItem(storageKey) } catch { /* Selection still works without browser storage. */ }
-      setSelected(current => list.find(o => o.address === preferred)?.address ?? (list.some(o => o.address === current) ? current : list.find(o => o.address === saved)?.address ?? list[0]?.address ?? null))
+      const wanted = preferredSelection.current
+      setSelected(current => list.find(o => o.address === wanted)?.address ?? (list.some(o => o.address === current) ? current : list.find(o => o.address === saved)?.address ?? list[0]?.address ?? null))
+      if (list.some(o => o.address === wanted)) preferredSelection.current = null
       setOrchestrators(list); setMode(config.mode); setProblem('')
     } catch (error) {
       if (!controller.signal.aborted) { setProblem(error instanceof Error ? error.message : 'Could not load orchestrators.') }
@@ -78,7 +83,7 @@ export function OrchestratorWorkspace({ session, header, children }: Props) {
   }
   const reset = () => { setAdding(!adding); setAddress(''); setChallenge(''); setExpiresAt(''); setSignature(''); setClaimProblem('') }
   return <>
-    {header(<label className="orchestrator-picker"><span>Orchestrator</span><select aria-label="Orchestrator" value={selected ?? ''} disabled={!orchestrators?.length} onChange={e => setSelected(e.target.value)}>
+    {header(<label className="orchestrator-picker"><span>Orchestrator</span><select aria-label="Orchestrator" value={selected ?? ''} disabled={!orchestrators?.length} onChange={e => { preferredSelection.current = null; setSelected(e.target.value) }}>
       {!selected && <option value="">{problem ? 'Orchestrators unavailable' : orchestrators ? 'No orchestrators' : 'Loading orchestrators…'}</option>}
       {orchestrators?.map(o => <option key={o.address} value={o.address}>{o.display_name ? `${o.display_name} · ` : ''}{o.address}</option>)}
     </select></label>)}
@@ -98,6 +103,8 @@ export function OrchestratorWorkspace({ session, header, children }: Props) {
         {claimProblem && <p role="alert">{claimProblem}</p>}
       </div>}
     </div>}
+    {invitation && <div className="orchestrator-notice"><InvitationAcceptance session={session} token={invitation} dismiss={clearInvitation} accepted={async (address, signal) => { await refresh(address); if (!signal.aborted) clearInvitation() }} /></div>}
+    {selected && <div className="orchestrator-notice"><OrchestratorMembers key={`${session.user.id}:${selected}`} session={session} address={selected} authorityFailure={authorityFailure} changed={() => refresh()} /></div>}
     {children(selected,authorityFailure)}
   </>
 }
