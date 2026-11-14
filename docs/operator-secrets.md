@@ -77,57 +77,61 @@ encryption.
 
 ## Deployment
 
-1. Run the secrets service and Vault with [Compose](../deploy/compose.secrets.yaml).
-   Route `controlcenter-secrets.livepeer.live` through the existing Cloudflare
-   tunnel to `http://localhost:23812`. Only the secrets service binds a loopback
-   host port. Vault uses HTTP on a private Docker network, with no published port.
-   Prepare `deploy/vault-private/data/` owned by UID 65532 for persistent storage.
-2. Create the files named in [Compose](../deploy/compose.secrets.yaml) under
-   `deploy/secrets-service-private/`. Keep them owner-only, readable by UID
-   65532, and out of Git. Generate the service signing and encryption keys:
+The secrets service and Vault are required services in the default
+[Compose deployment](../deploy/compose.yaml). Existing installations using the
+`livepeer-secrets` project should use the local deployment helper to retain the
+running Vault and its network. For a fresh setup, work from `deploy/`:
+
+1. Copy `secrets-service.env.example` to `secrets-service.env`. Use the same
+   Supabase settings as `config.toml`, and keep `SECRETS_PUBLIC_URL` equal to
+   `SecretsURL`. Route that public hostname through the Cloudflare tunnel to
+   `http://localhost:23812`.
+2. Create `secrets-service-private/`, mode `0700`, with files readable by UID
+   65532 and mode `0600`:
+
+   | File | Contents |
+   | --- | --- |
+   | `database-url` | TLS PostgreSQL connection URI for the secrets service |
+   | `signing-key` | Independent enrollment signing secret, at least 32 bytes |
+   | `identity-key.pem` | Ed25519 service signing private key |
+   | `encryption-key.pem` | X25519 service encryption private key |
+   | `control-metadata-token` | Independent credential, at least 32 bytes, shared with the API's `SecretsMetadataTokenFile` |
+   | `vault-token` | Vault Transit credential from the next step |
+   | `ca-bundle.pem` | Public HTTPS root certificates plus the Vault CA |
+
+   Generate the service keys once and retain them across upgrades:
 
    ```sh
-   openssl genpkey -algorithm ED25519 \
-     -out deploy/secrets-service-private/identity-key.pem
-   openssl genpkey -algorithm X25519 \
-     -out deploy/secrets-service-private/encryption-key.pem
+   openssl genpkey -algorithm ED25519 -out secrets-service-private/identity-key.pem
+   openssl genpkey -algorithm X25519 -out secrets-service-private/encryption-key.pem
    ```
 
-   Compose mounts these as `SECRETS_IDENTITY_KEY_FILE` and
-   `SECRETS_ENCRYPTION_KEY_FILE`. Preserve both across redeployments, separately
-   from the enrollment-token signing secret.
-3. Start Vault with `docker compose -f deploy/compose.secrets.yaml up -d vault`,
-   then initialize and unseal it. Enable Vault Transit at `transit/`. Grant
-   `create,update` on `transit/encrypt/orchestrator-<lowercase address>` and
-   `update` on its decrypt path.
-   Do not grant key export or administration. Disable raw Vault audit and
-   ingress body logging so credentials and data keys are not recorded. Preserve
-   the recovery keys privately and arrange unsealing after restarts and renewal
-   of expiring service tokens.
-4. Set `SECRETS_PUBLIC_URL` and Control Center's `SecretsURL` to the same public
-   HTTPS origin. Put an independent metadata credential of at least 32 bytes in
-   `secrets-service-private/control-metadata-token`; Control Center's Compose
-   file mounts it at `/run/secrets/secrets-metadata-token`. Set
-   `SecretsMetadataTokenFile` to that path. Supply the remaining Compose settings
-   and start the project:
+3. Prepare `/opt/controlcenter-secrets/vault/{config,tls,data}` with data owned
+   by UID 65532. Copy `vault.hcl` to `config/server.hcl`, and supply
+   `tls/ca.pem`, `tls/server.pem`, and `tls/server-key.pem`, readable by UID 65532.
+   The certificate must cover hostname `vault` and IP address `127.0.0.1`.
+   Preserve existing Vault data when adopting these paths. Start Vault:
 
    ```sh
-   docker compose -f deploy/compose.secrets.yaml up --build -d
+   docker compose up -d vault
    ```
 
-The service applies PostgreSQL migrations on startup. See [orchestrator provisioning](operations.md#orchestrators).
+   Initialize and unseal it, then enable Transit at `transit/`. Grant the service
+   token `create,update` on `transit/encrypt/orchestrator-<lowercase address>` and
+   `update` on its decrypt path; save the token in `vault-token`. Do not grant key
+   export or administration. Keep recovery keys privately and arrange unsealing
+   after restarts and renewal of expiring tokens. Vault's HTTPS port binds only
+   to `127.0.0.1:28200`. Disable raw Vault audit and ingress body logging.
+4. Start the complete deployment:
 
-To inspect or apply migrations separately, run the service image with
-`SECRETS_DATABASE_URL_FILE` configured. With the Compose deployment above:
+   ```sh
+   docker compose up -d --build --wait
+   ```
 
-```sh
-docker compose -f deploy/compose.secrets.yaml \
-  run --rm --no-deps secrets migrate status
-docker compose -f deploy/compose.secrets.yaml \
-  run --rm --no-deps secrets migrate up
-```
-
-Use `migrate down` to roll back the latest migration; this can delete data.
+The service applies PostgreSQL migrations on startup. See
+[orchestrator provisioning](operations.md#orchestrators). To inspect migrations,
+run `docker compose run --rm --no-deps secrets migrate status`; use `migrate up`
+to apply them separately. `migrate down` can delete data.
 
 ## Application behavior
 
