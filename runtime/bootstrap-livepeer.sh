@@ -104,7 +104,7 @@ authenticate_node() {
     request=$(jq -nc --arg fingerprint "$INSTALLATION_FINGERPRINT" --arg hostname "$(hostname)" \
       --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" --argjson development_http "${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0}" \
       '{fingerprint:$fingerprint,hostname:$hostname,install_dir:$install_dir,k3s_version:$k3s_version,development_http:($development_http==1)}')
-    if [[ -n ${SECRET_PUBLIC:-} ]]; then request=$(jq -c --arg public "$SECRET_PUBLIC" --rawfile signature <(registration_key_proof <<< "$request") '.+{public_key:$public,signature:$signature}' <<< "$request"); fi
+    request=$(jq -c --arg public "$SECRET_PUBLIC" --rawfile signature <(registration_key_proof <<< "$request") '.+{public_key:$public,signature:$signature}' <<< "$request")
     log 'Registering machine with the Livepeer API.'
     # Pass the bearer header through a descriptor, rather than curl's argv.
     response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 \
@@ -214,10 +214,7 @@ write_host_configuration() {
   render_template "$SCRIPT_DIR/config/gvisor.conflist" "$INSTALL_DIR/config/gvisor-cni/10-gvisor.conflist"
   render_template "$SCRIPT_DIR/config/runsc.toml" "$INSTALL_DIR/config/runsc.toml"
   render_template "$SCRIPT_DIR/config/containerd.tmpl" "$containerd_config"
-  local preserve_unencrypted=0
-  if [[ -d "$INSTALL_DIR/k3s/server" ]] && ! grep -q '^secrets-encryption: true$' "$INSTALL_DIR/config/k3s.yaml"; then preserve_unencrypted=1; fi
   render_template "$SCRIPT_DIR/config/k3s.yaml" "$INSTALL_DIR/config/k3s.yaml"
-  if (( preserve_unencrypted )); then sed -i '/^secrets-encryption: true$/d' "$INSTALL_DIR/config/k3s.yaml"; fi
   render_template "$SCRIPT_DIR/config/kubelet.conf" "$INSTALL_DIR/k3s/agent/etc/kubelet.conf.d/10-livepeer.conf"
   render_template "$SCRIPT_DIR/config/livepeer-k3s.service" "$INSTALL_DIR/systemd/$UNIT"
   render_template "$SCRIPT_DIR/config/firewall.nft" "$INSTALL_DIR/config/firewall.nft"
@@ -278,12 +275,13 @@ bootstrap_cluster() {
   # Child reconciliation can recreate these after the parent is Ready.
   kube -n system-upgrade wait --for=create deployment/system-upgrade-controller --timeout=300s
   kube -n system-upgrade rollout status deployment/system-upgrade-controller --timeout=300s
-  kube -n livepeer wait --for=create deployment/orchestrator --timeout=300s
-  kube -n livepeer rollout status deployment/orchestrator --timeout=300s
   kube -n flux-system wait kustomization/livepeer-upgrade-plan --for=condition=Ready --timeout=300s
 }
 
 smoke_test() {
+  # Secrets identity recovery must restore the signer before onchain readiness.
+  kube -n livepeer wait --for=create deployment/orchestrator --timeout=300s
+  kube -n livepeer rollout status deployment/orchestrator --timeout=300s
   kube -n livepeer delete pod/livepeer-gvisor-smoke --ignore-not-found --wait=true >/dev/null
   kube -n livepeer apply -f "$SCRIPT_DIR/manifests/gvisor-smoke.yaml"
   kube -n livepeer wait pod/livepeer-gvisor-smoke --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s

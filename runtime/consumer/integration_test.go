@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/onchain"
 	"github.com/livepeer/control-center/runtime/transport"
+	protocol "github.com/livepeer/control-center/secrets"
 )
 
 type podFixture struct {
@@ -41,6 +43,20 @@ func TestDeliveryKeepsSecretsOutOfStateAndRejectsInsecureTransport(t *testing.T)
 		f.i.Control.AllowHTTP = true
 		if _, err := f.i.fetch(t.Context(), grant.Launch); err == nil {
 			t.Fatal("insecure credential delivery allowed")
+		}
+		if profile == Orchestrator {
+			f.i.Control.AllowHTTP = false
+			if err := os.Remove(f.i.SigningKeyFile); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if _, err := f.i.fetch(t.Context(), grant.Launch); err == nil || f.fetched != 1 {
+					t.Fatal("runtime fell back to bearer-only delivery")
+				}
+				if err := os.WriteFile(f.i.SigningKeyFile, []byte("invalid key"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 }
@@ -108,7 +124,7 @@ func TestFailedNewLaunchDurablyInvalidatesTheOldAssociation(t *testing.T) {
 			first := f.launch(t, "a")
 			bad := first.Launch
 			bad.PodUID = "unrelated-pod"
-			if _, err := f.i.fetch(t.Context(), bad); err == nil || f.i.grant == nil || f.i.grant.Launch != first.Launch {
+			if _, err := f.i.fetch(t.Context(), bad); err == nil || f.i.grant == nil || f.i.grant.Launch != first.Launch || f.fetched != 1 {
 				t.Fatal("unverified Pod invalidated the current grant")
 			}
 			f.mutate = func() { f.m.TokenGeneration++; f.m.Onchain.Generation++ }
@@ -155,6 +171,7 @@ type integrationFixture struct {
 
 func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 	t.Helper()
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	f := &integrationFixture{pod: &podFixture{container: "containerd://first"}, m: contract.Metadata{NodeID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", CredentialVersion: 1, Generation: 7, BundleFormat: contract.BundleFormat, TunnelID: "tunnel", TokenGeneration: 2, ProviderVersion: 10, ConnectorTokenRef: "/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/tunnel/connector-token"}}
 	profile := Connector
 	if len(profiles) > 0 {
@@ -177,6 +194,9 @@ func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 			if profile == Orchestrator {
 				var request Request
 				json.NewDecoder(r.Body).Decode(&request)
+				if f.pod.calls == 0 || !request.Verify(key.Public().(ed25519.PublicKey), old.NodeID, old.CredentialVersion, "https://"+r.Host+r.URL.Path, time.Now()) {
+					t.Error("missing verified Pod launch proof")
+				}
 				json.NewEncoder(w).Encode(Grant{Association: Association{Launch: request.Launch, NodeID: old.NodeID, CredentialVersion: old.CredentialVersion, OnchainGeneration: old.Onchain.Generation, ConfigDigest: old.ConfigDigest, GrantID: "grant-" + request.LaunchID}, RPCURL: "https://rpc.example/private", Headers: "Authorization: Bearer submission-secret"})
 				return
 			}
@@ -192,6 +212,10 @@ func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 	}))
 	t.Cleanup(server.Close)
 	root := t.TempDir()
+	keyFile := filepath.Join(root, "runtime-key.pem")
+	if err := os.WriteFile(keyFile, protocol.PrivatePEM(key), 0600); err != nil {
+		t.Fatal(err)
+	}
 	token := filepath.Join(root, "machine-token")
 	if err := os.WriteFile(token, []byte(strings.Repeat("b", 64)), 0600); err != nil {
 		t.Fatal(err)
@@ -201,7 +225,7 @@ func fixture(t *testing.T, profiles ...Profile) *integrationFixture {
 		t.Fatal(err)
 	}
 	control.Client.Transport = server.Client().Transport
-	f.i = &Integration{Profile: profile, Control: control, Kube: f.pod, Desired: func() (contract.Metadata, bool) { return f.m, true }, StateFile: filepath.Join(root, "grant.json")}
+	f.i = &Integration{Profile: profile, Control: control, Kube: f.pod, Desired: func() (contract.Metadata, bool) { return f.m, true }, StateFile: filepath.Join(root, "grant.json"), SigningKeyFile: keyFile}
 	return f
 }
 

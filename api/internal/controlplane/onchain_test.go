@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,6 +27,53 @@ func onchainSettings(t *testing.T, s *Server) onchain.Config {
 	ref := rpcSecret(t, s, "https://rpc.example/private-token")
 	return onchain.Config{Version: 1, CredentialRevision: 1, Mode: "onchain", Network: "custom", ChainID: 123, Controller: "0x" + strings.Repeat("1", 40), Recipient: "0x" + strings.Repeat("2", 40), RPCSecret: ref, RedeemerURL: "https://api.example/redemption", WeiPerUSD: "1000000000000000", TicketFaceValue: "1000", TicketWinProb: "100", MaxPendingTickets: 100, MaxTicketsPerRecipient: 10}
 }
+
+func TestOnchainCredentialsRequireBoundRuntimeProofWithoutSecretsService(t *testing.T) {
+	s, _, machine := onchainMachine(t)
+	s.params.SecretsURL = "https://127.0.0.1:1"
+	node := machine["node_id"]
+	path := "/v1/nodes/" + node + "/onchain/credentials"
+	in := signedOnchainRequest(t, s, node, consumer.Launch{PodName: "orchestrator", PodUID: "pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)})
+	seed := sha256.Sum256([]byte(ownerA + installationFingerprint(t, s, node)))
+	key, endpoint := ed25519.NewKeyFromSeed(seed[:]), s.params.PublicAPIURL+path
+	for name, mutate := range map[string]func(*consumer.Request){
+		"unsigned":   func(r *consumer.Request) { r.Signature = nil },
+		"pod-name":   func(r *consumer.Request) { r.PodName += "x" },
+		"pod-uid":    func(r *consumer.Request) { r.PodUID += "x" },
+		"launch":     func(r *consumer.Request) { r.LaunchID = strings.Repeat("c", 32) },
+		"process":    func(r *consumer.Request) { r.ProcessID = strings.Repeat("c", 64) },
+		"generation": func(r *consumer.Request) { r.OnchainGeneration++ },
+		"config":     func(r *consumer.Request) { r.ConfigDigest = strings.Repeat("c", 64) },
+		"node":       func(r *consumer.Request) { r.Sign(key, node+"x", 1, endpoint, s.currentTime()) },
+		"credential": func(r *consumer.Request) { r.Sign(key, node, 2, endpoint, s.currentTime()) },
+		"endpoint":   func(r *consumer.Request) { r.Sign(key, node, 1, endpoint+"x", s.currentTime()) },
+		"expired":    func(r *consumer.Request) { r.Sign(key, node, 1, endpoint, s.currentTime().Add(-time.Minute)) },
+		"future":     func(r *consumer.Request) { r.Sign(key, node, 1, endpoint, s.currentTime().Add(time.Minute)) },
+		"wrong-key": func(r *consumer.Request) {
+			r.Sign(ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)), node, 1, endpoint, s.currentTime())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := in
+			mutate(&bad)
+			requireStatus(t, request(t, s, "POST", path, machine["token"], bad), 403)
+			if count(t, s, `SELECT count(*) FROM lpcc.onchain_grants`) != 0 {
+				t.Fatal("invalid proof created a grant")
+			}
+		})
+	}
+	for range 2 {
+		requireStatus(t, request(t, s, "POST", path, machine["token"], in), 200)
+	}
+	if count(t, s, `SELECT count(*) FROM lpcc.onchain_grants`) != 1 {
+		t.Fatal("replay minted another grant")
+	}
+	execSQL(t, s.db, `UPDATE lpcc.secret_machines SET public_key='' WHERE node_id=$1`, node)
+	requireStatus(t, request(t, s, "POST", path, machine["token"], in), 403)
+	execSQL(t, s.db, `DELETE FROM lpcc.secret_machines WHERE node_id=$1`, node)
+	requireStatus(t, request(t, s, "POST", path, machine["token"], in), 409)
+}
+
 func TestOnchainApplyAtomicBindingAndSecretVersions(t *testing.T) {
 	s := newTestServer(t)
 	c := onchainSettings(t, s)
@@ -79,10 +127,9 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta := onchainMetadata(t, s, node)
 	var e error
 	launch := consumer.Launch{PodName: "orchestrator-test", PodUID: "uid-test", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
-	in := consumer.Request{Launch: launch, OnchainGeneration: meta.Onchain.Generation, ConfigDigest: meta.ConfigDigest}
+	in := signedOnchainRequest(t, s, node, launch)
 	path := "/v1/nodes/" + node + "/onchain/credentials"
 	requireStatus(t, request(t, s, "POST", path, "session-a", in), 401)
 	w := request(t, s, "POST", path, machine["token"], in)
@@ -450,14 +497,26 @@ func onchainMetadata(t *testing.T, s *Server, node string) contract.Metadata {
 }
 func onchainGrant(t *testing.T, s *Server, c map[string]string, launch consumer.Launch) consumer.Grant {
 	t.Helper()
-	m := onchainMetadata(t, s, c["node_id"])
-	w := request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/onchain/credentials", c["token"], consumer.Request{Launch: launch, OnchainGeneration: m.Onchain.Generation, ConfigDigest: m.ConfigDigest})
+	w := request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/onchain/credentials", c["token"], signedOnchainRequest(t, s, c["node_id"], launch))
 	requireStatus(t, w, 200)
 	var g consumer.Grant
 	if err := json.Unmarshal(w.Body.Bytes(), &g); err != nil {
 		t.Fatal(err)
 	}
 	return g
+}
+
+func signedOnchainRequest(t *testing.T, s *Server, node string, launch consumer.Launch) consumer.Request {
+	t.Helper()
+	m := onchainMetadata(t, s, node)
+	var owner string
+	if e := s.db.QueryRow(`SELECT actor_user_id::text FROM lpcc.enrollment_audit WHERE action='machine.enroll' AND target=$1`, node).Scan(&owner); e != nil {
+		t.Fatal(e)
+	}
+	seed := sha256.Sum256([]byte(owner + installationFingerprint(t, s, node)))
+	in := consumer.Request{Launch: launch, OnchainGeneration: m.Onchain.Generation, ConfigDigest: m.ConfigDigest}
+	in.Sign(ed25519.NewKeyFromSeed(seed[:]), node, m.CredentialVersion, s.params.PublicAPIURL+"/v1/nodes/"+node+"/onchain/credentials", s.currentTime())
+	return in
 }
 
 func installationFingerprint(t *testing.T, s *Server, node string) string {

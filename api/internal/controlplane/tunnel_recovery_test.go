@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"uuid"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
+	protocol "github.com/livepeer/control-center/secrets"
 )
 
 func TestArtifactPublicationFencesAfterLockWait(t *testing.T) {
@@ -282,14 +285,18 @@ func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	fp := strings.Repeat("1", 64)
-	w := request(t, s, "POST", "/v1/nodes/register", jwt, map[string]any{"fingerprint": fp, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1", "development_http": true})
+	body := registrationBody(ownerA, fp, jwt)
+	body["development_http"] = true
+	seed := sha256.Sum256([]byte(ownerA + fp))
+	body["signature"] = ed25519.Sign(ed25519.NewKeyFromSeed(seed[:]), protocol.RegistrationProof(jwt, fp, "worker-01", "/opt/livepeer", "v1.37.2+k3s1", body["public_key"].(string), true))
+	w := request(t, s, "POST", "/v1/nodes/register", jwt, body)
 	requireStatus(t, w, 200)
 	c := credentials(t, w.Body.Bytes())
 	reportRuntime(t, s, c, "runtime", false)
 	driveTunnels(t, s)
 	// An ordinary enrollment retry over the production URL must not upgrade a
 	// credential previously released to development HTTP consumers.
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, map[string]any{"fingerprint": fp, "hostname": "worker-01", "install_dir": "/opt/livepeer", "k3s_version": "v1.37.2+k3s1", "management_proof": c["token"]}), 200)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, registrationBody(ownerA, fp, jwt)), 200)
 	driveTunnels(t, s)
 	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE state->>'tunnel_id' IS NOT NULL AND state->>'tunnel_id'<>''`) != 0 {
 		t.Fatal("development enrollment became live")

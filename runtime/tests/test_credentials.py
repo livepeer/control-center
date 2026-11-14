@@ -152,13 +152,16 @@ transition_credentials
         self.assertGreater(next(i for i, x in enumerate(steps) if 'rollout status' in x), secret)
         self.assertTrue(any('create secret generic livepeer-runner-bootstrap' in x for x in steps[:next(i for i,x in enumerate(steps) if 'rollout status' in x)]))
 
-    def test_management_proof_is_in_body_and_never_process_arguments(self):
+    def test_registration_and_refresh_proofs_stay_out_of_process_arguments(self):
         for mode in ('refresh', 'reenroll'):
             with self.subTest(mode=mode):
                 result = self.transition(mode=mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 request = json.loads((self.root / 'requests').read_text().splitlines()[-1])
-                self.assertIn(request['management_proof'], ('b' * 64, 'c' * 64))
+                if mode == 'refresh':
+                    self.assertIn(request['management_proof'], ('b' * 64, 'c' * 64))
+                else:
+                    self.assertNotIn('management_proof', request)
                 if mode == 'reenroll':
                     self.assertEqual(request['public_key'], 'replacement-fixture')
                     self.assertEqual(request['signature'], 'registration-proof-sentinel')
@@ -166,6 +169,29 @@ transition_credentials
                 arguments = (self.root / 'process-args').read_bytes()
                 self.assertNotIn(b'b' * 64, arguments)
                 self.assertNotIn(b'c' * 64, arguments)
+
+    def test_runtime_key_delivery_needs_no_secrets_service_enrollment(self):
+        key = self.root / 'credentials/secrets/key.pem'
+        key.parent.mkdir()
+        key.write_text('private-key-fixture')
+        script = r'''set -Eeuo pipefail
+source "$1"
+INSTALL_DIR=$2
+curl() { exit 91; }
+kube() {
+  for arg in "$@"; do
+    case "$arg" in
+      --from-file=runtime-key.pem=*) cp "${arg#--from-file=runtime-key.pem=}" "$INSTALL_DIR/delivered-key" ;;
+    esac
+  done
+  if [[ "$*" == 'apply -f -' ]]; then cat >/dev/null; else printf '{}'; fi
+}
+install_machine_secret
+'''
+        result = subprocess.run(['bash', '-c', script, 'fixture', str(LIBRARY), str(self.root)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'delivered-key').read_bytes(), key.read_bytes())
+        self.assertFalse((key.parent / 'identity.json').exists())
 
     def test_unconfirmed_consumer_termination_prevents_refresh(self):
         result = self.transition('stop')
@@ -188,7 +214,7 @@ transition_credentials
         self.assertEqual(archived.read_text(), 'previous owner')
         self.assertTrue((self.root / 'state/credential-transition.json').exists())
         self.assertFalse((secrets/'managed').exists())
-        self.assertNotIn('secrets-encryption: true',(self.root/'config/k3s.yaml').read_text())
+        self.assertIn('secrets-encryption: true',(self.root/'config/k3s.yaml').read_text())
         result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(archived.read_text(), 'previous owner')

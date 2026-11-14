@@ -211,6 +211,7 @@ func appReconciler(ctx context.Context, args []string) error {
 }
 func httpSource(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("http-source", flag.ContinueOnError)
+	signingKey := flags.String("signing-key-file", "", "Enrolled runtime private key")
 	configURL := flags.String("url", "", "Control Center machine configuration URL")
 	token := flags.String("token-file", "", "Machine credential file")
 	identity := flags.String("identity-file", "", "Installed enrollment identity")
@@ -224,7 +225,7 @@ func httpSource(ctx context.Context, args []string) error {
 		return errors.New("invalid http-source flags")
 	}
 	u, err := url.Parse(*artifactURL)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || (u.Scheme != "http" && u.Scheme != "https") || *directory == "" || *token == "" || *identity == "" || *socketRoot == "" || *interval < time.Second || (*mode != "https" && *mode != "development-http") {
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || (u.Scheme != "http" && u.Scheme != "https") || *directory == "" || *token == "" || *identity == "" || *signingKey == "" || *socketRoot == "" || *interval < time.Second || (*mode != "https" && *mode != "development-http") {
 		return errors.New("invalid http-source configuration")
 	}
 	control, err := transport.NewControl(*configURL, *token, *mode == "development-http")
@@ -243,7 +244,7 @@ func httpSource(ctx context.Context, args []string) error {
 	socketErrors := make(chan error, 1)
 	integration := &consumer.Integration{Reporter: &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "connector-grant.json")}
 	integration.Restore()
-	onchain := &consumer.Integration{Profile: consumer.Orchestrator, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "onchain-grant.json")}
+	onchain := &consumer.Integration{Profile: consumer.Orchestrator, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "onchain-grant.json"), SigningKeyFile: *signingKey}
 	onchain.Restore()
 	source.Onchain = onchain.Observe
 	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, onchain)
