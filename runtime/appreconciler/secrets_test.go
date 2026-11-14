@@ -889,7 +889,7 @@ func TestPreparationPreservesConcurrentOwnerWithdrawal(t *testing.T) {
 }
 
 func TestRequiredSecretsBlockProvisioningUntilAvailable(t *testing.T) {
-	for _, mode := range []string{"no-delivery", "disabled", "missing-value", "unavailable"} {
+	for _, mode := range []string{"no-delivery", "identity-unavailable", "missing-value", "unavailable"} {
 		t.Run(mode, func(t *testing.T) {
 			c, input, cluster, _, _, _, resolver, set := secretController(t, 1, nil)
 			input.value.Metadata.ManagedSecrets = false
@@ -897,8 +897,8 @@ func TestRequiredSecretsBlockProvisioningUntilAvailable(t *testing.T) {
 			switch mode {
 			case "no-delivery":
 				c.Secrets = nil
-			case "disabled":
-				resolver.enabled = false
+			case "identity-unavailable":
+				resolver.identityReady = false
 			case "missing-value":
 				resolver.err = fmt.Errorf("secret_unprovisioned")
 			case "unavailable":
@@ -910,7 +910,7 @@ func TestRequiredSecretsBlockProvisioningUntilAvailable(t *testing.T) {
 				t.Fatal("missing secrets allowed provisioning", state.AssignmentReasons)
 			}
 			c.Secrets = delivery
-			resolver.enabled = true
+			resolver.identityReady = true
 			resolver.err = nil
 			delivery.Next = time.Time{}
 			secretTicks(t, c, cluster, 4)
@@ -925,7 +925,7 @@ func TestRequiredSecretsBlockProvisioningUntilAvailable(t *testing.T) {
 }
 
 func TestPersistedStartCannotPublishWithoutSecretDelivery(t *testing.T) {
-	for _, mode := range []string{"no-delivery", "disabled"} {
+	for _, mode := range []string{"no-delivery", "identity-unavailable"} {
 		t.Run(mode, func(t *testing.T) {
 			c, input, cluster, _, _, _, resolver, _ := secretController(t, 1, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
 			input.value.Metadata.ManagedSecrets = false
@@ -941,7 +941,7 @@ func TestPersistedStartCannotPublishWithoutSecretDelivery(t *testing.T) {
 			if mode == "no-delivery" {
 				c.Secrets = nil
 			} else {
-				resolver.enabled = false
+				resolver.identityReady = false
 			}
 			secretTicks(t, c, cluster, 2)
 			state := c.Journal.View()
@@ -949,7 +949,7 @@ func TestPersistedStartCannotPublishWithoutSecretDelivery(t *testing.T) {
 				t.Fatal("persisted start bypassed secret readiness")
 			}
 			c.Secrets = delivery
-			resolver.enabled = true
+			resolver.identityReady = true
 			delivery.Kube = secretKube(nil)
 			delivery.Next = time.Time{}
 			secretTicks(t, c, cluster, 4)
@@ -959,7 +959,7 @@ func TestPersistedStartCannotPublishWithoutSecretDelivery(t *testing.T) {
 			if mode == "no-delivery" {
 				c.Secrets = nil
 			} else {
-				resolver.enabled = false
+				resolver.identityReady = false
 			}
 			tick(t, c)
 			state = c.Journal.View()
