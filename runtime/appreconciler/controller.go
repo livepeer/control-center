@@ -450,7 +450,11 @@ func (c *Controller) Tick(ctx context.Context) error {
 					s.AssignmentReasons[a.RevisionID] = "onchain_incompatible"
 					continue
 				}
-				if c.Secrets != nil && c.Secrets.Managed(a) {
+				if a.Revision != nil && len(a.Revision.Definition.Container.Secrets) > 0 {
+					if c.Secrets == nil || !c.Secrets.Managed(a) {
+						s.AssignmentReasons[a.RevisionID] = "secrets_unavailable"
+						continue
+					}
 					if _, ok := c.Secrets.Targets[a.RevisionID]; !ok {
 						s.AssignmentReasons[a.RevisionID] = c.Secrets.Faults[a.RevisionID]
 						continue
@@ -697,6 +701,9 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 		i := s.Instances[id]
 		if i.Phase == "retired" || i.Phase == "removed" {
 			snapshot.Retired[id] = true
+			continue
+		}
+		if len(i.Definition.Container.Secrets) > 0 && i.PodUID == "" && !i.PublicationStarted && (c.Secrets == nil || !c.Secrets.Client.Enabled()) {
 			continue
 		}
 		if c.Secrets != nil && c.Secrets.Client.Enabled() && len(i.Definition.Container.Secrets) > 0 {

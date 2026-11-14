@@ -42,7 +42,7 @@ async function setup(page: Page, { secrets = false, empty = false, admin = false
       if(state.hold&&address===a){state.held.push(route);return}
       return route.fulfill({json:{machines:[machine(address)]}})
     }
-    if(path==='/api/operator/apps')return route.fulfill({json:{apps:[{name:'provider',denied:false,generation:0,secrets:[]}]}})
+    if(path==='/api/operator/apps')return route.fulfill({json:{apps:[{name:'provider',denied:false,generation:0,secrets:[{name:'API_TOKEN',secret:'lp-app-provider',key:'token'}]}]}})
     if(path.endsWith('/policy')){state.policies.push(address);if(state.holdPolicy){state.heldPolicy=route;return};return route.fulfill({json:{generation:1}})}
     return route.fulfill({status:404,json:{error:'Unexpected route'}})
   })
@@ -123,14 +123,15 @@ test('switching clears secret drafts and stops a delayed upload from progressing
   const state=await setup(page,{secrets:true})
   await expect(page.getByLabel('Bootstrap command')).toContainText('lpcc1.')
   state.holdReserve=true
-  await page.getByLabel('Secret name').fill('lp-app-provider')
-  await page.getByLabel('Key',{exact:true}).fill('token')
+  await page.getByLabel('App name',{exact:true}).selectOption('provider')
+  await page.getByLabel('Secret name',{exact:true}).selectOption('lp-app-provider')
+  await page.getByRole('button',{name:'Add value',exact:true}).click()
   await page.getByLabel('Value',{exact:true}).fill('private-draft')
-  await page.getByRole('button',{name:'Save secret'}).click()
+  await page.getByRole('button',{name:'Save value',exact:true}).click()
   await expect.poll(()=>state.reserve!==null).toBe(true)
   await page.getByRole('combobox',{name:'Orchestrator'}).selectOption(b)
   await expect(page.getByLabel('Secret name')).toHaveValue('')
-  await expect(page.getByLabel('Value',{exact:true})).toHaveValue('')
+  await expect(page.getByLabel('Value',{exact:true})).toHaveCount(0)
   await state.completeReserve!()
   await page.getByRole('button',{name:'Deny',exact:true}).click()
   await expect.poll(()=>state.policies).toEqual([b])
@@ -151,17 +152,18 @@ test('background membership outage preserves a draft and an in-flight secret sav
   await expect(page.getByLabel('Bootstrap command')).toContainText('lpcc1.')
   const command=await page.getByLabel('Bootstrap command').innerText()
   state.holdReserve=true
-  await page.getByLabel('Secret name').fill('lp-app-provider')
-  await page.getByLabel('Key',{exact:true}).fill('token')
+  await page.getByLabel('App name',{exact:true}).selectOption('provider')
+  await page.getByLabel('Secret name',{exact:true}).selectOption('lp-app-provider')
+  await page.getByRole('button',{name:'Add value',exact:true}).click()
   await page.getByLabel('Value',{exact:true}).fill('retained-private-draft')
-  await page.getByRole('button',{name:'Save secret'}).click()
+  await page.getByRole('button',{name:'Save value',exact:true}).click()
   await expect.poll(()=>state.reserve!==null).toBe(true)
   state.fail=true
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')))
   await expect(page.getByRole('alert')).toContainText('Membership service unavailable.')
   await expect(page.getByLabel('Value',{exact:true})).toHaveValue('retained-private-draft')
   await expect(page.getByLabel('Bootstrap command')).toHaveText(command)
-  await expect(page.getByRole('button',{name:'Save secret'})).toBeDisabled()
+  await expect(page.getByRole('button',{name:'Saving…',exact:true})).toBeDisabled()
   state.fail=false
   await page.getByRole('button',{name:'Retry orchestrators'}).click()
   await expect(page.getByRole('alert')).toHaveCount(0)
