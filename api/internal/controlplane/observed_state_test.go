@@ -3,7 +3,9 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
@@ -20,6 +22,8 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -28,6 +32,102 @@ import (
 	"github.com/livepeer/control-center/runtime/transport"
 	"github.com/livepeer/control-center/schema"
 )
+
+type observationQueryCounter struct{ atomic.Int64 }
+
+func (c *observationQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.Add(1)
+	return ctx
+}
+func (*observationQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestObservedStateScalarProjection(t *testing.T) {
+	s, desired, machine := onchainMachine(t)
+	node := machine["node_id"]
+	var database string
+	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queries := &observationQueryCounter{}
+	cfg.Database, cfg.Tracer, cfg.DefaultQueryExecMode = database, queries, pgx.QueryExecModeExec
+	s.db = stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { s.db.Close() })
+	read := func(lifecycle string) machineObservation {
+		t.Helper()
+		queries.Store(0)
+		w := request(t, s, "GET", "/api/machines/"+node+"/status", "session-a", nil)
+		requireStatus(t, w, 200)
+		if got := queries.Load(); got != 5 {
+			t.Fatalf("status executed %d SQL statements, want 5", got)
+		}
+		var v machineObservation
+		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+			t.Fatal(err)
+		}
+		if v.Lifecycle != lifecycle || v.Onchain.Desired.Generation != 2 || v.Onchain.DeliveredGeneration != 1 || v.Onchain.Desired.RPCSecret != "" || len(v.Onchain.Desired.RPCGrants)+len(v.Onchain.Desired.RedeemerGrants) != 0 {
+			t.Fatalf("incorrect lifecycle or onchain projection: %+v", v)
+		}
+		return v
+	}
+	// Desired onchain state can advance while the published bundle stays older.
+	desired.Generation = 2
+	desired.RPCGrants, desired.RedeemerGrants = []string{"10.0.0.1:443"}, []string{"10.0.0.2:443"}
+	raw, err := json.Marshal(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s.db, `INSERT INTO lpcc.onchain_configs(fingerprint,generation,config) SELECT fingerprint,2,$2 FROM lpcc.enrollments WHERE node_id=$1`, node, string(raw))
+	execSQL(t, s.db, `UPDATE lpcc.onchain_state SET generation=2 WHERE fingerprint=(SELECT fingerprint FROM lpcc.enrollments WHERE node_id=$1)`, node)
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,state,apps_generation,apps_error) VALUES($1,'{}',23,'private diagnostic')
+ ON CONFLICT(node_id) DO UPDATE SET apps_generation=EXCLUDED.apps_generation,apps_error=EXCLUDED.apps_error`, node)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	for _, generation := range []int64{10, 11, 99} {
+		published := at
+		if generation == 99 {
+			published = at.Add(-time.Hour)
+		}
+		digest := fmt.Sprintf("%064x", generation)
+		execSQL(t, s.db, `INSERT INTO lpcc.machine_app_deliveries(node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal,published_at) VALUES($1,$2,$3,$4,'[]',false,$5)`, node, "sha256:"+digest, digest, generation, published)
+	}
+	v := read("active")
+	if v.Requested.Generation != 23 || v.DeliveryReason != "unknown_failure" || v.Delivered == nil || v.Delivered.Generation != 11 || v.Delivered.AppsDigest != "sha256:"+fmt.Sprintf("%064x", 11) || v.Delivered.ArtifactDigest != v.Delivered.AppsDigest || v.DeliveredAt == nil || !v.DeliveredAt.Equal(at) {
+		t.Fatalf("incorrect requested/latest delivery projection: %+v", v)
+	}
+	// Retirement removes machine_configs; delivered onchain evidence uses the
+	// retained live bundle, even if a terminal bundle is present.
+	execSQL(t, s.db, `DELETE FROM lpcc.machines WHERE node_id=$1`, node)
+	execSQL(t, s.db, `UPDATE lpcc.enrollments SET terminal_bundle='invalid',terminal_sha256=$2 WHERE node_id=$1`, node, strings.Repeat("a", 64))
+	read("cleanup_pending")
+	execSQL(t, s.db, `UPDATE lpcc.enrollments SET removal_ack_at=now() WHERE node_id=$1`, node)
+	read("removed")
+	// Invalid retained archives are ignored, as for invalid live archives.
+	execSQL(t, s.db, `UPDATE lpcc.enrollments SET retained_bundle='invalid' WHERE node_id=$1`, node)
+	v, err = s.machineObservation(t.Context(), Machine{NodeID: node, CredentialVersion: 1, Terminal: true})
+	if err != nil || v.Onchain.DeliveredGeneration != 0 {
+		t.Fatal("invalid retained bundle produced delivery evidence", err)
+	}
+}
+
+func TestObservedStateMissingScalars(t *testing.T) {
+	s := newTestServer(t)
+	machine := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	node := machine["node_id"]
+	execSQL(t, s.db, `DELETE FROM lpcc.machine_states WHERE node_id=$1`, node)
+	execSQL(t, s.db, `DELETE FROM lpcc.machine_configs WHERE node_id=$1`, node)
+	for _, id := range []string{node, "missing"} {
+		v, err := s.machineObservation(t.Context(), Machine{NodeID: id, CredentialVersion: 1})
+		if err != nil || v.Lifecycle != "active" || v.RolloutGeneration != 1 || v.Requested.Generation != 0 || v.DeliveryReason != "" || v.Delivered != nil || v.DeliveredAt != nil || v.Onchain.Desired.Mode != "offchain" || v.Onchain.DeliveredGeneration != 0 {
+			t.Fatalf("missing scalar defaults: %+v, %v", v, err)
+		}
+	}
+	if _, err := s.machineObservation(t.Context(), Machine{NodeID: "missing", Terminal: true}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing terminal enrollment: %v", err)
+	}
+}
 
 func TestSharedAppMembershipQueries(t *testing.T) {
 	a := observedAssignment{Name: "backend", Version: "v1", DiscoveryApps: []string{"first", "second"}}
