@@ -23,6 +23,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
   const [counts, setCounts] = useState<Record<string, { value: number; activation: number }>>({})
   const [detail, setDetail] = useState<Detail | null>(null)
   const [problem, setProblem] = useState('')
+  const [fields, setFields] = useState<APIError['fields']>([])
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const requestGeneration = useRef(0), serial = useRef<Record<string, number>>({}), changing = useRef(false)
@@ -40,6 +41,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
       if (!current()) return
       if (error instanceof APIError && [401, 403, 503].includes(error.status)) { cancel(); failure.current(error); return }
       setProblem(error instanceof Error ? error.message : 'Assignment request failed.')
+      setFields(error instanceof APIError ? error.fields : [])
     } finally { controllers.current.delete(controller); if (current() && key === 'mutation') { changing.current = false; setBusy(false) } }
   }
   function load(after?: string) {
@@ -98,7 +100,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
 
   function mutate(path: string, method: string, body: unknown) {
     if (changing.current || !listing) return
-    changing.current = true; setBusy(true); setProblem(''); setMessage('')
+    changing.current = true; setBusy(true); setProblem(''); setFields([]); setMessage('')
     listingRequest.current = null
     serial.current.list = (serial.current.list || 0) + 1; serial.current.detail = (serial.current.detail || 0) + 1
     void run('mutation', signal => api<{ assignments: Assignment[] }>(session, path, { method, signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), data => {
@@ -121,7 +123,7 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
   return <section className="machine-apps" aria-labelledby="machine-apps-title">
     <div className="section-heading"><div><h3 id="machine-apps-title">Apps on {machine.hostname}</h3><code>{machine.node_id}</code></div><button className="button" disabled={busy} onClick={() => { load(); loadApps(); if (appName) chooseApp(appName) }}>Refresh assignments</button></div>
     <p className="muted">Revisions stay pinned. Equal replica limits above one roll within the combined limit; other replacements wait for full cleanup. Applied means replica reconciliation completed; health, registration and discoverability are separate.</p>
-    {problem && <div role="alert" className="notice error">{problem}</div>}{message && <div role="status" className="notice success">{message}</div>}
+    {problem && <div role="alert" className="notice error">{problem}{fields.length > 0 && <ul>{fields.map((f, i) => <li key={i}><code>{f.path}</code>: {f.message}</li>)}</ul>}</div>}{message && <div role="status" className="notice success">{message}</div>}
     {listing && <p className="muted">Desired app generation {listing.apps_generation}; published {listing.published_generation}. Last config request: {listing.last_config_fetch_at ? new Date(listing.last_config_fetch_at).toLocaleString() : 'None'}{listing.delivery_error ? ` · Delivery failed: ${listing.delivery_error}` : ''}</p>}
     <div className="catalog-actions">
       <label>Catalog app <select aria-label="Catalog app for machine" value={appName} disabled={busy} onChange={e => chooseApp(e.target.value)}><option value="">Choose an app</option>{apps.map(a => <option key={a.name}>{a.name}</option>)}</select></label>
