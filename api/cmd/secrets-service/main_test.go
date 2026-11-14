@@ -33,7 +33,8 @@ func TestUpstreamTransports(t *testing.T) {
 		name, auth, control, vault string
 		valid                      bool
 	}{
-		{"private Vault", "https://auth.example", "https://control.example", "http://vault:8200", true},
+		{"private Vault", "https://auth.example", "https://control.example", "https://vault:8200", true},
+		{"HTTP private Vault", "https://auth.example", "https://control.example", "http://vault:8200", false},
 		{"external Vault", "https://auth.example", "https://control.example", "https://vault.example", true},
 		{"HTTP auth", "http://auth.example", "https://control.example", "http://vault:8200", false},
 		{"HTTP control", "https://auth.example", "http://control.example", "http://vault:8200", false},

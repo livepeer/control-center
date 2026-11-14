@@ -116,12 +116,15 @@ running Vault and its network. For a fresh setup, work from `deploy/`:
    docker compose up -d vault
    ```
 
-   Initialize and unseal it, then enable Transit at `transit/`. Grant the service
-   token `create,update` on `transit/encrypt/orchestrator-<lowercase address>` and
-   `update` on its decrypt path; save the token in `vault-token`. Do not grant key
-   export or administration. Keep recovery keys privately and arrange unsealing
-   after restarts and renewal of expiring tokens. Vault's HTTPS port binds only
-   to `127.0.0.1:28200`. Disable raw Vault audit and ingress body logging.
+   Initialize and unseal it, then enable Transit at `transit/`. Apply
+   [the service policy](../deploy/vault-policy.hcl) as `operator-secrets` using
+   an administrator credential, and issue the service token with that policy;
+   save it in `vault-token`. The policy grants wrapping and unwrapping under
+   `orchestrator-*`, token renewal, and inspection of the token's own permissions.
+   Do not grant key export or administration. Keep recovery keys privately and
+   arrange unsealing after restarts and renewal of expiring tokens. Vault's HTTPS
+   port binds only to `127.0.0.1:28200`. Disable raw Vault audit and ingress body
+   logging.
 4. Start the complete deployment:
 
    ```sh
