@@ -27,8 +27,8 @@ type DatabaseParams struct {
 }
 
 type Params struct {
-	SecretsURL               string `env:"SECRETS_URL" optional:"true" descr:"Independent HTTPS operator secrets API"`
-	SecretsMetadataToken     string `secret:"true" optional:"true"`
+	SecretsURL               string `env:"SECRETS_URL" min:"1" descr:"Independent HTTPS operator secrets API"`
+	SecretsMetadataToken     string `secret:"true" min:"32"`
 	SecretsMetadataTokenFile string `secretfor:"SecretsMetadataToken" basepath:"source"`
 	ConfigFile               string `name:"config" env:"CONTROL_CENTER_CONFIG" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables file loading"`
 	DatabaseParams
@@ -117,14 +117,12 @@ func (p Params) PreValidate() error {
 	if _, e := p.enrollmentKeys(); e != nil {
 		return e
 	}
-	if p.SecretsURL != "" {
-		u, e := url.Parse(p.SecretsURL)
-		if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
-			return errors.New("SecretsURL must be an HTTPS origin")
-		}
-		if len(p.SecretsMetadataToken) < 32 {
-			return errors.New("configure independent secrets metadata credentials")
-		}
+	u, e := url.Parse(p.SecretsURL)
+	if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+		return errors.New("SecretsURL must be an HTTPS origin")
+	}
+	if len(p.SecretsMetadataToken) < 32 {
+		return errors.New("configure independent secrets metadata credentials")
 	}
 
 	if p.RuntimeNodeDrainTimeout < 0 || p.RuntimeNodeDrainTimeout > 12*time.Hour {

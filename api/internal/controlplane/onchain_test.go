@@ -36,7 +36,8 @@ func onchainSettings(t *testing.T, s *Server) onchain.Config {
 	}
 	return c
 }
-func TestOnchainCredentialsRequireBoundRuntimeProofWithoutSecretsService(t *testing.T) {
+
+func TestOnchainCredentialsRequireBoundRuntimeProofWhileSecretsUnavailable(t *testing.T) {
 	s, _, machine := onchainMachine(t)
 	s.params.SecretsURL = "https://127.0.0.1:1"
 	node := machine["node_id"]

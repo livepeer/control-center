@@ -29,7 +29,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  const mainRequests:string[]=[],secretRequests:string[]=[]
  let releaseInitialApps=()=>{},appReads=0
  const initialApps=new Promise<void>(resolve=>{releaseInitialApps=resolve})
- let denied=false,reserved=false,failWrap=true,tamperKey=true,replacePin=false,wrapCalls=0
+ let denied=false,reserved=false,failWrap=true,tamperKey=true,replacePin=false,limitReached=false,wrapCalls=0
  let dek:Buffer|undefined,encrypted:Record<string,string>|undefined
  await page.route('**/api/**',async route=>{
   const req=route.request();mainRequests.push(req.postData()||'')
@@ -40,7 +40,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
    case '/api/bootstrap-token':return route.fulfill({json:{token:'control.grant.signature',expires_at:new Date(expiry*1000).toISOString()}})
    case '/api/machines':return route.fulfill({json:{machines:[]}})
    case '/api/me':return route.fulfill({json:{user_id:session.user.id,is_admin:false}})
-   case '/api/operator/apps':if(appReads++===0){await initialApps;return route.fulfill({status:503,json:{error:'unavailable'}})}return route.fulfill({json:{apps:[{name:'provider',aliases:[{name:'provider-alias'}],secrets:[{name:'API_TOKEN',secret:secret.name,key:secret.key}],machines:['owner-machine'],denied,generation:denied?1:0}]}})
+   case '/api/operator/apps':if(appReads++===0){await initialApps;return route.fulfill({status:503,json:{error:'unavailable'}})}return route.fulfill({json:{apps:[{name:'provider',aliases:[{name:'provider-alias'}],secrets:[{name:'API_TOKEN',secret:secret.name,key:secret.key},{name:'SECOND_TOKEN',secret:secret.name,key:'another-key'}],machines:['owner-machine'],denied,generation:denied?1:0}]}})
    case '/api/operator/apps/provider/policy':denied=req.postDataJSON().denied;return route.fulfill({json:{generation:1}})
    default:return route.fulfill({status:404,json:{error:'unexpected'}})
   }
@@ -58,7 +58,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
   if(path==='/v1/enrollment-grants')return reply({token:'setup.grant.signature',expires_at:new Date(expiry*1000).toISOString(),service:replacePin?{...trust,public_key:substitute.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64')}:trust},200,replacePin?substitute.privateKey:identity.privateKey)
   if(path==='/v1/encryption-key')return reply({public_key:vector.public_key},200,tamperKey?substitute.privateKey:identity.privateKey)
   if(path==='/v1/secrets')return reply({secrets:reserved?[secret]:[]})
-  if(path==='/v1/secrets/reserve'){expect(req.postDataJSON().expected_revision).toBe(reserved?1:0);reserved=true;return reply(secret)}
+  if(path==='/v1/secrets/reserve'){if(limitReached){expect(req.postDataJSON()).toMatchObject({key:'another-key',expected_revision:0});return reply({code:'secret_limit_reached'},409)};expect(req.postDataJSON().expected_revision).toBe(reserved?1:0);reserved=true;return reply(secret)}
   if(path.endsWith('/wrap')){
    wrapCalls++
    expect(req.postDataJSON()).not.toHaveProperty('data_key')
@@ -85,7 +85,7 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  await expect(page.getByRole('button',{name:'Allow',exact:true})).toBeVisible()
  await page.getByLabel('App name',{exact:true}).selectOption('provider')
  await page.getByLabel('Secret name',{exact:true}).selectOption(secret.name)
- await page.getByRole('button',{name:'Add value',exact:true}).click()
+ await page.getByRole('row').filter({has:page.getByText(secret.key,{exact:true})}).getByRole('button',{name:'Add value',exact:true}).click()
  const save=async()=>{await page.getByLabel('Value',{exact:true}).fill('plaintext-sentinel');await page.getByRole('button',{name:'Save value',exact:true}).click()}
  await save()
  await expect(page.getByRole('alert')).toContainText('could not be authenticated')
@@ -105,9 +105,13 @@ test('uploads hide data keys from the HTTPS edge and refuse service-key substitu
  const aad=Buffer.from(JSON.stringify([1,owner,secret.secret_id,secret.name,secret.key,secret.version_id]))
  const plain=await webcrypto.subtle.decrypt({name:'AES-GCM',iv:Buffer.from(encrypted!.nonce,'base64'),additionalData:aad},key,Buffer.from(encrypted!.ciphertext,'base64'))
  expect(Buffer.from(plain).toString()).toBe('plaintext-sentinel');await expect(page.getByLabel('Value',{exact:true})).toHaveCount(0)
+ limitReached=true
+ await page.getByRole('row').filter({has:page.getByText('another-key',{exact:true})}).getByRole('button',{name:'Add value',exact:true}).click()
+ await save();await expect(page.getByRole('alert')).toContainText('limit of 100 secrets, including reserved and deleted entries')
+ expect(wrapCalls).toBe(2)
  replacePin=true
  await page.getByRole('button',{name:'Refresh token'}).click()
- await expect(page.getByRole('alert')).toContainText('could not be authenticated')
+ await expect(page.getByRole('alert').filter({hasText:'could not be authenticated'})).toBeVisible()
  expect(await page.evaluate(origin=>JSON.parse(localStorage.getItem(`lpcc-secrets-service:${origin}`)!).public_key,vector.origin)).toBe(trust.public_key)
 })
 

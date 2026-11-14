@@ -12,7 +12,7 @@ import { OrchestratorWorkspace } from './orchestrators'
 import { MachineStatus, MachineReadinessBadge } from './machine-status'
 
 type AuthConfig = { supabase_url: string; supabase_publishable_key: string }
-type OperatorConfig = { public_api_url: string; secrets_url?: string }
+type OperatorConfig = { public_api_url: string; secrets_url: string }
 type Machine = { node_id: string; terminal?: boolean; lifecycle?: string; report_state?: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
 type Enrollment = { token: string; expires_at: string }
 
@@ -113,11 +113,9 @@ function MachineConsole({ session, address, authorityFailure }: { session: Sessi
       if (signal.aborted) return
       setConfig(settings)
       const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestrator_address: address }) })
-      if (settings.secrets_url) {
-        const setup = await enrollSecretsService<Enrollment>(session, settings.secrets_url, address, signal)
-        control.token = enrollmentEnvelope(control.token, setup.token)
-        control.expires_at = new Date(Math.min(Date.parse(control.expires_at), Date.parse(setup.expires_at))).toISOString()
-      }
+      const setup = await enrollSecretsService<Enrollment>(session, settings.secrets_url, address, signal)
+      control.token = enrollmentEnvelope(control.token, setup.token)
+      control.expires_at = new Date(Math.min(Date.parse(control.expires_at), Date.parse(setup.expires_at))).toISOString()
       if (!signal.aborted) setEnrollment({ ...control, ...settings })
     }
     catch (error) { if (!signal.aborted) { setTokenProblem(error instanceof Error ? error.message : 'Could not generate a command.'); authorityFailure(error) } }
@@ -168,7 +166,7 @@ function MachineConsole({ session, address, authorityFailure }: { session: Sessi
         <p className="table-note">Open View status to check work readiness, deployment, apps, tunnel provisioning and discovery. Runtime reporting alone does not mean a node can receive work.</p>
       </section>
       {machines?.filter(m => m.node_id === selectedMachine).map(m => <MachineStatus key={`${session.user.id}:${m.node_id}`} session={session} machine={m} authorityFailure={authorityFailure} />)}
-      {config?.secrets_url && <OperatorSecrets session={session} origin={config.secrets_url} address={address} authorityFailure={authorityFailure} />}
+      {config && <OperatorSecrets session={session} origin={config.secrets_url} address={address} authorityFailure={authorityFailure} />}
   </>
 }
 

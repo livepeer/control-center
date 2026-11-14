@@ -100,7 +100,7 @@ func archiveFiles(t *testing.T, data []byte) map[string]string {
 	return files
 }
 
-func TestManagedNamespaceLabelIsReconciled(t *testing.T) {
+func TestAppNamespaceIsAlwaysManaged(t *testing.T) {
 	m := Desired{Machine: Machine{NodeID: strings.Repeat("a", 26), CredentialVersion: 1, InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1"}, RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64)}
 	for _, managed := range []bool{false, true} {
 		m.ManagedSecrets = managed
@@ -109,8 +109,8 @@ func TestManagedNamespaceLabelIsReconciled(t *testing.T) {
 			t.Fatal(e)
 		}
 		namespace := strings.Split(archiveFiles(t, data)["management/app-reconciler.yaml"], "---")[0]
-		if strings.Contains(namespace, "livepeer.io/managed-secrets: 'true'") != managed {
-			t.Fatal("namespace enforcement disagrees with enrollment", managed, namespace)
+		if !strings.Contains(namespace, "livepeer.io/managed-apps: 'true'") {
+			t.Fatal("namespace enforcement missing", managed, namespace)
 		}
 	}
 }

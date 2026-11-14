@@ -207,11 +207,6 @@ func (c *Controller) Tick(ctx context.Context) error {
 	defer cancel()
 	now := c.now()
 	before := c.Journal.View()
-	if c.Secrets != nil && before.Metadata.ManagedSecrets && !c.Secrets.Client.Enabled() {
-		if e := c.Secrets.Client.MarkManaged(); e != nil {
-			return e
-		}
-	}
 	if now.Before(before.LastClock.Add(-time.Second)) {
 		// Stop/join the ready snapshot before sending a replacement that withdraws admission.
 		// No deadline or lifecycle timestamp is moved backwards to accommodate the clock.
@@ -236,11 +231,6 @@ func (c *Controller) Tick(ctx context.Context) error {
 		return ErrStateLost
 	}
 	input, inputErr := c.Input.Read(ctx)
-	if inputErr == nil && input.Metadata.ManagedSecrets && c.Secrets != nil && !c.Secrets.Client.Enabled() {
-		if e := c.Secrets.Client.MarkManaged(); e != nil {
-			return e
-		}
-	}
 	now = c.now() // Input/API latency must not keep an expired Node proof fresh.
 	inputReason := ""
 	if inputErr != nil {
@@ -381,7 +371,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 				continue
 			}
 			_, desired := wanted[i.Group.Key]
-			if c.Secrets != nil && c.Secrets.Client.Enabled() && len(i.Definition.Container.Secrets) > 0 {
+			if c.Secrets != nil && len(i.Definition.Container.Secrets) > 0 {
 				fault := c.Secrets.Faults[i.Group.RevisionID]
 				if fault == "secrets_denied" || fault == "secret_missing" {
 					desired = false
@@ -450,8 +440,8 @@ func (c *Controller) Tick(ctx context.Context) error {
 					s.AssignmentReasons[a.RevisionID] = "onchain_incompatible"
 					continue
 				}
-				if a.Revision != nil && len(a.Revision.Definition.Container.Secrets) > 0 {
-					if c.Secrets == nil || !c.Secrets.Managed(a) {
+				if needsSecrets(a) {
+					if c.Secrets == nil {
 						s.AssignmentReasons[a.RevisionID] = "secrets_unavailable"
 						continue
 					}
@@ -631,9 +621,9 @@ func (c *Controller) prepareSecrets(ctx context.Context) error {
 	if s.Payload.Intent == nil {
 		return nil
 	}
-	if c.Secrets != nil && c.Secrets.Client.Enabled() {
+	if c.Secrets != nil {
 		for _, a := range s.Payload.Intent.Entries {
-			if a.Desired != "present" || !c.Secrets.Managed(a) {
+			if a.Desired != "present" || !needsSecrets(a) {
 				continue
 			}
 			for _, i := range s.Instances {
@@ -703,10 +693,7 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 			snapshot.Retired[id] = true
 			continue
 		}
-		if len(i.Definition.Container.Secrets) > 0 && i.PodUID == "" && !i.PublicationStarted && (c.Secrets == nil || !c.Secrets.Client.Enabled()) {
-			continue
-		}
-		if c.Secrets != nil && c.Secrets.Client.Enabled() && len(i.Definition.Container.Secrets) > 0 {
+		if len(i.Definition.Container.Secrets) > 0 {
 			if !i.SecretPrepared && i.PodUID == "" {
 				continue
 			}
@@ -717,7 +704,7 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 						a = entry
 					}
 				}
-				if a.Revision == nil || c.Secrets.Authorize(authCtx, a, i) != nil {
+				if c.Secrets == nil || a.Revision == nil || c.Secrets.Authorize(authCtx, a, i) != nil {
 					continue
 				}
 			}

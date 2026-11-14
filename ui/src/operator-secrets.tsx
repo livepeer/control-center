@@ -34,7 +34,7 @@ async function serviceRequest<T>(session: Session, origin: string, address: stri
  if (pin) await verifyServiceResponse(pin, url, method, headers.get('Authorization')!, request, response, raw)
  const body = JSON.parse(raw)
  options.signal?.throwIfAborted()
- if (!response.ok) throw new APIError(response.status, typeof body.code === 'string' ? body.code.replaceAll('_',' ') : 'Secrets service unavailable.',typeof body.code === 'string' ? body.code : '')
+ if (!response.ok) throw new APIError(response.status, body.code === 'secret_limit_reached' ? 'This orchestrator has reached its limit of 100 secrets, including reserved and deleted entries.' : typeof body.code === 'string' ? body.code.replaceAll('_',' ') : 'Secrets service unavailable.',typeof body.code === 'string' ? body.code : '')
  if (enrollment) {
   const trust = body.service as ServiceTrust
   if (!trust || new URL(trust.origin).origin !== url.origin) throw new Error('Invalid secrets service enrollment identity.')

@@ -267,6 +267,7 @@ main "$2" --install-dir "$1"
     def test_main_stage_order_without_host_mutation(self):
         result = self.shell('''
 preflight() { echo eligibility; }
+prepare_secrets_enrollment() { :; }
 authenticate_node() { echo authentication; }
 lock_installation() { echo lock; }
 check_existing_installation() { echo recheck; }

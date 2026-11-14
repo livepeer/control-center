@@ -14,10 +14,6 @@ func routeEnabled(m Desired) bool {
 	return !m.Terminal && m.Exposure != nil && m.Exposure.IngressDigest != "" && (m.State.Lifecycle == "active" || m.State.Lifecycle == "draining")
 }
 func templateValues(m Desired) *strings.Replacer {
-	managedLabel := ""
-	if m.ManagedSecrets {
-		managedLabel = "    livepeer.io/managed-secrets: 'true'"
-	}
 	service, proxy := PrivateOrchestrator, ""
 	if routeEnabled(m) {
 		service = m.Exposure.ServiceURL
@@ -27,7 +23,7 @@ func templateValues(m Desired) *strings.Replacer {
 	if strings.HasPrefix(m.ControlAPIURL, "http://") {
 		mode = "development-http"
 	}
-	return strings.NewReplacer("@MANAGED_SECRETS_LABEL@", managedLabel, "@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
+	return strings.NewReplacer("@RUNTIME_IMAGE@", m.RuntimeImage, "@CONTROL_TRANSPORT@", mode, "@NODE_ID@", m.NodeID, "@MANAGEMENT_CREDENTIAL_VERSION@", fmt.Sprint(m.CredentialVersion), "@INSTALL_DIR@", m.InstallDir, "@K3S_VERSION@", m.K3sVersion, "@SERVICE_URL@", service, "@PROXY_URL_TEMPLATE@", proxy)
 }
 func Digest(m Desired) string {
 	b, _ := templates.ReadFile("templates/system/node/orchestrator.yaml")

@@ -7,7 +7,6 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
-	"github.com/livepeer/control-center/runtime/artifact"
 	protocol "github.com/livepeer/control-center/secrets"
 	"io"
 	"net/http"
@@ -25,16 +24,8 @@ type Client struct {
 	activated bool
 }
 
-func (c *Client) Enabled() bool {
-	_, e := os.Stat(filepath.Join(c.Directory, "managed"))
-	return e == nil
-}
-
 // IdentityReady describes local credential readiness, not service availability.
 func (c *Client) IdentityReady() bool {
-	if !c.Enabled() {
-		return false
-	}
 	_, _, e := c.identity()
 	return e == nil
 }
@@ -151,13 +142,6 @@ func (c *Client) Resolve(ctx context.Context, in protocol.ResolveRequest) (proto
 		v.Values[i].SealedKey = nil
 	}
 	return v, nil
-}
-
-func (c *Client) MarkManaged() error {
-	if e := os.MkdirAll(c.Directory, 0700); e != nil {
-		return e
-	}
-	return artifact.AtomicWrite(filepath.Join(c.Directory, "managed"), []byte("1"), 0600)
 }
 
 func (c *Client) VersionsAll(ctx context.Context, requests []protocol.ResolveRequest) (map[string]protocol.VersionSet, map[string]string, error) {

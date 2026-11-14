@@ -64,5 +64,5 @@ RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 # OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
 
 # Independent operator secrets service; see docs/operator-secrets.md.
-# SecretsURL = "https://controlcenter-secrets.livepeer.live"
-# SecretsMetadataTokenFile = "secrets/secrets-metadata-token"
+SecretsURL = "https://controlcenter-secrets.livepeer.live"
+SecretsMetadataTokenFile = "secrets/secrets-metadata-token"

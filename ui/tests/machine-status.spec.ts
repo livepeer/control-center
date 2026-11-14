@@ -1,3 +1,4 @@
+import { mockSecrets, secretsURL } from './secrets-fixture'
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import type { MachineObservation } from '../src/machine-status'
@@ -39,7 +40,7 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     if (path === '/api/orchestrators') return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
     if (route.request().method() !== 'GET') state.writes.push(path)
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
-    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example' } })
+    if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example', secrets_url: secretsURL } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (path === '/api/me') return route.fulfill({ json: { user_id: user, is_admin: state.admin } })
     if (path === '/api/admin/administrators') return route.fulfill({ json: { administrators: [] } })
@@ -57,6 +58,7 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     }
     return route.fulfill({ status: 404, json: { error: 'Not found' } })
   })
+  await mockSecrets(page)
   await page.goto('/')
   await page.getByRole('button', { name: admin ? 'Inspect Runtime for worker-status' : 'View status for worker-status' }).click()
   await expect(page.getByRole('heading', { name: 'Runtime status on worker-status' })).toBeVisible()

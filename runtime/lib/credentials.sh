@@ -206,7 +206,7 @@ transition_credentials() {
         mv -- "$INSTALL_DIR/volumes/app-reconciler/state" "$INSTALL_DIR/volumes/app-reconciler/state.$previous_node"
         sync -- "$INSTALL_DIR/volumes/app-reconciler"
       fi
-      rm -f -- "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json" "$INSTALL_DIR/volumes/app-reconciler/secrets/key.pem" "$INSTALL_DIR/volumes/app-reconciler/secrets/managed"
+      rm -f -- "$INSTALL_DIR/volumes/app-reconciler/secrets/identity.json" "$INSTALL_DIR/volumes/app-reconciler/secrets/key.pem"
       printf '1\n' | atomic_write "$INSTALL_DIR/volumes/app-reconciler/reenrolled-$IDENTITY_NODE_ID"
     fi
     # Fence the retired node's cached artifact and watermark while Flux is suspended.
@@ -234,7 +234,8 @@ prepare_secrets_enrollment() {
   local encoded document
   unset SETUP_TOKEN
   SETUP_TOKEN=''
-  if [[ "$ENROLLMENT_TOKEN" == lpcc1.* ]]; then
+  if [[ -n "$ENROLLMENT_TOKEN" ]]; then
+    [[ "$ENROLLMENT_TOKEN" == lpcc1.* ]] || die 'invalid enrollment envelope'
     encoded=${ENROLLMENT_TOKEN#lpcc1.}; encoded=${encoded//-/+}; encoded=${encoded//_/\/}
     while (( ${#encoded} % 4 )); do encoded+='='; done
     document=$(printf '%s' "$encoded" | base64 --decode) || die 'invalid enrollment envelope'
@@ -243,7 +244,6 @@ prepare_secrets_enrollment() {
     SETUP_TOKEN=$(jq -er '.setup' <<< "$document")
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ && "$SETUP_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment grants'
   fi
-  [[ -z "$ENROLLMENT_TOKEN" || "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
   command -v openssl >/dev/null || die 'install openssl before enrollment'
   initialize_installation
   install -d -m 0700 "$INSTALL_DIR/credentials/secrets"
@@ -377,7 +377,7 @@ enroll_secrets() {
   if [[ "$status" == 401 ]]; then rm -f -- "$target/setup"; log 'Secrets setup grant expired or revoked; generate a fresh enrollment command.'; return 0; fi
   if [[ "$status" != 200 ]]; then log 'Secrets enrollment pending; no secret values have been installed.'; return 0; fi
   [[ $(jq -r '.node_id' <<< "$response") == "$NODE_ID" ]] || die 'secrets identity mismatch'
-  jq -e '(.orchestrator_address | type == "string" and test("^0x[0-9a-f]{40}$") and . != "0x0000000000000000000000000000000000000000") and (.generation | type == "number" and . >= 1 and . == floor)' <<< "$response" >/dev/null || die 'invalid secrets identity'
+  jq -e '(.orchestrator_address | type == "string" and test("^0x[0-9a-f]{40}$")) and (.generation | type == "number" and . >= 1 and . == floor)' <<< "$response" >/dev/null || die 'invalid secrets identity'
   jq -e --arg origin "$endpoint" '.origin == $origin and (.public_key | type == "string")' <<< "$candidate" >/dev/null || die 'invalid secrets service identity'
   [[ "$candidate" == "$anchor" ]] || die 'secrets service identity changed; restore the trusted service key before retrying'
   printf '%s' "$anchor" | atomic_write "$target/service.json"
@@ -386,8 +386,6 @@ enroll_secrets() {
   atomic_write "$public/key.pem" < "$target/key.pem"
   printf '%s' "$response" | atomic_write "$public/identity.json"
   atomic_write "$public/url" < "$target/url"
-  kube label namespace livepeer-apps livepeer.io/managed-secrets=true --overwrite
-  printf '1' | atomic_write "$public/managed"
   chown -R 65532:65532 "$public"
   # An owner-authorized key reset must also update the onchain request signer.
   install_machine_secret

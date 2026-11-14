@@ -123,11 +123,14 @@ func TestTOMLConfig(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{
 		"connection": "postgres://example:[PG_PASSWORD]@localhost/test",
+		"metadata":   strings.Repeat("m", 32),
 		"password":   "p@ss word", "enrollment": strings.Repeat("a", 32), "machine": strings.Repeat("b", 32),
 		"config.toml": `PGConnstrFile = "connection"
 PGPasswordFile = "password"
 JWTSigningSecretFile = "enrollment"
 MachineTokenSecretFile = "machine"
+SecretsURL = "https://secrets.example"
+SecretsMetadataTokenFile = "metadata"
 SupabaseURL = "https://auth.example"
 SupabasePublishableKey = "public-key"
 RuntimeImage = "registry.invalid/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -166,7 +169,7 @@ DefaultAdminEmail = "first@example.invalid"
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
-	for _, name := range []string{"CONTROL_CENTER_CONFIG", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE"} {
+	for _, name := range []string{"CONTROL_CENTER_CONFIG", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL"} {
 		t.Setenv(name, "")
 	}
 }
@@ -197,6 +200,8 @@ func TestConfigValidation(t *testing.T) {
 		change func(*Params)
 		want   string
 	}{
+		{func(p *Params) { p.SecretsURL = "" }, "SecretsURL"},
+		{func(p *Params) { p.SecretsMetadataToken = "" }, "secrets metadata credentials"},
 		{func(p *Params) { p.JWTSigningSecret = "short" }, "jwt-signing-secret"},
 		{func(p *Params) { p.MachineTokenSecret = "short" }, "machine-token-secret"},
 		{func(p *Params) { p.JWTSigningSecret = p.MachineTokenSecret }, "different"},

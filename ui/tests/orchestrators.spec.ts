@@ -1,3 +1,4 @@
+import { enrollmentToken } from './secrets-fixture'
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
@@ -16,7 +17,7 @@ function session(id = user) {
 }
 function machine(address: string) { return { node_id:address,hostname:address===a?'alpha-machine':'beta-machine',created_at:'2026-11-06T00:00:00Z',last_config_fetch_at:null } }
 
-async function setup(page: Page, { secrets = false, empty = false, admin = false, hold = false, setupFailure = 0, mode = 'offchain', inactive = false } = {}) {
+async function setup(page: Page, { empty = false, admin = false, hold = false, setupFailure = 0, mode = 'offchain', inactive = false } = {}) {
   const state = { setupFailure, controlGrants:0, membershipTokens:[] as string[], holdPolicy:false, heldPolicy:null as Route|null, groups:empty?[]:groups, fail:false, denied:new Set<string>(),hold,held:[] as Route[],reserve:null as Route|null,completeReserve:null as (()=>Promise<void>)|null,holdReserve:false,wraps:[] as string[],policies:[] as string[], challengeRequests:0, claims:[] as Record<string,string>[] }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token',JSON.stringify(saved))
@@ -31,7 +32,7 @@ async function setup(page: Page, { secrets = false, empty = false, admin = false
     if(path==='/api/orchestrators/challenge') {state.challengeRequests++;return route.fulfill(inactive?{status:403,json:{error:'Orchestrator is not active on chain.'}}:{json:{challenge:'header.payload.signature',expires_at:new Date(Date.now()+3600000).toISOString()}})}
     if(path==='/api/orchestrators'&&req.method()==='POST') {const body=req.postDataJSON() as Record<string,string>;state.claims.push(body);const claimed=(body.address||'0x0000000000000000000000000000000000000000').toLowerCase();state.groups=[...state.groups,{address:claimed,display_name:''}];return route.fulfill({status:201,json:{address:claimed}})}
     if(path==='/api/orchestrators'){state.membershipTokens.push(req.headers().authorization);return route.fulfill(state.fail?{status:503,json:{error:'Membership service unavailable.'}}:{json:{orchestrators:state.groups}})}
-    if(path==='/api/operator/config')return route.fulfill({json:{public_api_url:'https://api.example',mode,...(secrets?{secrets_url:'https://secrets.test'}:{})}})
+    if(path==='/api/operator/config')return route.fulfill({json:{public_api_url:'https://api.example',mode,secrets_url:'https://secrets.test'}})
     if(path==='/api/me')return route.fulfill({json:{user_id:req.headers().authorization===`Bearer ${session(otherUser).access_token}`?otherUser:user,is_admin:admin}})
     if(path.startsWith('/api/admin/'))return route.fulfill({json:{administrators:[],machines:[],apps:[]}})
     if(path==='/api/bootstrap-token'){
@@ -49,28 +50,26 @@ async function setup(page: Page, { secrets = false, empty = false, admin = false
     if(path.endsWith('/policy')){state.policies.push(address);if(state.holdPolicy){state.heldPolicy=route;return};return route.fulfill({json:{generation:1}})}
     return route.fulfill({status:404,json:{error:'Unexpected route'}})
   })
-  if(secrets){
-    const identity=generateKeyPairSync('ed25519'),encryption=generateKeyPairSync('x25519')
-    const service={origin:'https://secrets.test',public_key:identity.publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('base64')}
-    await page.route('https://secrets.test/**',route=>{
-      const req=route.request(),url=new URL(req.url()),address=url.searchParams.get('orchestrator_address')!
-      const headers={'Access-Control-Allow-Origin':'http://localhost:5173','Access-Control-Allow-Headers':'authorization,content-type','Access-Control-Allow-Methods':'GET,POST,PUT,DELETE,OPTIONS','Access-Control-Expose-Headers':'X-Livepeer-Service-Signature'}
-      if(req.method()==='OPTIONS')return route.fulfill({status:204,headers})
-      const reply=(body:unknown,status=200)=>{
-        const raw=JSON.stringify(body),digest=hash(canonical([req.method(),url.pathname+url.search,hash(req.postData()||'')]))
-        const proof=JSON.stringify(['lpcc-secrets-response-v1',service.origin,digest,hash(req.headers().authorization||''),status,hash(raw)])
-        return route.fulfill({status,body:raw,contentType:'application/json',headers:{...headers,'X-Livepeer-Service-Signature':sign(null,Buffer.from(proof),identity.privateKey).toString('base64')}})
-      }
-      if(url.pathname==='/v1/enrollment-grants'&&state.setupFailure)return reply({code:state.setupFailure===403?'orchestrator_access_required':'authentication_required'},state.setupFailure)
-      if(url.pathname==='/v1/enrollment-grants')return reply({token:`setup-${address}`,expires_at:new Date(Date.now()+3600000).toISOString(),service})
-      if(url.pathname==='/v1/secrets')return reply({secrets:[]})
-      if(url.pathname==='/v1/secrets/reserve'&&state.holdReserve){state.reserve=route;state.completeReserve=()=>reply({orchestrator_address:address,secret_id:'reserved-old-scope',name:'lp-app-provider',key:'token',version_id:'old-version',revision:1});return}
-      state.wraps.push(url.pathname)
-      if(url.pathname==='/v1/encryption-key')return reply({public_key:encryption.publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('base64')})
-      if(url.pathname.endsWith('/wrap'))return reply({wrapped_key:'vault:v1:fixture'})
-      return reply({revision:2})
-    })
-  }
+  const identity=generateKeyPairSync('ed25519'),encryption=generateKeyPairSync('x25519')
+  const service={origin:'https://secrets.test',public_key:identity.publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('base64')}
+  await page.route('https://secrets.test/**',route=>{
+    const req=route.request(),url=new URL(req.url()),address=url.searchParams.get('orchestrator_address')!
+    const headers={'Access-Control-Allow-Origin':'http://localhost:5173','Access-Control-Allow-Headers':'authorization,content-type','Access-Control-Allow-Methods':'GET,POST,PUT,DELETE,OPTIONS','Access-Control-Expose-Headers':'X-Livepeer-Service-Signature'}
+    if(req.method()==='OPTIONS')return route.fulfill({status:204,headers})
+    const reply=(body:unknown,status=200)=>{
+      const raw=JSON.stringify(body),digest=hash(canonical([req.method(),url.pathname+url.search,hash(req.postData()||'')]))
+      const proof=JSON.stringify(['lpcc-secrets-response-v1',service.origin,digest,hash(req.headers().authorization||''),status,hash(raw)])
+      return route.fulfill({status,body:raw,contentType:'application/json',headers:{...headers,'X-Livepeer-Service-Signature':sign(null,Buffer.from(proof),identity.privateKey).toString('base64')}})
+    }
+    if(url.pathname==='/v1/enrollment-grants'&&state.setupFailure)return reply({code:state.setupFailure===403?'orchestrator_access_required':'authentication_required'},state.setupFailure)
+    if(url.pathname==='/v1/enrollment-grants')return reply({token:`setup-${address}`,expires_at:new Date(Date.now()+3600000).toISOString(),service})
+    if(url.pathname==='/v1/secrets')return reply({secrets:[]})
+    if(url.pathname==='/v1/secrets/reserve'&&state.holdReserve){state.reserve=route;state.completeReserve=()=>reply({orchestrator_address:address,secret_id:'reserved-old-scope',name:'lp-app-provider',key:'token',version_id:'old-version',revision:1});return}
+    state.wraps.push(url.pathname)
+    if(url.pathname==='/v1/encryption-key')return reply({public_key:encryption.publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('base64')})
+    if(url.pathname.endsWith('/wrap'))return reply({wrapped_key:'vault:v1:fixture'})
+    return reply({revision:2})
+  })
   await page.goto('/')
   return state
 }
@@ -81,18 +80,18 @@ test('switching scopes enrollment and inventory and ignores old responses',async
   await expect(selector).toHaveValue(a)
   await expect.poll(()=>state.held.length).toBe(2)
   await selector.selectOption(b)
-  await expect(page.getByLabel('Bootstrap command')).toContainText(`control-${b}`)
+  await expect(page.getByLabel('Bootstrap command')).toContainText(enrollmentToken(`control-${b}`,`setup-${b}`))
   await expect(page.getByText('beta-machine',{exact:true})).toBeVisible()
   for(const route of state.held){
     const body=new URL(route.request().url()).pathname==='/api/machines'?{machines:[machine(a)]}:{token:'obsolete-alpha-command',expires_at:new Date(Date.now()+3600000).toISOString()}
     await route.fulfill({json:body})
   }
   await expect(page.getByText('alpha-machine',{exact:true})).toHaveCount(0)
-  await expect(page.getByLabel('Bootstrap command')).not.toContainText('obsolete-alpha-command')
+  await expect(page.getByLabel('Bootstrap command')).toContainText(enrollmentToken(`control-${b}`,`setup-${b}`))
   state.hold=false
   await page.reload()
   await expect(selector).toHaveValue(b)
-  await expect(page.getByLabel('Bootstrap command')).toContainText(`control-${b}`)
+  await expect(page.getByLabel('Bootstrap command')).toContainText(enrollmentToken(`control-${b}`,`setup-${b}`))
 })
 
 test('no membership hides scoped content while global Administration remains available',async({page})=>{
@@ -102,7 +101,7 @@ test('no membership hides scoped content while global Administration remains ava
   await expect(page.getByRole('heading',{name:'Administration',exact:true})).toBeVisible()
   state.groups=groups
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')))
-  await expect(page.getByLabel('Bootstrap command')).toContainText(`control-${a}`)
+  await expect(page.getByLabel('Bootstrap command')).toContainText(enrollmentToken(`control-${a}`,`setup-${a}`))
 })
 
 test('onchain address check reveals signing instructions and claim selects enrollment',async({page})=>{
@@ -120,7 +119,7 @@ test('onchain address check reveals signing instructions and claim selects enrol
   await page.getByLabel('Signature').fill('0xsigned')
   await page.getByRole('button',{name:'Claim orchestrator'}).click()
   await expect(page.getByRole('combobox',{name:'Orchestrator'})).toHaveValue(a)
-  await expect(page.getByLabel('Bootstrap command')).toContainText(`control-${a}`)
+  await expect(page.getByLabel('Bootstrap command')).toContainText(enrollmentToken(`control-${a}`,`setup-${a}`))
   expect(state.challengeRequests).toBe(1)
   expect(state.claims).toEqual([{address:a,challenge:'header.payload.signature',signature:'0xsigned'}])
 })
@@ -161,7 +160,7 @@ test('membership loss clears the old orchestrator and account selection stays se
 })
 
 test('switching clears secret drafts and stops a delayed upload from progressing',async({page})=>{
-  const state=await setup(page,{secrets:true})
+  const state=await setup(page)
   await expect(page.getByLabel('Bootstrap command')).toContainText('lpcc1.')
   state.holdReserve=true
   await page.getByLabel('App name',{exact:true}).selectOption('provider')
@@ -180,7 +179,7 @@ test('switching clears secret drafts and stops a delayed upload from progressing
 })
 
 for(const status of [401,403])test(`persistent secrets ${status} preserves its error without regenerating commands`,async({page})=>{
-  const state=await setup(page,{secrets:true,setupFailure:status})
+  const state=await setup(page,{setupFailure:status})
   await expect(page.getByRole('alert')).toContainText(status===403?'orchestrator access required':'authentication required')
   await expect.poll(()=>state.membershipTokens.length).toBe(2)
   await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))))
@@ -189,7 +188,7 @@ for(const status of [401,403])test(`persistent secrets ${status} preserves its e
 })
 
 test('background membership outage preserves a draft and an in-flight secret save',async({page})=>{
-  const state=await setup(page,{secrets:true})
+  const state=await setup(page)
   await expect(page.getByLabel('Bootstrap command')).toContainText('lpcc1.')
   const command=await page.getByLabel('Bootstrap command').innerText()
   state.holdReserve=true
@@ -214,7 +213,7 @@ test('background membership outage preserves a draft and an in-flight secret sav
 })
 
 test('a late old-token authorization failure refreshes memberships with the current session',async({page})=>{
-  const state=await setup(page,{secrets:true})
+  const state=await setup(page)
   await expect(page.getByLabel('Bootstrap command')).toContainText('lpcc1.')
   state.holdPolicy=true
   await page.getByRole('button',{name:'Deny',exact:true}).click()

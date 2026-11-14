@@ -1,3 +1,4 @@
+import { mockSecrets, secretsURL } from './secrets-fixture'
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 
@@ -23,7 +24,7 @@ async function setup(page: Page, existing = false, paginated = false) {
     const p = new URL(route.request().url()).pathname
     if (p === '/api/orchestrators') return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
     if (p === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture-public' } })
-    if (p === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932' } })
+    if (p === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932', secrets_url: secretsURL } })
     if (p === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
     if (p === '/api/me') {
       state.capabilityRequests++
@@ -58,6 +59,7 @@ async function setup(page: Page, existing = false, paginated = false) {
     if (p === '/api/admin/apps/example/revisions/' + revisionId) return route.fulfill({ json: revision })
     return route.fulfill({ status: 404, json: { error: 'Unexpected route' } })
   })
+  await mockSecrets(page)
   await page.goto('/')
   if (existing) {
     await page.getByRole('button', { name: 'example', exact: true }).click()
