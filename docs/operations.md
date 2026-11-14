@@ -32,7 +32,8 @@ claim the same address. In an off-chain deployment, **Add orchestrator** creates
 the zero-address workspace by default; enter a distinct Ethereum address to
 create another workspace.
 
-Configure the [Vault policy](operator-secrets.md#deployment) for each address.
+The shared [Vault policy](operator-secrets.md#deployment) covers newly added
+orchestrators.
 
 Invitation links are issued without stored state, expire after 24 hours, and can
 be accepted once. Member removal and departure are recorded in
