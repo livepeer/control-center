@@ -694,9 +694,6 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 			continue
 		}
 		if len(i.Definition.Container.Secrets) > 0 {
-			if c.Secrets == nil {
-				continue
-			}
 			if !i.SecretPrepared && i.PodUID == "" {
 				continue
 			}
@@ -707,7 +704,7 @@ func (c *Controller) publish(ctx context.Context, s State, now time.Time) error 
 						a = entry
 					}
 				}
-				if a.Revision == nil || c.Secrets.Authorize(authCtx, a, i) != nil {
+				if c.Secrets == nil || a.Revision == nil || c.Secrets.Authorize(authCtx, a, i) != nil {
 					continue
 				}
 			}
