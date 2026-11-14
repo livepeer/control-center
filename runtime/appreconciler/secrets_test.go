@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -471,27 +472,30 @@ func (k regressionContextCluster) Read(ctx context.Context) (View, error) {
 	return k.testCluster.Read(ctx)
 }
 func TestRegressionVaultWaitMustNotStarveLifecycleInput(t *testing.T) {
-	c, input, k, _, _, now := fixtureController(t)
-	set, p := regressionSecretFixture(t)
-	v := regressionVersion(t, set, "v2")
-	slow := &regressionSlowResolver{fakeSecretResolver{identityReady: true, set: v}}
-	c.Secrets = &SecretDelivery{Client: slow, Kube: secretKube(nil), Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: v}, Next: now.Add(time.Hour)}
-	counter := &regressionCountingInput{base: input}
-	c.Input = counter
-	c.Cluster = regressionContextCluster{k}
-	if e := c.Journal.Update(func(s *State) error {
-		s.Payload = p
-		s.Instances["old"] = &Instance{ID: "old", Name: "old", Group: p.Index.Groups[0], Generation: 1, Definition: set.Entries[0].Revision.Definition, PodUID: "pod", SecretPrepared: true, SecretVersion: "v1", Phase: "running"}
-		return nil
-	}); e != nil {
-		t.Fatal(e)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
-	defer cancel()
-	_ = c.Tick(ctx)
-	if counter.reads == 0 {
-		t.Fatal("slow secret preparation consumed the tick before central denial/removal input was read")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c, input, k, _, _, _ := fixtureController(t)
+		c.Now = time.Now
+		set, p := regressionSecretFixture(t)
+		v := regressionVersion(t, set, "v2")
+		slow := &regressionSlowResolver{fakeSecretResolver{identityReady: true, set: v}}
+		c.Secrets = &SecretDelivery{Client: slow, Kube: secretKube(nil), Targets: map[string]protocol.VersionSet{set.Entries[0].RevisionID: v}, Next: time.Now().Add(time.Hour)}
+		counter := &regressionCountingInput{base: input}
+		c.Input = counter
+		c.Cluster = regressionContextCluster{k}
+		if e := c.Journal.Update(func(s *State) error {
+			s.Payload = p
+			s.Instances["old"] = &Instance{ID: "old", Name: "old", Group: p.Index.Groups[0], Generation: 1, Definition: set.Entries[0].Revision.Definition, PodUID: "pod", SecretPrepared: true, SecretVersion: "v1", Phase: "running"}
+			return nil
+		}); e != nil {
+			t.Fatal(e)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+		defer cancel()
+		_ = c.Tick(ctx)
+		if counter.reads == 0 {
+			t.Fatal("slow secret preparation consumed the tick before central denial/removal input was read")
+		}
+	})
 }
 func TestRegressionAppliedMustRequireFreshNodeRegistration(t *testing.T) {
 	c, _, k, _, reports, now := fixtureController(t)

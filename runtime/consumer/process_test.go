@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -20,57 +21,62 @@ func (f requestFunc) Request(ctx context.Context, endpoint string, value any, li
 }
 
 func TestStartExecsWithFreshMemoryFileAndNeverFallsBack(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private", "token")
-	issued := 0
-	client := requestFunc(func(_ context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
-		if endpoint != "tunnel/connector-token" {
-			t.Fatal(endpoint)
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "private", "token")
+		issued := 0
+		client := requestFunc(func(_ context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
+			if endpoint != "tunnel/connector-token" {
+				t.Fatal(endpoint)
+			}
+			issued++
+			if issued == 3 {
+				return nil, nil, errors.New("offline")
+			}
+			launch := value.(Launch)
+			b, _ := json.Marshal(Grant{Association: Association{Launch: launch}, Token: strings.Repeat(string(rune('a'+issued)), 64)})
+			return b, nil, nil
+		})
+		executed := 0
+		exec := func(command string, args, env []string) error {
+			executed++
+			b, err := os.ReadFile(path)
+			if err != nil || string(b) != strings.Repeat(string(rune('a'+executed)), 64) {
+				t.Fatal("stale token file", err)
+			}
+			info, _ := os.Stat(path)
+			parent, _ := os.Stat(filepath.Dir(path))
+			if info.Mode().Perm() != 0600 || parent.Mode().Perm() != 0700 {
+				t.Fatal("token permissions")
+			}
+			if command != "/usr/local/bin/cloudflared" || !strings.Contains(strings.Join(args, " "), "--token-file "+path) || strings.Contains(strings.Join(args, " "), string(b)) || strings.Contains(strings.Join(env, " "), string(b)) {
+				t.Fatal("unsafe exec")
+			}
+			return errors.New("exec fixture")
 		}
-		issued++
-		if issued == 3 {
-			return nil, nil, errors.New("offline")
+		for n := 0; n < 2; n++ {
+			if start(t.Context(), Connector, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, exec) == nil {
+				t.Fatal("exec did not run")
+			}
 		}
-		launch := value.(Launch)
-		b, _ := json.Marshal(Grant{Association: Association{Launch: launch}, Token: strings.Repeat(string(rune('a'+issued)), 64)})
-		return b, nil, nil
+		os.WriteFile(path, []byte("stale secret"), 0600)
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		if start(ctx, Connector, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, exec) == nil {
+			t.Fatal("offline start succeeded")
+		}
+		if executed != 2 || issued != 3 {
+			t.Fatal("fallback or supervision changed process count")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("failed startup retained a credential")
+		}
 	})
-	executed := 0
-	exec := func(command string, args, env []string) error {
-		executed++
-		b, err := os.ReadFile(path)
-		if err != nil || string(b) != strings.Repeat(string(rune('a'+executed)), 64) {
-			t.Fatal("stale token file", err)
-		}
-		info, _ := os.Stat(path)
-		parent, _ := os.Stat(filepath.Dir(path))
-		if info.Mode().Perm() != 0600 || parent.Mode().Perm() != 0700 {
-			t.Fatal("token permissions")
-		}
-		if command != "/usr/local/bin/cloudflared" || !strings.Contains(strings.Join(args, " "), "--token-file "+path) || strings.Contains(strings.Join(args, " "), string(b)) || strings.Contains(strings.Join(env, " "), string(b)) {
-			t.Fatal("unsafe exec")
-		}
-		return errors.New("exec fixture")
-	}
-	for n := 0; n < 2; n++ {
-		if start(t.Context(), Connector, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, exec) == nil {
-			t.Fatal("exec did not run")
-		}
-	}
-	os.WriteFile(path, []byte("stale secret"), 0600)
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	if start(ctx, Connector, client, path, "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, exec) == nil {
-		t.Fatal("offline start succeeded")
-	}
-	if executed != 2 || issued != 3 {
-		t.Fatal("fallback or supervision changed process count")
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("failed startup retained a credential")
-	}
 }
 
 func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
+	previous := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{DisableKeepAlives: true}
+	defer func() { http.DefaultTransport = previous }()
 	for _, test := range []struct {
 		name              string
 		profile           Profile
@@ -102,36 +108,38 @@ func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			marker := filepath.Join(t.TempDir(), "launch.json")
-			process := strings.Repeat("e", 64)
-			b, _ := json.Marshal(Association{Launch: Launch{PodName: "test-pod", PodUID: "uid", LaunchID: strings.Repeat("a", 32), ProcessID: process}})
-			if err := os.WriteFile(marker, b, 0600); err != nil {
-				t.Fatal(err)
-			}
-			delivered := false
-			client := requestFunc(func(ctx context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
-				delivered = true
-				observation := value.(Observation)
-				if endpoint != map[Profile]string{Connector: "tunnel/observation", Orchestrator: "onchain/observation"}[test.profile] || observation.Ready != test.healthy || observation.ProviderVersion != 0 {
-					t.Fatal("invalid process evidence", endpoint, observation)
+			synctest.Test(t, func(t *testing.T) {
+				marker := filepath.Join(t.TempDir(), "launch.json")
+				process := strings.Repeat("e", 64)
+				b, _ := json.Marshal(Association{Launch: Launch{PodName: "test-pod", PodUID: "uid", LaunchID: strings.Repeat("a", 32), ProcessID: process}})
+				if err := os.WriteFile(marker, b, 0600); err != nil {
+					t.Fatal(err)
 				}
-				select {
-				case <-time.After(test.delay):
-					return nil, nil, test.deliveryErr
-				case <-ctx.Done():
-					return nil, nil, ctx.Err()
+				delivered := false
+				client := requestFunc(func(ctx context.Context, endpoint string, value any, _ int64) ([]byte, http.Header, error) {
+					delivered = true
+					observation := value.(Observation)
+					if endpoint != map[Profile]string{Connector: "tunnel/observation", Orchestrator: "onchain/observation"}[test.profile] || observation.Ready != test.healthy || observation.ProviderVersion != 0 {
+						t.Fatal("invalid process evidence", endpoint, observation)
+					}
+					select {
+					case <-time.After(test.delay):
+						return nil, nil, test.deliveryErr
+					case <-ctx.Done():
+						return nil, nil, ctx.Err()
+					}
+				})
+				if test.mismatch {
+					process = strings.Repeat("f", 64)
+				}
+				started := time.Now()
+				if ready := probe(t.Context(), test.profile, client, marker, server.URL, func() (string, error) { return process, nil }); ready != test.ready || delivered != test.delivered {
+					t.Fatal("unexpected readiness or evidence delivery", ready, delivered)
+				}
+				if test.profile == Connector && time.Since(started) > 2*time.Second {
+					t.Fatal("reporting consumed readiness deadline")
 				}
 			})
-			if test.mismatch {
-				process = strings.Repeat("f", 64)
-			}
-			started := time.Now()
-			if ready := probe(t.Context(), test.profile, client, marker, server.URL, func() (string, error) { return process, nil }); ready != test.ready || delivered != test.delivered {
-				t.Fatal("unexpected readiness or evidence delivery", ready, delivered)
-			}
-			if test.profile == Connector && time.Since(started) > 2*time.Second {
-				t.Fatal("reporting consumed readiness deadline")
-			}
 		})
 	}
 }
@@ -157,20 +165,22 @@ func TestKernelIdentitySurvivesExecAndDistinguishesReplacement(t *testing.T) {
 }
 
 func TestStartupRetriesTransientFailureBeforeExec(t *testing.T) {
-	calls := 0
-	client := requestFunc(func(_ context.Context, _ string, value any, _ int64) ([]byte, http.Header, error) {
-		calls++
-		if calls == 1 {
-			return nil, nil, errors.New("Waiting")
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		client := requestFunc(func(_ context.Context, _ string, value any, _ int64) ([]byte, http.Header, error) {
+			calls++
+			if calls == 1 {
+				return nil, nil, errors.New("Waiting")
+			}
+			b, _ := json.Marshal(Grant{Association: Association{Launch: value.(Launch)}, Token: strings.Repeat("x", 64)})
+			return b, nil, nil
+		})
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		executed := false
+		start(ctx, Connector, client, filepath.Join(t.TempDir(), "token"), "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, func(string, []string, []string) error { executed = true; return errors.New("exec fixture") })
+		if !executed || calls != 2 {
+			t.Fatal("transient startup failure caused a premature container exit")
 		}
-		b, _ := json.Marshal(Grant{Association: Association{Launch: value.(Launch)}, Token: strings.Repeat("x", 64)})
-		return b, nil, nil
 	})
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	executed := false
-	start(ctx, Connector, client, filepath.Join(t.TempDir(), "token"), "tunnel-pod", "pod-uid", strings.Repeat("e", 64), nil, func(string, []string, []string) error { executed = true; return errors.New("exec fixture") })
-	if !executed || calls != 2 {
-		t.Fatal("transient startup failure caused a premature container exit")
-	}
 }

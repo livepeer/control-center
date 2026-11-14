@@ -360,6 +360,9 @@ func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observed
 		a.Desired, a.Replicas, a.StartAllowed = assignment.Desired, assignment.Replicas, assignment.StartAllowed
 		a.Failure = safeObservationReason(a.Failure)
 		a.Health.Type, a.Health.Interval, a.Health.Timeout, a.Health.FailureThreshold = definition.Health.Readiness.Type, definition.Health.Readiness.Interval, definition.Health.Readiness.Timeout, definition.Health.Readiness.FailureThreshold
+		if interval, _ := time.ParseDuration(a.Health.Interval); interval < 10*time.Second {
+			a.Health.Interval = "10s"
+		}
 		a.Mode = definition.Runner.Mode
 		for _, app := range definition.Apps {
 			a.DiscoveryApps = append(a.DiscoveryApps, app.Name)

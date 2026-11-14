@@ -139,7 +139,7 @@ consumed:
 		}
 		h.pending = true
 		interval, _ := time.ParseDuration(i.Definition.Health.Readiness.Interval)
-		h.next = now.Add(interval)
+		h.next = now.Add(max(interval, 10*time.Second))
 		timeout, _ := time.ParseDuration(i.Definition.Health.Readiness.Timeout)
 		h.timeout = timeout
 		target := privateURL(i.Name, i.Definition.HTTP.Port)
@@ -190,5 +190,6 @@ func (p *Probes) Status(id, uid string) *contract.ProbeStatus {
 	if h == nil || h.uid != uid || h.observedAt.IsZero() {
 		return nil
 	}
-	return &contract.ProbeStatus{ObservedAt: h.observedAt, DueAt: h.observedDue, ExpiresAt: h.observedDue.Add(h.timeout + time.Second), Success: h.success, Failures: h.failures, Started: h.started}
+	ttl := max(30*time.Second, h.observedDue.Sub(h.observedAt)+h.timeout+time.Second)
+	return &contract.ProbeStatus{ObservedAt: h.observedAt, DueAt: h.observedDue, ExpiresAt: h.observedAt.Add(ttl), Success: h.success, Failures: h.failures, Started: h.started}
 }
