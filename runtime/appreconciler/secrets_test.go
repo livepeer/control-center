@@ -881,3 +881,86 @@ func TestPreparationPreservesConcurrentOwnerWithdrawal(t *testing.T) {
 		})
 	}
 }
+
+func TestRequiredSecretsBlockProvisioningUntilAvailable(t *testing.T) {
+	for _, mode := range []string{"no-delivery", "disabled", "missing-value", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			c, input, cluster, _, _, _, resolver, set := secretController(t, 1, nil)
+			input.value.Metadata.ManagedSecrets = false
+			delivery := c.Secrets
+			switch mode {
+			case "no-delivery":
+				c.Secrets = nil
+			case "disabled":
+				resolver.enabled = false
+			case "missing-value":
+				resolver.err = fmt.Errorf("secret_unprovisioned")
+			case "unavailable":
+				resolver.err = protocol.ErrUnavailable
+			}
+			secretTicks(t, c, cluster, 2)
+			state := c.Journal.View()
+			if len(state.Instances) != 0 || len(cluster.view.Pods) != 0 || state.AssignmentReasons[set.Entries[0].RevisionID] == "" {
+				t.Fatal("missing secrets allowed provisioning", state.AssignmentReasons)
+			}
+			c.Secrets = delivery
+			resolver.enabled = true
+			resolver.err = nil
+			delivery.Next = time.Time{}
+			secretTicks(t, c, cluster, 4)
+			for _, instance := range c.Journal.View().Instances {
+				if instance.SecretPrepared && instance.PodUID != "" {
+					return
+				}
+			}
+			t.Fatal("setting required values did not unblock provisioning")
+		})
+	}
+}
+
+func TestPersistedStartCannotPublishWithoutSecretDelivery(t *testing.T) {
+	for _, mode := range []string{"no-delivery", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			c, input, cluster, _, _, _, resolver, _ := secretController(t, 1, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+			input.value.Metadata.ManagedSecrets = false
+			tick(t, c)
+			var pending *Instance
+			for _, instance := range c.Journal.View().Instances {
+				pending = instance
+			}
+			if pending == nil || pending.SecretPrepared || pending.PublicationStarted {
+				t.Fatal("fixture did not persist an unprepared start", pending)
+			}
+			delivery := c.Secrets
+			if mode == "no-delivery" {
+				c.Secrets = nil
+			} else {
+				resolver.enabled = false
+			}
+			secretTicks(t, c, cluster, 2)
+			state := c.Journal.View()
+			if state.Instances[pending.ID].PublicationStarted || state.Snapshots[state.Published].Included[pending.ID] || len(cluster.view.Pods) != 0 {
+				t.Fatal("persisted start bypassed secret readiness")
+			}
+			c.Secrets = delivery
+			resolver.enabled = true
+			delivery.Kube = secretKube(nil)
+			delivery.Next = time.Time{}
+			secretTicks(t, c, cluster, 4)
+			if instance := c.Journal.View().Instances[pending.ID]; !instance.SecretPrepared || instance.PodUID == "" {
+				t.Fatal("persisted start failed to resume after values became available", instance)
+			}
+			if mode == "no-delivery" {
+				c.Secrets = nil
+			} else {
+				resolver.enabled = false
+			}
+			tick(t, c)
+			state = c.Journal.View()
+			if !state.Snapshots[state.Published].Included[pending.ID] || state.Instances[pending.ID].WithdrawalID != "" {
+				t.Fatal("delivery outage withdrew an already provisioned app")
+			}
+
+		})
+	}
+}

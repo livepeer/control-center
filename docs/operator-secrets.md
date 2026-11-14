@@ -18,6 +18,10 @@ This obtains a setup grant valid for one hour and saves the service's signing
 public key as a **pin** in browser storage for that service origin. A changed
 pin is refused. Run the command on the runtime machine; the installer creates
 and saves a runtime signing key. Its private key stays on the machine.
+The installer proves possession of its Control Center machine credential with
+a purpose-bound HMAC over the node ID, runtime public key and fresh enrollment
+nonce. The secrets service forwards the proof to Control Center for verification;
+the reusable machine credential stays on the runtime.
 
 ```mermaid
 sequenceDiagram
@@ -125,6 +129,8 @@ Use `migrate down` to roll back reversible future migrations.
 
 ## Application behavior
 
+Apps are provisioned only when their required secrets are available.
+You can save values on the Secrets screen before an app is running.
 Applications declare secret references in `container.secrets`; the runtime
 provides values as environment variables. When a secret changes, affected app
 instances are replaced one at a time, waiting for each replacement to become
@@ -150,6 +156,6 @@ a compromised runtime key, use owner-authorized
 `POST /v1/machines/{node}/reset`, then enroll again. To revoke access without
 resetting identity, use `POST /v1/machines/{node}/revoke`.
 
-Upgrade the service, installer and runtime together, then rerun enrollment to
-install the pin. Existing clusters must first complete
+Upgrade Control Center, the secrets service, installer and runtime together,
+then rerun enrollment to install the pin. Existing clusters must first complete
 [K3s secrets encryption](https://docs.k3s.io/cli/secrets-encrypt).

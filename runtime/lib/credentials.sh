@@ -310,8 +310,24 @@ secrets_key_proof() {
   printf 'lpcc-secrets-enroll-v1\n%s\n%s' "$1" "$SECRET_PUBLIC" | sign_secrets_proof
 }
 
+secrets_management_proof() {
+  local credential inner='' outer='' byte pad i digest
+  credential=$(cat "$INSTALL_DIR/credentials/service-token")
+  [[ "$credential" =~ ^[0-9a-f]{64}$ ]] || die 'invalid saved machine credential'
+  # The ASCII credential fills one SHA-256 block. Keep it out of argv and files.
+  for ((i=0; i<64; i++)); do
+    printf -v byte '%d' "'${credential:i:1}"
+    printf -v pad '\\x%02x' "$((byte ^ 0x36))"; inner+=$pad
+    printf -v pad '\\x%02x' "$((byte ^ 0x5c))"; outer+=$pad
+  done
+  digest=$({ printf '%b' "$inner"; printf 'lpcc-secrets-machine-enroll-v1\n%s\n%s\n%s' "$NODE_ID" "$SECRET_PUBLIC" "$1"; } | sha256sum)
+  digest=${digest%% *}
+  for ((i=0; i<64; i+=2)); do outer+="\\x${digest:i:2}"; done
+  printf '%b' "$outer" | sha256sum | cut -d' ' -f1
+}
+
 enroll_secrets() {
-  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt nonce anchor candidate headers signature replaced=0
+  local target="$INSTALL_DIR/credentials/secrets" response status request endpoint public setup_token attempt nonce anchor candidate headers signature management_proof replaced=0
   [[ -f "$target/setup" ]] || return 0
   local payload exp padded
   payload=$(cut -d. -f2 "$target/setup")
@@ -333,7 +349,8 @@ enroll_secrets() {
   setup_token=$(cat "$target/setup")
   for attempt in {1..12}; do
     nonce=$(openssl rand -hex 32)
-    request=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --arg nonce "$nonce" --rawfile signature <(secrets_key_proof "$NODE_ID") --rawfile management "$INSTALL_DIR/credentials/service-token" '{node_id:$node,public_key:$public,nonce:$nonce,signature:$signature,management_token:$management,encryption_ready:true}')
+    management_proof=$(secrets_management_proof "$nonce")
+    request=$(jq -nc --arg node "$NODE_ID" --arg public "$SECRET_PUBLIC" --arg nonce "$nonce" --rawfile signature <(secrets_key_proof "$NODE_ID") --arg proof "$management_proof" '{node_id:$node,public_key:$public,nonce:$nonce,signature:$signature,management_proof:$proof,encryption_ready:true}')
     headers=$(mktemp "$target/headers.XXXXXX")
     response=$(curl -q --silent --show-error --connect-timeout 10 --max-time 30 --dump-header "$headers" --proto '=https' --request POST --header 'Content-Type: application/json' --config <(printf 'header = "Authorization: Bearer %s"\n' "$setup_token") --data-binary @<(printf '%s' "$request") --write-out '\n%{http_code}' "$endpoint/v1/machines/enroll") || { rm -f -- "$headers"; log 'Secrets enrollment pending: service unavailable.'; return 0; }
     status=${response##*$'\n'}; response=${response%$'\n'*}

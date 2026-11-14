@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -165,6 +166,20 @@ func Proof(node, public string) []byte {
 	return []byte("lpcc-secrets-enroll-v1\n" + node + "\n" + public)
 }
 
+// EnrollmentProof proves possession of the machine credential for this binding.
+// The credential is the ASCII bearer string, not its hex-decoded bytes.
+func EnrollmentProof(credential, node, public, nonce string) string {
+	mac := hmac.New(sha256.New, []byte(credential))
+	mac.Write([]byte("lpcc-secrets-machine-enroll-v1\n" + node + "\n" + public + "\n" + nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+var enrollmentHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func (r EnrollRequest) ValidProof() bool {
+	return enrollmentHex.MatchString(r.Nonce) && enrollmentHex.MatchString(r.ManagementProof)
+}
+
 func RegistrationProof(grant, fingerprint, hostname, directory, version, public string, development bool) []byte {
 	digest := sha256.Sum256([]byte(grant))
 	b, _ := json.Marshal([]any{"lpcc-registration-v1", hex.EncodeToString(digest[:]), fingerprint, hostname, directory, version, development, public})
@@ -195,7 +210,7 @@ type EnrollRequest struct {
 	NodeID          string `json:"node_id"`
 	PublicKey       string `json:"public_key"`
 	Signature       []byte `json:"signature"`
-	Management      string `json:"management_token,omitempty"`
+	ManagementProof string `json:"management_proof,omitempty"`
 	EncryptionReady bool   `json:"encryption_ready"`
 }
 

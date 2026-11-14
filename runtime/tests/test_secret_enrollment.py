@@ -2,6 +2,7 @@
 import base64
 import json
 import hashlib
+import hmac
 import os
 from pathlib import Path
 import subprocess
@@ -22,7 +23,7 @@ INSTALL_DIR=$2
 prepare_secrets_enrollment
 target="$INSTALL_DIR/credentials/secrets"
 printf '%s' "$TEST_SETUP" > "$target/setup"
-printf management-sentinel > "$INSTALL_DIR/credentials/service-token"
+printf '%064d' 0 > "$INSTALL_DIR/credentials/service-token"
 mkdir -p "$INSTALL_DIR/bin"
 printf '#!/bin/sh\nprintf "Encryption Status: Enabled\\nCurrent Rotation Stage: start\\n"\n' > "$INSTALL_DIR/bin/k3s"
 chmod 700 "$INSTALL_DIR/bin/k3s"
@@ -32,6 +33,7 @@ kube() { :; }
 chown() { :; }
 curl() {
   printf '%s\0' "$@" >> "$INSTALL_DIR/process-args"
+  printf '%s\n' "$request" >> "$INSTALL_DIR/requests"
   local count=0
   if [[ -f "$INSTALL_DIR/count" ]]; then count=$(cat "$INSTALL_DIR/count"); fi
   count=$((count+1)); printf '%s' "$count" > "$INSTALL_DIR/count"
@@ -71,7 +73,15 @@ enroll_secrets
                                     env={**os.environ, 'TEST_SETUP': grant}, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn(grant, result.stdout + result.stderr)
-            self.assertNotIn(b'management-sentinel', (Path(root) / 'process-args').read_bytes())
+            self.assertNotIn(b'0' * 64, (Path(root) / 'process-args').read_bytes())
+            requests = [json.loads(line) for line in (Path(root) / 'requests').read_text().splitlines()]
+            self.assertEqual(len({r['nonce'] for r in requests}), len(requests))
+            self.assertNotEqual(requests[0]['public_key'], requests[1]['public_key'])
+            self.assertEqual(requests[1]['public_key'], requests[2]['public_key'])
+            for r in requests:
+                self.assertNotIn('management_token', r)
+                statement = '\n'.join(['lpcc-secrets-machine-enroll-v1', r['node_id'], r['public_key'], r['nonce']])
+                self.assertEqual(r['management_proof'], hmac.new(b'0' * 64, statement.encode(), hashlib.sha256).hexdigest())
 
     def test_expiry_cleanup_needs_no_enrollment_rerun(self):
         cleanup=SCRIPT.parent/'lib/expire-secrets-setup.sh'
@@ -118,14 +128,35 @@ prepare_secrets_enrollment
             self.assertEqual(verified.returncode,0,verified.stderr)
 
 class EnrollmentReplies(unittest.TestCase):
+    def test_machine_proof_matches_independent_hmac(self):
+        for credential in ('0' * 64, '0123456789abcdef' * 4):
+            with self.subTest(credential=credential), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'credentials').mkdir()
+                (root / 'credentials/service-token').write_text(credential)
+                nonce = 'a' * 64
+                script = r'''set -Eeuo pipefail
+source "$1"
+INSTALL_DIR=$2
+NODE_ID=test-node
+SECRET_PUBLIC=runtime-public
+if ! command -v sha256sum >/dev/null; then sha256sum() { shasum -a 256; }; fi
+secrets_management_proof "$3"
+'''
+                result = subprocess.run(['bash', '-c', script, 'fixture', str(SCRIPT.parent / 'lib/credentials.sh'), str(root), nonce], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                statement = '\n'.join(['lpcc-secrets-machine-enroll-v1', 'test-node', 'runtime-public', nonce])
+                self.assertEqual(result.stdout.strip(), hmac.new(credential.encode(), statement.encode(), hashlib.sha256).hexdigest())
+
     def test_only_authenticated_replies_can_change_saved_credentials(self):
         grant = 'header.' + base64.urlsafe_b64encode(json.dumps({'exp': int(time.time()) + 3600}).encode()).decode().rstrip('=') + '.signature'
-        for mode, replaced, removed in [('missing409', False, False), ('missing401', False, False), ('forged409', False, False), ('replay409', False, False), ('signed409', True, False), ('signed401', False, True), ('initial200', False, True), ('retry200', True, True), ('initial-forged200', False, False), ('changed200', False, False)]:
+        for mode, replaced, removed in [('missing-credential', False, False), ('invalid-credential', False, False), ('missing409', False, False), ('missing401', False, False), ('forged409', False, False), ('replay409', False, False), ('signed409', True, False), ('signed401', False, True), ('initial200', False, True), ('retry200', True, True), ('initial-forged200', False, False), ('changed200', False, False)]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 target = root / 'credentials/secrets'
                 target.mkdir(parents=True)
-                (root / 'credentials/service-token').write_text('management-fixture')
+                if mode != 'missing-credential':
+                    (root / 'credentials/service-token').write_text('invalid' if mode == 'invalid-credential' else 'c' * 64)
                 (target / 'key.pem').write_text('original-key')
                 (target / 'setup').write_text(grant)
                 (target / 'url').write_text('https://secrets.example')
@@ -186,7 +217,11 @@ curl() {
 enroll_secrets
 '''
                 result = subprocess.run(['bash', '-c', script, 'fixture', str(SCRIPT.parent / 'lib/credentials.sh'), str(root)], env={**os.environ, 'TEST_SETUP': grant, 'TEST_MODE': mode, 'TEST_PYTHON': sys.executable}, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 1 if mode == 'changed200' else 0, result.stderr)
+                local_failure = mode.endswith('-credential')
+                self.assertEqual(result.returncode, 1 if mode == 'changed200' or local_failure else 0, result.stderr)
+                if local_failure:
+                    self.assertIn('invalid saved machine credential', result.stderr)
+                    self.assertFalse((root / 'calls').exists())
                 if mode == 'changed200':
                     self.assertIn('secrets service identity changed', result.stderr)
                 self.assertEqual((target / 'key.pem').read_text(), 'replacement-key' if replaced else 'original-key')
@@ -197,7 +232,8 @@ enroll_secrets
                     self.assertEqual(json.loads(saved.read_text()), json.loads(pin))
                 else:
                     self.assertFalse(saved.exists())
-                self.assertEqual(int((root / 'calls').read_text()), 12 if mode == 'signed409' else 3 if mode == 'retry200' else 1)
+                if not local_failure:
+                    self.assertEqual(int((root / 'calls').read_text()), 12 if mode == 'signed409' else 3 if mode == 'retry200' else 1)
                 if mode in ('initial200', 'retry200'):
                     self.assertEqual((root / 'management-key').read_bytes(), (target / 'key.pem').read_bytes())
                 self.assertNotIn(grant, result.stdout + result.stderr)
