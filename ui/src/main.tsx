@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { createClient } from '@supabase/supabase-js'
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
@@ -8,6 +8,7 @@ import { api } from './api'
 import { OperatorSecrets, enrollSecretsService, enrollmentEnvelope } from './operator-secrets'
 import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
+import { OrchestratorWorkspace } from './orchestrators'
 import { MachineStatus, MachineReadinessBadge } from './machine-status'
 
 type AuthConfig = { supabase_url: string; supabase_publishable_key: string }
@@ -90,7 +91,7 @@ function Login({ client }: { client: SupabaseClient }) {
   </div>
 }
 
-function Dashboard({ client, session }: { client: SupabaseClient; session: Session }) {
+function MachineConsole({ session, address, authorityFailure }: { session: Session; address: string; authorityFailure: (error: unknown) => void }) {
   const [config, setConfig] = useState<OperatorConfig | null>(null)
   const [enrollment, setEnrollment] = useState<(Enrollment & OperatorConfig) | null>(null)
   const [machines, setMachines] = useState<Machine[] | null>(null)
@@ -100,23 +101,28 @@ function Dashboard({ client, session }: { client: SupabaseClient; session: Sessi
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const [now, setNow] = useState(Date.now())
-  const [logoutProblem, setLogoutProblem] = useState('')
+  const generation = useRef<AbortController | null>(null)
+  useEffect(() => () => generation.current?.abort(), [])
   const generate = useCallback(async () => {
+    generation.current?.abort()
+    const controller = new AbortController(); generation.current = controller
+    const signal = controller.signal
     setBusy(true); setTokenProblem(''); setCopied(false)
     try {
-      const settings = await api<OperatorConfig>(session, '/api/operator/config')
+      const settings = await api<OperatorConfig>(session, '/api/operator/config', { signal })
+      if (signal.aborted) return
       setConfig(settings)
-      const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST' })
+      const control = await api<Enrollment>(session, '/api/bootstrap-token', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestrator_address: address }) })
       if (settings.secrets_url) {
-        const setup = await enrollSecretsService<Enrollment>(session, settings.secrets_url)
+        const setup = await enrollSecretsService<Enrollment>(session, settings.secrets_url, address, signal)
         control.token = enrollmentEnvelope(control.token, setup.token)
         control.expires_at = new Date(Math.min(Date.parse(control.expires_at), Date.parse(setup.expires_at))).toISOString()
       }
-      setEnrollment({ ...control, ...settings })
+      if (!signal.aborted) setEnrollment({ ...control, ...settings })
     }
-    catch (error) { setTokenProblem(error instanceof Error ? error.message : 'Could not generate a command.') }
-    finally { setBusy(false) }
-  }, [session.access_token])
+    catch (error) { if (!signal.aborted) { setTokenProblem(error instanceof Error ? error.message : 'Could not generate a command.'); authorityFailure(error) } }
+    finally { if (!signal.aborted) setBusy(false) }
+  }, [session.access_token, address, authorityFailure])
   useEffect(() => { void generate() }, [generate])
   useEffect(() => {
     const controller = new AbortController()
@@ -125,16 +131,16 @@ function Dashboard({ client, session }: { client: SupabaseClient; session: Sessi
       if (pending || document.hidden) return
       pending = true
       try {
-        const data = await api<{ machines: Machine[] }>(session, '/api/machines', { signal: controller.signal })
-        setMachines(data.machines); setMachineProblem('')
-      } catch (error) { if (!controller.signal.aborted) setMachineProblem(error instanceof Error ? error.message : 'Could not load machines.') }
+        const data = await api<{ machines: Machine[] }>(session, `/api/machines?orchestrator_address=${encodeURIComponent(address)}`, { signal: controller.signal })
+        if (!controller.signal.aborted) { setMachines(data.machines); setMachineProblem('') }
+      } catch (error) { if (!controller.signal.aborted) { setMachineProblem(error instanceof Error ? error.message : 'Could not load machines.'); authorityFailure(error) } }
       finally { pending = false }
     }
     void refresh()
     const interval = window.setInterval(refresh, 5000)
     document.addEventListener('visibilitychange', refresh)
     return () => { controller.abort(); window.clearInterval(interval); document.removeEventListener('visibilitychange', refresh) }
-  }, [session.access_token])
+  }, [session.access_token, address, authorityFailure])
   useEffect(() => { const interval = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(interval) }, [])
   const seconds = enrollment ? Math.max(0, Math.floor((Date.parse(enrollment.expires_at) - now) / 1000)) : 0
   const command = enrollment ? bootstrapCommand(window.location.origin, enrollment.public_api_url, enrollment.token, enrollment.secrets_url) : ''
@@ -142,20 +148,13 @@ function Dashboard({ client, session }: { client: SupabaseClient; session: Sessi
     try { await navigator.clipboard.writeText(command); setCopied(true); window.setTimeout(() => setCopied(false), 2500) }
     catch { setTokenProblem('Clipboard access is unavailable. Select and copy the command below.') }
   }
-  async function logout() {
-    const { error } = await client.auth.signOut()
-    if (error) setLogoutProblem(error.message)
-  }
-  return <div className="console">
-    <header className="topbar"><Brand /><span className="header-divider" /><span className="workspace-label">Machine console</span><div className="account"><span className="avatar">{(session.user.email || 'U')[0].toUpperCase()}</span><span className="account-email">{session.user.email}</span><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={logout}><LogOut size={17} /></button></div></header>
-    <main className="dashboard">
-      <div className="breadcrumb">WORKSPACE<ChevronRight size={12} /><span>OVERVIEW</span></div>
-      {logoutProblem && <Notice>{logoutProblem}</Notice>}
+  return <>
+      <div className="breadcrumb">ORCHESTRATOR<ChevronRight size={12} /><span>OVERVIEW</span></div>
       <div className="page-heading"><div><span className="eyebrow green">YOUR COMPUTE, CONNECTED</span><h1>Let’s put your machines to work.</h1><p className="muted">Connect a machine. We’ll take care of the configuration.</p></div><a href="#machines" className="text-link">View machines<ArrowDown size={15} /></a></div>
       <div className="onboarding-grid">
         <section className="connect-card" aria-labelledby="connect-title">
           <div className="connect-heading"><span className="terminal-badge"><Terminal size={19} /></span><span>CONNECT A MACHINE</span><span className="step-pill">01 / 02</span></div>
-          <h2 id="connect-title">One command. You’re connected.</h2><p>Run this on your machine to enroll it in your workspace.</p>
+          <h2 id="connect-title">One command. You’re connected.</h2><p>Run this on your machine to enroll it with this orchestrator.</p>
           <div className="command-window"><div className="command-bar"><div className="window-dots"><i /><i /><i /></div><span>root@your-machine ~</span><span>POSIX SH</span></div><div className="command-body"><span className="prompt">$</span><code aria-label="Bootstrap command">{command || (busy ? 'Generating your command…' : 'Generate a command to get started.')}</code></div></div>
           {tokenProblem && <Notice>{tokenProblem}</Notice>}
           <div className="command-actions"><button className="button lime" onClick={copy} disabled={!enrollment || seconds === 0 || busy}>{copied ? <CheckCheck size={16} /> : <Copy size={16} />}{copied ? 'Command copied' : 'Copy command'}</button><button className="regenerate" onClick={generate} disabled={busy}><RefreshCw size={14} className={busy ? 'spin' : ''} />{seconds === 0 && enrollment ? 'Generate new token' : 'Refresh token'}</button><span className="expiry"><span className={`status-dot ${seconds > 0 ? 'active' : ''}`} />{enrollment ? seconds > 0 ? `Expires in ${Math.ceil(seconds / 60)} min` : 'Token expired' : 'One-hour enrollment window'}</span></div>
@@ -168,11 +167,26 @@ function Dashboard({ client, session }: { client: SupabaseClient; session: Sessi
         <div className="machine-panel">{machines === null ? <div className="empty-state"><RefreshCw size={22} className="spin" /><h3>Loading your machines…</h3></div> : machines.length === 0 ? <div className="empty-state"><div className="empty-icon"><Server size={25} /><span><Plus size={12} /></span></div><h3>Your first machine starts here.</h3><p>Run the command above. Your machine will appear<br />here as soon as enrollment succeeds.</p><a href="#connect-title" className="text-link">Ready when you are<ArrowRight size={15} /></a></div> : <div className="table-scroll"><table><thead><tr><th>MACHINE</th><th>WORK READINESS</th><th>ENROLLED / RETIRED</th><th>LAST CONFIG REQUEST</th><th>RUNTIME</th></tr></thead><tbody>{machines.map(machine => <tr key={machine.node_id}><td><div className="machine-name"><span className="machine-glyph"><Server size={17} /></span><div><strong>{machine.hostname}</strong><code>{machine.node_id}</code></div></div></td><td><MachineReadinessBadge machine={machine} /></td><td>{new Date(machine.created_at).toLocaleString()}</td><td>{machine.last_config_fetch_at ? new Date(machine.last_config_fetch_at).toLocaleString() : 'Awaiting first request'}</td><td><button className="button" aria-label={`View status for ${machine.hostname}`} onClick={() => setSelectedMachine(machine.node_id)}>View status</button></td></tr>)}</tbody></table></div>}</div>
         <p className="table-note">Open View status to check work readiness, deployment, apps, tunnel provisioning and discovery. Runtime reporting alone does not mean a node can receive work.</p>
       </section>
-      {machines?.filter(m => m.node_id === selectedMachine).map(m => <MachineStatus key={`${session.user.id}:${m.node_id}`} session={session} machine={m} />)}
-      {config?.secrets_url && <OperatorSecrets session={session} origin={config.secrets_url} />}
-      <Administration key={session.user.id} session={session} />
-      <footer className="dashboard-footer"><span>LIVEPEER / CONTROL CENTER</span><span>YOUR MACHINES. OPEN POSSIBILITIES.</span></footer>
-    </main>
+      {machines?.filter(m => m.node_id === selectedMachine).map(m => <MachineStatus key={`${session.user.id}:${m.node_id}`} session={session} machine={m} authorityFailure={authorityFailure} />)}
+      {config?.secrets_url && <OperatorSecrets session={session} origin={config.secrets_url} address={address} authorityFailure={authorityFailure} />}
+  </>
+}
+
+function Dashboard({ client, session }: { client: SupabaseClient; session: Session }) {
+  const [logoutProblem, setLogoutProblem] = useState('')
+  async function logout() {
+    const { error } = await client.auth.signOut()
+    if (error) setLogoutProblem(error.message)
+  }
+  return <div className="console">
+    <OrchestratorWorkspace session={session} header={selector => <header className="topbar"><Brand /><span className="header-divider" />{selector}<div className="account"><span className="avatar">{(session.user.email || 'U')[0].toUpperCase()}</span><span className="account-email">{session.user.email}</span><button className="icon-button" aria-label="Sign out" title="Sign out" onClick={logout}><LogOut size={17} /></button></div></header>}>
+      {(address, authorityFailure) => <main className="dashboard">
+        {logoutProblem && <Notice>{logoutProblem}</Notice>}
+        {address && <MachineConsole key={`${session.user.id}:${address}`} session={session} address={address} authorityFailure={authorityFailure} />}
+        <Administration key={session.user.id} session={session} />
+        <footer className="dashboard-footer"><span>LIVEPEER / CONTROL CENTER</span><span>YOUR MACHINES. OPEN POSSIBILITIES.</span></footer>
+      </main>}
+    </OrchestratorWorkspace>
   </div>
 }
 

@@ -125,7 +125,7 @@ func Append(ctx context.Context, tx *sql.Tx, node, actor string, a schema.AppAss
 		return e
 	}
 	var denied bool
-	e = tx.QueryRowContext(ctx, `SELECT COALESCE(p.denied,false) FROM lpcc.enrollments m JOIN lpcc.app_revisions r ON r.revision_id=$2 LEFT JOIN lpcc.operator_app_policy p ON p.owner_id=m.owner_id AND p.app_name=r.app_name WHERE m.node_id=$1`, node, a.RevisionID).Scan(&denied)
+	e = tx.QueryRowContext(ctx, `SELECT COALESCE(p.denied,false) FROM lpcc.enrollments m JOIN lpcc.app_revisions r ON r.revision_id=$2 LEFT JOIN lpcc.operator_app_policy p ON p.orchestrator_address=m.orchestrator_address AND p.app_name=r.app_name WHERE m.node_id=$1`, node, a.RevisionID).Scan(&denied)
 	if e != nil {
 		return e
 	}

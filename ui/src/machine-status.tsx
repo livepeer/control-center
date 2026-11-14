@@ -181,7 +181,7 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
       {view.onchain && <section aria-label="Onchain operation">
         <h4>Onchain operation</h4>
         <p>Desired: {view.onchain.desired.mode} · generation {view.onchain.desired.generation}. Delivered generation: {view.onchain.delivered_generation}.</p>
-        {view.onchain.desired.recipient && <p>Recipient: <code>{view.onchain.desired.recipient}</code> · {view.onchain.desired.network}</p>}
+        {view.onchain.desired.recipient && <p>Configured onchain orchestrator: <code>{view.onchain.desired.recipient}</code> · {view.onchain.desired.network}</p>}
         <p>Configuration: {fresh(runtime) && runtime?.onchain?.applied ? `applied generation ${runtime.onchain.generation}` : 'pending or unobserved'}. Local onchain admission: {fresh(runtime) && runtime?.onchain?.mode === 'onchain' && runtime.onchain.ready ? 'ready' : 'not verified'}. Remote handoff: {fresh(runtime) ? runtime?.onchain?.handoff || 'unverified' : 'unverified'}.</p>
         {fresh(runtime) && runtime?.onchain?.mode === 'offchain' && <p>Effective service is free; catalog registration quotes are retained.</p>}
       </section>}

@@ -2,7 +2,7 @@ import { Aes256Gcm, CipherSuite, HkdfSha256 } from '@hpke/core'
 import { DhkemX25519HkdfSha256 } from '@hpke/dhkem-x25519'
 
 export type ServiceTrust = { origin: string; public_key: string }
-export type Binding = { owner_id: string; secret_id: string; name: string; key: string; version_id: string }
+export type Binding = { orchestrator_address: string; secret_id: string; name: string; key: string; version_id: string }
 const utf8 = new TextEncoder()
 export const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b))
 const unb64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
@@ -38,7 +38,7 @@ export async function verifyServiceResponse(trust: ServiceTrust, url: URL, metho
 export async function sealUploadKey(origin: string, binding: Binding, publicKey: string, dataKey: Uint8Array) {
  const suite = new CipherSuite({ kem: new DhkemX25519HkdfSha256(), kdf: new HkdfSha256(), aead: new Aes256Gcm() })
  const recipientPublicKey = await suite.kem.deserializePublicKey(unb64(publicKey))
- const info = utf8.encode(JSON.stringify(['lpcc-data-key-v1', 'upload', origin, binding.owner_id, binding.secret_id, binding.name, binding.key, binding.version_id]))
+ const info = utf8.encode(JSON.stringify(['lpcc-data-key-v1', 'upload', origin, binding.orchestrator_address, binding.secret_id, binding.name, binding.key, binding.version_id]))
  const sealed = await suite.seal({ recipientPublicKey, info }, dataKey)
  const bytes = new Uint8Array(new Uint8Array(sealed.enc).length + new Uint8Array(sealed.ct).length)
  bytes.set(new Uint8Array(sealed.enc))

@@ -289,11 +289,13 @@ func claimTestTunnel(t *testing.T) (*Manager, *recoveryCloudflare, *tunnelLease)
 	owner := "11111111-1111-4111-8111-111111111111"
 	execSQL(t, db, `INSERT INTO auth.users(id) VALUES($1)`, owner)
 	m := Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", InstallDir: "/srv/livepeer", K3sVersion: "v1.37.2+k3s1", CredentialVersion: 1}
-	err := db.QueryRow(`INSERT INTO lpcc.machines(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,'test',$4,$5,1,true) RETURNING node_id::text`, m.NodeID, owner, strings.Repeat("a", 64), m.InstallDir, m.K3sVersion).Scan(&m.NodeID)
+	owner = "0x1111111111111111111111111111111111111111"
+	execSQL(t, db, `INSERT INTO lpcc.orchestrators(address) VALUES($1)`, owner)
+	err := db.QueryRow(`INSERT INTO lpcc.machines(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,'test',$4,$5,1,true) RETURNING node_id::text`, m.NodeID, owner, strings.Repeat("a", 64), m.InstallDir, m.K3sVersion).Scan(&m.NodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
+	execSQL(t, db, `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version) SELECT node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines`)
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	fake := newRecoveryCloudflare()
 	s := New(Config{CloudflareBaseDomain: "fleet.example.invalid", CloudflareAccessLifetime: 24 * time.Hour,
@@ -329,7 +331,7 @@ func TestLeaseFencingOnRetirement(t *testing.T) {
 	if _, err := s.claimTunnel(t.Context(), lease.Machine); err == nil {
 		t.Fatal("concurrent lease acquired")
 	}
-	execSQL(t, s.db, `DELETE FROM auth.users`)
+	execSQL(t, s.db, `DELETE FROM lpcc.machines`)
 	if err := lease.save(t.Context()); !errors.Is(err, errTunnelFenced) {
 		t.Fatal("retired worker was not fenced", err)
 	}

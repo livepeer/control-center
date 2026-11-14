@@ -21,7 +21,7 @@ import (
 
 func (s *Server) enrollmentToken(m Machine) string {
 	mac := hmac.New(sha256.New, []byte(s.params.MachineTokenSecret))
-	mac.Write([]byte("machine:v2:" + m.OwnerID + ":" + m.NodeID + ":" + strconv.FormatInt(m.CredentialVersion, 10)))
+	mac.Write([]byte("machine:v3:" + m.OrchestratorAddress + ":" + m.NodeID + ":" + strconv.FormatInt(m.CredentialVersion, 10)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 func (s *Server) authenticateMachine(ctx context.Context, node, token string, retired bool) (Machine, error) {
@@ -39,7 +39,7 @@ func (s *Server) authenticateMachine(ctx context.Context, node, token string, re
 }
 func (s *Server) machineEnrollment(ctx context.Context, node string) (Machine, error) {
 	var m Machine
-	e := s.db.QueryRowContext(ctx, `SELECT node_id,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&m.NodeID, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal)
+	e := s.db.QueryRowContext(ctx, `SELECT node_id,orchestrator_address::text,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal)
 	if errors.Is(e, sql.ErrNoRows) {
 		return m, problem(404, "machine_not_found", "Machine not found.")
 	}
@@ -92,7 +92,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var m Machine
-	e = tx.QueryRowContext(r.Context(), `SELECT node_id,owner_id::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.OwnerID, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
+	e = tx.QueryRowContext(r.Context(), `SELECT node_id,orchestrator_address::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
 	if errors.Is(e, sql.ErrNoRows) {
 		fail(w, 404, "machine not found")
 		return
@@ -101,7 +101,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	if grant.Subject != m.OwnerID || in.Fingerprint != m.Fingerprint || in.InstallDir != m.InstallDir {
+	if grant.OrchestratorAddress != m.OrchestratorAddress || in.Fingerprint != m.Fingerprint || in.InstallDir != m.InstallDir {
 		fail(w, 403, "installation identity mismatch")
 		return
 	}

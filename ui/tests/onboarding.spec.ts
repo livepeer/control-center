@@ -18,6 +18,7 @@ async function onboard(page: Page, apiURL: string, token = 'header.payload.signa
   await page.route('http://auth.test/**', route => route.fulfill({ json: session.user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', route => {
     switch (new URL(route.request().url()).pathname) {
+      case '/api/orchestrators': return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
       case '/api/config': return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
       case '/api/operator/config':
         expect(route.request().headers().authorization).toBe(`Bearer ${session.access_token}`)

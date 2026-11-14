@@ -5,7 +5,7 @@ const a = '11111111-1111-4111-8111-111111111111'
 const b = '22222222-2222-4222-8222-222222222222'
 const grantA = { grant_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'a@example.invalid', current_email: 'renamed@example.invalid', user_id: a, state: 'bound', revision: 2 }
 const grantB = { grant_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', email: 'b@example.invalid', current_email: null, user_id: b, state: 'bound', revision: 1 }
-const fleet = { node_id: 'vkvkvkvkvkvkuaaaaaaaaaaaaa', hostname: 'private-fleet-machine', owner_id: b, k3s_version: 'v1.37.2+k3s1', created_at: '2026-11-06T00:00:00Z', last_config_fetch_at: null }
+const fleet = { node_id: 'vkvkvkvkvkvkuaaaaaaaaaaaaa', hostname: 'private-fleet-machine', orchestrator_address: b, k3s_version: 'v1.37.2+k3s1', created_at: '2026-11-06T00:00:00Z', last_config_fetch_at: null }
 const expires = Math.floor(Date.now() / 1000) + 3600
 
 function session(id: string) {
@@ -23,6 +23,7 @@ async function setup(page: Page, initialAdmin = true) {
   await page.route('http://auth.test/**', route => route.fulfill({ json: session(a).user, headers: { 'Access-Control-Allow-Origin': '*' } }))
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
+    if (path === '/api/orchestrators') return route.fulfill({ json: { orchestrators: [{ address: '0x1111111111111111111111111111111111111111', display_name: 'Test orchestrator' }] } })
     const actor = route.request().headers().authorization === `Bearer ${session(b).access_token}` ? b : a
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture-public' } })
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'http://localhost:41932' } })

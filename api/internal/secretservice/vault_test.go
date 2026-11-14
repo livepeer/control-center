@@ -40,7 +40,7 @@ func TestRealVaultTransit(t *testing.T) {
 	if _, e = s.Transit.Unwrap(context.Background(), "22222222-2222-4222-8222-222222222222", wrapped); e == nil {
 		t.Fatal("cross-owner unwrap accepted")
 	}
-	req, _ = http.NewRequest("GET", addr+"/v1/transit/keys/operator-"+testOwner, nil)
+	req, _ = http.NewRequest("GET", addr+"/v1/transit/keys/orchestrator-"+testOwner, nil)
 	req.Header.Set("X-Vault-Token", token)
 	res, e = http.DefaultClient.Do(req)
 	if e != nil {

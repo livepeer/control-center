@@ -219,7 +219,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	runtime.Sequence = 5
 	runtime.ObservedAt = time.Now().UTC().Add(time.Hour)
 	requireStatus(t, request(t, s, "POST", p, c["token"], runtime), 200)
-	for _, path := range []string{"/api/machines", "/api/admin/machines"} {
+	for _, path := range []string{"/api/machines?orchestrator_address=" + orchA, "/api/admin/machines"} {
 		w := request(t, s, "GET", path, "session-a", nil)
 		requireStatus(t, w, 200)
 		var list struct {
@@ -266,7 +266,7 @@ func TestNonRunnerOrderDuplicateAgeClockAndCredentialScope(t *testing.T) {
 	r.ReportVersion = 0
 	r.Sequence = 0
 	requireStatus(t, request(t, s, "POST", p, c["token"], r), 409)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	w = request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": c["token"], "fingerprint": strings.Repeat("a", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
 	requireStatus(t, w, 200)
 	credential := credentials(t, w.Body.Bytes())
@@ -404,7 +404,7 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "cleanup_unconfirmed") {
 		t.Fatal("intermediate terminal cleanup hidden")
 	}
-	list := request(t, s, "GET", "/api/machines", "session-a", nil)
+	list := request(t, s, "GET", "/api/machines?orchestrator_address="+orchA, "session-a", nil)
 	requireStatus(t, list, 200)
 	if !strings.Contains(list.Body.String(), m.NodeID) || !strings.Contains(list.Body.String(), "cleanup_pending") {
 		t.Fatal("pending retirement disappeared")
@@ -434,7 +434,7 @@ func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {
 		requireStatus(t, appReport(t, s, c, a, terminal.AppsDigest, "removed"), 200)
 	}
 	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/removal-ack", c["token"], map[string]any{"node_id": m.NodeID, "digest": terminalDigest, "connector_absent": true}), 200)
-	list = request(t, s, "GET", "/api/machines", "session-a", nil)
+	list = request(t, s, "GET", "/api/machines?orchestrator_address="+orchA, "session-a", nil)
 	requireStatus(t, list, 200)
 	if strings.Contains(list.Body.String(), m.NodeID) {
 		t.Fatal("acknowledged retired enrollment still listed")
