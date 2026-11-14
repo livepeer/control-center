@@ -377,7 +377,7 @@ enroll_secrets() {
   if [[ "$status" == 401 ]]; then rm -f -- "$target/setup"; log 'Secrets setup grant expired or revoked; generate a fresh enrollment command.'; return 0; fi
   if [[ "$status" != 200 ]]; then log 'Secrets enrollment pending; no secret values have been installed.'; return 0; fi
   [[ $(jq -r '.node_id' <<< "$response") == "$NODE_ID" ]] || die 'secrets identity mismatch'
-  jq -e '(.owner_id | type == "string" and length > 0) and (.generation | type == "number" and . >= 1 and . == floor)' <<< "$response" >/dev/null || die 'invalid secrets identity'
+  jq -e '(.orchestrator_address | type == "string" and test("^0x[0-9a-f]{40}$") and . != "0x0000000000000000000000000000000000000000") and (.generation | type == "number" and . >= 1 and . == floor)' <<< "$response" >/dev/null || die 'invalid secrets identity'
   jq -e --arg origin "$endpoint" '.origin == $origin and (.public_key | type == "string")' <<< "$candidate" >/dev/null || die 'invalid secrets service identity'
   [[ "$candidate" == "$anchor" ]] || die 'secrets service identity changed; restore the trusted service key before retrying'
   printf '%s' "$anchor" | atomic_write "$target/service.json"

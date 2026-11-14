@@ -35,9 +35,11 @@ func (s *Service) authenticated(next http.HandlerFunc) http.HandlerFunc {
 				c.IssuedAt.After(s.Now().Add(30*time.Second)) || c.Digest != protocol.RequestDigest(r, body) {
 				return nil, protocol.ErrDenied
 			}
-			kid, _ := t.Header["kid"].(string)
-			// Keep accepting proofs without kid from current enrolled keys.
-			e := s.DB.QueryRowContext(r.Context(), `SELECT public_key FROM lpsecrets.identities WHERE node_id=$1 AND ($2='' OR public_key=$2)
+			kid, ok := t.Header["kid"].(string)
+			if !ok || kid == "" {
+				return nil, protocol.ErrDenied
+			}
+			e := s.DB.QueryRowContext(r.Context(), `SELECT public_key FROM lpsecrets.identities WHERE node_id=$1 AND public_key=$2
 UNION SELECT public_key FROM lpsecrets.retired_keys WHERE node_id=$1 AND public_key=$2`, c.Subject, kid).Scan(&id.PublicKey)
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return nil, protocol.ErrUnavailable

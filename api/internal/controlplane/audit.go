@@ -46,7 +46,7 @@ func writeAudit(ctx context.Context, tx *sql.Tx, actorKind, actorID string, acti
 	return err
 }
 
-// Non-admin traffic never creates durable rows. Buckets are keyed only by
+// Denied non-admin traffic never creates durable rows. Buckets are keyed only by
 // server-defined actions, not attacker-controlled identities or request paths.
 type denialWindow struct {
 	start      time.Time

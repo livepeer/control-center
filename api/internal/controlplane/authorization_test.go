@@ -74,7 +74,7 @@ func TestAdministratorLifecycleAndCredentialBoundaries(t *testing.T) {
 	// Direct admin API access must claim without a preliminary /api/me call.
 	fleet := request(t, s, "GET", "/api/admin/machines", "session-a", nil)
 	requireStatus(t, fleet, 200)
-	if !strings.Contains(fleet.Body.String(), ownerB) {
+	if !strings.Contains(fleet.Body.String(), orchB) {
 		t.Fatal("admin cannot see another owner's inventory")
 	}
 	for _, secret := range []string{"fingerprint", "install_dir", "bundle", a["token"], b["token"]} {
@@ -107,8 +107,8 @@ func TestAdministratorLifecycleAndCredentialBoundaries(t *testing.T) {
 		requireStatus(t, request(t, s, "GET", path, "session-a", nil), 403)
 	}
 	requireStatus(t, request(t, s, "POST", "/api/admin/administrators", "session-a", map[string]string{"email": "b@example.invalid"}), 403)
-	requireStatus(t, request(t, s, "GET", "/api/machines", "session-a", nil), 200)
-	requireStatus(t, request(t, s, "POST", "/api/bootstrap-token", "session-a", nil), 200)
+	requireStatus(t, request(t, s, "GET", "/api/machines?orchestrator_address="+orchA, "session-a", nil), 200)
+	requireStatus(t, request(t, s, "POST", "/api/bootstrap-token", "session-a", map[string]string{"orchestrator_address": orchA}), 200)
 	if err := s.BootstrapAdmin(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestAdministratorLifecycleAndCredentialBoundaries(t *testing.T) {
 	var own struct {
 		Machines []Machine `json:"machines"`
 	}
-	if err := json.Unmarshal(request(t, s, "GET", "/api/machines", "session-b", nil).Body.Bytes(), &own); err != nil || len(own.Machines) != 1 {
+	if err := json.Unmarshal(request(t, s, "GET", "/api/machines?orchestrator_address="+orchB, "session-b", nil).Body.Bytes(), &own); err != nil || len(own.Machines) != 1 {
 		t.Fatal("administrator bypassed owner scope", err)
 	}
 	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE actor_id=$1 AND action='administrator.revoke' AND target_id=$2 AND revision='3' AND outcome='success'`, ownerB, grantA) != 1 {
@@ -550,12 +550,12 @@ func TestProvisioningEmailDoesNotGateUUIDAuthority(t *testing.T) {
 			adminA(t, s)
 		}
 		execSQL(t, s.db, `UPDATE auth.users SET email='a..b@example.invalid' WHERE id=$1`, ownerA)
-		for _, path := range []string{"/api/machines", "/api/bootstrap-token"} {
+		for _, path := range []string{"/api/machines?orchestrator_address=" + orchA, "/api/bootstrap-token"} {
 			method := "GET"
 			if path == "/api/bootstrap-token" {
 				method = "POST"
 			}
-			requireStatus(t, request(t, s, method, path, "session-a", nil), 200)
+			requireStatus(t, request(t, s, method, path, "session-a", map[string]string{"orchestrator_address": orchA}), 200)
 		}
 		me := request(t, s, "GET", "/api/me", "session-a", nil)
 		requireStatus(t, me, 200)

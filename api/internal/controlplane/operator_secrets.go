@@ -22,7 +22,7 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 	var out protocol.Machine
 	out.NodeID = node
 	var retired bool
-	e := s.db.QueryRowContext(r.Context(), `SELECT owner_id::text,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&out.Owner, &retired)
+	e := s.db.QueryRowContext(r.Context(), `SELECT orchestrator_address::text,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&out.Owner, &retired)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		fail(w, 503, "unavailable")
 		return
@@ -66,7 +66,7 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 503, "unavailable")
 				return
 			}
-			if err != nil || m.Terminal || m.OwnerID != out.Owner || !hmacEqual(in.ManagementProof, protocol.EnrollmentProof(s.enrollmentToken(m), node, in.PublicKey, in.Nonce)) {
+			if err != nil || m.Terminal || m.OrchestratorAddress != out.Owner || !hmacEqual(in.ManagementProof, protocol.EnrollmentProof(s.enrollmentToken(m), node, in.PublicKey, in.Nonce)) {
 				fail(w, 403, "machine proof required")
 				return
 			}
@@ -92,12 +92,12 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "unavailable")
 		return
 	}
-	e = s.db.QueryRowContext(r.Context(), `SELECT generation FROM lpcc.operator_policy_generation WHERE owner_id=$1`, out.Owner).Scan(&out.PolicyGeneration)
+	e = s.db.QueryRowContext(r.Context(), `SELECT generation FROM lpcc.operator_policy_generation WHERE orchestrator_address=$1`, out.Owner).Scan(&out.PolicyGeneration)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		fail(w, 503, "unavailable")
 		return
 	}
-	denied, err := s.db.QueryContext(r.Context(), `SELECT v.revision_id::text FROM lpcc.machine_app_heads v JOIN lpcc.app_revisions r USING(revision_id) JOIN lpcc.operator_app_policy p ON p.owner_id=$1 AND p.app_name=r.app_name WHERE v.node_id=$2 AND p.denied ORDER BY v.revision_id`, out.Owner, node)
+	denied, err := s.db.QueryContext(r.Context(), `SELECT v.revision_id::text FROM lpcc.machine_app_heads v JOIN lpcc.app_revisions r USING(revision_id) JOIN lpcc.operator_app_policy p ON p.orchestrator_address=$1 AND p.app_name=r.app_name WHERE v.node_id=$2 AND p.denied ORDER BY v.revision_id`, out.Owner, node)
 	if err != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -153,7 +153,12 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	rows, e := s.db.QueryContext(r.Context(), `SELECT r.app_name,r.canonical,COALESCE(p.denied,false),COALESCE(p.generation,0) FROM lpcc.apps a JOIN lpcc.app_revisions r ON r.revision_id=a.head_revision_id LEFT JOIN lpcc.operator_app_policy p ON p.owner_id=$1 AND p.app_name=r.app_name ORDER BY r.app_name`, u.ID)
+	address, e := s.orchestrator(r, u.ID)
+	if e != nil {
+		s.respondError(w, e)
+		return
+	}
+	rows, e := s.db.QueryContext(r.Context(), `SELECT r.app_name,r.canonical,COALESCE(p.denied,false),COALESCE(p.generation,0) FROM lpcc.apps a JOIN lpcc.app_revisions r ON r.revision_id=a.head_revision_id LEFT JOIN lpcc.operator_app_policy p ON p.orchestrator_address=$1 AND p.app_name=r.app_name ORDER BY r.app_name`, address)
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -194,7 +199,7 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 		seenRequested := map[string]bool{}
 		aliases := append([]schema.App(nil), d.Apps...)
 		references := []schema.SecretEnvironment{}
-		usage, e := s.db.QueryContext(r.Context(), `SELECT v.node_id,r.canonical,(v.intent->>'desired'='present' OR c.received_at IS NULL) FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) JOIN lpcc.app_revisions r USING(revision_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.owner_id=$1 AND r.app_name=$2 AND (v.intent->>'desired'='present' OR c.received_at IS NULL OR q.intent->>'desired'='present') ORDER BY v.node_id,v.revision_id`, u.ID, name)
+		usage, e := s.db.QueryContext(r.Context(), `SELECT v.node_id,r.canonical,(v.intent->>'desired'='present' OR c.received_at IS NULL) FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) JOIN lpcc.app_revisions r USING(revision_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.orchestrator_address=$1 AND r.app_name=$2 AND (v.intent->>'desired'='present' OR c.received_at IS NULL OR q.intent->>'desired'='present') ORDER BY v.node_id,v.revision_id`, address, name)
 		if e != nil {
 			s.databaseError(w, e)
 			return
@@ -264,6 +269,11 @@ func (s *Server) operatorPolicy(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
+	address, e := protocol.OrchestratorAddress(r.URL.Query().Get("orchestrator_address"))
+	if e != nil {
+		s.respondError(w, problem(400, "invalid_orchestrator", "Choose an orchestrator."))
+		return
+	}
 	name := r.PathValue("name")
 	var in struct {
 		Denied   bool  `json:"denied"`
@@ -273,15 +283,23 @@ func (s *Server) operatorPolicy(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid policy")
 		return
 	}
-	tx, e := s.policyTx(r.Context())
+	tx, e := s.db.BeginTx(r.Context(), nil)
 	if e != nil {
 		s.databaseError(w, e)
 		return
 	}
 	defer tx.Rollback()
+	if e = lockMembership(r.Context(), tx, u.ID, address); e != nil {
+		s.respondError(w, e)
+		return
+	}
+	if _, e = tx.ExecContext(r.Context(), `SELECT pg_advisory_xact_lock(1129073483,2)`); e != nil {
+		s.respondError(w, e)
+		return
+	}
 	var gen int64
 	var denied bool
-	e = tx.QueryRowContext(r.Context(), `SELECT generation,denied FROM lpcc.operator_app_policy WHERE owner_id=$1 AND app_name=$2 FOR UPDATE`, u.ID, name).Scan(&gen, &denied)
+	e = tx.QueryRowContext(r.Context(), `SELECT generation,denied FROM lpcc.operator_app_policy WHERE orchestrator_address=$1 AND app_name=$2 FOR UPDATE`, address, name).Scan(&gen, &denied)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		s.databaseError(w, e)
 		return
@@ -299,15 +317,15 @@ func (s *Server) operatorPolicy(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]any{"generation": gen, "changed": false})
 		return
 	}
-	_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.operator_app_policy VALUES($1,$2,$3,1) ON CONFLICT(owner_id,app_name) DO UPDATE SET denied=EXCLUDED.denied,generation=lpcc.operator_app_policy.generation+1`, u.ID, name, in.Denied)
+	_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.operator_app_policy VALUES($1,$2,$3,1) ON CONFLICT(orchestrator_address,app_name) DO UPDATE SET denied=EXCLUDED.denied,generation=lpcc.operator_app_policy.generation+1`, address, name, in.Denied)
 	if e == nil {
-		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.operator_policy_generation(owner_id) VALUES($1) ON CONFLICT(owner_id) DO UPDATE SET generation=lpcc.operator_policy_generation.generation+1`, u.ID)
+		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.operator_policy_generation(orchestrator_address) VALUES($1) ON CONFLICT(orchestrator_address) DO UPDATE SET generation=lpcc.operator_policy_generation.generation+1`, address)
 	}
 	if e != nil {
 		s.databaseError(w, e)
 		return
 	}
-	rows, e := tx.QueryContext(r.Context(), `SELECT node_id FROM lpcc.machines WHERE owner_id=$1 ORDER BY node_id FOR UPDATE`, u.ID)
+	rows, e := tx.QueryContext(r.Context(), `SELECT node_id FROM lpcc.machines WHERE orchestrator_address=$1 ORDER BY node_id FOR UPDATE`, address)
 	if e != nil {
 		s.databaseError(w, e)
 		return
@@ -326,7 +344,7 @@ func (s *Server) operatorPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, node := range nodes {
-		if e = applyOwnerPolicy(r.Context(), tx, node, u.ID, name, in.Denied); e != nil {
+		if e = applyOwnerPolicy(r.Context(), tx, node, address, name, in.Denied); e != nil {
 			if errors.Is(e, machineapps.ErrRequestedBudget) {
 				fail(w, 409, "requested assignments exceed machine limits")
 				return
@@ -334,6 +352,14 @@ func (s *Server) operatorPolicy(w http.ResponseWriter, r *http.Request) {
 			s.databaseError(w, e)
 			return
 		}
+	}
+	action := AdminAction("orchestrator.policy.allow")
+	if in.Denied {
+		action = "orchestrator.policy.deny"
+	}
+	if e = writeAudit(r.Context(), tx, "user", u.ID, action, AdminTarget{Kind: "orchestrator_policy", ID: address + "/" + name, Revision: revisionString(gen + 1)}, "success", "changed"); e != nil {
+		s.databaseError(w, e)
+		return
 	}
 	if tx.Commit() != nil {
 		fail(w, 503, "policy pending")

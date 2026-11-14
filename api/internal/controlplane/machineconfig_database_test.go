@@ -80,7 +80,7 @@ func TestCredentialRefreshSerializesWithBlockedStateWrite(t *testing.T) {
 	written := make(chan error, 1)
 	go func() { written <- lease.Save(t.Context()) }()
 	waitForStateLock(t, s, "UPDATE lpcc.machine_states SET state=%", 1)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	refreshed := make(chan int, 1)
 	go func() {
 		refreshed <- request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": s.enrollmentToken(m), "fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}).Code
@@ -287,7 +287,7 @@ func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute, StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !refreshed {
 			refreshed = true
-			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": s.enrollmentToken(m), "fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}), 200)
 		}
 		return nil, nil
@@ -325,7 +325,7 @@ func TestTerminalBundleUsesRetirementCredential(t *testing.T) {
 	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Build: func(d machineconfig.Desired) ([]byte, string, error) {
 		if d.NodeID == one["node_id"] && !changed {
 			changed = true
-			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+			jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 			requireStatus(t, request(t, s, "POST", "/v1/nodes/"+m.NodeID+"/credentials/refresh", jwt, map[string]any{"management_proof": s.enrollmentToken(m), "fingerprint": m.Fingerprint, "install_dir": m.InstallDir, "operation_id": uuid.New().String(), "expected_credential_version": 1}), 200)
 			if err := s.RetireMachine(t.Context(), m.NodeID); err != nil {
 				t.Fatal(err)

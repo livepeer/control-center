@@ -2,14 +2,12 @@ package controlplane
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
-	"strings"
 	"time"
 	"uuid"
 
@@ -21,7 +19,8 @@ const enrollmentAudience = "livepeer-enrollment"
 
 type enrollmentClaims struct {
 	jwt.RegisteredClaims
-	Scope string `json:"scope"`
+	Scope               string `json:"scope"`
+	OrchestratorAddress string `json:"orchestrator_address"`
 }
 
 func (p Params) signingKeyID() string {
@@ -54,12 +53,12 @@ func (p Params) enrollmentKeys() (map[string]string, error) {
 	return keys, nil
 }
 
-func signEnrollment(secret, owner string, now time.Time) (string, time.Time, error) {
-	return (Params{JWTSigningSecret: secret}).signEnrollment(owner, now)
+func signEnrollment(secret, owner, address string, now time.Time) (string, time.Time, error) {
+	return (Params{JWTSigningSecret: secret}).signEnrollment(owner, address, now)
 }
-func (p Params) signEnrollment(owner string, now time.Time) (string, time.Time, error) {
+func (p Params) signEnrollment(owner, address string, now time.Time) (string, time.Time, error) {
 	expires := now.Add(time.Hour).Truncate(time.Second)
-	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: owner, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires), ID: uuid.New().String()}, Scope: "machines:register"}
+	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: owner, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires), ID: uuid.New().String()}, Scope: "machines:register", OrchestratorAddress: address}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
 	token.Header["kid"] = p.signingKeyID()
 	raw, e := token.SignedString([]byte(p.JWTSigningSecret))
@@ -81,40 +80,29 @@ func (p Params) enrollmentGrant(raw string, now time.Time, expired bool) (*enrol
 	if expired {
 		opts = append(opts, jwt.WithoutClaimsValidation())
 	}
-	// Tokens issued before key IDs were introduced remain valid for their
-	// original hour. They can also be explicitly revoked by their signed hash.
-	for _, legacyKey := range keys {
-		c := new(enrollmentClaims)
-		_, e = jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
-			if value, ok := t.Header["kid"]; ok {
-				id, ok := value.(string)
-				if !ok || id == "" || keys[id] == "" {
-					return nil, errors.New("unknown enrollment key")
-				}
-				return []byte(keys[id]), nil
-			}
-			return []byte(legacyKey), nil
-		}, opts...)
-		if e != nil {
-			continue
+	c := new(enrollmentClaims)
+	_, e = jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
+		id, ok := t.Header["kid"].(string)
+		if !ok || keys[id] == "" {
+			return nil, errors.New("unknown enrollment key")
 		}
-		if c.Issuer != enrollmentIssuer || len(c.Audience) != 1 || c.Audience[0] != enrollmentAudience || c.Scope != "machines:register" || c.ExpiresAt == nil || c.IssuedAt == nil || c.IssuedAt.After(now) || !c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > time.Hour {
-			break
-		}
-		id, e := uuid.Parse(c.Subject)
-		if e != nil || id == uuid.Nil() {
-			break
-		}
-		c.Subject = id.String()
-		if c.ID == "" {
-			// Signature encodings can vary without changing the verified MAC.
-			// Identity comes from the authenticated signing input, never its alias.
-			digest := sha256.Sum256([]byte(raw[:strings.LastIndexByte(raw, '.')]))
-			c.ID = "legacy-" + hex.EncodeToString(digest[:])
-		}
-		return c, nil
+		return []byte(keys[id]), nil
+	}, opts...)
+	invalid := errors.New("invalid or expired enrollment token")
+	if e != nil || c.Issuer != enrollmentIssuer || len(c.Audience) != 1 || c.Audience[0] != enrollmentAudience || c.Scope != "machines:register" || c.ID == "" || c.ExpiresAt == nil || c.IssuedAt == nil || c.IssuedAt.After(now) || !c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > time.Hour {
+		return nil, invalid
 	}
-	return nil, errors.New("invalid or expired enrollment token")
+	id, e := uuid.Parse(c.Subject)
+	if e != nil || id == uuid.Nil() {
+		return nil, invalid
+	}
+	c.Subject = id.String()
+	address, e := protocol.OrchestratorAddress(c.OrchestratorAddress)
+	if e != nil {
+		return nil, invalid
+	}
+	c.OrchestratorAddress = address
+	return c, nil
 }
 
 func (s *Server) currentTime() time.Time {
@@ -128,6 +116,9 @@ func lockEnrollmentGrant(ctx context.Context, tx *sql.Tx, id string) error {
 	return e
 }
 func (s *Server) acceptEnrollmentGrant(ctx context.Context, tx *sql.Tx, c *enrollmentClaims) error {
+	if e := lockMembership(ctx, tx, c.Subject, c.OrchestratorAddress); e != nil {
+		return e
+	}
 	if e := lockEnrollmentGrant(ctx, tx, c.ID); e != nil {
 		return e
 	}
@@ -171,6 +162,10 @@ func (s *Server) revokeEnrollmentGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if e = lockMembership(r.Context(), tx, owner.ID, c.OrchestratorAddress); e != nil {
+		s.respondError(w, e)
+		return
+	}
 	if e = lockEnrollmentGrant(r.Context(), tx, c.ID); e != nil {
 		s.databaseError(w, e)
 		return
@@ -179,14 +174,14 @@ func (s *Server) revokeEnrollmentGrant(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]bool{"changed": false})
 		return
 	}
-	res, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.revoked_enrollment_grants(jti,owner_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, c.ID, owner.ID, c.ExpiresAt.Time)
+	res, e := tx.ExecContext(r.Context(), `INSERT INTO lpcc.revoked_enrollment_grants(jti,actor_user_id,orchestrator_address,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, c.ID, owner.ID, c.OrchestratorAddress, c.ExpiresAt.Time)
 	if e != nil {
 		s.databaseError(w, e)
 		return
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(owner_id,action,target) VALUES($1,'grant.revoke',$2)`, owner.ID, c.ID)
+		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(actor_user_id,orchestrator_address,action,target) VALUES($1,$2,'grant.revoke',$3)`, owner.ID, c.OrchestratorAddress, c.ID)
 	}
 	if e != nil {
 		s.databaseError(w, e)

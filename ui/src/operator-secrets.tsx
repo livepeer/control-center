@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
-import { api } from './api'
+import { api as requestAPI, APIError } from './api'
 import { b64, saveServicePin, sealUploadKey, servicePin, verifyServiceResponse } from './secret-crypto'
 import type { ServiceTrust } from './secret-crypto'
 
-type Secret = { owner_id: string; secret_id: string; name: string; key: string; version_id: string; revision: number; deleted: boolean }
+type Secret = { orchestrator_address: string; secret_id: string; name: string; key: string; version_id: string; revision: number; deleted: boolean }
 type Reference = { name: string; secret: string; key: string }
 type App = { name: string; aliases?: {name: string}[]; denied: boolean; generation: number; secrets: Reference[]; catalog_secrets?: Reference[]; machines?: string[]; requested_machines?: string[] }
 type Editor = { scope: 'group' | 'inventory'; name: string; key: string; secret?: Secret; action: 'save' | 'delete' }
@@ -19,9 +19,11 @@ function declarationSources(app: App, name: string, key?: string): string {
  if (((app.requested_machines?.length ?? 0) > 0 || (app.machines?.length ?? 0) > 0) && app.secrets.some(matches)) sources.push('Machine revisions')
  return sources.join(' · ')
 }
-async function serviceRequest<T>(session: Session, origin: string, path: string, options: RequestInit, enrollment = false): Promise<T> {
+async function serviceRequest<T>(session: Session, origin: string, address: string, path: string, options: RequestInit, enrollment = false): Promise<T> {
  const url = new URL(path, origin)
  if (url.origin !== new URL(origin).origin || (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname))) throw new Error('The secrets service requires an HTTPS origin.')
+ options.signal?.throwIfAborted()
+ url.searchParams.set('orchestrator_address', address)
  const pin = servicePin(origin)
  if (!pin && !enrollment) throw new Error('Generate an enrollment command in this browser to trust the secrets service first.')
  url.searchParams.set('nonce', b64(crypto.getRandomValues(new Uint8Array(32))))
@@ -31,7 +33,8 @@ async function serviceRequest<T>(session: Session, origin: string, path: string,
  const raw = await response.text()
  if (pin) await verifyServiceResponse(pin, url, method, headers.get('Authorization')!, request, response, raw)
  const body = JSON.parse(raw)
- if (!response.ok) throw new Error(typeof body.code === 'string' ? body.code.replaceAll('_',' ') : 'Secrets service unavailable.')
+ options.signal?.throwIfAborted()
+ if (!response.ok) throw new APIError(response.status, typeof body.code === 'string' ? body.code.replaceAll('_',' ') : 'Secrets service unavailable.',typeof body.code === 'string' ? body.code : '')
  if (enrollment) {
   const trust = body.service as ServiceTrust
   if (!trust || new URL(trust.origin).origin !== url.origin) throw new Error('Invalid secrets service enrollment identity.')
@@ -40,11 +43,11 @@ async function serviceRequest<T>(session: Session, origin: string, path: string,
  }
  return body as T
 }
-export function secretsAPI<T>(session: Session, origin: string, path: string, options: RequestInit = {}): Promise<T> {
- return serviceRequest<T>(session, origin, path, options)
+export function secretsAPI<T>(session: Session, origin: string, address: string, path: string, options: RequestInit = {}): Promise<T> {
+ return serviceRequest<T>(session, origin, address, path, options)
 }
-export function enrollSecretsService<T>(session: Session, origin: string): Promise<T> {
- return serviceRequest<T>(session, origin, '/v1/enrollment-grants', {method:'POST'}, true)
+export function enrollSecretsService<T>(session: Session, origin: string, address: string, signal?: AbortSignal): Promise<T> {
+ return serviceRequest<T>(session, origin, address, '/v1/enrollment-grants', {method:'POST', signal}, true)
 }
 export function enrollmentEnvelope(control: string, setup: string): string {
  return 'lpcc1.' + b64(new TextEncoder().encode(JSON.stringify({version:1, control, setup}))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','')
@@ -54,12 +57,18 @@ export async function encryptSecret(binding: Secret, value: string) {
  if (bytes.length > 65536 || value.includes('\0')) throw new Error('Use a UTF-8 value up to 64 KiB without NUL characters.')
  const raw = crypto.getRandomValues(new Uint8Array(32)), nonce = crypto.getRandomValues(new Uint8Array(12))
  const key = await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['encrypt'])
- const aad = new TextEncoder().encode(JSON.stringify([1,binding.owner_id,binding.secret_id,binding.name,binding.key,binding.version_id]))
+ const aad = new TextEncoder().encode(JSON.stringify([1,binding.orchestrator_address,binding.secret_id,binding.name,binding.key,binding.version_id]))
  const encrypted = await crypto.subtle.encrypt({name:'AES-GCM',iv:nonce,additionalData:aad,tagLength:128},key,bytes)
  bytes.fill(0)
  return {dataKey:raw, nonce:b64(nonce),ciphertext:b64(new Uint8Array(encrypted))}
 }
-export function OperatorSecrets({session, origin}: {session: Session; origin: string}) {
+export function OperatorSecrets({session, origin, address, authorityFailure}: {session: Session; origin: string; address: string; authorityFailure: (error: unknown) => void}) {
+ const controller = useRef(new AbortController())
+ const signal = controller.current.signal
+ const scoped = (path: string) => path + (path.includes('?') ? '&' : '?') + 'orchestrator_address=' + encodeURIComponent(address)
+ const api = <T,>(session: Session, path: string, options: RequestInit = {}) => requestAPI<T>(session, scoped(path), {...options, signal})
+ const request = <T,>(path: string, options: RequestInit = {}) => secretsAPI<T>(session, origin, address, path, {...options, signal})
+ useEffect(() => () => controller.current.abort(), [])
  const [secrets, setSecrets] = useState<Secret[] | null>(null)
  const [apps, setApps] = useState<App[] | null>(null)
  const [appName, setAppName] = useState(''), [name, setName] = useState('')
@@ -73,13 +82,15 @@ export function OperatorSecrets({session, origin}: {session: Session; origin: st
   const generation = ++refreshGeneration.current
   setLoading(true)
   const [s, a] = await Promise.allSettled([
-   servicePin(origin) ? secretsAPI<{secrets: Secret[]}>(session, origin, '/v1/secrets') : Promise.resolve(null),
+   servicePin(origin) ? request<{secrets: Secret[]}>('/v1/secrets') : Promise.resolve(null),
    api<{apps: App[]}>(session, '/api/operator/apps'),
   ])
-  if (generation !== refreshGeneration.current) return
+  if (signal.aborted || generation !== refreshGeneration.current) return
   // Retain the last successful data on failure, but disable mutations until a fresh read succeeds.
   if (s.status === 'fulfilled') setSecrets(s.value?.secrets ?? null)
   if (a.status === 'fulfilled') setApps(a.value.apps)
+  if (s.status === 'rejected') authorityFailure(s.reason)
+  if (a.status === 'rejected') authorityFailure(a.reason)
   setSecretsProblem(s.status === 'rejected' ? 'Could not load secrets.' : '')
   setAppProblem(a.status === 'rejected' ? 'Could not load app access.' : '')
   setLoading(false)
@@ -90,7 +101,7 @@ export function OperatorSecrets({session, origin}: {session: Session; origin: st
   load()
   window.addEventListener('lpcc-secrets-enrolled', load)
   return () => { refreshGeneration.current++; contextGeneration.current++; window.removeEventListener('lpcc-secrets-enrolled', load) }
- }, [session.access_token, origin])
+ }, [session.access_token, origin, address])
 
  const selectedApp = apps?.find(app => app.name === appName)
  const groups = selectedApp ? [...new Set(references(selectedApp).map(ref => ref.secret))].sort() : []
@@ -115,9 +126,11 @@ export function OperatorSecrets({session, origin}: {session: Session; origin: st
   if (changing.current) return
   changing.current = true; setBusy(true); setProblem(''); setMessage('')
   const context = contextGeneration.current
-  const current = () => context === contextGeneration.current
+  const current = () => !signal.aborted && context === contextGeneration.current
   try { await fn(current) }
   catch (error) {
+   if (signal.aborted) return
+   authorityFailure(error)
    if (!current()) return
    const text = error instanceof Error ? error.message : 'Operation failed.'
    if (text === 'secret conflict') {
@@ -143,20 +156,21 @@ export function OperatorSecrets({session, origin}: {session: Session; origin: st
   const draft = editor
   await perform(async current => {
    if (new TextEncoder().encode(value).length > 65536 || value.includes('\0')) throw new Error('Use a UTF-8 value up to 64 KiB without NUL characters.')
-   const binding = await secretsAPI<Secret>(session, origin, '/v1/secrets/reserve', {method: 'POST', body: JSON.stringify({name: draft.name, key: draft.key, expected_revision: draft.secret?.revision ?? 0})})
+   const binding = await request<Secret>('/v1/secrets/reserve', {method: 'POST', body: JSON.stringify({name: draft.name, key: draft.key, expected_revision: draft.secret?.revision ?? 0})})
    if (!current()) return
+   if (binding.orchestrator_address !== address) throw new Error('Secret belongs to a different orchestrator.')
    // A failed first upload can leave a reservation. Retrying it must use its revision.
    setEditor({...draft, secret: {...binding, version_id: draft.secret?.version_id ?? ''}})
    const encrypted = await encryptSecret(binding, value)
    try {
     if (!current()) return
-    const serviceKey = await secretsAPI<{public_key: string}>(session, origin, '/v1/encryption-key')
+    const serviceKey = await request<{public_key: string}>('/v1/encryption-key')
     if (!current()) return
     const sealedKey = await sealUploadKey(servicePin(origin)!.origin, binding, serviceKey.public_key, encrypted.dataKey)
     if (!current()) return
-    const wrapped = await secretsAPI<{wrapped_key: string}>(session, origin, `/v1/secrets/${binding.secret_id}/wrap`, {method: 'POST', body: JSON.stringify({version_id: binding.version_id, sealed_key: sealedKey})})
+    const wrapped = await request<{wrapped_key: string}>(`/v1/secrets/${binding.secret_id}/wrap`, {method: 'POST', body: JSON.stringify({version_id: binding.version_id, sealed_key: sealedKey})})
     if (!current()) return
-    await secretsAPI(session, origin, `/v1/secrets/${binding.secret_id}`, {method: 'PUT', body: JSON.stringify({owner_id: binding.owner_id, secret_id: binding.secret_id, name: binding.name, key: binding.key, version_id: binding.version_id, nonce: encrypted.nonce, ciphertext: encrypted.ciphertext, wrapped_key: wrapped.wrapped_key})})
+    await request(`/v1/secrets/${binding.secret_id}`, {method: 'PUT', body: JSON.stringify({orchestrator_address: binding.orchestrator_address, secret_id: binding.secret_id, name: binding.name, key: binding.key, version_id: binding.version_id, nonce: encrypted.nonce, ciphertext: encrypted.ciphertext, wrapped_key: wrapped.wrapped_key})})
    } finally { encrypted.dataKey.fill(0) }
    if (!current()) return
    clearEditor()
@@ -167,7 +181,7 @@ export function OperatorSecrets({session, origin}: {session: Session; origin: st
   if (!editor?.secret || !canManage) return
   const secret = editor.secret
   await perform(async current => {
-   await secretsAPI(session, origin, `/v1/secrets/${secret.secret_id}`, {method: 'DELETE', body: JSON.stringify({expected_revision: secret.revision})})
+   await request(`/v1/secrets/${secret.secret_id}`, {method: 'DELETE', body: JSON.stringify({expected_revision: secret.revision})})
    if (!current()) return
    clearEditor()
    setMessage('Deletion accepted. Dependent apps will drain; offline machines remain pending.')

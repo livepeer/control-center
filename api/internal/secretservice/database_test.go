@@ -20,13 +20,174 @@ import (
 	"time"
 )
 
+const testUser = "11111111-1111-4111-8111-111111111111"
+const testOwner = "0x1111111111111111111111111111111111111111"
 const testMachineCredential = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
-const testOwner = "11111111-1111-4111-8111-111111111111"
-
 type testMetadata struct {
-	machine protocol.Machine
-	after   func(*protocol.MachineBinding) error
+	machine    protocol.Machine
+	after      func(*protocol.MachineBinding) error
+	membership func(string, string) error
+}
+
+func TestOrchestratorSecretsAreSharedAndMachineIdentityOutlivesIssuer(t *testing.T) {
+	s, key, m, vault := dbService(t)
+	id := enrolled(t, s, key, m)
+	second := "22222222-2222-4222-8222-222222222222"
+	other := "0x2222222222222222222222222222222222222222"
+	users := map[string]bool{testUser: true, second: true}
+	m.membership = func(user, address string) error {
+		if !users[user] || (address != testOwner && address != other) {
+			return protocol.ErrDenied
+		}
+		return nil
+	}
+	s.HTTP.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		user := testUser
+		if r.Header.Get("Authorization") == "Bearer second-member" {
+			user = second
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: ioBody(`{"id":"` + user + `"}`)}, nil
+	})
+	reserve := func(token, address string) protocol.Binding {
+		t.Helper()
+		w := call(t, s, "/v1/secrets/reserve?orchestrator_address="+address, "POST", token, map[string]any{"name": "lp-app-provider", "key": "token", "expected_revision": 0}, nil)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var binding protocol.Binding
+		if json.Unmarshal(w.Body.Bytes(), &binding) != nil || binding.Owner != address {
+			t.Fatal(w.Body.String())
+		}
+		return binding
+	}
+	a := reserve("operator", testOwner)
+	b := reserve("second-member", other)
+	if a.ID == b.ID {
+		t.Fatal("orchestrator namespaces collided")
+	}
+	w := call(t, s, "/v1/secrets", "GET", "second-member", nil, nil)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), a.ID) || strings.Contains(w.Body.String(), b.ID) {
+		t.Fatal("shared secret inventory was mixed", w.Code, w.Body.String())
+	}
+	w = call(t, s, "/v1/secrets/"+b.ID, "DELETE", "second-member", map[string]int{"expected_revision": 1}, nil)
+	if w.Code != 409 {
+		t.Fatal("cross-orchestrator deletion was accepted", w.Code)
+	}
+	w = call(t, s, "/v1/secrets/"+a.ID, "DELETE", "second-member", map[string]int{"expected_revision": 1}, nil)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var actor, owner string
+	if err := s.DB.QueryRow(`SELECT actor_id,orchestrator_address FROM lpsecrets.audit WHERE action='secret.delete'`).Scan(&actor, &owner); err != nil || actor != second || owner != testOwner {
+		t.Fatal("audit conflated actor and owner", actor, owner, err)
+	}
+	grant, _, _ := s.Grant(testUser, testOwner)
+	if w = call(t, s, "/v1/enrollment-grants/revoke", "POST", "second-member", map[string]string{"token": grant}, nil); w.Code != 403 {
+		t.Fatal("co-member revoked another issuer's grant", w.Code)
+	}
+	var revocations int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM lpsecrets.revoked_grants`).Scan(&revocations); err != nil || revocations != 0 {
+		t.Fatal("cross-member rejection wrote revocation", revocations, err)
+	}
+	if w = call(t, s, "/v1/enrollment-grants/revoke", "POST", "operator", map[string]string{"token": grant}, nil); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if err := s.DB.QueryRow(`SELECT actor_user_id::text,orchestrator_address FROM lpsecrets.revoked_grants`).Scan(&actor, &owner); err != nil || actor != testUser || owner != testOwner {
+		t.Fatal("grant revocation actor/scope was incorrect", actor, owner, err)
+	}
+	grant, _, _ = s.Grant(testUser, testOwner)
+	delete(users, testUser)
+	in := enrollmentRequest(m.machine.NodeID, key)
+	if w = call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 403 {
+		t.Fatal("departed issuer could enroll", w.Code)
+	}
+	// Runtime authorization follows the machine, not the human who enrolled it.
+	w = call(t, s, "/v1/runtime/batch", "POST", "", map[string]any{"assignments": []any{}}, id)
+	if w.Code != 200 {
+		t.Fatal("departed issuer revoked runtime identity", w.Code, w.Body.String())
+	}
+	if vault.calls.Load() != 0 {
+		t.Fatal("metadata/denied operations reached Vault")
+	}
+}
+
+func TestEnrollmentMembershipRevocation(t *testing.T) {
+	for _, stage := range []string{"identity-lock", "metadata-call"} {
+		t.Run(stage, func(t *testing.T) {
+			s, key, m, _ := dbService(t)
+			var allowed atomic.Bool
+			allowed.Store(true)
+			m.membership = func(user, address string) error {
+				if !allowed.Load() {
+					return protocol.ErrDenied
+				}
+				return nil
+			}
+			grant, _, _ := s.Grant(testUser, testOwner)
+			in := enrollmentRequest(m.machine.NodeID, key)
+			var release func()
+			if stage == "identity-lock" {
+				tx, err := s.DB.Begin()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				if err = lockIdentity(t.Context(), tx, m.machine.NodeID); err != nil {
+					t.Fatal(err)
+				}
+				release = func() {
+					if err := tx.Commit(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				m.after = func(*protocol.MachineBinding) error { allowed.Store(false); return nil }
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- call(t, s, "/v1/machines/enroll", "POST", grant, in, nil) }()
+			if release != nil {
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					var waiting bool
+					if err := s.DB.QueryRow(`SELECT EXISTS(SELECT FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))`).Scan(&waiting); err != nil {
+						t.Fatal(err)
+					}
+					if waiting {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("enrollment did not reach identity lock")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				allowed.Store(false)
+				release()
+			}
+			w := <-done
+			status, identities := 403, 0
+			if stage == "metadata-call" {
+				status, identities = 200, 1
+			}
+			if w.Code != status {
+				t.Fatal("unexpected enrollment result", w.Code, w.Body.String())
+			}
+			var count int
+			if err := s.DB.QueryRow(`SELECT count(*) FROM lpsecrets.identities`).Scan(&count); err != nil || count != identities {
+				t.Fatal("unexpected enrollment identity count", count, err)
+			}
+		})
+	}
+}
+
+func (m *testMetadata) Member(_ context.Context, user, address string) error {
+	if m.membership != nil {
+		return m.membership(user, address)
+	}
+	if user != testUser || address != m.machine.Owner {
+		return protocol.ErrDenied
+	}
+	return nil
 }
 
 func (m *testMetadata) Machine(_ context.Context, _ string, in *protocol.MachineBinding) (protocol.Machine, error) {
@@ -88,7 +249,7 @@ func dbService(t *testing.T) (*Service, ed25519.PrivateKey, *testMetadata, *test
 		t.Fatal(e)
 	}
 	s.HTTP.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: ioBody(`{"id":"` + testOwner + `"}`)}, nil
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: ioBody(`{"id":"` + testUser + `"}`)}, nil
 	})
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
 	m := &testMetadata{machine: protocol.Machine{NodeID: "test-node", Owner: testOwner, Active: true, PublicKey: base64.StdEncoding.EncodeToString(pub), EncryptionReady: true, PolicyGeneration: 1}}
@@ -105,6 +266,14 @@ func (*bodyReader) Close() error { return nil }
 func call(t *testing.T, s *Service, path, method, token string, in any, id *testIdentity) *httptest.ResponseRecorder {
 	t.Helper()
 	b, _ := json.Marshal(in)
+	if id == nil && path != "/v1/machines/enroll" {
+		if strings.Contains(path, "?") {
+			path += "&"
+		} else {
+			path += "?"
+		}
+		path += "orchestrator_address=" + testOwner
+	}
 	r := httptest.NewRequest(method, s.Config.PublicURL+path, bytes.NewReader(b))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -132,7 +301,7 @@ func enrollmentRequest(node string, key ed25519.PrivateKey) protocol.EnrollReque
 
 func enrolled(t *testing.T, s *Service, key ed25519.PrivateKey, m *testMetadata) *testIdentity {
 	t.Helper()
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	in := enrollmentRequest(m.machine.NodeID, key)
 	w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil)
 	if w.Code != 200 {
@@ -163,7 +332,7 @@ func TestDatabaseStatelessGrantsRevocationAndIdentity(t *testing.T) {
 	if vault.calls.Load() != 0 {
 		t.Fatal("issuance called Vault")
 	}
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	c, _ := s.grant(grant, false)
 	for range 2 {
 		w := call(t, s, "/v1/enrollment-grants/revoke", "POST", "operator", map[string]string{"token": grant}, nil)
@@ -210,7 +379,7 @@ func TestRevocationRechecksExpiryAfterWaitingForGrantLock(t *testing.T) {
 	var clock atomic.Int64
 	clock.Store(time.Now().Unix())
 	s.Now = func() time.Time { return time.Unix(clock.Load(), 0) }
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	c, _ := s.grant(grant, false)
 	tx, e := s.DB.BeginTx(t.Context(), nil)
 	if e != nil {
@@ -257,7 +426,7 @@ func TestConcurrentEnrollmentAndRevocation(t *testing.T) {
 	s, key, m, _ := dbService(t)
 	in := enrollmentRequest(m.machine.NodeID, key)
 	for range 5 {
-		grant, _, _ := s.Grant(testOwner)
+		grant, _, _ := s.Grant(testUser, testOwner)
 		start := make(chan struct{})
 		enrollment, revocation := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
 		go func() {
@@ -459,7 +628,7 @@ func TestResetFencesEveryPreviousKey(t *testing.T) {
 	s, key, metadata, _ := dbService(t)
 	old := enrolled(t, s, key, metadata)
 	initialKey := key
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	for epoch := int64(2); epoch <= 3; epoch++ {
 		node := metadata.machine.NodeID
 		if w := call(t, s, "/v1/machines/"+node+"/reset", "POST", "operator", nil, nil); w.Code != 200 {
@@ -504,7 +673,7 @@ func TestRevokeCancelsPendingReset(t *testing.T) {
 		}
 	}
 	_, replacement, _ := ed25519.GenerateKey(rand.Reader)
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	in := enrollmentRequest(node, replacement)
 	w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil)
 	if w.Code != 409 {
@@ -523,7 +692,7 @@ func TestEnrollmentActivationRequiresInstalledIdentity(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			s, key, metadata, _ := dbService(t)
 			metadata.machine.PublicKey = ""
-			grant, _, _ := s.Grant(testOwner)
+			grant, _, _ := s.Grant(testUser, testOwner)
 			in := enrollmentRequest(metadata.machine.NodeID, key)
 			in.EncryptionReady = failure != "encryption"
 			if failure == "expiry" {
@@ -612,7 +781,7 @@ func TestOwnerCanResetPendingBindingWithoutCommittedIdentity(t *testing.T) {
 	if m.machine.PublicKey != "" {
 		t.Fatal("pending key not cleared")
 	}
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	in := enrollmentRequest(node, key)
 	if w := call(t, s, "/v1/machines/enroll", "POST", grant, in, nil); w.Code != 409 {
 		t.Fatal("retired pending key accepted", w.Code)
@@ -623,7 +792,7 @@ func TestOwnerCanResetPendingBindingWithoutCommittedIdentity(t *testing.T) {
 
 func TestEnrollmentRequiresProofAndForwardsBinding(t *testing.T) {
 	s, key, m, _ := dbService(t)
-	grant, _, _ := s.Grant(testOwner)
+	grant, _, _ := s.Grant(testUser, testOwner)
 	in := enrollmentRequest(m.machine.NodeID, key)
 	for _, field := range []string{"nonce", "management_proof"} {
 		for _, value := range []string{"", "abcd", strings.Repeat("A", 64)} {

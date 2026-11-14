@@ -15,12 +15,8 @@ type secretView struct {
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
-	rows, e := s.DB.QueryContext(r.Context(), `SELECT id::text,name,key,COALESCE(head::text,''),revision,deleted FROM lpsecrets.secrets WHERE owner_id=$1 ORDER BY name,key LIMIT 1000`, owner)
+	owner := operatorActor(r).Address
+	rows, e := s.DB.QueryContext(r.Context(), `SELECT id::text,name,key,COALESCE(head::text,''),revision,deleted FROM lpsecrets.secrets WHERE orchestrator_address=$1 ORDER BY name,key LIMIT 1000`, owner)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -42,11 +38,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	response(w, 200, map[string]any{"secrets": out})
 }
 func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
+	owner := operatorActor(r).Address
 	var in struct {
 		Name     string `json:"name"`
 		Key      string `json:"key"`
@@ -63,11 +55,11 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	v := secretView{Binding: protocol.Binding{Owner: owner, Name: in.Name, Key: in.Key, Version: ident()}}
-	e = tx.QueryRowContext(r.Context(), `SELECT id::text,revision FROM lpsecrets.secrets WHERE owner_id=$1 AND name=$2 AND key=$3 AND NOT deleted FOR UPDATE`, owner, in.Name, in.Key).Scan(&v.ID, &v.Revision)
+	e = tx.QueryRowContext(r.Context(), `SELECT id::text,revision FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted FOR UPDATE`, owner, in.Name, in.Key).Scan(&v.ID, &v.Revision)
 	if errors.Is(e, sql.ErrNoRows) && in.Revision == 0 {
 		v.ID = ident()
 		v.Revision = 1
-		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.secrets(id,owner_id,name,key) VALUES($1,$2,$3,$4)`, v.ID, owner, in.Name, in.Key)
+		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.secrets(id,orchestrator_address,name,key) VALUES($1,$2,$3,$4)`, v.ID, owner, in.Name, in.Key)
 	} else if e == nil && v.Revision != in.Revision {
 		fail(w, 409, "secret_conflict")
 		return
@@ -84,11 +76,7 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 	response(w, 200, v)
 }
 func (s *Service) wrap(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
+	owner := operatorActor(r).Address
 	var in struct {
 		Version   string             `json:"version_id"`
 		SealedKey protocol.Sensitive `json:"sealed_key"`
@@ -98,7 +86,7 @@ func (s *Service) wrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding := protocol.Binding{Owner: owner, ID: r.PathValue("id"), Version: in.Version}
-	e = s.DB.QueryRowContext(r.Context(), `SELECT s.name,s.key FROM lpsecrets.versions v JOIN lpsecrets.secrets s ON s.id=v.secret_id WHERE v.id=$1 AND s.id=$2 AND s.owner_id=$3 AND NOT s.deleted AND v.base_revision=s.revision AND v.ciphertext IS NULL AND v.wrapped_key IS NULL`, in.Version, binding.ID, owner).Scan(&binding.Name, &binding.Key)
+	e := s.DB.QueryRowContext(r.Context(), `SELECT s.name,s.key FROM lpsecrets.versions v JOIN lpsecrets.secrets s ON s.id=v.secret_id WHERE v.id=$1 AND s.id=$2 AND s.orchestrator_address=$3 AND NOT s.deleted AND v.base_revision=s.revision AND v.ciphertext IS NULL AND v.wrapped_key IS NULL`, in.Version, binding.ID, owner).Scan(&binding.Name, &binding.Key)
 	if e != nil {
 		fail(w, 409, "secret_conflict")
 		return
@@ -114,7 +102,7 @@ func (s *Service) wrap(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "key_unavailable")
 		return
 	}
-	res, e := s.DB.ExecContext(r.Context(), `UPDATE lpsecrets.versions v SET wrapped_key=$1 FROM lpsecrets.secrets s WHERE v.id=$2 AND s.id=v.secret_id AND s.id=$3 AND s.owner_id=$4 AND NOT s.deleted AND s.revision=v.base_revision AND v.wrapped_key IS NULL AND v.ciphertext IS NULL`, wrapped, in.Version, r.PathValue("id"), owner)
+	res, e := s.DB.ExecContext(r.Context(), `UPDATE lpsecrets.versions v SET wrapped_key=$1 FROM lpsecrets.secrets s WHERE v.id=$2 AND s.id=v.secret_id AND s.id=$3 AND s.orchestrator_address=$4 AND NOT s.deleted AND s.revision=v.base_revision AND v.wrapped_key IS NULL AND v.ciphertext IS NULL`, wrapped, in.Version, r.PathValue("id"), owner)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -127,11 +115,7 @@ func (s *Service) wrap(w http.ResponseWriter, r *http.Request) {
 	response(w, 200, map[string]string{"wrapped_key": wrapped})
 }
 func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
+	owner := operatorActor(r).Address
 	var in protocol.Ciphertext
 	if decode(r, &in) != nil || in.Owner != owner || in.ID != r.PathValue("id") || len(in.Nonce) != 12 || len(in.Ciphertext) < 16 || len(in.Ciphertext) > protocol.MaxValue+16 {
 		fail(w, 400, "invalid_ciphertext")
@@ -145,7 +129,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	var rev, base int64
 	var name, key, wrapped string
-	e = tx.QueryRowContext(r.Context(), `SELECT s.revision,v.base_revision,s.name,s.key,COALESCE(v.wrapped_key,'') FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON s.id=v.secret_id WHERE s.id=$1 AND v.id=$2 AND s.owner_id=$3 AND NOT s.deleted AND v.ciphertext IS NULL FOR UPDATE OF s,v`, in.ID, in.Version, owner).Scan(&rev, &base, &name, &key, &wrapped)
+	e = tx.QueryRowContext(r.Context(), `SELECT s.revision,v.base_revision,s.name,s.key,COALESCE(v.wrapped_key,'') FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON s.id=v.secret_id WHERE s.id=$1 AND v.id=$2 AND s.orchestrator_address=$3 AND NOT s.deleted AND v.ciphertext IS NULL FOR UPDATE OF s,v`, in.ID, in.Version, owner).Scan(&rev, &base, &name, &key, &wrapped)
 	if e != nil || rev != base || name != in.Name || key != in.Key || !equal(wrapped, in.WrappedKey) {
 		fail(w, 409, "secret_conflict")
 		return
@@ -167,11 +151,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request) {
 	response(w, 200, map[string]any{"revision": rev + 1, "version_id": in.Version})
 }
 func (s *Service) deleteSecret(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
+	owner := operatorActor(r).Address
 	var in struct {
 		Revision int64 `json:"expected_revision"`
 	}
@@ -185,7 +165,7 @@ func (s *Service) deleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	res, e := tx.ExecContext(r.Context(), `UPDATE lpsecrets.secrets SET deleted=true,head=NULL,revision=revision+1,updated_at=now() WHERE id=$1 AND owner_id=$2 AND revision=$3 AND NOT deleted`, r.PathValue("id"), owner, in.Revision)
+	res, e := tx.ExecContext(r.Context(), `UPDATE lpsecrets.secrets SET deleted=true,head=NULL,revision=revision+1,updated_at=now() WHERE id=$1 AND orchestrator_address=$2 AND revision=$3 AND NOT deleted`, r.PathValue("id"), owner, in.Revision)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -256,7 +236,7 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 	out := protocol.VersionSet{NodeID: m.NodeID, IdentityGeneration: gen, PolicyGeneration: m.PolicyGeneration, Assignment: in, Values: []protocol.Resolved{}}
 	for _, ref := range refs {
 		v := protocol.Resolved{Ciphertext: protocol.Ciphertext{Binding: protocol.Binding{Owner: m.Owner, Name: ref.Name, Key: ref.Key}}}
-		e = tx.QueryRowContext(r.Context(), `SELECT s.id::text,v.id::text,v.nonce,v.ciphertext,v.wrapped_key,s.revision FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON v.id=s.head WHERE s.owner_id=$1 AND s.name=$2 AND s.key=$3 AND NOT s.deleted FOR SHARE OF s,v`, m.Owner, ref.Name, ref.Key).Scan(&v.ID, &v.Version, &v.Nonce, &v.Ciphertext.Ciphertext, &v.WrappedKey, &v.Revision)
+		e = tx.QueryRowContext(r.Context(), `SELECT s.id::text,v.id::text,v.nonce,v.ciphertext,v.wrapped_key,s.revision FROM lpsecrets.secrets s JOIN lpsecrets.versions v ON v.id=s.head WHERE s.orchestrator_address=$1 AND s.name=$2 AND s.key=$3 AND NOT s.deleted FOR SHARE OF s,v`, m.Owner, ref.Name, ref.Key).Scan(&v.ID, &v.Version, &v.Nonce, &v.Ciphertext.Ciphertext, &v.WrappedKey, &v.Revision)
 		if errors.Is(e, sql.ErrNoRows) {
 			reason, err := missingSecret(r.Context(), tx, m.Owner, ref.Name, ref.Key)
 			if err != nil {
@@ -297,12 +277,6 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 			return
 		}
 	}
-	// Recheck live policy/identity immediately before returning a newly issued authorization.
-	again, g, e := s.machine(r)
-	if e != nil || g != gen || !again.Managed || again.PolicyGeneration != m.PolicyGeneration || !eligibleAssignment(again, in) {
-		fail(w, 409, "authorization_changed")
-		return
-	}
 	if tx.Commit() != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -335,7 +309,7 @@ func assignmentDenied(m protocol.Machine, revision string) bool {
 // blocks starts without withdrawing healthy consumers during adoption.
 func missingSecret(ctx context.Context, tx *sql.Tx, owner, name, key string) (string, error) {
 	var deleted, live bool
-	e := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpsecrets.secrets WHERE owner_id=$1 AND name=$2 AND key=$3 AND deleted), EXISTS(SELECT FROM lpsecrets.secrets WHERE owner_id=$1 AND name=$2 AND key=$3 AND NOT deleted)`, owner, name, key).Scan(&deleted, &live)
+	e := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND deleted), EXISTS(SELECT FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted)`, owner, name, key).Scan(&deleted, &live)
 	if deleted && !live {
 		return "secret_missing", e
 	}

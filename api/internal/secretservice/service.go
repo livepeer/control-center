@@ -36,6 +36,7 @@ type Config struct {
 }
 type Metadata interface {
 	Machine(context.Context, string, *protocol.MachineBinding) (protocol.Machine, error)
+	Member(context.Context, string, string) error
 }
 type Transit interface {
 	Wrap(context.Context, string, []byte) (string, error)
@@ -104,7 +105,7 @@ func bearer(r *http.Request) string {
 	}
 	return v
 }
-func (s *Service) owner(r *http.Request) (string, error) {
+func (s *Service) user(r *http.Request) (string, error) {
 	token := bearer(r)
 	if token == "" {
 		return "", protocol.ErrDenied
@@ -135,16 +136,17 @@ func (s *Service) owner(r *http.Request) (string, error) {
 
 type claims struct {
 	jwt.RegisteredClaims
-	Scope string `json:"scope"`
+	Scope               string `json:"scope"`
+	OrchestratorAddress string `json:"orchestrator_address"`
 }
 
 const issuer = "livepeer-secrets"
 const audience = "livepeer-secrets-enrollment"
 
-func (s *Service) Grant(owner string) (string, time.Time, error) {
+func (s *Service) Grant(user, owner string) (string, time.Time, error) {
 	now := s.Now().UTC()
 	exp := now.Add(time.Hour).Truncate(time.Second)
-	c := claims{jwt.RegisteredClaims{Issuer: issuer, Subject: owner, Audience: jwt.ClaimStrings{audience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(exp), ID: ident()}, "machines:enroll"}
+	c := claims{jwt.RegisteredClaims{Issuer: issuer, Subject: user, Audience: jwt.ClaimStrings{audience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(exp), ID: ident()}, "machines:enroll", owner}
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
 	t.Header["kid"] = s.Config.SigningKeyID
 	v, e := t.SignedString([]byte(s.Config.SigningKey))
@@ -174,6 +176,11 @@ func (s *Service) grant(raw string, expired bool) (*claims, error) {
 	if e != nil || id == uuid.Nil() {
 		return nil, protocol.ErrDenied
 	}
+	address, err := protocol.OrchestratorAddress(c.OrchestratorAddress)
+	if err != nil {
+		return nil, protocol.ErrDenied
+	}
+	c.OrchestratorAddress = address
 	return c, nil
 }
 func lockGrant(ctx context.Context, tx *sql.Tx, id string) error {
@@ -185,31 +192,36 @@ func lockIdentity(ctx context.Context, tx *sql.Tx, node string) error {
 	return e
 }
 func audit(ctx context.Context, tx *sql.Tx, owner, action, target string) error {
-	_, e := tx.ExecContext(ctx, `INSERT INTO lpsecrets.audit(owner_id,action,target) VALUES($1,$2,$3)`, owner, action, target)
+	actor, _ := ctx.Value(operatorKey{}).(operatorIdentity)
+	actorID := actor.UserID
+	if machine, ok := ctx.Value(requestIdentityKey{}).(requestIdentity); ok {
+		actorID = machine.Subject
+	}
+	_, e := tx.ExecContext(ctx, `INSERT INTO lpsecrets.audit(orchestrator_address,actor_id,action,target) VALUES($1,$2,$3,$4)`, owner, actorID, action, target)
 	return e
 }
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/encryption-key", s.encryptionKey)
+	mux.HandleFunc("GET /v1/encryption-key", s.operator(s.encryptionKey))
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		fmt.Fprintf(w, "secrets_setup_grants_issued_total %d\nsecrets_setup_grants_rejected_total %d\n", s.issued.Load(), s.issuanceRejected.Load())
 	})
-	mux.HandleFunc("POST /v1/enrollment-grants", s.issue)
-	mux.HandleFunc("POST /v1/enrollment-grants/revoke", s.revokeGrant)
+	mux.HandleFunc("POST /v1/enrollment-grants", s.operator(s.issue))
+	mux.HandleFunc("POST /v1/enrollment-grants/revoke", s.operator(s.revokeGrant))
 	mux.HandleFunc("POST /v1/machines/enroll", s.enroll)
-	mux.HandleFunc("GET /v1/machines", s.listIdentities)
+	mux.HandleFunc("GET /v1/machines", s.operator(s.listIdentities))
 	mux.HandleFunc("POST /v1/machines/activate", s.authenticated(s.activate))
-	mux.HandleFunc("POST /v1/machines/{node}/revoke", s.revokeIdentity)
-	mux.HandleFunc("POST /v1/machines/{node}/reset", s.resetIdentity)
+	mux.HandleFunc("POST /v1/machines/{node}/revoke", s.operator(s.revokeIdentity))
+	mux.HandleFunc("POST /v1/machines/{node}/reset", s.operator(s.resetIdentity))
 	mux.HandleFunc("POST /v1/runtime/resolve", s.authenticated(s.resolve))
 	mux.HandleFunc("POST /v1/runtime/versions", s.authenticated(s.versions))
 	mux.HandleFunc("POST /v1/runtime/batch", s.authenticated(s.batchVersions))
-	mux.HandleFunc("GET /v1/secrets", s.list)
-	mux.HandleFunc("POST /v1/secrets/reserve", s.reserve)
-	mux.HandleFunc("POST /v1/secrets/{id}/wrap", s.wrap)
-	mux.HandleFunc("PUT /v1/secrets/{id}", s.upload)
-	mux.HandleFunc("DELETE /v1/secrets/{id}", s.deleteSecret)
+	mux.HandleFunc("GET /v1/secrets", s.operator(s.list))
+	mux.HandleFunc("POST /v1/secrets/reserve", s.operator(s.reserve))
+	mux.HandleFunc("POST /v1/secrets/{id}/wrap", s.operator(s.wrap))
+	mux.HandleFunc("PUT /v1/secrets/{id}", s.operator(s.upload))
+	mux.HandleFunc("DELETE /v1/secrets/{id}", s.operator(s.deleteSecret))
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if s.DB.PingContext(r.Context()) != nil {
 			fail(w, 503, "unavailable")
@@ -241,13 +253,8 @@ func (s *Service) Handler() http.Handler {
 	}))
 }
 func (s *Service) issue(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		s.issuanceRejected.Add(1)
-		fail(w, 401, "authentication_required")
-		return
-	}
-	raw, exp, e := s.Grant(owner)
+	owner := operatorActor(r).Address
+	raw, exp, e := s.Grant(operatorActor(r).UserID, owner)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -256,20 +263,16 @@ func (s *Service) issue(w http.ResponseWriter, r *http.Request) {
 	response(w, 200, map[string]any{"token": raw, "expires_at": exp, "service": s.trust()})
 }
 func (s *Service) revokeGrant(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
+	owner := operatorActor(r).Address
 	var in struct {
 		Token string `json:"token"`
-	}
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
 	}
 	if decode(r, &in) != nil {
 		fail(w, 400, "invalid_grant")
 		return
 	}
 	c, e := s.grant(in.Token, true)
-	if e != nil || c.Subject != owner {
+	if e != nil || c.OrchestratorAddress != owner || c.Subject != operatorActor(r).UserID {
 		fail(w, 403, "grant_refused")
 		return
 	}
@@ -291,7 +294,7 @@ func (s *Service) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		response(w, 200, map[string]bool{"changed": false})
 		return
 	}
-	res, e := tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.revoked_grants VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, c.ID, owner, c.ExpiresAt.Time)
+	res, e := tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.revoked_grants(jti,actor_user_id,orchestrator_address,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, c.ID, operatorActor(r).UserID, owner, c.ExpiresAt.Time)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -346,11 +349,11 @@ type vaultTransit struct{ s *Service }
 
 func (v *vaultTransit) call(ctx context.Context, owner, op string, in, out any) error {
 	b, _ := json.Marshal(in)
-	id, e := uuid.Parse(owner)
+	address, e := protocol.OrchestratorAddress(owner)
 	if e != nil {
 		return protocol.ErrDenied
 	}
-	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(v.s.Config.VaultURL, "/")+"/v1/transit/"+op+"/operator-"+id.String(), strings.NewReader(string(b)))
+	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(v.s.Config.VaultURL, "/")+"/v1/transit/"+op+"/orchestrator-"+address, strings.NewReader(string(b)))
 	if e != nil {
 		return protocol.ErrUnavailable
 	}

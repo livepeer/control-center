@@ -510,7 +510,7 @@ func signedOnchainRequest(t *testing.T, s *Server, node string, launch consumer.
 	t.Helper()
 	m := onchainMetadata(t, s, node)
 	var owner string
-	if e := s.db.QueryRow(`SELECT owner_id::text FROM lpcc.machines WHERE node_id=$1`, node).Scan(&owner); e != nil {
+	if e := s.db.QueryRow(`SELECT actor_user_id::text FROM lpcc.enrollment_audit WHERE action='machine.enroll' AND target=$1`, node).Scan(&owner); e != nil {
 		t.Fatal(e)
 	}
 	seed := sha256.Sum256([]byte(owner + installationFingerprint(t, s, node)))

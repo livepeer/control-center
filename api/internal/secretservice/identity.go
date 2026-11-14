@@ -52,13 +52,13 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	var owner, key string
 	var gen int64
 	var reset bool
-	e = tx.QueryRowContext(r.Context(), `SELECT owner_id::text,public_key,generation,revoked,reset_pending FROM lpsecrets.identities WHERE node_id=$1 FOR UPDATE`, in.NodeID).Scan(&owner, &key, &gen, &revoked, &reset)
+	e = tx.QueryRowContext(r.Context(), `SELECT orchestrator_address::text,public_key,generation,revoked,reset_pending FROM lpsecrets.identities WHERE node_id=$1 FOR UPDATE`, in.NodeID).Scan(&owner, &key, &gen, &revoked, &reset)
 	exists := e == nil
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		fail(w, 503, "unavailable")
 		return
 	}
-	if exists && (owner != c.Subject || (revoked && !reset) || (!reset && key != in.PublicKey)) {
+	if exists && (owner != c.OrchestratorAddress || (revoked && !reset) || (!reset && key != in.PublicKey)) {
 		fail(w, 409, "identity_conflict")
 		return
 	}
@@ -71,25 +71,30 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "identity_reset_required")
 		return
 	}
+	// Revocation can race enrollment, BUT this window is normally only a few seconds.
+	if e = s.Metadata.Member(r.Context(), c.Subject, c.OrchestratorAddress); e != nil {
+		failAuthorization(w, e, 403, "orchestrator_access_required")
+		return
+	}
 	if reset && key != "" {
-		_, e = s.Metadata.Machine(r.Context(), in.NodeID, &protocol.MachineBinding{EnrollRequest: protocol.EnrollRequest{NodeID: in.NodeID}, Owner: c.Subject, ResetKey: key})
+		_, e = s.Metadata.Machine(r.Context(), in.NodeID, &protocol.MachineBinding{EnrollRequest: protocol.EnrollRequest{NodeID: in.NodeID}, Owner: c.OrchestratorAddress, ResetKey: key})
 		if e != nil {
 			fail(w, 503, "reset_pending")
 			return
 		}
 	}
-	m, e := s.Metadata.Machine(r.Context(), in.NodeID, &protocol.MachineBinding{EnrollRequest: in, Owner: c.Subject})
+	m, e := s.Metadata.Machine(r.Context(), in.NodeID, &protocol.MachineBinding{EnrollRequest: in, Owner: c.OrchestratorAddress})
 	if errors.Is(e, protocol.ErrUnavailable) {
 		fail(w, 503, "unavailable")
 		return
 	}
-	if e != nil || !m.Active || m.Owner != c.Subject || m.PublicKey != in.PublicKey || !m.EncryptionReady {
+	if e != nil || !m.Active || m.Owner != c.OrchestratorAddress || m.PublicKey != in.PublicKey || !m.EncryptionReady {
 		fail(w, 403, "machine_refused")
 		return
 	}
 	if !exists {
 		gen = 1
-		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.identities(node_id,owner_id,public_key) VALUES($1,$2,$3)`, in.NodeID, c.Subject, in.PublicKey)
+		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.identities(node_id,orchestrator_address,public_key) VALUES($1,$2,$3)`, in.NodeID, c.OrchestratorAddress, in.PublicKey)
 	} else if reset {
 		_, e = tx.ExecContext(r.Context(), `UPDATE lpsecrets.identities SET public_key=$2,revoked=false,reset_pending=false WHERE node_id=$1`, in.NodeID, in.PublicKey)
 	}
@@ -98,13 +103,13 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !exists || reset {
-		e = audit(r.Context(), tx, c.Subject, "machine.enroll", in.NodeID)
+		e = audit(context.WithValue(r.Context(), operatorKey{}, operatorIdentity{UserID: c.Subject, Address: c.OrchestratorAddress}), tx, c.OrchestratorAddress, "machine.enroll", in.NodeID)
 	}
 	if e != nil || !s.Now().Before(c.ExpiresAt.Time) || tx.Commit() != nil {
 		fail(w, 503, "enrollment_pending")
 		return
 	}
-	response(w, 200, protocol.Identity{NodeID: in.NodeID, Owner: c.Subject, Generation: gen, Service: s.trust()})
+	response(w, 200, protocol.Identity{NodeID: in.NodeID, Owner: c.OrchestratorAddress, Generation: gen, Service: s.trust()})
 }
 func (s *Service) machine(r *http.Request) (protocol.Machine, int64, error) {
 	return s.machineWith(r, s.DB)
@@ -123,7 +128,7 @@ func (s *Service) machineWith(r *http.Request, q identityReader) (protocol.Machi
 	var owner, key string
 	var expected int64
 	var revoked bool
-	e := q.QueryRowContext(r.Context(), `SELECT owner_id::text,public_key,generation,revoked FROM lpsecrets.identities WHERE node_id=$1`, id.Subject).Scan(&owner, &key, &expected, &revoked)
+	e := q.QueryRowContext(r.Context(), `SELECT orchestrator_address::text,public_key,generation,revoked FROM lpsecrets.identities WHERE node_id=$1`, id.Subject).Scan(&owner, &key, &expected, &revoked)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return m, 0, protocol.ErrUnavailable
 	}
@@ -179,11 +184,7 @@ func (s *Service) revokeIdentity(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) resetIdentity(w http.ResponseWriter, r *http.Request) { s.changeIdentity(w, r, true) }
 func (s *Service) changeIdentity(w http.ResponseWriter, r *http.Request, reset bool) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
+	owner := operatorActor(r).Address
 	tx, e := s.DB.BeginTx(r.Context(), nil)
 	if e != nil {
 		fail(w, 503, "unavailable")
@@ -196,7 +197,7 @@ func (s *Service) changeIdentity(w http.ResponseWriter, r *http.Request, reset b
 		return
 	}
 	var current string
-	e = tx.QueryRowContext(r.Context(), `UPDATE lpsecrets.identities SET revoked=true,generation=generation+CASE WHEN reset_pending AND $3 THEN 0 ELSE 1 END,reset_pending=$3 WHERE node_id=$1 AND owner_id=$2 RETURNING public_key`, node, owner, reset).Scan(&current)
+	e = tx.QueryRowContext(r.Context(), `UPDATE lpsecrets.identities SET revoked=true,generation=generation+CASE WHEN reset_pending AND $3 THEN 0 ELSE 1 END,reset_pending=$3 WHERE node_id=$1 AND orchestrator_address=$2 RETURNING public_key`, node, owner, reset).Scan(&current)
 	if errors.Is(e, sql.ErrNoRows) {
 		// A Control Center binding can precede the first committed identity.
 		m, err := s.Metadata.Machine(r.Context(), node, nil)
@@ -205,7 +206,7 @@ func (s *Service) changeIdentity(w http.ResponseWriter, r *http.Request, reset b
 			return
 		}
 		current = m.PublicKey
-		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.identities(node_id,owner_id,public_key,revoked,reset_pending) VALUES($1,$2,$3,true,$4)`, node, owner, current, reset)
+		_, e = tx.ExecContext(r.Context(), `INSERT INTO lpsecrets.identities(node_id,orchestrator_address,public_key,revoked,reset_pending) VALUES($1,$2,$3,true,$4)`, node, owner, current, reset)
 	}
 	if e != nil {
 		if errors.Is(e, sql.ErrNoRows) {
@@ -243,12 +244,8 @@ func (s *Service) changeIdentity(w http.ResponseWriter, r *http.Request, reset b
 }
 
 func (s *Service) listIdentities(w http.ResponseWriter, r *http.Request) {
-	owner, e := s.owner(r)
-	if e != nil {
-		fail(w, 401, "authentication_required")
-		return
-	}
-	rows, e := s.DB.QueryContext(r.Context(), `SELECT node_id,generation,revoked FROM lpsecrets.identities WHERE owner_id=$1 ORDER BY node_id`, owner)
+	owner := operatorActor(r).Address
+	rows, e := s.DB.QueryContext(r.Context(), `SELECT node_id,generation,revoked FROM lpsecrets.identities WHERE orchestrator_address=$1 ORDER BY node_id`, owner)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return

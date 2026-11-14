@@ -283,7 +283,7 @@ func TestLateDrainReportNeedsAuditedRetry(t *testing.T) {
 
 func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
 	s, _ := tunnelTestServer(t)
-	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	jwt, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	fp := strings.Repeat("1", 64)
 	body := registrationBody(ownerA, fp, jwt)
 	body["development_http"] = true

@@ -24,6 +24,16 @@ import (
 	"github.com/livepeer/control-center/api/internal/testdb"
 )
 
+const orchA = "0x1111111111111111111111111111111111111111"
+const orchB = "0x2222222222222222222222222222222222222222"
+
+func testOrchestrator(user string) string {
+	if user == ownerB {
+		return orchB
+	}
+	return orchA
+}
+
 const ownerA = "11111111-1111-4111-8111-111111111111"
 const ownerB = "22222222-2222-4222-8222-222222222222"
 const ownerC = "33333333-3333-4333-8333-333333333333"
@@ -34,14 +44,14 @@ func testParams() Params {
 
 func TestEnrollmentAuthorization(t *testing.T) {
 	p := testParams()
-	good, _, err := signEnrollment(p.JWTSigningSecret, ownerA, time.Now())
+	good, _, err := signEnrollment(p.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if owner, err := verifyEnrollment(p.JWTSigningSecret, good); err != nil || owner != ownerA {
 		t.Fatal(owner, err)
 	}
-	expired, _, _ := signEnrollment(p.JWTSigningSecret, ownerA, time.Now().Add(-2*time.Hour))
+	expired, _, _ := signEnrollment(p.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now().Add(-2*time.Hour))
 	for name, raw := range map[string]string{"expired": expired, "modified": good + "x", "malformed": "nope"} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
@@ -53,10 +63,14 @@ func TestEnrollmentAuthorization(t *testing.T) {
 		func(c *enrollmentClaims) { c.Issuer = "other" }, func(c *enrollmentClaims) { c.Audience = jwt.ClaimStrings{"other"} },
 		func(c *enrollmentClaims) { c.Scope = "other" }, func(c *enrollmentClaims) { c.Subject = "not-a-user" },
 		func(c *enrollmentClaims) { c.ExpiresAt = nil },
+		func(c *enrollmentClaims) { c.IssuedAt = nil },
+		func(c *enrollmentClaims) { c.ID = "" },
 	} {
-		claims := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register"}
+		claims := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: ownerA, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(time.Now()), ID: "fixture-grant", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Scope: "machines:register", OrchestratorAddress: orchA}
 		change(&claims)
-		raw, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(p.JWTSigningSecret))
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		token.Header["kid"] = p.signingKeyID()
+		raw, _ := token.SignedString([]byte(p.JWTSigningSecret))
 		if _, err := verifyEnrollment(p.JWTSigningSecret, raw); err == nil {
 			t.Fatal("accepted wrong claims")
 		}
@@ -87,6 +101,12 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO auth.users(id,email,email_confirmed_at) VALUES($1,'a@example.invalid',now()),($2,'b@example.invalid',now())`, ownerA, ownerB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO lpcc.orchestrators(address) VALUES($1),($2);`, orchA, orchB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO lpcc.orchestrator_memberships(user_id,orchestrator_address) VALUES($1,$2),($3,$4)`, ownerA, orchA, ownerB, orchB); err != nil {
 		t.Fatal(err)
 	}
 	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +199,7 @@ func credentials(t *testing.T, data []byte) map[string]string {
 
 func enroll(t *testing.T, s *Server, owner, fingerprint string) map[string]string {
 	t.Helper()
-	token, _, _ := s.params.signEnrollment(owner, s.currentTime())
+	token, _, _ := s.params.signEnrollment(owner, testOrchestrator(owner), s.currentTime())
 	w := request(t, s, "POST", "/v1/nodes/register", token, registrationBody(owner, fingerprint, token))
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -198,7 +218,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 	if w := request(t, s, "POST", "/api/bootstrap-token", "invalid", nil); w.Code != 401 {
 		t.Fatal(w.Code)
 	}
-	if w := request(t, s, "POST", "/api/bootstrap-token", "session-a", nil); w.Code != 200 {
+	if w := request(t, s, "POST", "/api/bootstrap-token", "session-a", map[string]string{"orchestrator_address": orchA}); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	first := enroll(t, s, ownerA, strings.Repeat("a", 64))
@@ -208,7 +228,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 	}
 	second := enroll(t, s, ownerA, strings.Repeat("b", 64))
 	enroll(t, s, ownerB, strings.Repeat("c", 64))
-	foreign, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerB, time.Now())
+	foreign, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerB, testOrchestrator(ownerB), time.Now())
 	conflict := request(t, s, "POST", "/v1/nodes/register", foreign, registrationBody(ownerB, strings.Repeat("a", 64), foreign))
 	if conflict.Code != 409 {
 		t.Fatal(conflict.Code)
@@ -228,7 +248,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 		t.Fatal("node ID must encode 128 random bits as unpadded base32", err)
 	}
 	for session, count := range map[string]int{"session-a": 2, "session-b": 1} {
-		w := request(t, s, "GET", "/api/machines", session, nil)
+		w := request(t, s, "GET", "/api/machines?orchestrator_address="+testOrchestrator(map[string]string{"session-a": ownerA, "session-b": ownerB}[session]), session, nil)
 		if w.Code != 200 {
 			t.Fatal(w.Code)
 		}
@@ -243,7 +263,7 @@ func TestEnrollmentAndConfigFlow(t *testing.T) {
 		}
 	}
 	// Enrollment authorization expiry has no effect on durable machine credentials.
-	expired, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now().Add(-2*time.Hour))
+	expired, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now().Add(-2*time.Hour))
 	if w := request(t, s, "POST", "/v1/nodes/register", expired, nil); w.Code != 401 {
 		t.Fatal(w.Code)
 	}
@@ -297,7 +317,7 @@ func TestReconciliationPreservesLastGoodBundle(t *testing.T) {
 
 func TestRegistrationFailureIsAtomic(t *testing.T) {
 	s := newTestServer(t)
-	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, time.Now())
+	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
 	body := registrationBody(ownerA, strings.Repeat("a", 64), token)
 	s.build = func(machineconfig.Desired) ([]byte, string, error) { return nil, "", errors.New("generation failed") }
 	if w := request(t, s, "POST", "/v1/nodes/register", token, body); w.Code != 503 {

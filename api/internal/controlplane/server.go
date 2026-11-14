@@ -31,19 +31,19 @@ import (
 var MigrationFiles embed.FS
 
 type Machine struct {
-	PublicKey         string     `json:"public_key,omitempty"`
-	Signature         []byte     `json:"signature,omitempty"`
-	NodeID            string     `json:"node_id"`
-	OwnerID           string     `json:"-"`
-	Fingerprint       string     `json:"fingerprint"`
-	Hostname          string     `json:"hostname"`
-	InstallDir        string     `json:"install_dir"`
-	K3sVersion        string     `json:"k3s_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	LastConfigFetchAt *time.Time `json:"last_config_fetch_at"`
-	CredentialVersion int64      `json:"-"`
-	Terminal          bool       `json:"-"`
-	DevelopmentHTTP   bool       `json:"development_http,omitempty"`
+	PublicKey           string     `json:"public_key,omitempty"`
+	Signature           []byte     `json:"signature,omitempty"`
+	NodeID              string     `json:"node_id"`
+	OrchestratorAddress string     `json:"-"`
+	Fingerprint         string     `json:"fingerprint"`
+	Hostname            string     `json:"hostname"`
+	InstallDir          string     `json:"install_dir"`
+	K3sVersion          string     `json:"k3s_version"`
+	CreatedAt           time.Time  `json:"created_at"`
+	LastConfigFetchAt   *time.Time `json:"last_config_fetch_at"`
+	CredentialVersion   int64      `json:"-"`
+	Terminal            bool       `json:"-"`
+	DevelopmentHTTP     bool       `json:"development_http,omitempty"`
 }
 
 type Server struct {
@@ -104,6 +104,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bootstrap-token", s.bootstrapToken)
 	mux.HandleFunc("POST /api/bootstrap-token/revoke", s.revokeEnrollmentGrant)
 	mux.HandleFunc("GET /metrics", s.enrollmentMetrics)
+	mux.HandleFunc("GET /api/orchestrators", s.listOrchestrators)
+	mux.HandleFunc("GET /internal/users/{user_id}/orchestrators/{address}", s.orchestratorMembership)
 	mux.HandleFunc("GET /api/machines", s.listMachines)
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
 	mux.HandleFunc("GET /api/me", s.me)
@@ -165,7 +167,28 @@ func (s *Server) bootstrapToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, err)
 		return
 	}
-	token, expires, err := s.params.signEnrollment(owner.ID, s.currentTime())
+	var in struct {
+		Address string `json:"orchestrator_address"`
+	}
+	if boundedInput(r, &in, 4096) != nil {
+		s.respondError(w, problem(400, "invalid_orchestrator", "Choose an orchestrator."))
+		return
+	}
+	address, err := protocol.OrchestratorAddress(in.Address)
+	if err != nil {
+		s.respondError(w, problem(400, "invalid_orchestrator", "Choose an orchestrator."))
+		return
+	}
+	yes, err := member(r.Context(), s.db, owner.ID, address)
+	if err != nil {
+		s.respondError(w, err)
+		return
+	}
+	if !yes {
+		s.respondError(w, problem(403, "orchestrator_access_required", "Orchestrator access is required."))
+		return
+	}
+	token, expires, err := s.params.signEnrollment(owner.ID, address, s.currentTime())
 	if err != nil {
 		fail(w, 500, "could not issue enrollment token")
 		return
@@ -180,7 +203,12 @@ func (s *Server) listMachines(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, err)
 		return
 	}
-	machines, err := s.observedMachineList(r.Context(), owner.ID, false)
+	address, err := s.orchestrator(r, owner.ID)
+	if err != nil {
+		s.respondError(w, err)
+		return
+	}
+	machines, err := s.observedMachineList(r.Context(), address, false)
 	if err != nil {
 		s.databaseError(w, err)
 		return
@@ -228,8 +256,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.NodeID = strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(id[:]))
-	owner := grant.Subject
-	m.OwnerID = owner
+	owner := grant.OrchestratorAddress
+	m.OrchestratorAddress = owner
 	newNodeID := m.NodeID
 	pub, e := protocol.PublicKey(m.PublicKey)
 	if e != nil || !ed25519.Verify(pub, protocol.RegistrationProof(bearer(r), m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.PublicKey, m.DevelopmentHTTP), m.Signature) {
@@ -248,9 +276,9 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	// An active installation retains its ID on retry. A retired installation gets
 	// a fresh ID; its retained cleanup records remain scoped to the previous ID.
-	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,owner_id,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,1,$7)
+	row := tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.machines(node_id,fingerprint,orchestrator_address,hostname,install_dir,k3s_version,credential_version,tunnel_eligible) VALUES($1,$2,$3,$4,$5,$6,1,$7)
  ON CONFLICT(fingerprint) DO UPDATE SET hostname=EXCLUDED.hostname,updated_at=now()
- WHERE lpcc.machines.owner_id=EXCLUDED.owner_id AND lpcc.machines.fingerprint=EXCLUDED.fingerprint
+ WHERE lpcc.machines.orchestrator_address=EXCLUDED.orchestrator_address AND lpcc.machines.fingerprint=EXCLUDED.fingerprint
 	 AND lpcc.machines.install_dir=EXCLUDED.install_dir AND lpcc.machines.k3s_version=EXCLUDED.k3s_version
  RETURNING node_id,credential_version`, m.NodeID, m.Fingerprint, owner, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
 	err = row.Scan(&m.NodeID, &m.CredentialVersion)
@@ -263,10 +291,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A random collision with a retained node must fail, never reuse cleanup state.
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,owner_id,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7)
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO lpcc.enrollments(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version) VALUES($1,$2,$3,$4,$5,$6,$7)
  ON CONFLICT(node_id) DO UPDATE SET hostname=EXCLUDED.hostname
- WHERE lpcc.enrollments.retired_at IS NULL AND lpcc.enrollments.owner_id=EXCLUDED.owner_id AND lpcc.enrollments.fingerprint=EXCLUDED.fingerprint
- RETURNING node_id`, m.NodeID, m.OwnerID, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion).Scan(&m.NodeID); err != nil {
+ WHERE lpcc.enrollments.retired_at IS NULL AND lpcc.enrollments.orchestrator_address=EXCLUDED.orchestrator_address AND lpcc.enrollments.fingerprint=EXCLUDED.fingerprint
+ RETURNING node_id`, m.NodeID, m.OrchestratorAddress, m.Fingerprint, m.Hostname, m.InstallDir, m.K3sVersion, m.CredentialVersion).Scan(&m.NodeID); err != nil {
 		s.databaseError(w, err)
 		return
 	}
@@ -297,7 +325,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m.NodeID == newNodeID {
-		if _, err = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(owner_id,action,target) VALUES($1,'machine.enroll',$2)`, owner, m.NodeID); err != nil {
+		if _, err = tx.ExecContext(r.Context(), `INSERT INTO lpcc.enrollment_audit(actor_user_id,orchestrator_address,action,target) VALUES($1,$2,'machine.enroll',$3)`, grant.Subject, owner, m.NodeID); err != nil {
 			s.databaseError(w, err)
 			return
 		}
