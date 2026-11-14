@@ -12,7 +12,6 @@ DefaultAdminEmail = "admin@example.com"
 
 Listen = "0.0.0.0:43812"
 PublicAPIURL = "https://controlcenter-api.livepeer.live"
-Mode = "offchain" # Set to "onchain" before first startup for Arbitrum One.
 ConfigReconcileInterval = "1m"
 
 # Publish both images to the bundled registry and use the returned digests.
@@ -39,10 +38,9 @@ TunnelNodeAddresses = ["<FLEET_NODE_IP/CIDR>"]
 DiscoveryRefreshInterval = "5m"
 DiscoveryMaxFailedRefreshes = 6
 
-# Enable with compose.onchain.yaml when Mode = "onchain".
-# OnchainConfigFile = "/etc/controlcenter/onchain.json"
-# OnchainSecretsDir = "/run/onchain-rpc"
-# OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
+OnchainConfigFile = "/etc/controlcenter/onchain.json"
+OnchainSecretsDir = "/run/onchain-rpc"
+OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"
 
 # Independent operator secrets service; see docs/operator-secrets.md.
 SecretsURL = "https://controlcenter-secrets.livepeer.live"

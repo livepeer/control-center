@@ -39,7 +39,7 @@ const ownerB = "22222222-2222-4222-8222-222222222222"
 const ownerC = "33333333-3333-4333-8333-333333333333"
 
 func testParams() Params {
-	return Params{SecretsURL: "https://secrets.example", SecretsMetadataToken: strings.Repeat("m", 32), RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), RuntimeNodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64), RuntimeConnectorImage: "registry.invalid/connector@sha256:" + strings.Repeat("c", 64), AppStopSignals: true, JWTSigningSecret: strings.Repeat("a", 32), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
+	return Params{Mode: "offchain", SecretsURL: "https://secrets.example", SecretsMetadataToken: strings.Repeat("m", 32), RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), RuntimeNodeImage: "registry.invalid/node@sha256:" + strings.Repeat("b", 64), RuntimeConnectorImage: "registry.invalid/connector@sha256:" + strings.Repeat("c", 64), AppStopSignals: true, JWTSigningSecret: strings.Repeat("a", 32), MachineTokenSecret: strings.Repeat("b", 32), PublicAPIURL: "https://api.example", SupabasePublishableKey: "public-test", ConfigReconcileInterval: time.Minute}
 }
 
 func TestEnrollmentAuthorization(t *testing.T) {

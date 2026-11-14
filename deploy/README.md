@@ -1,8 +1,8 @@
 # Staging deployment
 
 Docker Compose runs the Go API, built web UI with Caddy, persistent image
-registry, and Cloudflare Tunnel connector. PostgreSQL and authentication use the
-Supabase project selected in the private `config.toml`.
+registry, payment redeemer, and Cloudflare Tunnel connector. PostgreSQL and
+authentication use the Supabase project selected in the private `config.toml`.
 
 | Hostname | Origin | Routes |
 | --- | --- | --- |
@@ -38,28 +38,49 @@ administrator signs in using the verified address in `DefaultAdminEmail`.
 The Compose network enables IPv6 because direct Supabase database endpoints can
 be IPv6-only. The host needs working IPv6 egress for such an endpoint.
 
-From this directory:
+Copy `redeemer.example.toml` to `redeemer.toml` and `onchain.example.json` to
+`onchain.json`. Create these owner-only files, readable by UID 65532:
+
+- `secrets/onchain-rpc/<sha256>`: HTTPS RPC URL. Name the file with the SHA-256
+  of its exact bytes (`shasum -a 256 <rpc-file>`) and set `rpc_secret` in
+  `onchain.json` to that hash.
+- `secrets/onchain-webhook-auth`: random secret of at least 32 bytes.
+- `secrets/redeemer/keystore.json`, `password`, and `rpc`: redeemer wallet inputs.
+- `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.
+- `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
+
+Build and publish images from this directory. Set `NODE_IMAGE` to the compatible
+upstream Node release digest; the first command starts only the registry:
 
 ```sh
-docker compose up -d registry
+LIVEPEER_REDEEMER_IMAGE="$NODE_IMAGE" docker compose up -d registry
 docker build -f ../runtime/Dockerfile -t 127.0.0.1:63812/controlcenter/runtime:staging ..
 docker push 127.0.0.1:63812/controlcenter/runtime:staging
-# Use the returned Runtime digest below.
 docker build -f ../runtime/services/Dockerfile.tunnel \
-  --build-arg RUNTIME_IMAGE=127.0.0.1:63812/controlcenter/runtime@sha256:<RUNTIME_DIGEST> \
+  --build-arg RUNTIME_IMAGE=<registry/runtime@sha256:digest> \
   -t 127.0.0.1:63812/controlcenter/connector:staging ../runtime/services
 docker push 127.0.0.1:63812/controlcenter/connector:staging
-# Set RuntimeImage, RuntimeConnectorImage, and RuntimeNodeImage in config.toml
-# using the public registry hostname and the digests returned by the pushes.
-# Set NEW_RELEASE_ID to a previously unused ID (see Bootstrap releases below).
+docker build -f ../runtime/services/Dockerfile.node \
+  --build-arg NODE_IMAGE="$NODE_IMAGE" \
+  --build-arg RUNTIME_IMAGE=<registry/runtime@sha256:digest> \
+  -t 127.0.0.1:63812/controlcenter/node:staging ../runtime/services
+docker push 127.0.0.1:63812/controlcenter/node:staging
+```
+
+Use the public registry hostname and returned digests for `RuntimeImage`,
+`RuntimeConnectorImage`, and `RuntimeNodeImage` in `config.toml`. Set
+`LIVEPEER_REDEEMER_IMAGE` in `.env` to the same managed Node digest as
+`RuntimeNodeImage`. Package a bootstrap release, then start the complete deployment:
+
+```sh
 python3 ../tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" --output bootstrap --activate
 chmod 0755 bootstrap bootstrap/releases
-docker compose config --quiet
 docker compose up -d --build --wait
 ```
 
-The connector build argument `RUNTIME_IMAGE` selects the build input; the backend
-`RuntimeImage` configuration selects the image used for system services.
+Onchain is the default; startup requires valid payment settings. Control Center
+configures each machine automatically. The redeemer retains its wallet and
+`redeemer-data` volume.
 
 Enable managed tunnels and discovery after configuring the `livepeer.vip`
 account/zone, Zero Trust team, certificate permissions, keyring, image digests,
@@ -67,43 +88,8 @@ and node address exclusions. Update `TunnelNodeAddresses` with the public and
 management addresses of every machine before enrollment; the bootstrap
 installer's origin firewall remains required.
 
-## Onchain setup
-
-Wrap the bundled Node revision or later with Runtime's startup wrapper. Set
-`RuntimeNodeImage` to the pushed digest and use the same Node build for
-`LIVEPEER_REDEEMER_IMAGE`.
-
-```sh
-docker build -f ../runtime/services/Dockerfile.node \
-  --build-arg NODE_IMAGE=<registry/node@sha256:digest> \
-  --build-arg RUNTIME_IMAGE=<registry/runtime@sha256:digest> \
-  -t <registry/managed-node:build> ../runtime/services
-docker push <registry/managed-node:build>
-```
-
-Copy `redeemer.example.toml` to `redeemer.toml`. Create owner-only files readable
-by UID 65532:
-
-- `secrets/onchain-rpc/<sha256>`: HTTPS RPC URL; name the file with its raw-byte
-  SHA-256 (`shasum -a 256 <rpc-file>`) and use that hash as `rpc_secret`.
-  Preserve the exact bytes, including any final newline.
-- `secrets/onchain-webhook-auth`: random secret of at least 32 bytes.
-- `secrets/redeemer/keystore.json`, `password`, and `rpc`: redeemer wallet inputs.
-- `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.
-- `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
-
-Copy `onchain.example.json` to `onchain.json` and set its `rpc_secret` to the
-hash above. Set `Mode = "onchain"`, `OnchainConfigFile`, `OnchainSecretsDir`
-and `OnchainWebhookSecretFile` in `config.toml` before first startup, then start:
-
-```sh
-docker compose -f compose.yaml -f compose.onchain.yaml --profile onchain up -d
-```
-
-The wallet is mounted only into the redeemer, which uses the separate
-`redeemer-data` volume. Only HTTPS ticket submission is exposed through ingress.
-Control Center derives machine settings from the template when users claim
-orchestrators and enroll machines; see the [operations runbook](../docs/operations.md#onchain-operation).
+Deployment mode and chain identity are fixed at first startup. Local development
+opts out with `Mode = "offchain"`; see [API configuration](../api/config.example.toml).
 
 ## Bootstrap releases
 
