@@ -37,7 +37,7 @@ func TestProbesHonorThresholdAndOneSuccessRecovery(t *testing.T) {
 		if got := p.Poll(t.Context(), instances, view, now)["i"]; got != want {
 			t.Fatalf("ready=%v want=%v", got, want)
 		}
-		now = now.Add(time.Second)
+		now = now.Add(10 * time.Second)
 	}
 	poll(true)
 	code.Store(503)

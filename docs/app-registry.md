@@ -81,7 +81,7 @@ onchain mode, add a positive price to the example. See the
 | `resources.limits.cpu` | 1 CPU. Use integer cores or quoted values such as `"0.5"` or `"500m"`. |
 | `resources.limits.ephemeral_storage` | `"100MB"`. |
 | `resources.requests` | Each omitted CPU, memory, or ephemeral storage request defaults to its corresponding limit. Requests cannot exceed limits. |
-| `health.readiness` | With no table, TCP check on the HTTP port. A supplied table defaults to HTTP and requires `path`; set `type = "tcp"` for TCP. Defaults: `interval = "5s"`, `timeout = "2s"`, `failure_threshold = 3`. |
+| `health.readiness` | With no table, TCP check on the HTTP port. A supplied table defaults to HTTP and requires `path`; set `type = "tcp"` for TCP. Defaults: `interval = "10s"`, `timeout = "2s"`, `failure_threshold = 3`. Runtime enforces a minimum interval of ten seconds. |
 | `filesystem.read_only_root` | `true`; writable roots are unsupported. |
 | `filesystem.shm_size` | `"64MiB"` of memory-backed shared memory. |
 | `filesystem.scratch` | No mounts. Each `[[filesystem.scratch]]` table requires `path`; `size` defaults to `"64MiB"`. Mounts are memory-backed. |

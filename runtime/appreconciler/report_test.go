@@ -194,10 +194,10 @@ func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := reports.reports[len(reports.reports)-1].Apps.Assignments[0]
-	if a.Ready != 0 || !a.ProbeExpiresAt.Equal(now.Add(8*time.Second)) {
+	if a.Ready != 0 || !a.ProbeExpiresAt.Equal(now.Add(30*time.Second)) {
 		t.Fatal("fresh failing probes became unknown", a)
 	}
-	*now = now.Add(9 * time.Second)
+	*now = now.Add(31 * time.Second)
 	if err := c.report(t.Context(), map[string]bool{}, k.view, *now); err != nil {
 		t.Fatal(err)
 	}
