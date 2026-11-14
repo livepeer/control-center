@@ -92,7 +92,9 @@ by UID 65532:
 - `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.
 - `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
 
-Set `OnchainSecretsDir` and `OnchainWebhookSecretFile` in `config.toml`, then start:
+Copy `onchain.example.json` to `onchain.json` and set its `rpc_secret` to the
+hash above. Set `Mode = "onchain"`, `OnchainConfigFile`, `OnchainSecretsDir`
+and `OnchainWebhookSecretFile` in `config.toml` before first startup, then start:
 
 ```sh
 docker compose -f compose.yaml -f compose.onchain.yaml --profile onchain up -d
@@ -100,7 +102,8 @@ docker compose -f compose.yaml -f compose.onchain.yaml --profile onchain up -d
 
 The wallet is mounted only into the redeemer, which uses the separate
 `redeemer-data` volume. Only HTTPS ticket submission is exposed through ingress.
-Apply machine settings using the [operations runbook](../docs/operations.md#onchain-operation).
+Control Center derives machine settings from the template when users claim
+orchestrators and enroll machines; see the [operations runbook](../docs/operations.md#onchain-operation).
 
 ## Bootstrap releases
 

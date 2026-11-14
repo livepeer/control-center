@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 
 const a = '0x1111111111111111111111111111111111111111'
 const b = '0x2222222222222222222222222222222222222222'
@@ -15,8 +16,8 @@ function session(id = user) {
 }
 function machine(address: string) { return { node_id:address,hostname:address===a?'alpha-machine':'beta-machine',created_at:'2026-11-06T00:00:00Z',last_config_fetch_at:null } }
 
-async function setup(page: Page, { secrets = false, empty = false, admin = false, hold = false, setupFailure = 0 } = {}) {
-  const state = { setupFailure, controlGrants:0, membershipTokens:[] as string[], holdPolicy:false, heldPolicy:null as Route|null, groups:empty?[]:groups, fail:false, denied:new Set<string>(),hold,held:[] as Route[],reserve:null as Route|null,completeReserve:null as (()=>Promise<void>)|null,holdReserve:false,wraps:[] as string[],policies:[] as string[] }
+async function setup(page: Page, { secrets = false, empty = false, admin = false, hold = false, setupFailure = 0, mode = 'offchain', inactive = false } = {}) {
+  const state = { setupFailure, controlGrants:0, membershipTokens:[] as string[], holdPolicy:false, heldPolicy:null as Route|null, groups:empty?[]:groups, fail:false, denied:new Set<string>(),hold,held:[] as Route[],reserve:null as Route|null,completeReserve:null as (()=>Promise<void>)|null,holdReserve:false,wraps:[] as string[],policies:[] as string[], challengeRequests:0, claims:[] as Record<string,string>[] }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token',JSON.stringify(saved))
     // Exercise responses that have already escaped transport cancellation.
@@ -27,13 +28,15 @@ async function setup(page: Page, { secrets = false, empty = false, admin = false
   await page.route('**/api/**',route=>{
     const req=route.request(),url=new URL(req.url()),path=url.pathname,address=url.searchParams.get('orchestrator_address')??''
     if(path==='/api/config')return route.fulfill({json:{supabase_url:'http://auth.test',supabase_publishable_key:'fixture'}})
+    if(path==='/api/orchestrators/challenge') {state.challengeRequests++;return route.fulfill(inactive?{status:403,json:{error:'Orchestrator is not active on chain.'}}:{json:{challenge:'header.payload.signature',expires_at:new Date(Date.now()+3600000).toISOString()}})}
+    if(path==='/api/orchestrators'&&req.method()==='POST') {const body=req.postDataJSON() as Record<string,string>;state.claims.push(body);const claimed=(body.address||'0x0000000000000000000000000000000000000000').toLowerCase();state.groups=[...state.groups,{address:claimed,display_name:''}];return route.fulfill({status:201,json:{address:claimed}})}
     if(path==='/api/orchestrators'){state.membershipTokens.push(req.headers().authorization);return route.fulfill(state.fail?{status:503,json:{error:'Membership service unavailable.'}}:{json:{orchestrators:state.groups}})}
-    if(path==='/api/operator/config')return route.fulfill({json:{public_api_url:'https://api.example',...(secrets?{secrets_url:'https://secrets.test'}:{})}})
+    if(path==='/api/operator/config')return route.fulfill({json:{public_api_url:'https://api.example',mode,...(secrets?{secrets_url:'https://secrets.test'}:{})}})
     if(path==='/api/me')return route.fulfill({json:{user_id:req.headers().authorization===`Bearer ${session(otherUser).access_token}`?otherUser:user,is_admin:admin}})
     if(path.startsWith('/api/admin/'))return route.fulfill({json:{administrators:[],machines:[],apps:[]}})
     if(path==='/api/bootstrap-token'){
       state.controlGrants++
-      const target=req.postDataJSON().orchestrator_address
+      const target=req.postDataJSON()?.orchestrator_address
       if(state.hold&&target===a){state.held.push(route);return}
       return route.fulfill({json:{token:`control-${target}`,expires_at:new Date(Date.now()+3600000).toISOString()}})
     }
@@ -100,6 +103,44 @@ test('no membership hides scoped content while global Administration remains ava
   state.groups=groups
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')))
   await expect(page.getByLabel('Bootstrap command')).toContainText(`control-${a}`)
+})
+
+test('onchain address check reveals signing instructions and claim selects enrollment',async({page})=>{
+  const state=await setup(page,{empty:true,mode:'onchain'})
+  await page.getByRole('button',{name:'Add orchestrator'}).click()
+  await page.getByLabel('Orchestrator address').fill(a)
+  await expect(page.getByLabel('Signing command')).toHaveCount(0)
+  await page.getByRole('button',{name:'Check active address'}).click()
+  await expect(page.getByLabel('Signing command')).toContainText('livepeer chain sign message --message-file ./orchestrator-claim.jwt')
+  const download=page.waitForEvent('download')
+  await page.getByRole('button',{name:'Download orchestrator-claim.jwt'}).click()
+  const file=await download
+  expect(file.suggestedFilename()).toBe('orchestrator-claim.jwt')
+  expect(await readFile(await file.path(),'utf8')).toBe('header.payload.signature')
+  await page.getByLabel('Signature').fill('0xsigned')
+  await page.getByRole('button',{name:'Claim orchestrator'}).click()
+  await expect(page.getByRole('combobox',{name:'Orchestrator'})).toHaveValue(a)
+  await expect(page.getByLabel('Bootstrap command')).toContainText(`control-${a}`)
+  expect(state.challengeRequests).toBe(1)
+  expect(state.claims).toEqual([{address:a,challenge:'header.payload.signature',signature:'0xsigned'}])
+})
+
+test('offchain workspace defaults to the zero address',async({page})=>{
+  const state=await setup(page,{empty:true})
+  await page.getByRole('button',{name:'Add orchestrator'}).click()
+  await page.getByRole('button',{name:'Add workspace'}).click()
+  await expect(page.getByRole('combobox',{name:'Orchestrator'})).toHaveValue('0x0000000000000000000000000000000000000000')
+  expect(state.claims).toEqual([{address:''}])
+  expect(state.challengeRequests).toBe(0)
+})
+
+test('inactive address never reveals signing instructions',async({page})=>{
+  await setup(page,{empty:true,mode:'onchain',inactive:true})
+  await page.getByRole('button',{name:'Add orchestrator'}).click()
+  await page.getByLabel('Orchestrator address').fill(a)
+  await page.getByRole('button',{name:'Check active address'}).click()
+  await expect(page.getByRole('alert')).toContainText('Orchestrator is not active on chain.')
+  await expect(page.getByLabel('Signing command')).toHaveCount(0)
 })
 
 test('membership loss clears the old orchestrator and account selection stays separate',async({page})=>{

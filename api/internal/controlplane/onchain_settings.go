@@ -9,21 +9,91 @@ import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
-	"fmt"
 	"io"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
-	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/onchain"
-	"github.com/spf13/cobra"
+	"github.com/livepeer/control-center/schema"
 )
+
+const mainnetController = "0xd8e8328501e9645d16cf49539efc04f734606ee4"
+const zeroAddress = "0x0000000000000000000000000000000000000000"
+
+func (p Params) networkMode() string {
+	if p.Mode == "" {
+		return "offchain"
+	}
+	return p.Mode
+}
+
+// ConfigureMode makes the deployment mode and chain identity immutable.
+func (s *Server) ConfigureMode(ctx context.Context) error {
+	mode := s.params.networkMode()
+	if mode == "onchain" {
+		if _, err := s.loadOnchainTemplate(); err != nil {
+			return err
+		}
+	}
+	chainID, controller := int64(0), ""
+	if mode == "onchain" {
+		chainID, controller = 42161, mainnetController
+	}
+	var stored string
+	err := s.db.QueryRowContext(ctx, `INSERT INTO lpcc.control_center_mode(id,mode,chain_id,controller)
+ VALUES(true,$1,$2,$3) ON CONFLICT(id) DO UPDATE SET mode=EXCLUDED.mode
+ WHERE lpcc.control_center_mode.mode=EXCLUDED.mode
+ AND lpcc.control_center_mode.chain_id=EXCLUDED.chain_id
+ AND lpcc.control_center_mode.controller=EXCLUDED.controller
+ RETURNING mode`, mode, chainID, controller).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("control center mode and chain identity cannot change after initialization")
+	}
+	return err
+}
+
+func (s *Server) loadOnchainTemplate() (onchain.Config, error) {
+	bad := errors.New("invalid Control Center onchain configuration")
+	if s.params.OnchainConfigFile == "" || len(s.params.OnchainWebhookSecret) < 32 || !machineconfig.ValidConnectorImage(s.params.RuntimeNodeImage) {
+		return onchain.Config{}, bad
+	}
+	b, err := os.ReadFile(s.params.OnchainConfigFile)
+	if err != nil || len(b) > 128<<10 {
+		return onchain.Config{}, bad
+	}
+	var c onchain.Config
+	if jsonv2.Unmarshal(b, &c, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil ||
+		c.Version != 1 || c.Mode != "onchain" || c.Network != "arbitrum-one-mainnet" ||
+		c.ChainID != 42161 || !strings.EqualFold(c.Controller, mainnetController) ||
+		c.Recipient != "" || c.Generation != 0 || c.CredentialRevision != 0 {
+		return onchain.Config{}, bad
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(b, &fields) != nil {
+		return onchain.Config{}, bad
+	}
+	for _, key := range []string{"recipient", "generation", "credential_revision"} {
+		if _, present := fields[key]; present {
+			return onchain.Config{}, bad
+		}
+	}
+	c.Controller = mainnetController
+	c.ETHUSDFeed = strings.ToLower(c.ETHUSDFeed)
+	c.Recipient, c.Generation, c.CredentialRevision = "0x1111111111111111111111111111111111111111", 1, 1
+	if c.Validate() != nil {
+		return onchain.Config{}, bad
+	}
+	rpc, err := s.readOnchainRPC(c.RPCSecret)
+	if err != nil || onchain.ValidateEndpoint(string(rpc), c.RPCGrants) != nil {
+		return onchain.Config{}, bad
+	}
+	c.Recipient, c.Generation, c.CredentialRevision = "", 0, 0
+	return c, nil
+}
 
 func loadOnchain(ctx context.Context, q rowQuerier, node string) (onchain.Config, error) {
 	return loadInstallationOnchain(ctx, q, `(SELECT fingerprint FROM lpcc.enrollments WHERE node_id=$1)`, node)
@@ -44,46 +114,6 @@ func loadInstallationOnchain(ctx context.Context, q rowQuerier, key, identity st
 		err = c.Validate()
 	}
 	return c, err
-}
-
-type onchainInput struct {
-	Version  int                       `json:"version"`
-	Machines map[string]onchain.Config `json:"machines"`
-}
-type onchainApplyParams struct {
-	ConfigFile string `name:"config" env:"CONTROL_CENTER_CONFIG" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig"`
-	DatabaseParams
-	OnchainSecretsDir        string `optional:"true"`
-	OnchainWebhookSecret     string `secret:"true" optional:"true"`
-	OnchainWebhookSecretFile string `secretfor:"OnchainWebhookSecret" basepath:"source"`
-	RuntimeNodeImage         string `env:"RUNTIME_NODE_IMAGE" optional:"true"`
-	File                     string `name:"file" boa:"noconfig" descr:"Onchain infrastructure JSON file"`
-	ExpectedRevision         int64  `name:"expected-revision" min:"0" boa:"noconfig"`
-}
-
-func OnchainCommand() *cobra.Command {
-	apply := boa.Cmd[onchainApplyParams]{Use: "apply", Short: "Apply deployment-owned onchain infrastructure", Args: cobra.NoArgs, RunFuncE: func(p *onchainApplyParams, cmd *cobra.Command, _ []string) error {
-		b, e := os.ReadFile(p.File)
-		if e != nil {
-			return errors.New("onchain input unavailable")
-		}
-		var input onchainInput
-		if len(b) > 128<<10 || jsonv2.Unmarshal(b, &input, jsonv2.RejectUnknownMembers(true), jsontext.AllowDuplicateNames(false)) != nil || input.Version != 1 || len(input.Machines) == 0 || len(input.Machines) > 1000 {
-			return errors.New("invalid onchain infrastructure document")
-		}
-		db, e := OpenDB(cmd.Context(), p.PGConnstr, p.PGPassword)
-		if e != nil {
-			return e
-		}
-		defer db.Close()
-		s := New(db, Params{OnchainSecretsDir: p.OnchainSecretsDir, OnchainWebhookSecret: p.OnchainWebhookSecret, RuntimeNodeImage: p.RuntimeNodeImage}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		rev, e := s.applyOnchain(cmd.Context(), input, p.ExpectedRevision)
-		if e == nil {
-			fmt.Fprintln(cmd.OutOrStdout(), rev)
-		}
-		return e
-	}}.ToCobra()
-	return boa.Cmd[boa.NoParams]{Use: "onchain", Short: "Deployment onchain configuration", SubCmds: []*cobra.Command{apply}}.ToCobra()
 }
 
 // readOnchainRPC never exposes a path or a URL in its errors.
@@ -122,147 +152,116 @@ func (s *Server) readOnchainRPC(ref string) ([]byte, error) {
 	return b, nil
 }
 
-func (s *Server) applyOnchain(ctx context.Context, input onchainInput, expected int64) (int64, error) {
-	if input.Version != 1 || len(input.Machines) == 0 || len(input.Machines) > 1000 {
-		return 0, errors.New("invalid onchain document")
+// syncOnchainConfig stores the automatic per-installation snapshot consumed by
+// configuration rendering and process-scoped redemption grants.
+func (s *Server) syncOnchainConfig(ctx context.Context, tx *sql.Tx, fingerprint, address string) (onchain.Config, bool, error) {
+	if s.params.networkMode() != "onchain" {
+		return onchain.Offchain(), false, nil
 	}
-	nodes := make([]string, 0, len(input.Machines))
-	for node, c := range input.Machines {
-		c.Recipient = strings.ToLower(c.Recipient)
-		c.Controller = strings.ToLower(c.Controller)
-		c.ETHUSDFeed = strings.ToLower(c.ETHUSDFeed)
-		input.Machines[node] = c
-		if !fingerprintPattern.MatchString(node) || c.Generation != 0 {
-			return 0, errors.New("invalid onchain machine identity")
+	if address == zeroAddress {
+		return onchain.Config{}, false, errors.New("onchain orchestrator address required")
+	}
+	next, err := s.loadOnchainTemplate()
+	if err != nil {
+		return onchain.Config{}, false, err
+	}
+	next.Recipient = address
+	var raw []byte
+	var recipient, controller string
+	var chainID, generation int64
+	err = tx.QueryRowContext(ctx, `SELECT s.recipient,s.chain_id,s.controller,s.generation,c.config
+ FROM lpcc.onchain_state s JOIN lpcc.onchain_configs c ON c.fingerprint=s.fingerprint AND c.generation=s.generation
+ WHERE s.fingerprint=$1 FOR UPDATE OF s`, fingerprint).Scan(&recipient, &chainID, &controller, &generation, &raw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return onchain.Config{}, false, err
+	}
+	if err == nil {
+		if recipient != address || chainID != 42161 || controller != mainnetController {
+			return onchain.Config{}, false, errors.New("onchain recipient and chain identity are immutable")
 		}
-		if e := c.Validate(); e != nil {
-			return 0, e
+		var current onchain.Config
+		if err = json.Unmarshal(raw, &current); err != nil {
+			return onchain.Config{}, false, err
 		}
-		nodes = append(nodes, node)
-		if c.Onchain() {
-			if len(s.params.OnchainWebhookSecret) < 32 {
-				return 0, errors.New("onchain operation requires a webhook service credential")
-			}
-			if !machineconfig.ValidConnectorImage(s.params.RuntimeNodeImage) {
-				return 0, errors.New("onchain operation requires a pinned wrapper/Node image")
-			}
-			b, e := s.readOnchainRPC(c.RPCSecret)
-			if e != nil {
-				return 0, e
-			}
-			if e := onchain.ValidateEndpoint(string(b), c.RPCGrants); e != nil {
-				return 0, e
-			}
+		compare := next
+		compare.Generation, compare.CredentialRevision = current.Generation, current.CredentialRevision
+		a, _ := json.Marshal(compare)
+		b, _ := json.Marshal(current)
+		if string(a) == string(b) {
+			return current, false, nil
 		}
 	}
-	sort.Strings(nodes)
-	tx, e := s.policyTx(ctx)
-	if e != nil {
-		return 0, e
+	next.Generation = generation + 1
+	next.CredentialRevision = uint64(next.Generation)
+	if err = next.Validate(); err != nil {
+		return onchain.Config{}, false, err
 	}
-	defer tx.Rollback()
-	var revision int64
-	if e = tx.QueryRowContext(ctx, `SELECT revision FROM lpcc.onchain_revision WHERE id=true FOR UPDATE`).Scan(&revision); e != nil {
-		return 0, e
+	raw, err = json.Marshal(next)
+	if err != nil {
+		return onchain.Config{}, false, err
 	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_configs(fingerprint,generation,config) VALUES($1,$2,$3)`, fingerprint, next.Generation, string(raw)); err != nil {
+		return onchain.Config{}, false, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_state(fingerprint,recipient,chain_id,controller,generation)
+ VALUES($1,$2,42161,$3,$4) ON CONFLICT(fingerprint) DO UPDATE SET generation=EXCLUDED.generation`, fingerprint, address, mainnetController, next.Generation)
+	return next, err == nil, err
+}
 
-	// Import is a complete desired snapshot: omission never silently disables onchain service.
-	rows, e := tx.QueryContext(ctx, `SELECT b.fingerprint FROM lpcc.onchain_state b JOIN lpcc.onchain_configs c ON c.fingerprint=b.fingerprint AND c.generation=b.generation WHERE c.config->>'mode'='onchain'`)
-	if e != nil {
-		return 0, e
+func (s *Server) reconcileOnchain(ctx context.Context) error {
+	if s.params.networkMode() != "onchain" {
+		return nil
 	}
+	rows, err := s.db.QueryContext(ctx, `SELECT fingerprint,orchestrator_address,node_id FROM lpcc.machines ORDER BY fingerprint`)
+	if err != nil {
+		return err
+	}
+	type machine struct{ fingerprint, address, node string }
+	var machines []machine
 	for rows.Next() {
-		var n string
-		if e = rows.Scan(&n); e != nil {
+		var m machine
+		if err = rows.Scan(&m.fingerprint, &m.address, &m.node); err != nil {
 			break
 		}
-		if _, ok := input.Machines[n]; !ok {
-			e = errors.New("explicit offchain intent is required")
-			break
-		}
+		machines = append(machines, m)
 	}
-	if e == nil {
-		e = rows.Err()
+	if err == nil {
+		err = rows.Err()
 	}
 	rows.Close()
-	if e != nil {
-		return 0, e
+	if err != nil {
+		return err
 	}
-	changed := false
-	for _, node := range nodes {
-		c := input.Machines[node]
-		old, e := loadInstallationOnchain(ctx, tx, "$1", node)
-		if e != nil {
-			return 0, e
+	for _, m := range machines {
+		tx, err := s.policyTx(ctx)
+		if err != nil {
+			return err
 		}
-		c.Generation = old.Generation
-		before, _ := json.Marshal(old)
-		after, _ := json.Marshal(c)
-		if string(before) == string(after) {
-			continue
-		}
-		// Same locking order as assignment mutation and configuration publication.
-		var activeNode string
-		e = tx.QueryRowContext(ctx, `SELECT node_id FROM lpcc.machines WHERE fingerprint=$1 FOR UPDATE`, node).Scan(&activeNode)
-		if e != nil && !errors.Is(e, sql.ErrNoRows) {
-			return 0, e
-		}
-		if activeNode != "" {
-			a, e := machineapps.Snapshot(ctx, tx, activeNode)
-			if e != nil {
-				return 0, e
-			}
-			if a != nil {
-				for _, a := range a.Entries {
-					if a.Revision != nil && a.Desired == "present" {
-						if e = c.Compatible(a.Revision.Definition); e != nil {
-							return 0, definitionProblem(e)
+		next, changed, err := s.syncOnchainConfig(ctx, tx, m.fingerprint, m.address)
+		if err == nil && changed {
+			var a *schema.AppAssignmentSetV1
+			a, err = machineapps.Snapshot(ctx, tx, m.node)
+			if err == nil && a != nil {
+				for _, entry := range a.Entries {
+					if entry.Revision != nil && entry.Desired == "present" {
+						if err = next.Compatible(entry.Revision.Definition); err != nil {
+							break
 						}
 					}
 				}
 			}
-		}
-		var recipient, controller string
-		var chain uint64
-		e = tx.QueryRowContext(ctx, `SELECT recipient,chain_id,controller FROM lpcc.onchain_state WHERE fingerprint=$1 FOR UPDATE`, node).Scan(&recipient, &chain, &controller)
-		if e != nil && !errors.Is(e, sql.ErrNoRows) {
-			return 0, e
-		}
-		if c.Onchain() {
-			if recipient != "" && (!strings.EqualFold(recipient, c.Recipient) || chain != c.ChainID || !strings.EqualFold(controller, c.Controller)) {
-				return 0, errors.New("onchain recipient and chain binding are immutable")
+			if err == nil {
+				_, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, m.node)
 			}
-			recipient = strings.ToLower(c.Recipient)
-			chain = c.ChainID
-			controller = strings.ToLower(c.Controller)
-			c.Recipient = recipient
-			c.Controller = controller
 		}
-		c.Generation = old.Generation + 1
-		after, _ = json.Marshal(c)
-		if _, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_configs VALUES($1,$2,$3)`, node, c.Generation, string(after)); e != nil {
-			return 0, e
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			tx.Rollback()
 		}
-		_, e = tx.ExecContext(ctx, `INSERT INTO lpcc.onchain_state(fingerprint,recipient,chain_id,controller,generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT(fingerprint) DO UPDATE SET recipient=EXCLUDED.recipient,chain_id=EXCLUDED.chain_id,controller=EXCLUDED.controller,generation=EXCLUDED.generation`, node, recipient, chain, controller, c.Generation)
-		if e != nil {
-			return 0, e
-		}
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, activeNode); e != nil {
-			return 0, e
-		}
-		if e = writeAudit(ctx, tx, "system", "deployment:onchain", "onchain.apply", AdminTarget{Kind: "machine", ID: node, Revision: revisionString(c.Generation)}, "success", "changed"); e != nil {
-			return 0, e
-		}
-		changed = true
-	}
-	if expected > revision || (changed && expected != revision) {
-		return 0, problem(409, "onchain_revision_changed", "Onchain infrastructure changed.")
-	}
-	if changed {
-		revision++
-		if _, e = tx.ExecContext(ctx, `UPDATE lpcc.onchain_revision SET revision=$1 WHERE id=true`, revision); e != nil {
-			return 0, e
+		if err != nil {
+			return err
 		}
 	}
-	return revision, tx.Commit()
+	return nil
 }

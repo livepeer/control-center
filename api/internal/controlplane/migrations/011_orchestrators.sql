@@ -1,7 +1,16 @@
 -- UP
 CREATE TABLE lpcc.orchestrators (
- address text PRIMARY KEY CHECK(address ~ '^0x[0-9a-f]{40}$' AND address <> '0x0000000000000000000000000000000000000000'),
+ address text PRIMARY KEY CHECK(address ~ '^0x[0-9a-f]{40}$'),
+ claimed_by_user_id uuid NOT NULL,
+ claimed_at timestamptz NOT NULL DEFAULT now(),
+ proof_jti text UNIQUE,
  display_name text CHECK(length(display_name) BETWEEN 1 AND 120)
+);
+CREATE TABLE lpcc.control_center_mode (
+ id boolean PRIMARY KEY DEFAULT true CHECK(id),
+ mode text NOT NULL CHECK(mode IN ('offchain','onchain')),
+ chain_id bigint NOT NULL,
+ controller text NOT NULL
 );
 CREATE TABLE lpcc.orchestrator_memberships (
  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -13,9 +22,11 @@ DROP INDEX lpcc.machines_owner;
 ALTER TABLE lpcc.machines RENAME COLUMN owner_id TO orchestrator_address;
 ALTER TABLE lpcc.machines ALTER COLUMN orchestrator_address TYPE text USING orchestrator_address::text;
 ALTER TABLE lpcc.machines ADD FOREIGN KEY(orchestrator_address) REFERENCES lpcc.orchestrators(address);
+ALTER TABLE lpcc.machines ADD COLUMN enrolled_by_user_id uuid NOT NULL;
 ALTER TABLE lpcc.enrollments RENAME COLUMN owner_id TO orchestrator_address;
 ALTER TABLE lpcc.enrollments ALTER COLUMN orchestrator_address TYPE text USING orchestrator_address::text;
 ALTER TABLE lpcc.enrollments ADD FOREIGN KEY(orchestrator_address) REFERENCES lpcc.orchestrators(address);
+ALTER TABLE lpcc.enrollments ADD COLUMN enrolled_by_user_id uuid NOT NULL;
 ALTER TABLE lpcc.operator_app_policy RENAME COLUMN owner_id TO orchestrator_address;
 ALTER TABLE lpcc.operator_app_policy ALTER COLUMN orchestrator_address TYPE text USING orchestrator_address::text;
 ALTER TABLE lpcc.operator_app_policy ADD FOREIGN KEY(orchestrator_address) REFERENCES lpcc.orchestrators(address);
@@ -30,8 +41,8 @@ ALTER TABLE lpcc.enrollment_audit ADD COLUMN orchestrator_address text NOT NULL 
 CREATE OR REPLACE FUNCTION lpcc.retire_machine() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
  SET search_path=pg_catalog,lpcc AS $$
 BEGIN
- INSERT INTO lpcc.enrollments(node_id,orchestrator_address,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at)
- VALUES(OLD.node_id,OLD.orchestrator_address,OLD.fingerprint,OLD.hostname,OLD.install_dir,OLD.k3s_version,OLD.credential_version,now())
+ INSERT INTO lpcc.enrollments(node_id,orchestrator_address,enrolled_by_user_id,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at)
+ VALUES(OLD.node_id,OLD.orchestrator_address,OLD.enrolled_by_user_id,OLD.fingerprint,OLD.hostname,OLD.install_dir,OLD.k3s_version,OLD.credential_version,now())
  ON CONFLICT(node_id) DO UPDATE SET retired_at=COALESCE(lpcc.enrollments.retired_at,now()),credential_version=OLD.credential_version;
  PERFORM lpcc.remove_machine_apps(OLD.node_id,'system:machine-retirement');
  UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{lifecycle}','"removed"')-'rollout_reason',state=jsonb_set(state,'{ready}','false'),
@@ -40,11 +51,12 @@ BEGIN
 END $$;
 ALTER TABLE lpcc.orchestrators ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lpcc.orchestrator_memberships ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON lpcc.orchestrators,lpcc.orchestrator_memberships FROM PUBLIC;
+ALTER TABLE lpcc.control_center_mode ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON lpcc.orchestrators,lpcc.orchestrator_memberships,lpcc.control_center_mode FROM PUBLIC;
 DO $$ DECLARE r text; BEGIN
  FOREACH r IN ARRAY ARRAY['anon','authenticated'] LOOP
  IF EXISTS(SELECT FROM pg_roles WHERE rolname=r) THEN
- EXECUTE format('REVOKE ALL ON lpcc.orchestrators,lpcc.orchestrator_memberships FROM %I',r);
+ EXECUTE format('REVOKE ALL ON lpcc.orchestrators,lpcc.orchestrator_memberships,lpcc.control_center_mode FROM %I',r);
  END IF;
  END LOOP;
 END $$;
@@ -55,9 +67,11 @@ ALTER TABLE lpcc.enrollment_audit DROP COLUMN orchestrator_address;
 ALTER TABLE lpcc.enrollment_audit RENAME COLUMN actor_user_id TO owner_id;
 DROP INDEX lpcc.machines_orchestrator;
 ALTER TABLE lpcc.machines DROP CONSTRAINT machines_orchestrator_address_fkey;
+ALTER TABLE lpcc.machines DROP COLUMN enrolled_by_user_id;
 ALTER TABLE lpcc.machines ALTER COLUMN orchestrator_address TYPE uuid USING orchestrator_address::uuid;
 ALTER TABLE lpcc.machines RENAME COLUMN orchestrator_address TO owner_id;
 ALTER TABLE lpcc.enrollments DROP CONSTRAINT enrollments_orchestrator_address_fkey;
+ALTER TABLE lpcc.enrollments DROP COLUMN enrolled_by_user_id;
 ALTER TABLE lpcc.enrollments ALTER COLUMN orchestrator_address TYPE uuid USING orchestrator_address::uuid;
 ALTER TABLE lpcc.enrollments RENAME COLUMN orchestrator_address TO owner_id;
 ALTER TABLE lpcc.operator_app_policy DROP CONSTRAINT operator_app_policy_orchestrator_address_fkey;
@@ -79,4 +93,4 @@ BEGIN
  revision=revision+1,next_attempt_at=now() WHERE node_id=OLD.node_id;
  RETURN OLD;
 END $$;
-DROP TABLE lpcc.orchestrator_memberships,lpcc.orchestrators;
+DROP TABLE lpcc.orchestrator_memberships,lpcc.orchestrators,lpcc.control_center_mode;

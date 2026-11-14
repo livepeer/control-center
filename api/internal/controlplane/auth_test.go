@@ -55,7 +55,7 @@ func TestTrustedIdentityAndAuthenticationFailures(t *testing.T) {
 				w := request(t, s, "GET", "/api/operator/config", "session", nil)
 				requireStatus(t, w, http.StatusOK)
 				var settings map[string]string
-				if err := json.Unmarshal(w.Body.Bytes(), &settings); err != nil || !maps.Equal(settings, map[string]string{"public_api_url": p.PublicAPIURL, "secrets_url": p.SecretsURL}) {
+				if err := json.Unmarshal(w.Body.Bytes(), &settings); err != nil || !maps.Equal(settings, map[string]string{"public_api_url": p.PublicAPIURL, "secrets_url": p.SecretsURL, "mode": "offchain"}) {
 					t.Fatal("operator config", w.Body.String(), err)
 				}
 			} else {

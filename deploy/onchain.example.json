@@ -1,23 +1,15 @@
 {
   "version": 1,
-  "machines": {
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
-      "version": 1,
-      "credential_revision": 1,
-      "mode": "onchain",
-      "network": "arbitrum-one-mainnet",
-      "chain_id": 42161,
-      "controller": "0xD8E8328501E9645d16Cf49539efC04f734606ee4",
-      "recipient": "0x2222222222222222222222222222222222222222",
-      "rpc_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "redeemer_url": "https://controlcenter-api.livepeer.live/redemption",
-      "eth_usd_feed": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",
-      "price_max_age": "2h",
-      "ticket_face_value": "1000000000000000",
-      "ticket_win_prob": "1000000000000000000000000000000000000000000000000000000000000000",
-      "max_pending_tickets": 100000,
-      "max_tickets_per_recipient": 10000
-    },
-    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"version": 1, "mode": "offchain"}
-  }
+  "mode": "onchain",
+  "network": "arbitrum-one-mainnet",
+  "chain_id": 42161,
+  "controller": "0xD8E8328501E9645d16Cf49539efC04f734606ee4",
+  "rpc_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "redeemer_url": "https://controlcenter-api.livepeer.live/redemption",
+  "eth_usd_feed": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",
+  "price_max_age": "2h",
+  "ticket_face_value": "1000000000000000",
+  "ticket_win_prob": "1000000000000000000000000000000000000000000000000000000000000000",
+  "max_pending_tickets": 100000,
+  "max_tickets_per_recipient": 10000
 }

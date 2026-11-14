@@ -45,7 +45,10 @@ func TestOrchestratorAddress(t *testing.T) {
 	if err != nil || got != address {
 		t.Fatal(got, err)
 	}
-	for _, raw := range []string{"", "11111111-1111-4111-8111-111111111111", "0x0000000000000000000000000000000000000000", "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", " " + address} {
+	if got, err := OrchestratorAddress("0x0000000000000000000000000000000000000000"); err != nil || got != "0x0000000000000000000000000000000000000000" {
+		t.Fatal(got, err)
+	}
+	for _, raw := range []string{"", "11111111-1111-4111-8111-111111111111", "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", " " + address} {
 		if _, err := OrchestratorAddress(raw); err == nil {
 			t.Fatal("invalid orchestrator accepted", raw)
 		}
