@@ -10,50 +10,6 @@ enable the sign-in methods you plan to use and allow
 `http://localhost:5173/auth/callback` as a redirect URL. Authentication and the
 database must use the same trusted project. `make api` loads `api/config.toml`.
 
-## Orchestrators
-
-Users select an orchestrator in the console. Its canonical owner is its lowercase
-recipient address, independent of network and payment configuration. Members
-share machines, secrets and app access policies. Administration remains global.
-
-Provision access through a trusted database connection until the membership
-verification flow is available. Confirm the recipient address and user identity
-before inserting them; this SQL does not verify control of a wallet. Use the
-Supabase user UUID, not an email address, for membership and audit identity:
-
-```sql
-BEGIN;
-INSERT INTO lpcc.orchestrators(address, display_name)
-VALUES(lower('<RECIPIENT_ADDRESS>'), '<DISPLAY_NAME>')
-ON CONFLICT(address) DO UPDATE SET display_name=EXCLUDED.display_name;
-INSERT INTO lpcc.orchestrator_memberships(user_id, orchestrator_address)
-VALUES('<USER_UUID>'::uuid, lower('<RECIPIENT_ADDRESS>'))
-ON CONFLICT DO NOTHING;
-COMMIT;
-```
-
-Configure the [Vault policy](operator-secrets.md#deployment) for each address.
-
-Remove access with:
-
-```sql
-DELETE FROM lpcc.orchestrator_memberships
-WHERE user_id='<USER_UUID>'::uuid
-AND orchestrator_address=lower('<RECIPIENT_ADDRESS>');
-```
-
-Removing a member or deleting their account preserves shared machines, secrets
-and runtime identities, even when no members remain. Restore membership to
-give another user access. A grant cannot be used while its issuer lacks
-membership or has a deleted account; rejoining can restore an unexpired grant.
-Only the issuing user can revoke a grant, and revocation lasts until expiry in
-both services.
-
-The orchestrator ownership migrations require fresh Control Center and secrets
-service data. They refuse populated ownership-dependent tables. Existing
-ciphertext cannot be reassigned by editing its owner field because ownership is
-part of its authenticated encryption metadata.
-
 ## Administrator access
 
 Ensure email confirmation is enabled and administrator accounts have verified

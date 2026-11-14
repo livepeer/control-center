@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
-	"github.com/livepeer/control-center/api/internal/migrations"
 	"github.com/livepeer/control-center/schema"
 )
 
@@ -514,17 +512,6 @@ func TestAssignmentReportValidationAndProviderBackoff(t *testing.T) {
 	requireStatus(t, <-receipt, 200)
 	if count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE failures=3 AND next_attempt_at>now()+interval '55 minutes'`) != 1 {
 		t.Fatal("app changes reset provider backoff")
-	}
-	files, err := fs.Sub(MigrationFiles, "migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Requested assignment history is now part of the operator-policy schema.
-	if err := migrations.Down(t.Context(), s.db, files); err == nil || !strings.Contains(err.Error(), "orchestrator ownership requires a fresh deployment") {
-		t.Fatal("rollback did not protect requested assignment history", err)
-	}
-	if count(t, s, `SELECT count(*) FROM lpcc.machine_app_versions`) != 2 {
-		t.Fatal("rollback changed history")
 	}
 }
 

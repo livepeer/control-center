@@ -1,11 +1,4 @@
 -- UP
-DO $$ BEGIN
- IF EXISTS(SELECT FROM lpcc.machines) OR EXISTS(SELECT FROM lpcc.enrollments)
- OR EXISTS(SELECT FROM lpcc.operator_app_policy) OR EXISTS(SELECT FROM lpcc.operator_policy_generation)
- OR EXISTS(SELECT FROM lpcc.enrollment_audit) OR EXISTS(SELECT FROM lpcc.revoked_enrollment_grants) THEN
- RAISE EXCEPTION 'orchestrator ownership requires a fresh deployment';
- END IF;
-END $$;
 CREATE TABLE lpcc.orchestrators (
  address text PRIMARY KEY CHECK(address ~ '^0x[0-9a-f]{40}$' AND address <> '0x0000000000000000000000000000000000000000'),
  display_name text CHECK(length(display_name) BETWEEN 1 AND 120)
@@ -56,13 +49,6 @@ DO $$ DECLARE r text; BEGIN
  END LOOP;
 END $$;
 -- DOWN
-DO $$ BEGIN
- IF EXISTS(SELECT FROM lpcc.machines) OR EXISTS(SELECT FROM lpcc.enrollments)
- OR EXISTS(SELECT FROM lpcc.operator_app_policy) OR EXISTS(SELECT FROM lpcc.operator_policy_generation)
- OR EXISTS(SELECT FROM lpcc.enrollment_audit) OR EXISTS(SELECT FROM lpcc.revoked_enrollment_grants) THEN
- RAISE EXCEPTION 'orchestrator ownership requires a fresh deployment';
- END IF;
-END $$;
 ALTER TABLE lpcc.revoked_enrollment_grants DROP COLUMN orchestrator_address;
 ALTER TABLE lpcc.revoked_enrollment_grants RENAME COLUMN actor_user_id TO owner_id;
 ALTER TABLE lpcc.enrollment_audit DROP COLUMN orchestrator_address;

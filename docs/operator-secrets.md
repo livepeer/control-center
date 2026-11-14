@@ -53,11 +53,6 @@ key and service pin. Later requests are signed with the runtime key; service
 replies are signed and bound to the exact request and authorization. Invalid
 proofs and replayed replies are retried, while verified revocation is enforced.
 
-API clients obtain a grant from each service and combine them locally; both
-grants must target the same orchestrator. Control Center's bootstrap endpoint
-takes `orchestrator_address` in its JSON body. Human secrets and app-policy
-endpoints require that address as a query parameter and a user bearer token.
-
 Initial enrollment trusts Cloudflare and HTTPS to introduce both signing
 identities. Without a prior pin, the installer cannot establish that the first
 service key belongs to the intended service from its signature alone. The
@@ -118,11 +113,7 @@ encryption.
    docker compose -f deploy/compose.secrets.yaml up --build -d
    ```
 
-The service applies PostgreSQL migrations on startup. Orchestrator ownership
-requires fresh data; migration refuses existing user-owned secrets and
-identities instead of relabeling encrypted values. See [orchestrator
-provisioning](operations.md#orchestrators). The baseline migration cannot be
-rolled back because it may contain data.
+The service applies PostgreSQL migrations on startup.
 
 To inspect or apply migrations separately, run the service image with
 `SECRETS_DATABASE_URL_FILE` configured. With the Compose deployment above:
@@ -162,9 +153,6 @@ Restore the original private key instead of silently replacing their pins. For
 a compromised runtime key, use member-authorized
 `POST /v1/machines/{node}/reset`, then enroll again. To revoke access without
 resetting identity, use `POST /v1/machines/{node}/revoke`.
-
-A member's departure and routine management credential refresh preserve the
-runtime identity. Machine retirement and explicit identity revocation disable it.
 
 Upgrade Control Center, the secrets service, installer and runtime together,
 then rerun enrollment to install the pin. Existing clusters must first complete
