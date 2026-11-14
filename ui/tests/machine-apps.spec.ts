@@ -69,9 +69,15 @@ test('choosing a catalog app defaults to its latest revision and replica count',
 })
 
 test('machine apps assign, scale and replace only after cleanup', async ({ page }) => {
-  const state = await setup(page)
+  const state = await setup(page), held: Route[] = []
+  await page.route('**/api/admin/apps/whoami**', route => { held.push(route) })
   await page.getByLabel('Catalog app for machine').selectOption('whoami')
+  await expect(page.getByLabel('Catalog revision for machine')).toHaveValue(r2)
+  await expect(page.getByRole('button', { name: 'Assign selected revision', exact: true })).toBeEnabled()
+  await page.unroute('**/api/admin/apps/whoami**')
+  for (const route of held) await route.fallback()
   await page.getByLabel('Catalog revision for machine').selectOption(r1)
+  await page.getByLabel('New assignment replicas').fill('2')
   await page.getByRole('button', { name: 'Assign selected revision', exact: true }).click()
   await expect(page.getByText('Pending Runtime completion', { exact: true })).toBeVisible()
   expect(state.posts[0].body).toMatchObject({ expected_generation: 0, replicas: 2 })

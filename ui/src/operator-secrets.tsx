@@ -103,7 +103,8 @@ export function OperatorSecrets({session, origin, address, authorityFailure}: {s
   return () => { refreshGeneration.current++; contextGeneration.current++; window.removeEventListener('lpcc-secrets-enrolled', load) }
  }, [session.access_token, origin, address])
 
- const selectedApp = apps?.find(app => app.name === appName)
+ const secretApps = (apps ?? []).filter(app => references(app).length > 0)
+ const selectedApp = secretApps.find(app => app.name === appName)
  const groups = selectedApp ? [...new Set(references(selectedApp).map(ref => ref.secret))].sort() : []
  const groupKeys = name ? [...new Set([
   ...(selectedApp ? references(selectedApp).filter(ref => ref.secret === name).map(ref => ref.key) : []),
@@ -228,12 +229,11 @@ export function OperatorSecrets({session, origin, address, authorityFailure}: {s
   {loading && <p className="secret-note" aria-live="polite">Loading apps and secret entries…</p>}
   <div className="machine-panel secret-browser">
    <div className="secret-selectors">
-    <label>App name<select aria-label="App name" value={appName} disabled={busy || loading || !apps || !!appProblem} onChange={event => {setAppName(event.target.value); setName(''); clearEditor(); setProblem(''); setMessage('')}}><option value="">Choose an app</option>{(apps ?? []).map(app => <option key={app.name} value={app.name}>{app.name}</option>)}</select></label>
+    <label>App name<select aria-label="App name" value={appName} disabled={busy || loading || !secretApps.length || !!appProblem} onChange={event => {setAppName(event.target.value); setName(''); clearEditor(); setProblem(''); setMessage('')}}><option value="">Choose an app</option>{secretApps.map(app => <option key={app.name} value={app.name}>{app.name}</option>)}</select></label>
     <label>Secret name<select aria-label="Secret name" value={name} disabled={busy || loading || !selectedApp || !groups.length || !!appProblem} onChange={event => {setName(event.target.value); clearEditor(); setProblem(''); setMessage('')}}><option value="">Choose a secret group</option>{groups.map(group => <option key={group} value={group}>{group} — {declarationSources(selectedApp!, group)}</option>)}</select></label>
    </div>
-   {!loading && !appProblem && apps?.length === 0 && <p className="secret-note">No apps are available.</p>}
-   {!loading && !appProblem && selectedApp && !groups.length && <p className="secret-note">This app does not declare any secrets.</p>}
-   {!appName && !!apps?.length && <p className="secret-note">Select an app to see the secret groups it declares.</p>}
+   {!loading && !appProblem && apps !== null && !secretApps.length && <p className="secret-note">No apps declare secrets.</p>}
+   {!appName && !!secretApps.length && <p className="secret-note">Select an app to see the secret groups it declares.</p>}
    {selectedApp && !!groups.length && !name && <p className="secret-note">Select a secret group to manage its keys.</p>}
    {name && selectedApp && <>
     <div className="secret-group-heading"><h3>{name}</h3><p>{declarationSources(selectedApp, name)}</p>

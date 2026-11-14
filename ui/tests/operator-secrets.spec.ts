@@ -219,7 +219,8 @@ async function operatorFixture(page: Page, trusted = true) {
 }
 
 test('app and group selectors combine catalog and machine declarations and reuse matching groups',async ({page}) => {
- const {section} = await operatorFixture(page)
+ const {state,section} = await operatorFixture(page)
+ await expect(section.getByLabel('App name',{exact:true}).locator('option')).toHaveText(['Choose an app','provider','worker'])
  await expect(section.getByLabel('Secret name',{exact:true})).toBeDisabled()
  await section.getByLabel('App name',{exact:true}).selectOption('provider')
  const groups = section.getByLabel('Secret name',{exact:true})
@@ -239,9 +240,11 @@ test('app and group selectors combine catalog and machine declarations and reuse
  await section.getByLabel('App name',{exact:true}).selectOption('worker')
  await expect(groups.locator('option')).toHaveText(['Choose a secret group','lp-app-provider — Latest catalog'])
  await expect(groups).toHaveValue('')
- await section.getByLabel('App name',{exact:true}).selectOption('no-secrets')
+ state.apps[1].secrets = []; state.apps[1].catalog_secrets = []
+ await section.getByRole('button',{name:'Refresh secrets',exact:true}).click()
+ await expect(section.getByLabel('App name',{exact:true})).toHaveValue('')
+ await expect(section.getByLabel('App name',{exact:true}).locator('option')).toHaveText(['Choose an app','provider'])
  await expect(groups).toBeDisabled()
- await expect(section.getByText('This app does not declare any secrets.')).toBeVisible()
 })
 
 test('create, replace, delete and re-create individual values without changing declarations',async ({page}) => {
@@ -362,10 +365,7 @@ test('failed refreshes retain metadata without presenting failures as missing en
  await policy.getByRole('button',{name:'Deny',exact:true}).click()
  await expect(policy.getByRole('button',{name:'Allow',exact:true})).toBeEnabled()
  expect(state.apps[0].denied).toBe(true)
- await section.getByLabel('App name',{exact:true}).selectOption('no-secrets')
- await expect(section.getByText('This app does not declare any secrets.')).toBeVisible()
- await section.getByLabel('App name',{exact:true}).selectOption('provider')
- await section.getByLabel('Secret name',{exact:true}).selectOption(group)
+ await expect(section.getByLabel('App name',{exact:true}).locator('option')).toHaveText(['Choose an app','provider','worker'])
  state.failSecrets = false; state.failApps = true
  await section.getByRole('button',{name:'Refresh secrets',exact:true}).click()
  await expect(section.getByRole('alert')).toContainText('Could not load app access.')
@@ -415,20 +415,22 @@ test('initial load failures and empty catalogs have distinct states',async ({pag
  await section.getByText('Workspace inventory',{exact:true}).click()
  await expect(section.getByText('Secret entries have not loaded.')).toBeVisible()
  await expect(section.getByText('No workspace secret entries yet.')).toHaveCount(0)
- state.apps = []
+ state.apps = state.apps.filter(app => app.name === 'no-secrets')
  await section.getByRole('button',{name:'Refresh secrets',exact:true}).click()
- await expect(section.getByText('No apps are available.')).toBeVisible()
+ await expect(section.getByText('No apps declare secrets.')).toBeVisible()
+ await expect(section.getByLabel('App name',{exact:true})).toBeDisabled()
+ await expect(section.getByLabel('App name',{exact:true}).locator('option')).toHaveText(['Choose an app'])
  state.failSecrets = false; state.failApps = true
  await page.reload()
  await expect(section.getByRole('alert')).toContainText('Could not load app access.')
- await expect(section.getByText('No apps are available.')).toHaveCount(0)
+ await expect(section.getByText('No apps declare secrets.')).toHaveCount(0)
  await section.getByText('Workspace inventory',{exact:true}).click()
  const orphan = section.getByRole('table',{name:'Workspace keys in lp-app-orphan',exact:true})
  await expect(orphan.getByRole('cell',{name:'Unavailable',exact:true})).toHaveCount(2)
  await expect(orphan.getByText('No app declarations',{exact:true})).toHaveCount(0)
  state.failApps = false; state.apps = []
  await section.getByRole('button',{name:'Refresh secrets',exact:true}).click()
- await expect(section.getByText('No apps are available.')).toBeVisible()
+ await expect(section.getByText('No apps declare secrets.')).toBeVisible()
  await expect(section.getByRole('alert')).toHaveCount(0)
 })
 
