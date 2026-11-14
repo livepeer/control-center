@@ -277,12 +277,6 @@ func (s *Service) resolveValues(w http.ResponseWriter, r *http.Request, keys boo
 			return
 		}
 	}
-	// Recheck live policy/identity immediately before returning a newly issued authorization.
-	again, g, e := s.machine(r)
-	if e != nil || g != gen || !again.Managed || again.PolicyGeneration != m.PolicyGeneration || !eligibleAssignment(again, in) {
-		fail(w, 409, "authorization_changed")
-		return
-	}
 	if tx.Commit() != nil {
 		fail(w, 503, "unavailable")
 		return

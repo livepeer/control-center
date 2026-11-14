@@ -99,17 +99,6 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	again, ng, e := s.machine(r)
-	if e != nil || ng != g || !again.Managed || again.PolicyGeneration != m.PolicyGeneration {
-		fail(w, 409, "authorization_changed")
-		return
-	}
-	for _, a := range in.Assignments {
-		if _, ok := sets[a.RevisionID]; ok && !eligibleAssignment(again, a) {
-			fail(w, 409, "authorization_changed")
-			return
-		}
-	}
 	if tx.Commit() != nil {
 		fail(w, 503, "unavailable")
 		return
