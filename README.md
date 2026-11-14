@@ -4,10 +4,9 @@ Control Center manages onboarding and configuration for Livepeer orchestrators.
 
 ## Connect a node
 
-Sign in to Control Center, select an orchestrator, and copy its enrollment
-command. Prepare the [prerequisite packages](runtime/README.md#prerequisites)
-on a Debian or Ubuntu amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB
-free. Run as root:
+Connect an orchestrator to Control Center and enroll a machine. Prepare the
+[prerequisite packages](runtime/README.md#prerequisites) on a Debian or Ubuntu
+amd64 systemd host with 2 CPUs, 4 GiB RAM, and 10 GiB free. Run as root:
 
 ```sh
 # Disable shell tracing before entering the token.
