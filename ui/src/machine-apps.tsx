@@ -4,6 +4,7 @@ import { api, APIError } from './api'
 
 type Revision = { revision_id: string; digest: string; name: string; revision: number; app_version: string; lifecycle: { retired_at: string | null }; definition: { name: string; instances: { replicas: number } } }
 type Summary = Pick<Revision, 'revision_id' | 'digest' | 'revision' | 'app_version' | 'lifecycle'>
+type App = { name: string; head: Summary }
 type Assignment = { revision_id: string; digest: string; app_name: string; revision_number: number; generation: number; activation_generation: number; desired: 'present' | 'absent'; replicas?: number; revision?: Revision; start_after?: unknown; replacement?: unknown; start_allowed: boolean; completed_at: string | null; failure?: string; observed_at: string | null; created_at: string; actor_id: string }
 type Listing = { assignments: Assignment[]; apps_generation: number; published_generation: number; delivery_error: string | null; next_after_revision_id: string | null; last_config_fetch_at: string | null }
 type Detail = { assignment: Assignment; revision: Revision; history: Assignment[]; next_before_generation: number | null }
@@ -11,11 +12,12 @@ type Detail = { assignment: Assignment; revision: Revision; history: Assignment[
 export function MachineApps({ session, machine, authorityFailure }: { session: Session; machine: { node_id: string; hostname: string; }; authorityFailure: (error: APIError) => void }) {
   const base = `/api/admin/machines/${machine.node_id}/apps`
   const [listing, setListing] = useState<Listing | null>(null)
-  const [apps, setApps] = useState<{ name: string }[]>([])
+  const [apps, setApps] = useState<App[]>([])
   const [moreApps, setMoreApps] = useState<string | null>(null)
   const [appName, setAppName] = useState('')
   const [revisions, setRevisions] = useState<Summary[]>([])
   const [moreRevisions, setMoreRevisions] = useState<number | null>(null)
+  const [revisionId, setRevisionId] = useState('')
   const [selected, setSelected] = useState<Revision | null>(null)
   const [replicas, setReplicas] = useState(1)
   const [counts, setCounts] = useState<Record<string, { value: number; activation: number }>>({})
@@ -60,22 +62,25 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     void request.finally(() => { if (listingRequest.current === request) listingRequest.current = null })
   }
   function loadApps(after?: string) {
-    void run('apps', signal => api<{ apps: { name: string }[]; next_after_name: string | null }>(session, '/api/admin/apps' + (after ? `?after_name=${encodeURIComponent(after)}` : ''), { signal }), data => { setApps(old => after ? [...old, ...data.apps] : data.apps); setMoreApps(data.next_after_name) })
+    void run('apps', signal => api<{ apps: App[]; next_after_name: string | null }>(session, '/api/admin/apps' + (after ? `?after_name=${encodeURIComponent(after)}` : ''), { signal }), data => { setApps(old => after ? [...old, ...data.apps] : data.apps); setMoreApps(data.next_after_name) })
   }
   function chooseApp(name: string, before?: number) {
+    const head = apps.find(a => a.name === name)?.head
     setAppName(name)
     if (!before) {
       serial.current.revision = (serial.current.revision || 0) + 1
-      setSelected(null); setRevisions([]); setMoreRevisions(null)
+      setSelected(null); setRevisionId(''); setRevisions(head ? [head] : []); setMoreRevisions(null)
     }
     if (!name) { serial.current.revisions = (serial.current.revisions || 0) + 1; return }
+    if (!before && head) chooseRevision(head.revision_id, name)
+    const selectionTicket = serial.current.revision
     void run('revisions', signal => api<{ revisions: Summary[]; next_before_revision: number | null }>(session, `/api/admin/apps/${encodeURIComponent(name)}` + (before ? `?before_revision=${before}` : ''), { signal }), data => {
-      setRevisions(old => before ? [...old, ...data.revisions] : data.revisions); setMoreRevisions(data.next_before_revision)
-      if (!before && data.revisions.length) chooseRevision(data.revisions[0].revision_id, name)
+      setRevisions(old => before ? [...old, ...data.revisions] : [...data.revisions, ...old.filter(r => !data.revisions.some(next => next.revision_id === r.revision_id))]); setMoreRevisions(data.next_before_revision)
+      if (!before && selectionTicket === serial.current.revision && data.revisions.length && data.revisions[0].revision_id !== head?.revision_id) chooseRevision(data.revisions[0].revision_id, name)
     })
   }
   function chooseRevision(id: string, name = appName) {
-    setSelected(null)
+    setRevisionId(id); setSelected(null)
     if (!id) { serial.current.revision = (serial.current.revision || 0) + 1; return }
     void run('revision', signal => api<Revision>(session, `/api/admin/apps/${encodeURIComponent(name)}/revisions/${id}`, { signal }), data => { setSelected(data); setReplicas(data.definition.instances.replicas) })
   }
@@ -120,8 +125,8 @@ export function MachineApps({ session, machine, authorityFailure }: { session: S
     {listing && <p className="muted">Desired app generation {listing.apps_generation}; published {listing.published_generation}. Last config request: {listing.last_config_fetch_at ? new Date(listing.last_config_fetch_at).toLocaleString() : 'None'}{listing.delivery_error ? ` · Delivery failed: ${listing.delivery_error}` : ''}</p>}
     <div className="catalog-actions">
       <label>Catalog app <select aria-label="Catalog app for machine" value={appName} disabled={busy} onChange={e => chooseApp(e.target.value)}><option value="">Choose an app</option>{apps.map(a => <option key={a.name}>{a.name}</option>)}</select></label>
-      <label>Revision <select aria-label="Catalog revision for machine" value={selected?.revision_id || ''} disabled={busy || !appName} onChange={e => chooseRevision(e.target.value)}><option value="">Choose a revision</option>{revisions.map(r => <option key={r.revision_id} value={r.revision_id}>Revision {r.revision} · version {r.app_version || '(unversioned)'}{r.lifecycle.retired_at ? ' (retired)' : ''}</option>)}</select></label>
-      <label>Replicas <input aria-label="New assignment replicas" type="number" min="1" max="100" value={replicas} disabled={busy} onChange={e => setReplicas(Number(e.target.value))} /></label>
+      <label>Revision <select aria-label="Catalog revision for machine" value={revisionId} disabled={busy || !appName} onChange={e => chooseRevision(e.target.value)}><option value="">Choose a revision</option>{revisions.map(r => <option key={r.revision_id} value={r.revision_id}>Revision {r.revision} · version {r.app_version || '(unversioned)'}{r.lifecycle.retired_at ? ' (retired)' : ''}</option>)}</select></label>
+      <label>Replicas <input aria-label="New assignment replicas" type="number" min="1" max="100" value={selected ? replicas : ''} placeholder={revisionId ? 'Loading…' : ''} disabled={busy || !selected} onChange={e => setReplicas(Number(e.target.value))} /></label>
       <button className="button lime" disabled={busy || !listing || !selected || !!selected.lifecycle.retired_at || !validCount(replicas) || !!(selectedAssignment && (present(selectedAssignment) || !selectedAssignment.completed_at))} onClick={() => selected && mutate(`${base}/${selected.revision_id}`, 'PUT', { digest: selected.digest, expected_generation: selectedAssignment?.generation || 0, replicas })}>Assign selected revision</button>
       {moreApps && <button className="button" disabled={busy} onClick={() => loadApps(moreApps)}>More catalog apps</button>}{moreRevisions && <button className="button" disabled={busy} onClick={() => chooseApp(appName, moreRevisions)}>Older catalog revisions</button>}
     </div>

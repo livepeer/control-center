@@ -60,6 +60,20 @@ async function setup(page: Page) {
   return state
 }
 
+test('latest revision is selected before history or details load', async ({ page }) => {
+  await setup(page)
+  const held: Route[] = []
+  await page.route('**/api/admin/apps/whoami**', route => { held.push(route) })
+  await page.getByLabel('Catalog app for machine').selectOption('whoami')
+  await expect(page.getByLabel('Catalog revision for machine')).toHaveValue(r2)
+  const assign = page.getByRole('button', { name: 'Assign selected revision', exact: true })
+  await expect(assign).toBeDisabled()
+  await expect.poll(() => held.length).toBe(2)
+  await held.find(route => route.request().url().endsWith(r2))!.fulfill({ json: revision(r2, 2) })
+  await expect(page.getByLabel('New assignment replicas')).toHaveValue('2')
+  await expect(assign).toBeEnabled()
+})
+
 test('machine apps assign, scale and replace only after cleanup', async ({ page }) => {
   const state = await setup(page)
   await page.getByLabel('Catalog app for machine').selectOption('whoami')
