@@ -196,6 +196,8 @@ These commands use the default root; substitute your `--install-dir`:
 
 ```sh
 sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml get pods -A
+sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml top nodes
+sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml top pods -A
 sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml \
   -n flux-system get externalartifacts,kustomizations
 sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml \
@@ -204,6 +206,13 @@ sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.
 
 With the port-forward running, inspect `http://127.0.0.1:8936/readyz` and
 `http://127.0.0.1:8935/discovery`.
+
+K3s's bundled metrics-server supplies CPU and memory usage through the Kubernetes
+Metrics API, subject to Kubernetes authentication and RBAC. Its Service stays
+cluster-internal, with no public tunnel route. The host firewall permits system
+Pods to reach the kubelet on TCP 10250 while blocking public and gVisor app
+traffic. Existing installations pick this up when rerunning an updated bootstrap
+bundle, which reloads the firewall and restarts K3s for the changed configuration.
 
 For a planned K3s upgrade, set the target `spec.version` in the backend-owned
 `api/internal/controlplane/machineconfig/templates/upgrade-plan/plan.yaml` and

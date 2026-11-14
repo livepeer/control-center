@@ -133,11 +133,13 @@ dns_reachable() {
   ip netns exec "$1" python3 -c 'import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(1); s.sendto(b"dns-test",(sys.argv[1],53)); assert s.recv(512)==b"dns-test"' "$2" 2>/dev/null
 }
 reachable external http://192.0.2.1:6443
+reachable external http://192.0.2.1:10250
 reachable external http://10.42.0.2:8080
 reachable external 'http://[fd42::2]:8080'
 reachable external 'http://[2001:db8:1::1]:8935'
 reachable external http://192.0.2.1:30080
 reachable gvisor2 http://192.0.2.1:6443
+reachable gvisor2 http://192.0.2.1:10250
 reachable gvisor2 http://10.42.0.2:8080
 reachable gvisor2 http://10.20.0.2:443
 reachable gvisor2 http://169.254.169.254:443
@@ -148,6 +150,7 @@ nft list table inet operator_owned >/dev/null
 curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:6443 >/dev/null
 reachable pod http://10.43.0.1:443
 reachable pod http://192.0.2.1:6443
+reachable pod http://192.0.2.1:10250
 reachable external http://192.0.2.1:22
 reachable pod http://192.0.2.2:8080
 reachable pod http://10.44.0.2:8080
@@ -159,7 +162,7 @@ dns_reachable gvisor2 1.0.0.1
 for address in 10.20.0.2 169.254.169.254 8.8.8.8; do
   if dns_reachable gvisor2 "$address"; then echo "Unexpected gVisor DNS access: $address" >&2; exit 1; fi
 done
-for url in http://192.0.2.1:6443 http://10.43.0.1:443 http://192.0.2.1:22 http://10.44.0.1:8935 http://10.42.0.2:8080 http://10.44.0.3:8080 http://10.20.0.2:443 http://169.254.169.254:443 http://11.22.33.2:443 http://8.8.8.8:8080 'http://[fd44::1]:8935' 'http://[fd42::2]:8080'; do
+for url in http://192.0.2.1:6443 http://192.0.2.1:10250 http://10.43.0.1:443 http://192.0.2.1:22 http://10.44.0.1:8935 http://10.42.0.2:8080 http://10.44.0.3:8080 http://10.20.0.2:443 http://169.254.169.254:443 http://11.22.33.2:443 http://8.8.8.8:8080 'http://[fd44::1]:8935' 'http://[fd42::2]:8080'; do
   if reachable gvisor2 "$url"; then echo "Unexpected gVisor access: $url" >&2; exit 1; fi
 done
 for url in http://192.0.2.1:6443 http://192.0.2.1:10250 http://192.0.2.1:8935 http://192.0.2.1:8936 http://192.0.2.1:20241 http://10.42.0.2:8080 http://10.44.0.2:8080 http://10.43.0.1:443 http://192.0.2.1:30080 http://192.0.2.1:18080 'http://[fd42::2]:8080' 'http://[fd44::2]:8080' 'http://[2001:db8:1::1]:8935'; do
@@ -173,4 +176,5 @@ nft list table inet operator_owned >/dev/null
 nft list table inet livepeer_bootstrap >/dev/null
 if reachable external http://192.0.2.1:6443; then exit 1; fi
 reachable pod http://10.43.0.1:443
-echo 'Firewall passed: gVisor local/Pod/metadata denial, public HTTPS/DNS, incoming replies; system Pod API access; atomic reload.'
+reachable pod http://192.0.2.1:10250
+echo 'Firewall passed: gVisor local/Pod/metadata denial, public HTTPS/DNS, incoming replies; system Pod API/kubelet access; atomic reload.'
