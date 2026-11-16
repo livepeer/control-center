@@ -20,6 +20,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/migrations"
 	"github.com/livepeer/control-center/api/internal/testdb"
 )
@@ -118,7 +119,7 @@ func TestTunnelIngressContract(t *testing.T) {
 	}
 	for _, path := range []string{"/apps/a/session", "/apps/a/session/b/stop", "/apps/a/session/b/payment", "/refresh-payment"} {
 		rule := match(api, path)
-		if rule.Service != PrivateOrchestrator || rule.OriginRequest == nil || rule.OriginRequest.Access != nil || rule.OriginRequest.HTTPHostHeader != endpointHost(PrivateOrchestrator) {
+		if rule.Service != machineconfig.PrivateIngressAPI || rule.OriginRequest == nil || rule.OriginRequest.Access != nil || rule.OriginRequest.HTTPHostHeader != endpointHost(PrivateOrchestrator) {
 			t.Fatalf("missing client path %s", path)
 		}
 	}
@@ -132,7 +133,7 @@ func TestTunnelIngressContract(t *testing.T) {
 			t.Fatal("exact hostname fell through to wildcard", host)
 		}
 	}
-	if rule := match(app, "/v1/completions"); rule.Service != PrivateOrchestrator || rule.OriginRequest != nil {
+	if rule := match(app, "/v1/completions"); rule.Service != machineconfig.PrivateIngressApps || rule.OriginRequest != nil {
 		t.Fatal("proxy Host was not preserved")
 	}
 	protected := match("discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa.example.invalid", "/discovery")
@@ -143,7 +144,7 @@ func TestTunnelIngressContract(t *testing.T) {
 		t.Fatal("alias bypass")
 	}
 	for _, r := range rules {
-		if r.Service != PrivateOrchestrator && !strings.HasPrefix(r.Service, "http_status:") {
+		if r.Service != machineconfig.PrivateIngressAPI && r.Service != machineconfig.PrivateIngressDiscovery && r.Service != machineconfig.PrivateIngressApps && !strings.HasPrefix(r.Service, "http_status:") {
 			t.Fatal("direct app ingress")
 		}
 	}
@@ -154,7 +155,7 @@ func TestAccessKeyringBindingAndRotation(t *testing.T) {
 		t.Fatal(e)
 	}
 	ref := "access/node/1"
-	secret := AccessCredential{"id", "high-entropy-secret"}
+	secret := AccessCredential{ClientID: "id", ClientSecret: "high-entropy-secret"}
 	id, b, e := k.seal(ref, secret)
 	if e != nil || bytes.Contains(b, []byte(secret.ClientSecret)) {
 		t.Fatal("plaintext secret", e)

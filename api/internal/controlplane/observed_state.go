@@ -21,7 +21,9 @@ import (
 )
 
 type componentObservation struct {
-	Software []contract.SoftwareIdentity `json:"software,omitempty"`
+	Software            []contract.SoftwareIdentity `json:"software,omitempty"`
+	IngressReady        bool                        `json:"ingress_ready"`
+	IngressConfigDigest string                      `json:"ingress_config_digest,omitempty"`
 
 	K3sVersion          string                  `json:"k3s_version,omitempty"`
 	Onchain             *onchain.Observation    `json:"onchain,omitempty"`
@@ -252,6 +254,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 		}
 		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
 		c.Software, c.K3sVersion = report.Software, report.K3sVersion
+		c.IngressReady, c.IngressConfigDigest = report.IngressReady, report.IngressConfigDigest
 		c.Onchain = report.Onchain
 		if c.Onchain != nil {
 			copy := *c.Onchain

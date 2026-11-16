@@ -3,9 +3,9 @@ package controlplane
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/livepeer/control-center/runtime/ingressauth"
 	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
 	"time"
@@ -30,64 +30,45 @@ func (p Params) signingKeyID() string {
 	return p.JWTSigningKeyID
 }
 
-func (p Params) enrollmentKeys() (map[string]string, error) {
-	keys := map[string]string{}
-	if p.JWTVerificationKeys != "" && json.Unmarshal([]byte(p.JWTVerificationKeys), &keys) != nil {
-		return nil, errors.New("invalid enrollment verification keyring")
+func (p *Params) loadJWTKeys() error {
+	if p.jwtKey != nil {
+		return nil
 	}
-	if keys == nil {
-		return nil, errors.New("invalid enrollment verification keyring")
+	key, err := ingressauth.Load(p.JWTSigningPrivateKeyFile, p.JWTVerificationPublicKeysFile, p.signingKeyID())
+	if err == nil {
+		p.jwtKey = key
 	}
-	if len(p.signingKeyID()) > 64 {
-		return nil, errors.New("enrollment signing key ID exceeds 64 bytes")
-	}
-	if len(keys) > 16 {
-		return nil, errors.New("enrollment verification keyring exceeds 16 keys")
-	}
-	for id, key := range keys {
-		if id == "" || len(id) > 64 || len(key) < 32 {
-			return nil, errors.New("enrollment verification keys require an ID and at least 32 bytes")
-		}
-	}
-	keys[p.signingKeyID()] = p.JWTSigningSecret
-	return keys, nil
+	return err
 }
-
-func signEnrollment(secret, owner, address string, now time.Time) (string, time.Time, error) {
-	return (Params{JWTSigningSecret: secret}).signEnrollment(owner, address, now)
+func (p Params) enrollmentKeys() (ingressauth.Keys, error) {
+	if err := p.loadJWTKeys(); err != nil {
+		return nil, err
+	}
+	return p.jwtKey.Keys, nil
+}
+func (p Params) signJWT(claims jwt.Claims) (string, error) {
+	if err := p.loadJWTKeys(); err != nil {
+		return "", err
+	}
+	return p.jwtKey.Sign(p.signingKeyID(), claims)
 }
 func (p Params) signEnrollment(owner, address string, now time.Time) (string, time.Time, error) {
 	expires := now.Add(time.Hour).Truncate(time.Second)
 	c := enrollmentClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: owner, Audience: jwt.ClaimStrings{enrollmentAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires), ID: uuid.New().String()}, Scope: "machines:register", OrchestratorAddress: address}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
-	token.Header["kid"] = p.signingKeyID()
-	raw, e := token.SignedString([]byte(p.JWTSigningSecret))
+	raw, e := p.signJWT(c)
 	return raw, expires, e
-}
-func verifyEnrollment(secret, raw string) (string, error) {
-	c, e := (Params{JWTSigningSecret: secret}).enrollmentGrant(raw, time.Now(), false)
-	if e != nil {
-		return "", e
-	}
-	return c.Subject, nil
 }
 func (p Params) enrollmentGrant(raw string, now time.Time, expired bool) (*enrollmentClaims, error) {
 	keys, e := p.enrollmentKeys()
 	if e != nil {
 		return nil, e
 	}
-	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer(enrollmentIssuer), jwt.WithAudience(enrollmentAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(func() time.Time { return now })}
+	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(enrollmentIssuer), jwt.WithAudience(enrollmentAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(func() time.Time { return now })}
 	if expired {
 		opts = append(opts, jwt.WithoutClaimsValidation())
 	}
 	c := new(enrollmentClaims)
-	_, e = jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
-		id, ok := t.Header["kid"].(string)
-		if !ok || keys[id] == "" {
-			return nil, errors.New("unknown enrollment key")
-		}
-		return []byte(keys[id]), nil
-	}, opts...)
+	_, e = jwt.ParseWithClaims(raw, c, keys.Key, opts...)
 	invalid := errors.New("invalid or expired enrollment token")
 	if e != nil || c.Issuer != enrollmentIssuer || len(c.Audience) != 1 || c.Audience[0] != enrollmentAudience || c.Scope != "machines:register" || c.ID == "" || c.ExpiresAt == nil || c.IssuedAt == nil || c.IssuedAt.After(now) || !c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > time.Hour {
 		return nil, invalid

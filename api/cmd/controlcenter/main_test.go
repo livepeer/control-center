@@ -37,7 +37,7 @@ func TestMigrationConfig(t *testing.T) {
 	for name, contents := range map[string]string{
 		"connection":  "postgres://example:[PG_PASSWORD]@localhost/test?sslmode=disable",
 		"password":    "p@ss word",
-		"config.toml": "PGConnstrFile = 'connection'\nPGPasswordFile = 'password'\nJWTSigningSecretFile = 'missing'\nMachineTokenSecretFile = 'missing'\n",
+		"config.toml": "PGConnstrFile = 'connection'\nPGPasswordFile = 'password'\nJWTSigningPrivateKeyFile = 'missing'\nMachineTokenSecretFile = 'missing'\n",
 	} {
 		if err := os.WriteFile(name, []byte(contents), 0600); err != nil {
 			t.Fatal(err)

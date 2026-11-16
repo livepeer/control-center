@@ -28,7 +28,9 @@ secret file mode `0600`, and deployed secret ownership `65532:65532` so the
 non-root API and cloudflared processes can read their respective mounts.
 Keep the configuration readable by UID 65532 as well.
 
-Preserve the signing secrets and Collector encryption keyring across upgrades.
+Generate `secrets/jwt-signing-key.pem` as an Ed25519 PKCS#8 PEM key; see the
+[discovery authentication guide](../docs/discovery-auth.md). Preserve this key,
+machine credential secrets and the Collector keyring across upgrades.
 For a fresh database, generate the keyring once with an independent random
 32-byte base64 key, following [the tunnel runbook](../docs/machine-tunnels.md).
 Back up the keyring separately from database backups. The registry uses the

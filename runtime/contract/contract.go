@@ -9,6 +9,8 @@ import (
 const BundleFormat = 3
 
 type Metadata struct {
+	IngressVersion          int            `json:"ingress_version,omitempty"`
+	IngressConfigDigest     string         `json:"ingress_config_digest,omitempty"`
 	ManagedSecrets          bool           `json:"managed_secrets,omitempty"`
 	SecretsEncryptionReady  bool           `json:"secrets_encryption_ready,omitempty"`
 	SecretsProtocol         int            `json:"secrets_protocol,omitempty"`

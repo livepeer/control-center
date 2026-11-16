@@ -75,6 +75,7 @@ type Runtime = contract.Metadata
 
 func DesiredRuntime(m Desired) Runtime {
 	d := Runtime{NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Generation: 1, Terminal: m.Terminal, ConfigDigest: Digest(m), ServiceURL: PrivateOrchestrator, APIURL: m.ControlAPIURL}
+	d.IngressConfigDigest = m.IngressConfigDigest()
 	d.ManagedSecrets = m.ManagedSecrets
 	d.SecretsEncryptionReady = m.SecretsEncryptionReady
 	if m.ManagedSecrets {
@@ -101,6 +102,7 @@ func DesiredRuntime(m Desired) Runtime {
 	}
 	if routeEnabled(m) {
 		r := m.Exposure
+		d.IngressVersion = r.IngressVersion
 		d.ServiceURL = r.ServiceURL
 		d.TunnelID = r.TunnelID
 		d.TokenGeneration = r.CredentialGeneration

@@ -133,7 +133,7 @@ func TestAdministratorLifecycleAndCredentialBoundaries(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT json_agg(e)::text FROM lpcc.admin_audit_events e`).Scan(&audit); err != nil {
 		t.Fatal(err)
 	}
-	for _, credential := range []string{a["token"], b["token"], "session-a", "session-b", s.params.JWTSigningSecret, s.params.MachineTokenSecret} {
+	for _, credential := range []string{a["token"], b["token"], "session-a", "session-b", string(s.params.jwtKey.Private), s.params.MachineTokenSecret} {
 		if strings.Contains(audit, credential) {
 			t.Fatal("credential recorded in audit")
 		}

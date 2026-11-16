@@ -125,10 +125,10 @@ func TestTOMLConfig(t *testing.T) {
 		"connection": "postgres://example:[PG_PASSWORD]@localhost/test",
 		"metadata":   strings.Repeat("m", 32),
 		"webhook":    strings.Repeat("w", 32),
-		"password":   "p@ss word", "enrollment": strings.Repeat("a", 32), "machine": strings.Repeat("b", 32),
+		"password":   "p@ss word", "enrollment": testJWTPem(), "machine": strings.Repeat("b", 32),
 		"config.toml": `PGConnstrFile = "connection"
 PGPasswordFile = "password"
-JWTSigningSecretFile = "enrollment"
+JWTSigningPrivateKeyFile = "enrollment"
 MachineTokenSecretFile = "machine"
 SecretsURL = "https://secrets.example"
 SecretsMetadataTokenFile = "metadata"
@@ -154,7 +154,7 @@ OnchainWebhookSecretFile = "webhook"
 	if err := (boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", filepath.Join(dir, "config.toml"), "--listen", "localhost:43000"}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if p.PGConnstr != files["connection"] || p.PGPassword != files["password"] || p.JWTSigningSecret != files["enrollment"] || p.MachineTokenSecret != files["machine"] || p.OnchainWebhookSecret != files["webhook"] {
+	if p.PGConnstr != files["connection"] || p.PGPassword != files["password"] || p.jwtKey == nil || p.JWTSigningPrivateKeyFile != filepath.Join(dir, "enrollment") || p.MachineTokenSecret != files["machine"] || p.OnchainWebhookSecret != files["webhook"] {
 		t.Fatal("secret files were not resolved relative to TOML")
 	}
 	if p.Mode != "onchain" || p.SupabaseURL != "https://auth.example" || p.SupabasePublishableKey != "public-key" || p.ConfigReconcileInterval != 75*time.Second || p.PublicAPIURL != "https://public.example" || p.Listen != "localhost:43000" {
@@ -174,7 +174,7 @@ OnchainWebhookSecretFile = "webhook"
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
-	for _, name := range []string{"CONTROL_CENTER_CONFIG", "CONTROL_CENTER_MODE", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_SECRET", "JWT_SIGNING_SECRET_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL"} {
+	for _, name := range []string{"CONTROL_CENTER_CONFIG", "CONTROL_CENTER_MODE", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_PRIVATE_KEY_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL"} {
 		t.Setenv(name, "")
 	}
 }
@@ -208,12 +208,11 @@ func TestConfigValidation(t *testing.T) {
 		{func(p *Params) { p.Mode = "" }, "onchain mode requires"},
 		{func(p *Params) { p.SecretsURL = "" }, "SecretsURL"},
 		{func(p *Params) { p.SecretsMetadataToken = "" }, "secrets metadata credentials"},
-		{func(p *Params) { p.JWTSigningSecret = "short" }, "jwt-signing-secret"},
+		{func(p *Params) { p.jwtKey = nil; p.JWTSigningPrivateKeyFile = "/missing-key" }, "JWTSigningPrivateKeyFile"},
 		{func(p *Params) { p.MachineTokenSecret = "short" }, "machine-token-secret"},
-		{func(p *Params) { p.JWTSigningSecret = p.MachineTokenSecret }, "different"},
 		{func(p *Params) { p.ConfigReconcileInterval = 500 * time.Millisecond }, "at least 1s"},
 		{func(p *Params) { p.SupabaseURL = "https://auth.example/?x=1" }, "HTTP(S) base URLs"},
-		{func(p *Params) { p.JWTSigningSecret, p.MachineTokenSecret = "", "" }, "missing required param 'jwt-signing-secret'"},
+		{func(p *Params) { p.jwtKey = nil; p.JWTSigningPrivateKeyFile = "" }, "JWTSigningPrivateKeyFile"},
 		{func(p *Params) { p.SupabaseURL = "" }, "missing required param 'supabase-url'"},
 		{func(p *Params) { p.DefaultAdminEmail = "Name <admin@example.com>" }, "single email address"},
 	} {

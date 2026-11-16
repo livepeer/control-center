@@ -1,10 +1,10 @@
 # Copy to config.toml. Paths are inside the API container, not the host.
 PGConnstrFile = "/run/secrets/pg-connstr"
 PGPasswordFile = "/run/secrets/pg-password"
-JWTSigningSecretFile = "/run/secrets/jwt-signing-secret"
+JWTSigningPrivateKeyFile = "/run/secrets/jwt-signing-key.pem"
 # Keep old key IDs and keys in this JSON file for one-hour grants and 24-hour invitations.
 # JWTSigningKeyID = "2"
-# JWTVerificationKeysFile = "/private/enrollment-verification-keys.json"
+# JWTVerificationPublicKeysFile = "/private/jwt-verification-public-keys.json"
 MachineTokenSecretFile = "/run/secrets/machine-token-secret"
 SupabaseURL = "https://PROJECT.supabase.co"
 SupabasePublishableKey = "replace-with-publishable-key"

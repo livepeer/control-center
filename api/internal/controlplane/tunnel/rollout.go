@@ -6,7 +6,7 @@ import (
 )
 
 func (l *tunnelLease) desired(state Snapshot) machineconfig.Desired {
-	exposure := &machineconfig.Exposure{TunnelID: state.TunnelID, ServiceURL: state.ServiceURL, ProxyURLTemplate: state.ProxyURLTemplate, DiscoveryURL: state.DiscoveryURL, IngressDigest: state.IngressDigest, CredentialGeneration: state.CredentialGeneration, ProviderVersion: state.ProviderVersion}
+	exposure := &machineconfig.Exposure{IngressVersion: state.IngressVersion, TunnelID: state.TunnelID, ServiceURL: state.ServiceURL, ProxyURLTemplate: state.ProxyURLTemplate, DiscoveryURL: state.DiscoveryURL, IngressDigest: state.IngressDigest, CredentialGeneration: state.CredentialGeneration, ProviderVersion: state.ProviderVersion}
 	return l.s.rollout.Desired(l.Machine, state.State, exposure)
 }
 func (l *tunnelLease) desiredDigest() string { return machineconfig.Digest(l.desired(l.state)) }

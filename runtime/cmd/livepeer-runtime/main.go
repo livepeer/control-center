@@ -20,6 +20,7 @@ import (
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/consumer"
 	"github.com/livepeer/control-center/runtime/httpsource"
+	"github.com/livepeer/control-center/runtime/ingressauth"
 	"github.com/livepeer/control-center/runtime/management"
 	"github.com/livepeer/control-center/runtime/secretclient"
 	"github.com/livepeer/control-center/runtime/transport"
@@ -35,9 +36,11 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("choose http-source, app-reconciler, connector-start, or connector-probe")
+		return errors.New("choose http-source, app-reconciler, ingress-auth, connector-start, or connector-probe")
 	}
 	switch args[0] {
+	case "ingress-auth":
+		return ingressAuth(ctx, args[1:])
 	case "orchestrator-start":
 		return consumer.Start(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/rpc", os.Getenv("POD_NAME"), os.Getenv("POD_UID"), args[1:])
 	case "orchestrator-probe":
@@ -304,7 +307,12 @@ func serve(ctx context.Context, address string, handler http.Handler, loop func(
 	done := make(chan error, 1)
 	loopDone := make(chan struct{})
 	go func() { done <- server.ListenAndServe() }()
-	go func() { defer close(loopDone); loop(ctx) }()
+	go func() {
+		defer close(loopDone)
+		if loop != nil {
+			loop(ctx)
+		}
+	}()
 	select {
 	case err := <-done:
 		cancel()
@@ -320,4 +328,27 @@ func serve(ctx context.Context, address string, handler http.Handler, loop func(
 	err := server.Shutdown(stop)
 	<-loopDone
 	return err
+}
+
+func ingressAuth(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("ingress-auth", flag.ContinueOnError)
+	listen := flags.String("listen", ":8080", "Private ForwardAuth listener")
+	public := flags.String("public-keys-file", "", "Ed25519 public verification map")
+	node := flags.String("node-id", "", "Intended machine identity")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return errors.New("invalid ingress-auth arguments")
+	}
+	data, err := os.ReadFile(*public)
+	if err != nil {
+		return errors.New("cannot read ingress-auth public keys")
+	}
+	keys, err := ingressauth.ParseKeys(data)
+	if err != nil {
+		return err
+	}
+	handler, err := ingressauth.Handler(keys, *node)
+	if err != nil {
+		return err
+	}
+	return serve(ctx, *listen, handler, nil)
 }

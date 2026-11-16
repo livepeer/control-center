@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"encoding/json"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,23 +35,23 @@ func TestPinnedCloudflaredIngress(t *testing.T) {
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/prefix/discovery", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/runners/heartbeat", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/runner/a/session/b/channels", "http_status:404"},
-		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session", PrivateOrchestrator},
-		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/payment", PrivateOrchestrator},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session", machineconfig.PrivateIngressAPI},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/payment", machineconfig.PrivateIngressAPI},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app/v1", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/app", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/session/b/app/ws", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/run/a/x", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/proxy/a", "http_status:404"},
-		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/refresh-payment", PrivateOrchestrator},
+		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/refresh-payment", machineconfig.PrivateIngressAPI},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/ai/trickle/a/0", "http_status:404"},
 		{"api.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/unknown", "http_status:404"},
 		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
 		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/discovery", "http_status:404"},
 		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/app/discovery", "http_status:404"},
 		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/readyz", "http_status:404"},
-		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/v1/completions", PrivateOrchestrator},
-		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/discovery", PrivateOrchestrator},
+		{"p.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/v1/completions", machineconfig.PrivateIngressApps},
+		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/discovery", machineconfig.PrivateIngressDiscovery},
 		{"discovery.vkvkvkvkvkvkuaaaaaaaaaaaaa", "/apps/a/app", "http_status:404"},
 		{"alias", "/discovery", "http_status:404"},
 	} {

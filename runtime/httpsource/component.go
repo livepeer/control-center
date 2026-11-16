@@ -12,7 +12,7 @@ import (
 
 // Compare verified component inputs, without borrowing readiness from another workload.
 func (s *Source) componentUnchanged(name, previous, current string) bool {
-	paths := map[string]string{"livepeer-node": "system/node/", "livepeer-connector": "system/connector/", "livepeer-upgrade-plan": "upgrade-plan/"}
+	paths := map[string]string{"livepeer-ingress": "system/ingress/", "livepeer-node": "system/node/", "livepeer-connector": "system/connector/", "livepeer-upgrade-plan": "upgrade-plan/"}
 	prefix := paths[name]
 	if prefix == "" {
 		return false

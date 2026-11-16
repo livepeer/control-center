@@ -66,7 +66,7 @@ func TestOwnerDenialRetainsIntentAndReallowWaitsForCleanup(t *testing.T) {
 func TestStolenEnrollmentGrantCannotReissueExistingMachineCredential(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	token, _, _ := signEnrollment(s.params.JWTSigningSecret, ownerA, testOrchestrator(ownerA), time.Now())
+	token, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	w := request(t, s, "POST", "/v1/nodes/register", token, registrationBody(ownerB, strings.Repeat("d", 64), token))
 	requireStatus(t, w, 409)
 	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", token, map[string]any{"fingerprint": strings.Repeat("d", 64), "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})

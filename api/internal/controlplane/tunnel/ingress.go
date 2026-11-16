@@ -37,7 +37,7 @@ const reservedPath = `(?i)(?:^|/)(?:discovery|runners?|metrics|healthz|readyz)(?
 const clientPath = `^/(?:apps/[A-Za-z0-9_-]{1,128}/session(?:/[A-Za-z0-9_-]{1,128}/(?:stop|payment))?|refresh-payment)$`
 
 func RoutingFor(node, domain string) Snapshot {
-	return Snapshot{State: machineconfig.InitialState(false), RoutingState: RoutingState{EndpointGeneration: 1, CredentialGeneration: 1, SourceGeneration: 1, AccessVersion: 1,
+	return Snapshot{State: machineconfig.InitialState(false), RoutingState: RoutingState{IngressVersion: 1, EndpointGeneration: 1, CredentialGeneration: 1, SourceGeneration: 1, AccessVersion: 1,
 		ServiceURL:       "https://api." + node + "." + domain,
 		ProxyURLTemplate: "https://{proxy}." + node + "." + domain, DiscoveryURL: "https://discovery." + node + "." + domain + "/discovery", Resources: map[string]CFResource{}}}
 }
@@ -48,12 +48,12 @@ func ingressFor(state RoutingState, p Config, audience string) []IngressRule {
 	apps := "*." + namespace
 	return []IngressRule{
 		{Hostname: api, Path: reservedPath, Service: "http_status:404"},
-		{Hostname: api, Path: clientPath, Service: PrivateOrchestrator, OriginRequest: &OriginRequest{HTTPHostHeader: endpointHost(PrivateOrchestrator)}},
+		{Hostname: api, Path: clientPath, Service: machineconfig.PrivateIngressAPI, OriginRequest: &OriginRequest{HTTPHostHeader: endpointHost(PrivateOrchestrator)}},
 		{Hostname: api, Service: "http_status:404"},
-		{Hostname: discovery, Path: `^/discovery$`, Service: PrivateOrchestrator, OriginRequest: protectedOrigin(p, audience)},
+		{Hostname: discovery, Path: `^/discovery$`, Service: machineconfig.PrivateIngressDiscovery, OriginRequest: protectedOrigin(p, audience)},
 		{Hostname: discovery, Service: "http_status:404"},
 		{Hostname: apps, Path: reservedPath, Service: "http_status:404"},
-		{Hostname: apps, Service: PrivateOrchestrator},
+		{Hostname: apps, Service: machineconfig.PrivateIngressApps},
 		{Service: "http_status:404"},
 	}
 }

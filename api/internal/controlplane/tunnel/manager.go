@@ -16,6 +16,7 @@ var ErrPending = errors.New("tunnel is not provisioned")
 type Machine = machineconfig.Machine
 
 type Dependencies struct {
+	SignDiscovery   func(string) (string, error)
 	DB              *sql.DB
 	Logger          *slog.Logger
 	Configurations  *machineconfig.Manager
@@ -24,6 +25,7 @@ type Dependencies struct {
 }
 
 type Manager struct {
+	signDiscovery    func(string) (string, error)
 	db               *sql.DB
 	params           Config
 	logger           *slog.Logger
@@ -37,7 +39,7 @@ type Manager struct {
 // Configure enables provisioning; ConfigureCredentials enables credential reads.
 // Both are startup operations and must finish before workers start.
 func New(config Config, deps Dependencies) *Manager {
-	return &Manager{db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
+	return &Manager{signDiscovery: deps.SignDiscovery, db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
 		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints}
 }
 

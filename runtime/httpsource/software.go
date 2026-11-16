@@ -69,6 +69,9 @@ func systemWorkload(ns string, labels map[string]string) string {
 	if ns == "kube-system" && labels["k8s-app"] == "kube-dns" {
 		app = "coredns"
 	}
+	if ns == "kube-system" && labels["app.kubernetes.io/name"] == "traefik" {
+		app = "traefik"
+	}
 	if ns == "system-upgrade" {
 		app = labels["app.kubernetes.io/name"]
 		if labels["upgrade.cattle.io/plan"] == "livepeer-k3s" {
@@ -76,7 +79,7 @@ func systemWorkload(ns string, labels map[string]string) string {
 		}
 	}
 	switch ns + "/" + app {
-	case "livepeer/orchestrator", "flux-system/livepeer-http-source", "flux-system/livepeer-app-reconciler", "flux-system/livepeer-tunnel", "flux-system/source-controller", "flux-system/kustomize-controller", "kube-system/coredns", "kube-system/local-path-provisioner", "system-upgrade/system-upgrade-controller", "system-upgrade/livepeer-k3s-upgrade":
+	case "livepeer/ingress-auth", "kube-system/traefik", "livepeer/orchestrator", "flux-system/livepeer-http-source", "flux-system/livepeer-app-reconciler", "flux-system/livepeer-tunnel", "flux-system/source-controller", "flux-system/kustomize-controller", "kube-system/coredns", "kube-system/local-path-provisioner", "system-upgrade/system-upgrade-controller", "system-upgrade/livepeer-k3s-upgrade":
 		return app
 	}
 	return ""

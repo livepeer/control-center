@@ -30,9 +30,7 @@ func (s *Server) signInvitation(user, address string) (string, time.Time, error)
 		RegisteredClaims: jwt.RegisteredClaims{Issuer: enrollmentIssuer, Subject: user, Audience: jwt.ClaimStrings{invitationAudience}, ID: uuid.New().String(), IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires)},
 		Scope:            "orchestrators:join", ControlCenter: strings.TrimRight(s.params.PublicAPIURL, "/"), OrchestratorAddress: address,
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
-	token.Header["kid"] = s.params.signingKeyID()
-	raw, err := token.SignedString([]byte(s.params.JWTSigningSecret))
+	raw, err := s.params.signJWT(c)
 	return raw, expires, err
 }
 
@@ -42,13 +40,7 @@ func (s *Server) verifyInvitation(raw string) (*invitationClaims, error) {
 		return nil, err
 	}
 	c := new(invitationClaims)
-	_, err = jwt.ParseWithClaims(raw, c, func(t *jwt.Token) (any, error) {
-		id, ok := t.Header["kid"].(string)
-		if !ok || keys[id] == "" {
-			return nil, errors.New("unknown signing key")
-		}
-		return []byte(keys[id]), nil
-	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer(enrollmentIssuer), jwt.WithAudience(invitationAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(s.currentTime))
+	_, err = jwt.ParseWithClaims(raw, c, keys.Key, jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(enrollmentIssuer), jwt.WithAudience(invitationAudience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(s.currentTime))
 	if err != nil || c.Scope != "orchestrators:join" || c.ControlCenter != strings.TrimRight(s.params.PublicAPIURL, "/") || len(c.Audience) != 1 || c.Audience[0] != invitationAudience || c.IssuedAt == nil || c.ExpiresAt == nil || !c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > 24*time.Hour {
 		return nil, problem(400, "invalid_invitation", "This invitation is invalid or has expired.")
 	}

@@ -39,9 +39,7 @@ func (s *Server) signOrchestratorClaim(user, address string) (string, time.Time,
 		Scope: "orchestrators:claim", ControlCenter: strings.TrimRight(s.params.PublicAPIURL, "/"),
 		OrchestratorAddress: address,
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	token.Header["kid"] = s.params.signingKeyID()
-	raw, err := token.SignedString([]byte(s.params.JWTSigningSecret))
+	raw, err := s.params.signJWT(claims)
 	return raw, expires, err
 }
 
@@ -51,13 +49,7 @@ func (s *Server) verifyOrchestratorClaim(raw, user string) (*orchestratorClaim, 
 		return nil, err
 	}
 	claims := new(orchestratorClaim)
-	_, err = jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
-		id, ok := token.Header["kid"].(string)
-		if !ok || keys[id] == "" {
-			return nil, errors.New("unknown signing key")
-		}
-		return []byte(keys[id]), nil
-	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer(enrollmentIssuer),
+	_, err = jwt.ParseWithClaims(raw, claims, keys.Key, jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithIssuer(enrollmentIssuer),
 		jwt.WithAudience(orchestratorClaimAudience), jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(), jwt.WithTimeFunc(s.currentTime))
 	if err != nil || claims.Subject != user || claims.Scope != "orchestrators:claim" ||

@@ -34,9 +34,9 @@ spec:
       podSelector: {matchLabels: {k8s-app: kube-dns}}
     ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
   - to:
-    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: livepeer}}
-      podSelector: {matchLabels: {app: orchestrator}}
-    ports: [{protocol: TCP, port: 8935}]
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {app.kubernetes.io/name: traefik}}
+    ports: [{protocol: TCP, port: 8080}, {protocol: TCP, port: 8081}, {protocol: TCP, port: 8082}]
   - to:
     - ipBlock: {cidr: 0.0.0.0/0, except: %s}
     - ipBlock: {cidr: '::/0', except: %s}
@@ -54,8 +54,8 @@ spec:
   policyTypes: [Ingress]
   ingress:
   - from:
-    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: flux-system}}
-      podSelector: {matchLabels: {app: livepeer-tunnel}}
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {app.kubernetes.io/name: traefik}}
     ports: [{protocol: TCP, port: 8935}]
   - from:
     - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: flux-system}}

@@ -13,6 +13,7 @@ import (
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/livepeer/control-center/runtime/ingressauth"
 )
 
 func init() {
@@ -34,29 +35,28 @@ type Params struct {
 	DatabaseParams
 	TunnelParams
 	DiscoveryParams
-	Listen                   string        `env:"LISTEN_ADDR" default:"localhost:41932" descr:"HTTP listen address"`
-	PublicAPIURL             string        `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
-	SupabaseURL              string        `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
-	SupabasePublishableKey   string        `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
-	Mode                     string        `env:"CONTROL_CENTER_MODE" default:"onchain" alts:"offchain,onchain" descr:"Fixed deployment payment mode"`
-	OnchainConfigFile        string        `optional:"true" basepath:"source" descr:"Control Center onchain configuration template JSON"`
-	OnchainSecretsDir        string        `optional:"true" descr:"Owner-only immutable RPC secret versions directory"`
-	OnchainWebhookSecret     string        `secret:"true" optional:"true"`
-	OnchainWebhookSecretFile string        `secretfor:"OnchainWebhookSecret" basepath:"source"`
-	DefaultAdminEmail        string        `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
-	JWTSigningKeyID          string        `optional:"true" descr:"Enrollment signing key ID; default 1"`
-	JWTVerificationKeys      string        `secret:"true" optional:"true" descr:"JSON map of retained enrollment verification keys"`
-	JWTVerificationKeysFile  string        `secretfor:"JWTVerificationKeys" basepath:"source" descr:"File containing retained enrollment verification keys"`
-	JWTSigningSecret         string        `env:"JWT_SIGNING_SECRET" secret:"true" min:"32" descr:"Persistent enrollment signing secret (at least 32 bytes)"`
-	JWTSigningSecretFile     string        `env:"JWT_SIGNING_SECRET_FILE" secretfor:"JWTSigningSecret" basepath:"source" descr:"File containing the enrollment signing secret"`
-	MachineTokenSecret       string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
-	MachineTokenSecretFile   string        `env:"MACHINE_TOKEN_SECRET_FILE" secretfor:"MachineTokenSecret" basepath:"source" descr:"File containing the machine credential secret"`
-	ConfigReconcileInterval  time.Duration `env:"CONFIG_RECONCILE_INTERVAL" default:"1m" descr:"Desired configuration reconciliation interval"`
-	RuntimeImage             string        `env:"RUNTIME_IMAGE" descr:"Digest-pinned Go Runtime distribution for system services"`
-	RuntimeConnectorImage    string        `env:"RUNTIME_CONNECTOR_IMAGE" optional:"true" descr:"Digest-pinned Runtime connector image"`
-	RuntimeNodeImage         string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
-	RuntimeNodeDrainTimeout  time.Duration `env:"RUNTIME_NODE_DRAIN_TIMEOUT" default:"12h" descr:"Node app drain timeout, from zero to 12h"`
-	AppStopSignals           bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
+	Listen                        string `env:"LISTEN_ADDR" default:"localhost:41932" descr:"HTTP listen address"`
+	PublicAPIURL                  string `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
+	SupabaseURL                   string `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
+	SupabasePublishableKey        string `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
+	Mode                          string `env:"CONTROL_CENTER_MODE" default:"onchain" alts:"offchain,onchain" descr:"Fixed deployment payment mode"`
+	OnchainConfigFile             string `optional:"true" basepath:"source" descr:"Control Center onchain configuration template JSON"`
+	OnchainSecretsDir             string `optional:"true" descr:"Owner-only immutable RPC secret versions directory"`
+	OnchainWebhookSecret          string `secret:"true" optional:"true"`
+	OnchainWebhookSecretFile      string `secretfor:"OnchainWebhookSecret" basepath:"source"`
+	DefaultAdminEmail             string `env:"DEFAULT_ADMIN_EMAIL" optional:"true" descr:"Seed a pending administrator email only when no active grants exist"`
+	JWTSigningKeyID               string `optional:"true" descr:"Ed25519 JWT signing key ID; default 1"`
+	JWTSigningPrivateKeyFile      string `env:"JWT_SIGNING_PRIVATE_KEY_FILE" basepath:"source" optional:"true" descr:"Locally mounted Ed25519 PKCS#8 PEM private key"`
+	JWTVerificationPublicKeysFile string `env:"JWT_VERIFICATION_PUBLIC_KEYS_FILE" basepath:"source" optional:"true" descr:"JSON map of retained key IDs to base64 Ed25519 public keys"`
+	jwtKey                        *ingressauth.Signer
+	MachineTokenSecret            string        `env:"MACHINE_TOKEN_SECRET" secret:"true" min:"32" descr:"Persistent machine credential secret (at least 32 bytes)"`
+	MachineTokenSecretFile        string        `env:"MACHINE_TOKEN_SECRET_FILE" secretfor:"MachineTokenSecret" basepath:"source" descr:"File containing the machine credential secret"`
+	ConfigReconcileInterval       time.Duration `env:"CONFIG_RECONCILE_INTERVAL" default:"1m" descr:"Desired configuration reconciliation interval"`
+	RuntimeImage                  string        `env:"RUNTIME_IMAGE" descr:"Digest-pinned Go Runtime distribution for system services"`
+	RuntimeConnectorImage         string        `env:"RUNTIME_CONNECTOR_IMAGE" optional:"true" descr:"Digest-pinned Runtime connector image"`
+	RuntimeNodeImage              string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
+	RuntimeNodeDrainTimeout       time.Duration `env:"RUNTIME_NODE_DRAIN_TIMEOUT" default:"12h" descr:"Node app drain timeout, from zero to 12h"`
+	AppStopSignals                bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
 }
 
 var passwordPlaceholder = regexp.MustCompile(`(?i)\[(?:your[-_])?password\]|\[PG_PASSWORD\]`)
@@ -104,7 +104,7 @@ func OpenDB(ctx context.Context, raw, password string) (*sql.DB, error) {
 	return db, nil
 }
 
-func (p Params) PreValidate() error {
+func (p *Params) PreValidate() error {
 	if p.Mode != "" && p.Mode != "offchain" && p.Mode != "onchain" {
 		return errors.New("mode must be offchain or onchain")
 	}
@@ -114,7 +114,7 @@ func (p Params) PreValidate() error {
 	if p.networkMode() == "offchain" && p.OnchainConfigFile != "" {
 		return errors.New("offchain mode cannot use an onchain configuration template")
 	}
-	if _, e := p.enrollmentKeys(); e != nil {
+	if e := p.loadJWTKeys(); e != nil {
 		return e
 	}
 	u, e := url.Parse(p.SecretsURL)
@@ -149,9 +149,6 @@ func (p Params) PreValidate() error {
 		if _, err := normalizeEmail(p.DefaultAdminEmail); err != nil {
 			return errors.New("DefaultAdminEmail must be a single email address")
 		}
-	}
-	if p.JWTSigningSecret != "" && p.JWTSigningSecret == p.MachineTokenSecret {
-		return errors.New("use different enrollment and machine credential secrets")
 	}
 	if p.ConfigReconcileInterval < time.Second {
 		return errors.New("ConfigReconcileInterval must be at least 1s")

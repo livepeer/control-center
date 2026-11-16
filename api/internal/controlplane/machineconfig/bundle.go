@@ -64,6 +64,9 @@ func Build(m Desired) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	if err = addIngress(files, m); err != nil {
+		return nil, "", err
+	}
 	if err = addRoutingBundle(files, m); err != nil {
 		return nil, "", err
 	}
