@@ -1,6 +1,7 @@
 package appreconciler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -10,6 +11,40 @@ import (
 
 	"github.com/livepeer/control-center/runtime/internal/testutil"
 )
+
+func TestCanceledProbeDoesNotBlockReadinessRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		definition := testutil.Assignment(t).Entries[0].Revision.Definition
+		instances := map[string]*Instance{"i": {ID: "i", Name: "one", Definition: definition}}
+		view := View{Pods: map[string]Pod{"one": {UID: "uid", Phase: "Running"}}, Endpoints: map[string]map[string]bool{"one": {"uid": true}}}
+		p := NewProbes()
+		p.results = make(chan probeResult, 1)
+		started := make(chan struct{})
+		calls := 0
+		p.Client.Transport = regressionTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				close(started)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
+			return httptest.NewRecorder().Result(), nil
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		p.Poll(ctx, instances, view, time.Now())
+		<-started
+		// A completed old probe occupies the result queue when this tick ends.
+		p.results <- probeResult{id: "old-pod"}
+		cancel()
+		synctest.Wait()
+		time.Sleep(10 * time.Second)
+		p.Poll(t.Context(), instances, view, time.Now())
+		synctest.Wait()
+		if !p.Poll(t.Context(), instances, view, time.Now())["i"] {
+			t.Fatal("canceled probe prevented a later successful readiness check")
+		}
+	})
+}
 
 func TestProbesHonorThresholdAndOneSuccessRecovery(t *testing.T) {
 	var code atomic.Int64

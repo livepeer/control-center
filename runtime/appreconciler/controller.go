@@ -251,7 +251,7 @@ func (c *Controller) Tick(ctx context.Context) error {
 		if inputErr == nil && input.Payload.Index.Available {
 			pollState.Payload = input.Payload
 		}
-		pollCtx, stop := optionalSecretContext(ctx, 2*time.Second)
+		pollCtx, stop := optionalSecretContext(ctx, 5*time.Second)
 		c.Secrets.Poll(pollCtx, pollState, now)
 		stop()
 		if e := c.Journal.Update(func(st *State) error {
@@ -684,7 +684,7 @@ func instanceIDs(s *State) []string {
 	return ids
 }
 func (c *Controller) publish(ctx context.Context, s State, now time.Time) error {
-	authCtx, stop := optionalSecretContext(ctx, 2*time.Second)
+	authCtx, stop := optionalSecretContext(ctx, 5*time.Second)
 	defer stop()
 	snapshot := Snapshot{Included: map[string]bool{}, Retired: map[string]bool{}, IntentDigest: s.Payload.Index.IntentDigest, AppsGeneration: s.Payload.Intent.Generation}
 	for _, id := range instanceIDs(&s) {

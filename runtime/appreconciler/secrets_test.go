@@ -56,6 +56,31 @@ func (f *fakeSecretResolver) Resolve(context.Context, protocol.ResolveRequest) (
 	return copy, f.err
 }
 
+type delayedActivation struct{ *fakeSecretResolver }
+
+func (f delayedActivation) Activate(ctx context.Context) error {
+	select {
+	case <-time.After(3 * time.Second):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestSecretPollingAllowsNormalServiceLatency(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _, _, _, _, _, resolver, set := secretController(t, 1, nil)
+		c.Secrets.Client = delayedActivation{resolver}
+		if err := c.Tick(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		rollout := c.Journal.View().SecretRollouts[set.Entries[0].RevisionID]
+		if rollout.Desired != resolver.set.Digest || rollout.Reason != "" {
+			t.Fatalf("healthy secret response was not admitted: %+v", rollout)
+		}
+	})
+}
+
 func TestSecretPreparationIsDirectCollisionFreeAndRetryable(t *testing.T) {
 	set := testutil.Assignment(t)
 	a := &set.Entries[0]
