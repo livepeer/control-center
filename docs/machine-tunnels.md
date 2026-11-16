@@ -3,12 +3,14 @@
 Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
 connector starts cloudflared, which forwards to private Traefik ingress, then Node;
 Node routes application traffic to private workloads. Client API and app hostnames
-are public through the tunnel; discovery requires both Cloudflare Access and an ingress bearer token in Stage 1.
+are public through the tunnel; discovery requires Cloudflare Access and a
+machine-bound ingress bearer token.
 
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
 
-See the [two-stage authentication rollout](discovery-auth-rollout.md) for signing configuration and separate existing-resource migrations.
+See [discovery authentication](discovery-auth.md) for signing configuration
+and key rotation.
 
 ## Infrastructure and enablement
 
@@ -49,6 +51,8 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
 | Backend Cloudflare API token | Private, read-only operator-mounted file (`CloudflareAPITokenFile`), mode 0600; scoped account tunnel/Access and zone DNS/certificate write permissions | Control Center only |
 | Machine Tunnel token | Provider API → authenticated Control Center endpoint → management agent's scoped Unix socket → private tmpfs file mode 0600 | cloudflared process only |
 | Discovery Access ID/secret | AES-GCM encrypted PostgreSQL row, immutable version reference; keyring in a separate private mounted file | Discovery Collector |
+| Discovery signing private key | Local private read-only `JWTSigningPrivateKeyFile` mount | Control Center only |
+| Discovery verification public keys | Generated ConfigMap, independently rolled out | Runtime ingress-auth |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
 the `flux-system/livepeer-service-auth` Secret. Only the management agent mounts
@@ -101,7 +105,8 @@ After certificate and Runtime readiness, three proxied CNAMEs point at the tunne
 TLS, public API routing, authenticated discovery, unauthenticated discovery
 rejection and public route isolation probes must succeed for each endpoint
 generation. API and discovery forwarding set Host to the private orchestrator;
-app forwarding preserves the original Host. The API host allows reservation,
+app forwarding preserves the original Host and application Authorization header.
+Traefik preserves the forwarded Host. The API host allows reservation,
 stop/payment and payment refresh; discovery allows `/discovery`. Other paths on
 those hosts return 404. App hosts deny discovery, runner, metrics, health and
 Trickle paths and forward the rest; Node checks HTTP methods.
@@ -138,6 +143,7 @@ acknowledgement; compromise revokes predecessors immediately. Expiry and
 security rotations proceed even when Runtime is offline; `RotationReason`
 reports rotation separately from observation expiry. See
 [Access service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
+Rotate signing keys as described in [discovery authentication](discovery-auth.md#key-rotation).
 
 Ordinary removal withdraws readiness and waits for draining. An expired drain
 deadline remains blocked even if a late completion arrives. An administrator can

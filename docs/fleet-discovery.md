@@ -10,19 +10,24 @@ service or Node release.
    is disabled by default.
 2. Mount the existing `CloudflareKeyringFile` privately, with directory mode
    0700 and file mode 0600, readable by the API identity. All API replicas need
-   the same keyring and credential database. A discovery reader does not need a
-   Cloudflare provisioning token when provisioning is disabled.
+   the same keyring and credential database. Mount the local Ed25519 signing key
+   with `JWTSigningPrivateKeyFile`; all replicas share the signing configuration.
+   A discovery reader does not need a Cloudflare provisioning token when
+   provisioning is disabled.
 3. Set `CloudflareIngressApproved = true` and `DiscoveryEnabled = true` in
    the existing API deployment. Expose public,
    read-only `GET /discovery` through its HTTPS proxy and restrict the API origin.
    Reading this aggregate requires no source credentials. Grant private
    destinations with `DiscoveryGrants` only when explicitly required.
 
-Keep Access credentials, the keyring and provisioning tokens out of bundles,
-ConfigMaps, application environments, browser responses, logs and command flags.
-Every machine's raw `/discovery` requires an ingress bearer token and, in Stage 1, Cloudflare Access Service Auth. See the [rollout](discovery-auth-rollout.md) for local Ed25519 signing, public-key distribution, and separate migrations. Public app hosts and direct origins must deny discovery and management
-access. See the [machine tunnel runbook](machine-tunnels.md) for credential
-protection, rotation, removal and rollback.
+Keep Access credentials, the keyring, signing key and provisioning tokens out of
+bundles, ConfigMaps, application environments, browser responses, logs and
+command flags. Every machine's raw `/discovery` requires Cloudflare Access
+Service Auth and a machine-bound ingress bearer token. Public app hosts and
+direct origins must deny discovery and management access. See [discovery
+authentication](discovery-auth.md) for signing configuration and rotation and
+the [machine tunnel runbook](machine-tunnels.md) for Access credentials and
+provider resource management.
 
 The aggregate returns 503 when disabled. When enabled it returns cached
 Node-compatible JSON, including `200 []` when no runners are advertised. An
@@ -49,6 +54,10 @@ credential snapshot, while in-flight requests retain the version they started
 with. Missing, expired, revoked or malformed credentials fail closed without
 stopping healthy sources. Managed Cloudflare sources use authenticated HTTPS;
 there is no plaintext credential export or unauthenticated fallback.
+
+Control Center also signs a short-lived, machine-bound bearer token for each
+source request. Ingress verifies it with public keys; see [discovery
+authentication](discovery-auth.md).
 
 Requests use verified TLS, a three-second timeout, no environment proxy, cookies
 or redirects, and Node's destination policy and 1 MiB source-body limit. The
@@ -98,5 +107,6 @@ labels.
 If selection is stale or reconciliation fails, restore database access; do not
 interpret a failed read as an empty fleet. For Access failures, check credential
 availability, source state and rotation acknowledgement, then restore the correct
-version through the tunnel workflow. After correcting public routes, wait for
-collection.
+version through the tunnel workflow. For bearer failures, check the signing key
+ID, machine identity, verification keys and applied ingress digest. After
+correcting public routes, wait for collection.
