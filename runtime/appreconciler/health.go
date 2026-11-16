@@ -177,6 +177,12 @@ consumed:
 			select {
 			case p.results <- probeResult{id: id, uid: uid, success: ok, at: time.Now().UTC()}:
 			case <-ctx.Done():
+				// A canceled reconciliation tick must not strand the probe slot.
+				p.mu.Lock()
+				if p.values[id] == h {
+					h.pending = false
+				}
+				p.mu.Unlock()
 			}
 		}()
 	}
