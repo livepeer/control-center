@@ -21,7 +21,7 @@ func (m Desired) IngressConfigDigest() string {
 	if m.Terminal || m.Exposure == nil || m.Exposure.IngressVersion != 1 || m.Exposure.DiscoveryURL == "" || len(m.IngressPublicKeys) == 0 {
 		return ""
 	}
-	data, _ := json.Marshal([]any{"ingress-v1", m.NodeID, m.Exposure.ServiceURL, m.Exposure.ProxyURLTemplate, m.RuntimeImage, string(m.IngressPublicKeys)})
+	data, _ := json.Marshal([]any{"ingress-v2", m.NodeID, m.Exposure.ServiceURL, m.Exposure.ProxyURLTemplate, m.RuntimeImage, string(m.IngressPublicKeys)})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -62,6 +62,8 @@ spec:
       CF-Access-Client-Id: ''
       CF-Access-Client-Secret: ''
 `
+	// Use the Service's publishNotReadyAddresses behavior so Node can serve
+	// discovery and control requests while its paid-work readiness is false.
 	for _, route := range []struct{ name, entrypoint, match, middleware string }{
 		{"api", "livepeer-api", "Host(`orchestrator.livepeer.svc.cluster.local`) && PathRegexp(`" + clientPath + "`)", ""},
 		{"discovery", "livepeer-discovery", "Host(`orchestrator.livepeer.svc.cluster.local`) && Method(`GET`) && Path(`/discovery`)", "    middlewares: [{name: discovery-auth}, {name: discovery-strip-auth}]\n"},
@@ -76,7 +78,7 @@ spec:
   routes:
   - kind: Rule
     match: %q
-%s    services: [{name: orchestrator, port: 8935, passHostHeader: true}]
+%s    services: [{name: orchestrator, port: 8935, passHostHeader: true, nativeLB: true}]
 `, route.name, route.entrypoint, route.match, route.middleware)
 	}
 	files["system/ingress/routes.yaml"] = []byte(routes)

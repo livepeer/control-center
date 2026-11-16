@@ -30,6 +30,52 @@ func ingressDesired() (Desired, *ingressauth.Signer) {
 	return m, signer
 }
 
+func TestIngressUsesOrchestratorService(t *testing.T) {
+	m, _ := ingressDesired()
+	files := map[string][]byte{}
+	if err := addIngress(files, m); err != nil {
+		t.Fatal(err)
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(files["system/ingress/routes.yaml"]))
+	routes := 0
+	for {
+		var doc struct {
+			Kind string
+			Spec struct {
+				Routes []struct {
+					Services []struct {
+						Name           string
+						Port           int
+						PassHostHeader bool `yaml:"passHostHeader"`
+						NativeLB       bool `yaml:"nativeLB"`
+					}
+				}
+			}
+		}
+		if err := decoder.Decode(&doc); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if doc.Kind != "IngressRoute" {
+			continue
+		}
+		for _, route := range doc.Spec.Routes {
+			if len(route.Services) != 1 {
+				t.Fatal("expected one orchestrator service")
+			}
+			service := route.Services[0]
+			if service.Name != "orchestrator" || service.Port != 8935 || !service.PassHostHeader || !service.NativeLB {
+				t.Fatalf("route must preserve Host and use the orchestrator ClusterIP, including unready endpoints: %+v", service)
+			}
+			routes++
+		}
+	}
+	if routes != 3 {
+		t.Fatalf("expected API, discovery, and app routes, got %d", routes)
+	}
+}
+
 // Exercise the generated rules and middleware with the actual pinned Traefik
 // process. Only Kubernetes resource discovery is replaced by the file provider.
 func TestTraefikIngressRoutingAndAuthentication(t *testing.T) {
