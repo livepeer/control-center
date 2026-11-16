@@ -399,7 +399,12 @@ func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
 	if m.Terminal {
 		err = s.db.QueryRowContext(r.Context(), `SELECT terminal_bundle,terminal_sha256 FROM lpcc.enrollments WHERE node_id=$1 AND terminal_bundle IS NOT NULL`, m.NodeID).Scan(&data, &digest)
 	} else {
-		err = s.db.QueryRowContext(r.Context(), `SELECT c.bundle,c.sha256 FROM lpcc.machine_configs c JOIN lpcc.machines m USING(node_id) WHERE m.node_id=$1`, m.NodeID).Scan(&data, &digest)
+		// The target row's credential fence is rechecked after any concurrent refresh
+		// or retirement releases its lock. A missing bundle must not mark a fetch.
+		err = s.db.QueryRowContext(r.Context(), `UPDATE lpcc.machines m SET last_config_fetch_at=now()
+ FROM lpcc.machine_configs c WHERE m.node_id=$1 AND m.credential_version=$2
+ AND m.orchestrator_address=$3 AND c.node_id=m.node_id
+ RETURNING c.bundle,c.sha256`, m.NodeID, m.CredentialVersion, m.OrchestratorAddress).Scan(&data, &digest)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "machine configuration not found")
@@ -409,9 +414,11 @@ func (s *Server) configuration(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, err)
 		return
 	}
-	if _, err := s.db.ExecContext(r.Context(), `UPDATE lpcc.machines SET last_config_fetch_at=now() WHERE node_id=$1`, m.NodeID); err != nil {
-		s.databaseError(w, err)
-		return
+	if m.Terminal {
+		if _, err := s.db.ExecContext(r.Context(), `UPDATE lpcc.machines SET last_config_fetch_at=now() WHERE node_id=$1`, m.NodeID); err != nil {
+			s.databaseError(w, err)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("ETag", `"`+digest+`"`)
