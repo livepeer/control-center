@@ -1,8 +1,9 @@
 package secretservice
 
 import (
+	"context"
 	"database/sql"
-	"errors"
+	"encoding/json"
 	protocol "github.com/livepeer/control-center/secrets"
 	"net/http"
 )
@@ -25,12 +26,28 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, e := s.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	var refs []secretReference
+	for _, a := range in.Assignments {
+		if eligibleAssignment(m, a) {
+			for _, assigned := range m.Assignments {
+				if assigned.RevisionID == a.RevisionID {
+					for _, ref := range assigned.Revision.Definition.Container.Secrets {
+						refs = append(refs, secretReference{ref.Secret, ref.Key})
+					}
+				}
+			}
+		}
+	}
+	for _, consumer := range m.Consumers {
+		for _, ref := range consumer.References {
+			refs = append(refs, secretReference{ref.Secret, ref.Key})
+		}
+	}
+	metadata, e := batchSecretMetadata(r.Context(), s.DB, m.Owner, refs)
 	if e != nil {
 		fail(w, 503, "unavailable")
 		return
 	}
-	defer tx.Rollback()
 	sets := map[string]protocol.VersionSet{}
 	faults := map[string]string{}
 	for _, a := range in.Assignments {
@@ -47,21 +64,13 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			for _, ref := range assigned.Revision.Definition.Container.Secrets {
-				item := protocol.Resolved{Ciphertext: protocol.Ciphertext{Binding: protocol.Binding{Owner: m.Owner, Name: ref.Secret, Key: ref.Key}}}
-				e = tx.QueryRowContext(r.Context(), `SELECT id::text,head::text,revision FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted AND head IS NOT NULL`, m.Owner, ref.Secret, ref.Key).Scan(&item.ID, &item.Version, &item.Revision)
-				if errors.Is(e, sql.ErrNoRows) {
-					reason, err := missingSecret(r.Context(), tx, m.Owner, ref.Secret, ref.Key)
-					if err != nil {
-						fail(w, 503, "unavailable")
-						return
-					}
-					faults[a.RevisionID] = reason
+				refMetadata := metadata[secretReference{ref.Secret, ref.Key}]
+				if refMetadata.reason != "" {
+					faults[a.RevisionID] = refMetadata.reason
 					break
 				}
-				if e != nil {
-					fail(w, 503, "unavailable")
-					return
-				}
+				item := refMetadata.value
+				item.Owner = m.Owner
 				v.Values = append(v.Values, item)
 			}
 		}
@@ -81,17 +90,8 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 	// their pinned declarations without granting any unwrap/start authority.
 	for _, consumer := range m.Consumers {
 		for _, ref := range consumer.References {
-			var present bool
-			if e = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT FROM lpsecrets.secrets WHERE orchestrator_address=$1 AND name=$2 AND key=$3 AND NOT deleted AND head IS NOT NULL)`, m.Owner, ref.Secret, ref.Key).Scan(&present); e != nil {
-				fail(w, 503, "unavailable")
-				return
-			}
-			if !present {
-				reason, err := missingSecret(r.Context(), tx, m.Owner, ref.Secret, ref.Key)
-				if err != nil {
-					fail(w, 503, "unavailable")
-					return
-				}
+			reason := metadata[secretReference{ref.Secret, ref.Key}].reason
+			if reason != "" {
 				if faults[consumer.RevisionID] != "secrets_denied" {
 					faults[consumer.RevisionID] = reason
 				}
@@ -99,9 +99,50 @@ func (s *Service) batchVersions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if tx.Commit() != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
 	response(w, 200, map[string]any{"sets": sets, "errors": faults})
+}
+
+type secretReference struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+type secretMetadata struct {
+	value  protocol.Resolved
+	reason string
+}
+
+func batchSecretMetadata(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, owner string, refs []secretReference) (map[secretReference]secretMetadata, error) {
+	out := map[secretReference]secretMetadata{}
+	if len(refs) == 0 {
+		return out, nil
+	}
+	raw, err := json.Marshal(refs)
+	if err != nil {
+		return nil, err
+	}
+	// Metadata and missing/deleted classifications share one statement snapshot.
+	// Resolution still uses its own locking transaction and audit path.
+	rows, err := q.QueryContext(ctx, `SELECT refs.name,refs.key,COALESCE(s.id::text,''),COALESCE(s.head::text,''),COALESCE(s.revision,0),
+ CASE WHEN s.head IS NOT NULL THEN '' WHEN s.id IS NULL AND EXISTS(SELECT FROM lpsecrets.secrets d
+ WHERE d.orchestrator_address=$1 AND d.name=refs.name AND d.key=refs.key AND d.deleted)
+ THEN 'secret_missing' ELSE 'secret_unprovisioned' END
+ FROM (SELECT DISTINCT name,key FROM jsonb_to_recordset($2::jsonb) AS x(name text,key text)) refs
+ LEFT JOIN lpsecrets.secrets s ON s.orchestrator_address=$1 AND s.name=refs.name AND s.key=refs.key AND NOT s.deleted`, owner, string(raw))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref secretReference
+		var m secretMetadata
+		if err = rows.Scan(&ref.Name, &ref.Key, &m.value.ID, &m.value.Version, &m.value.Revision, &m.reason); err != nil {
+			return nil, err
+		}
+		m.value.Name, m.value.Key = ref.Name, ref.Key
+		out[ref] = m
+	}
+	return out, rows.Err()
 }
