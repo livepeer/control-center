@@ -108,11 +108,51 @@ func scanGrant(row scanner) (AdministratorGrant, error) {
 	return g, err
 }
 
-func (s *Server) listAdministrators(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT g.grant_id::text,g.email,g.bound_user_id::text,g.revision,g.created_at,g.bound_at,u.email,(u.id IS NULL OR u.deleted_at IS NOT NULL) FROM lpcc.administrator_grants g LEFT JOIN auth.users u ON u.id=g.bound_user_id WHERE g.revoked_at IS NULL ORDER BY g.created_at,g.grant_id`)
+// administration returns no privileged projections for an ordinary account.
+// Bootstrap binding commits independently in adminStatus before either read.
+func (s *Server) administration(w http.ResponseWriter, r *http.Request) {
+	user, err := s.user(r.Context(), bearer(r))
 	if err != nil {
 		s.respondError(w, err)
 		return
+	}
+	yes, err := s.adminStatus(r.Context(), user)
+	if err != nil {
+		s.respondError(w, err)
+		return
+	}
+	result := struct {
+		UserIdentity
+		IsAdmin        bool                     `json:"is_admin"`
+		Administrators []AdministratorGrant     `json:"administrators"`
+		Machines       []observedMachineSummary `json:"machines"`
+	}{user, yes, []AdministratorGrant{}, []observedMachineSummary{}}
+	if yes {
+		result.Administrators, err = s.administratorGrants(r.Context())
+		if err == nil {
+			result.Machines, err = s.observedMachineList(r.Context(), "", true)
+		}
+		if err != nil {
+			s.respondError(w, err)
+			return
+		}
+	}
+	respond(w, 200, result)
+}
+
+func (s *Server) listAdministrators(w http.ResponseWriter, r *http.Request, _ UserIdentity) {
+	grants, err := s.administratorGrants(r.Context())
+	if err != nil {
+		s.respondError(w, err)
+		return
+	}
+	respond(w, 200, map[string]any{"administrators": grants})
+}
+
+func (s *Server) administratorGrants(ctx context.Context) ([]AdministratorGrant, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT g.grant_id::text,g.email,g.bound_user_id::text,g.revision,g.created_at,g.bound_at,u.email,(u.id IS NULL OR u.deleted_at IS NOT NULL) FROM lpcc.administrator_grants g LEFT JOIN auth.users u ON u.id=g.bound_user_id WHERE g.revoked_at IS NULL ORDER BY g.created_at,g.grant_id`)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	grants := []AdministratorGrant{}
@@ -120,8 +160,7 @@ func (s *Server) listAdministrators(w http.ResponseWriter, r *http.Request, _ Us
 		var g AdministratorGrant
 		var missing bool
 		if err := rows.Scan(&g.GrantID, &g.Email, &g.UserID, &g.Revision, &g.CreatedAt, &g.BoundAt, &g.CurrentEmail, &missing); err != nil {
-			s.respondError(w, err)
-			return
+			return nil, err
 		}
 		g.State = "bound"
 		if g.UserID == nil {
@@ -132,11 +171,7 @@ func (s *Server) listAdministrators(w http.ResponseWriter, r *http.Request, _ Us
 		}
 		grants = append(grants, g)
 	}
-	if err := rows.Err(); err != nil {
-		s.respondError(w, err)
-		return
-	}
-	respond(w, 200, map[string]any{"administrators": grants})
+	return grants, rows.Err()
 }
 
 func (s *Server) prepareGrant(r *http.Request, _ UserIdentity) (AdminApply, error) {

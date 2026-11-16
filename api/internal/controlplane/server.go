@@ -118,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/machines", s.listMachines)
 	mux.HandleFunc("GET /api/machines/{node_id}/status", s.observedState)
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/admin/overview", s.administration)
 	mux.HandleFunc("GET /api/admin/administrators", s.adminRead(s.listAdministrators))
 	mux.HandleFunc("GET /api/admin/deployment", s.adminRead(s.deployment))
 	mux.HandleFunc("POST /api/admin/administrators", s.adminMutation("administrator.grant", s.prepareGrant))
