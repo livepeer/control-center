@@ -1,14 +1,22 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 	"uuid"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/runtime/contract"
@@ -517,5 +525,126 @@ func TestCompletedEndpointDrainDoesNotMaskProviderFailure(t *testing.T) {
 	}
 	if state.Reason != "provisioning_pending" {
 		t.Fatalf("completed endpoint drain masked provider failure as %q", state.Reason)
+	}
+}
+
+// Count client commands without logging SQL arguments or bundle contents.
+type configurationQueryCounter struct{ queries int }
+
+func (c *configurationQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.queries++
+	return ctx
+}
+func (*configurationQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
+	s := newTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	other := enroll(t, s, ownerB, strings.Repeat("b", 64))
+	node := c["node_id"]
+	var bundle []byte
+	var digest, database string
+	if err := s.db.QueryRow(`SELECT bundle,sha256,current_database() FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle, &digest, &database); err != nil {
+		t.Fatal(err)
+	}
+	config, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Database = database
+	config.DefaultQueryExecMode = pgx.QueryExecModeExec
+	counter := &configurationQueryCounter{}
+	config.Tracer = counter
+	db := sql.OpenDB(stdlib.GetConnector(*config))
+	t.Cleanup(func() { db.Close() })
+	s.db = db
+	path := "/v1/nodes/" + node + "/config"
+	for _, token := range []string{c["token"], c["token"], other["token"]} {
+		before := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
+		if _, err := db.Exec(`UPDATE lpcc.machines SET last_config_fetch_at=$2 WHERE node_id=$1`, node, before); err != nil {
+			t.Fatal(err)
+		}
+		counter.queries = 0
+		w := request(t, s, "GET", path, token, nil)
+		queries := counter.queries
+		var fetched time.Time
+		if err := db.QueryRow(`SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&fetched); err != nil {
+			t.Fatal(err)
+		}
+		if token != c["token"] {
+			if w.Code != 401 || !fetched.Equal(before) {
+				t.Fatal("unauthorized fetch changed timestamp", w.Code, fetched)
+			}
+			continue
+		}
+		if w.Code != 200 || queries != 2 || !fetched.After(before) {
+			t.Fatal("live fetch must use two commands and refresh timestamp", w.Code, queries, fetched)
+		}
+		if !bytes.Equal(w.Body.Bytes(), bundle) || digest != fmt.Sprintf("%x", sha256.Sum256(bundle)) || w.Header().Get("ETag") != `"`+digest+`"` || w.Header().Get("Content-Type") != "application/gzip" || w.Header().Get("X-Livepeer-Node-ID") != node || w.Header().Get("X-Livepeer-Credential-Version") != "1" || w.Header().Get("X-Livepeer-Terminal") != "false" || w.Header().Get("X-Livepeer-App-Cleanup-Ready") != "" {
+			t.Fatal("configuration content or headers changed")
+		}
+	}
+	if _, err := db.Exec(`DELETE FROM lpcc.machine_configs WHERE node_id=$1`, node); err != nil {
+		t.Fatal(err)
+	}
+	var before, after time.Time
+	if err := db.QueryRow(`SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	w := request(t, s, "GET", path, c["token"], nil)
+	if err := db.QueryRow(`SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 404 || !before.Equal(after) {
+		t.Fatal("missing bundle marked a fetch", w.Code, before, after)
+	}
+}
+
+func TestConfigurationFetchFencedAfterLockWait(t *testing.T) {
+	for _, change := range []string{"refresh", "retire"} {
+		t.Run(change, func(t *testing.T) {
+			s := newTestServer(t)
+			c := enroll(t, s, ownerA, strings.Repeat("c", 64))
+			node := c["node_id"]
+			blocking, err := s.db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocking.Rollback()
+			if _, err := blocking.Exec(`SELECT FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- request(t, s, "GET", "/v1/nodes/"+node+"/config", c["token"], nil) }()
+			waitForStateLock(t, s, "UPDATE lpcc.machines m SET last_config_fetch_at=%", 1)
+			if change == "refresh" {
+				if _, err := blocking.Exec(`UPDATE lpcc.machines SET credential_version=credential_version+1 WHERE node_id=$1`, node); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := blocking.Exec(`UPDATE lpcc.enrollments SET credential_version=credential_version+1 WHERE node_id=$1`, node); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := blocking.Exec(`DELETE FROM lpcc.machines WHERE node_id=$1`, node); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := blocking.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			w := <-done
+			if w.Code != 404 || w.Header().Get("ETag") != "" {
+				t.Fatal("racing fetch returned a bundle", w.Code)
+			}
+			if change == "refresh" {
+				var fetched sql.NullTime
+				if err := s.db.QueryRow(`SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&fetched); err != nil {
+					t.Fatal(err)
+				}
+				if fetched.Valid {
+					t.Fatal("stale credential marked a fetch")
+				}
+			}
+		})
 	}
 }

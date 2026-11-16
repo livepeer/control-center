@@ -25,17 +25,28 @@ export function MachineReadinessBadge({ machine }: { machine: Parameters<typeof 
 
 const reasons: Record<string, string> = {
   runtime_pending: 'Waiting for Node deployment to become ready',
+  secrets_unavailable: 'Secret delivery is unavailable; startup is waiting for secret preflight', secrets_denied: 'Secret delivery was denied; check assignment access', secret_missing: 'A required secret or key is missing', secret_invalid: 'Delivered secret data could not be validated',
   onchain_not_ready: 'Onchain Node is not ready; inspect credential delivery, retained onchain state, RPC and rate source', sandbox_pending: 'Sandbox or Pod network setup is pending', invalid_app_payload: 'Downloaded app input is invalid',
   onchain_pending: 'Waiting for the target onchain configuration', onchain_incompatible: 'App price is incompatible with the target onchain mode', resource_refused: 'Insufficient resources for this assignment', cleanup_prerequisite: 'Waiting for previous revision cleanup', cleanup_pending: 'Waiting for earlier instance cleanup', generation_failed: 'App configuration could not be rendered', invalid_definition: 'App definition is invalid', unsupported_instance_mode: 'Instance lifetime is not supported', unsupported_stop_signal: 'Configured stop signal is not supported', image_pull_failed: 'Container image could not be pulled', container_start_failed: 'Container could not start', startup_failed: 'Startup deadline expired', readiness_failed: 'Configured readiness check failed', memory_limit: 'Container exceeded its memory limit', scheduling_refused: 'Kubernetes refused scheduling', isolation_failed: 'Sandbox isolation could not start', state_recovery_failed: 'App Reconciler state recovery failed; management repair remains available', registration_reset: 'Node registration was lost or expired', node_registration_recreated: 'Node registration was recreated; previous work is unconfirmed', clock_uncertain: 'Observation clock is uncertain', process_lost: 'App process disappeared', process_failed: 'App process failed', observation_pending: 'App state could not be observed', fetch_or_publication_failed: 'Configuration fetch or artifact publication failed', access_denied: 'Discovery bearer authentication was denied', credential_unavailable: 'Discovery credential is unavailable', unreported: 'No observation received', input_regression: 'Older app input was refused', registration_failed: 'Node registration failed', registration_pending: 'Node registration is pending', node_unavailable: 'Node registration service is unreachable', node_request_failed: 'Node rejected the registration request', heartbeat_response: 'Node registration response is invalid', heartbeat_ttl: 'Node registration expiry is invalid', registration_auth_failed: 'Node rejected registration credentials', tls_pending: 'Waiting for TLS', drain_pending: 'Drain or cleanup is pending', runtime_offline: 'Runtime has no fresh report', reconcile_failed: 'Flux resource reconciliation failed', cleanup_failed: 'Resource cleanup failed', ownership_conflict: 'Tunnel resource ownership conflicts', provisioning_pending: 'Tunnel provisioning is pending', ingress_pending: 'Waiting for ingress authentication configuration', denied_destination: 'Discovery destination was refused', dns: 'Discovery DNS lookup failed', timeout: 'Discovery collection timed out', http_error: 'Discovery source returned an error', redirect: 'Discovery source redirected the request', transport_error: 'Discovery source could not be reached', unsupported_stop_signal_field: 'Host does not support the requested stop signal', stop_signal_unverified: 'The configured stop signal could not be verified; admission is withheld', process_failed_to_start: 'App process failed to start', registration_cleanup_failed: 'Registration cleanup failed', clock_state_unavailable: 'Clock state is unavailable', app_cleanup_pending: 'App cleanup remains pending', drain_timeout: 'Drain deadline expired', input_unavailable: 'App input is unavailable', publication_failed: 'App artifact publication failed', serving_failed: 'App artifact serving failed', failed: 'Component reported failure', offline: 'Component has no ready observation', connector_observation_stale: 'No fresh connector readiness observation', applying: 'Resource reconciliation is pending', ready: 'Ready', removed: 'Removed', rollout_pending: 'Waiting for the new configuration to apply', cleanup_unconfirmed: 'Cleanup is unconfirmed',
 }
 function reason(code?: string) { return code ? reasons[code] || code.replaceAll('_', ' ') : '' }
 function date(value?: string | null) { return value && Date.parse(value) > 0 ? new Date(value).toLocaleString() : 'Unobserved' }
 function alive(value: string | undefined, now: number) { return !!value && Date.parse(value) > now }
+function freshObservation(c: Component | undefined, clock: number) { return !!c?.received_at && c.fresh && !c.clock_uncertain && alive(c.expires_at, clock) }
+
+function currentAssignment(view: MachineObservation, runner: Component | undefined, a: Assignment, clock: number) {
+  const apps = runner?.apps
+  if (!freshObservation(runner, clock) || !runner?.current || apps?.desired_generation !== view.requested.generation) return undefined
+  if (view.delivered?.generation === view.requested.generation && view.delivered.apps_digest && apps.desired_digest !== view.delivered.apps_digest) return undefined
+  // Assignment preflight describes desired input; artifact stages retain their
+  // original identities and cannot establish that an old Flux failure cleared.
+  return apps.assignments?.find(o => o.revision_id === a.revision_id && o.generation === a.generation && o.activation_generation === a.activation_generation)
+}
 
 type ReadinessCheck = { label: string; state: 'ready' | 'blocked' | 'unverified' | 'disabled'; status: string; detail: string }
 
 function WorkReadiness({ view, clock }: { view: MachineObservation; clock: number }) {
-  const fresh = (c?: Component) => !!c && !!c.received_at && c.fresh && !c.clock_uncertain && alive(c.expires_at, clock)
+  const fresh = (c?: Component) => freshObservation(c, clock)
   const runtime = view.components.find(c => c.component === 'runtime')
   const runner = view.components.find(c => c.component === 'runner')
   const connector = view.components.find(c => c.component === 'connector')
@@ -61,13 +72,14 @@ function WorkReadiness({ view, clock }: { view: MachineObservation; clock: numbe
   let readyApps = 0
   const appProblems: { state: 'blocked' | 'unverified'; detail: string }[] = []
   for (const a of active) {
-    const observed = runner?.apps?.assignments?.find(o => o.revision_id === a.revision_id && o.activation_generation === a.activation_generation && o.generation === a.generation)
+    const observed = currentAssignment(view, runner, a, clock)
     if (!a.start_allowed) appProblems.push({ state: 'blocked', detail: `${a.name}: startup is not permitted for this assignment.` })
-    else if (a.failure) appProblems.push({ state: 'blocked', detail: `${a.name}: ${reason(a.failure)}.` })
-    else if (!fresh(runner) || !runner?.current || !observed) appProblems.push({ state: 'unverified', detail: `${a.name}: no fresh observation for the current assignment.` })
-    else if (observed.instances === 0) appProblems.push({ state: 'blocked', detail: `${a.name}: no app instances loaded${observed.reason ? ` — ${reason(observed.reason)}` : ''}.` })
+    else if (observed?.reason && (observed.ready < a.replicas || observed.registered < a.replicas)) appProblems.push({ state: 'blocked', detail: `${a.name}: ${observed.instances === 0 ? 'no app instances loaded' : `${observed.ready} healthy and ${observed.registered} registered of ${a.replicas} requested instances`} — ${reason(observed.reason)}.${a.failure && a.failure !== observed.reason ? ` Last reconciliation diagnostic: ${reason(a.failure)}.` : ''}` })
+    else if (a.failure) appProblems.push({ state: 'blocked', detail: `${a.name}: last reconciliation diagnostic: ${reason(a.failure)}.` })
+    else if (!observed) appProblems.push({ state: 'unverified', detail: `${a.name}: no fresh observation for the current assignment.` })
+    else if (observed.instances === 0) appProblems.push({ state: 'blocked', detail: `${a.name}: no app instances loaded.` })
     else if (!alive(observed.probe_expires_at, clock) || !alive(observed.node_expires_at, clock)) appProblems.push({ state: 'unverified', detail: `${a.name}: health or Node registration evidence is missing or expired.` })
-    else if (observed.ready < a.replicas || observed.registered < a.replicas) appProblems.push({ state: 'blocked', detail: `${a.name}: ${observed.ready} healthy and ${observed.registered} registered of ${a.replicas} requested instances${observed.reason ? ` — ${reason(observed.reason)}` : ''}.` })
+    else if (observed.ready < a.replicas || observed.registered < a.replicas) appProblems.push({ state: 'blocked', detail: `${a.name}: ${observed.ready} healthy and ${observed.registered} registered of ${a.replicas} requested instances.` })
     else if (observed.ready + observed.registered - observed.instances < a.replicas) appProblems.push({ state: 'unverified', detail: `${a.name}: healthy and registered counts do not confirm the same instances.` })
     else readyApps++
   }
@@ -158,7 +170,7 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.user.id, session.access_token, machine.node_id])
   const clock = now + offset
-  const fresh = (c?: Component) => !!c && c.fresh && alive(c.expires_at, clock)
+  const fresh = (c?: Component) => freshObservation(c, clock)
   const runner = view?.components.find(c => c.component === 'runner'), apps = runner?.apps
   const runtime = view?.components.find(c => c.component === 'runtime')
   const diagnosis = view?.components.find(c => c.component === 'app-reconciler')
@@ -200,14 +212,15 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
       {apps?.owner_recreated_at && Date.parse(apps.owner_recreated_at) > 0 && <p role="status">Node registration was recreated at {date(apps.owner_recreated_at)}. This does not confirm survival of earlier sessions.</p>}
       {view.assignments.map(a => {
         const observed = apps?.assignments?.find(o => o.revision_id === a.revision_id && o.activation_generation === a.activation_generation)
-        const current = fresh(runner) && runner?.current && observed?.generation === a.generation
+        const current = currentAssignment(view, runner, a, clock)
         const instances = apps?.instances.filter(i => i.revision_id === a.revision_id) || []
         return <article className="observed-assignment" key={a.revision_id} aria-label={`Observed ${a.name} revision ${a.revision}`}>
           <h4>{a.name} / revision {a.revision} <span className="muted">{a.version}</span></h4>
           <p>Desired {a.desired === 'absent' ? 'removal' : `${a.replicas} replicas`} · generation {a.generation} · activation {a.activation_generation}. Observed generation {observed?.generation || 'unknown'}.</p>
-          <p><strong>Applied:</strong> {a.completed_at ? a.desired === 'absent' ? 'Removed — cleanup confirmed' : 'Resource reconciliation confirmed' : a.failure ? reason(a.failure) : 'Pending resource reconciliation'} · <strong>Configured health:</strong> {current && alive(observed?.probe_expires_at, clock) ? `${observed?.ready || 0} ready` : 'Unverified / stale'} · <strong>Registered:</strong> {current && alive(observed?.node_expires_at, clock) ? `${observed?.registered || 0} confirmed` : 'Unverified / stale'}</p>
+          <p><strong>Applied:</strong> {a.completed_at ? a.desired === 'absent' ? 'Removed — cleanup confirmed' : 'Resource reconciliation confirmed' : a.failure ? 'Resource reconciliation unconfirmed' : 'Pending resource reconciliation'} · <strong>Configured health:</strong> {current && alive(current.probe_expires_at, clock) ? `${current.ready} ready` : 'Unverified / stale'} · <strong>Registered:</strong> {current && alive(current.node_expires_at, clock) ? `${current.registered} confirmed` : 'Unverified / stale'}</p>
           <p className="muted">{a.health.type.toUpperCase()} readiness · every {a.health.interval} · timeout {a.health.timeout} · {a.health.failure_threshold} failures to withdraw readiness</p>
-          {(a.failure || observed?.reason) && <p className="notice error" role="alert">{reason(a.failure || observed?.reason)}</p>}
+          {current?.reason && <p className="notice error" role="alert">Current assignment blocker: {reason(current.reason)}</p>}
+          {a.failure && a.failure !== current?.reason && <p className={current?.reason ? 'muted' : 'notice error'} role={current?.reason ? undefined : 'alert'}>Last reconciliation diagnostic: {reason(a.failure)}</p>}
           {!!observed?.cleanup_pending && <p role="status">{observed.cleanup_pending} instance cleanup operations remain pending.</p>}
           <details><summary>Instance evidence and correlation ({instances.length})</summary>{instances.length === 0 && <p>No instance observation. Startup may not have been permitted.</p>}{instances.map(i => <div className="instance-evidence" key={i.instance_id}>
             <code>Instance {i.instance_id} · generation {i.generation} · activation {i.activation_generation}{i.activation_generation !== a.activation_generation ? ' · retained activation' : ''} · Pod {i.pod_uid || 'unobserved'} · runner {i.runner_id || 'unconfirmed'} · app {i.app_id || 'unconfirmed'}</code>

@@ -157,6 +157,143 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	}
 	requireStatus(t, request(t, s, "GET", appPath(c, r)+"?before_generation=bad", "session-a", nil), 400)
 }
+func TestListAssignmentsCleanupPrerequisitesAndPagination(t *testing.T) {
+	s := newTestServer(t)
+	adminA(t, s)
+	machine := enroll(t, s, ownerA, strings.Repeat("1", 64))
+	other := enroll(t, s, ownerB, strings.Repeat("2", 64))
+	node := machine["node_id"]
+	path := "/api/admin/machines/" + node + "/apps"
+	var page struct {
+		Assignments []machineapps.Version `json:"assignments"`
+		Next        *string               `json:"next_after_revision_id"`
+		Generation  int64                 `json:"apps_generation"`
+		Published   int64                 `json:"published_generation"`
+		Failure     *string               `json:"delivery_error"`
+		LastFetch   *time.Time            `json:"last_config_fetch_at"`
+	}
+	read := func(url string) {
+		t.Helper()
+		w := request(t, s, "GET", url, "session-a", nil)
+		requireStatus(t, w, 200)
+		page.Assignments = nil
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read(path)
+	if page.Assignments == nil || len(page.Assignments) != 0 || page.Next != nil || page.Generation != 0 || page.Published != 0 || page.Failure != nil || page.LastFetch != nil {
+		t.Fatal("empty machine", page)
+	}
+	requireStatus(t, request(t, s, "GET", "/api/admin/machines/missing/apps?limit=bad", "session-a", nil), 404)
+	requireStatus(t, request(t, s, "GET", path+"?limit=bad", "session-a", nil), 400)
+	requireStatus(t, request(t, s, "GET", path+"?after_revision_id=bad", "session-a", nil), 400)
+
+	parent := ""
+	revision := 0
+	publish := func() CatalogRevision {
+		t.Helper()
+		revision++
+		r := publishAssignmentRevision(t, s, strings.Replace(registryFixture(t), `app_version = "1"`, fmt.Sprintf(`app_version = "%d"`, revision), 1), parent)
+		parent = r.RevisionID
+		return r
+	}
+	appendVersion := func(n string, a schema.AppAssignment) {
+		t.Helper()
+		raw, err := json.Marshal(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		execSQL(t, s.db, `INSERT INTO lpcc.machine_app_versions(node_id,revision_id,generation,intent,actor_id) VALUES($1,$2,$3,$4,$5)`, n, a.RevisionID, a.Generation, string(raw), ownerA)
+	}
+	complete := func(n string, a schema.AppAssignment, phase string) {
+		t.Helper()
+		execSQL(t, s.db, `INSERT INTO lpcc.machine_app_completions(node_id,revision_id,generation,activation_generation,phase,apps_digest) VALUES($1,$2,$3,$4,$5,'fixture')`, n, a.RevisionID, a.Generation, a.ActivationGeneration, phase)
+	}
+	source := publish()
+	a := schema.AppAssignment{RevisionRef: schema.RevisionRef{RevisionID: source.RevisionID, Digest: source.Digest}, Generation: 1, ActivationGeneration: 1, Desired: "present", StartAllowed: true}
+	appendVersion(node, a)
+	complete(node, a, "applied")
+	a = a.Absent()
+	a.Generation = 2
+	appendVersion(node, a)
+	complete(node, a, "removed")
+	a.Generation = 3 // The exact historical removal still releases its dependent.
+	appendVersion(node, a)
+	crossNode := publish()
+	a.RevisionRef = schema.RevisionRef{RevisionID: crossNode.RevisionID, Digest: crossNode.Digest}
+	a.Generation = 2
+	appendVersion(node, a)
+	appendVersion(other["node_id"], a)
+	complete(other["node_id"], a, "removed")
+	completed := publish()
+	a.RevisionRef = schema.RevisionRef{RevisionID: completed.RevisionID, Digest: completed.Digest}
+	appendVersion(node, a)
+	complete(node, a, "removed")
+
+	want := map[string]bool{source.RevisionID: false, crossNode.RevisionID: false, completed.RevisionID: false}
+	for _, tc := range []struct {
+		prerequisite *schema.AppStartAfter
+		allowed      bool
+	}{
+		{nil, true},
+		{&schema.AppStartAfter{RevisionID: source.RevisionID, Generation: 2}, true},
+		{&schema.AppStartAfter{RevisionID: source.RevisionID, Generation: 1}, false}, // Applied is not removed.
+		{&schema.AppStartAfter{RevisionID: source.RevisionID, Generation: 3}, false}, // Another generation was removed.
+		{&schema.AppStartAfter{RevisionID: crossNode.RevisionID, Generation: 2}, false},
+	} {
+		r := publish()
+		a := schema.AppAssignment{RevisionRef: schema.RevisionRef{RevisionID: r.RevisionID, Digest: r.Digest}, Generation: 1, ActivationGeneration: 1, Desired: "present", StartAfter: tc.prerequisite, StartAllowed: !tc.allowed}
+		if tc.prerequisite == nil {
+			a.StartAllowed = true
+		}
+		appendVersion(node, a)
+		execSQL(t, s.db, `INSERT INTO lpcc.machine_app_requests(node_id,revision_id,intent) SELECT node_id,revision_id,intent FROM lpcc.machine_app_heads WHERE node_id=$1 AND revision_id=$2`, node, r.RevisionID)
+		want[r.RevisionID] = tc.allowed
+	}
+	last := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	execSQL(t, s.db, `UPDATE lpcc.machines SET last_config_fetch_at=$2 WHERE node_id=$1`, node, last)
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_states(node_id,state,apps_generation,apps_error) VALUES($1,'{}',9,'render_failed') ON CONFLICT(node_id) DO UPDATE SET apps_generation=9,apps_error='render_failed'`, node)
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_app_deliveries(node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal) VALUES($1,$2,$3,4,'[]',false),($1,$4,$3,7,'[]',false)`, node, "sha256:"+strings.Repeat("a", 64), strings.Repeat("b", 64), "sha256:"+strings.Repeat("c", 64))
+
+	s.db.SetMaxOpenConns(1)
+	previous, seen := "", 0
+	for url := path + "?limit=2"; ; {
+		read(url)
+		if page.Generation != 9 || page.Published != 7 || page.Failure == nil || *page.Failure != "render_failed" || page.LastFetch == nil || !page.LastFetch.Equal(last) {
+			t.Fatal("delivery metadata", page)
+		}
+		for _, v := range page.Assignments {
+			allowed, ok := want[v.RevisionID]
+			if !ok || v.RevisionID <= previous || v.StartAllowed != allowed {
+				t.Fatal("assignment order or prerequisite", v)
+			}
+			if v.RevisionID == completed.RevisionID && v.CompletedAt == nil {
+				t.Fatal("completed removal omitted")
+			}
+			if v.StartAfter != nil && (v.Requested == nil || v.Requested.StartAllowed == v.StartAllowed) {
+				t.Fatal("derived permission changed requested intent", v)
+			}
+			previous = v.RevisionID
+			seen++
+		}
+		if page.Next == nil {
+			break
+		}
+		if len(page.Assignments) != 2 || *page.Next != previous {
+			t.Fatal("invalid next cursor", page)
+		}
+		url = path + "?limit=2&after_revision_id=" + *page.Next
+	}
+	if seen != len(want) {
+		t.Fatal("incomplete listing", seen, len(want))
+	}
+	read(path + "?after_revision_id=" + previous)
+	if page.Assignments == nil || len(page.Assignments) != 0 || page.Next != nil {
+		t.Fatal("cursor beyond last head", page)
+	}
+}
+
 func TestAssignmentAuthorizationPolicyAndInvalidChanges(t *testing.T) {
 	s := newTestServer(t)
 	grant := adminA(t, s)

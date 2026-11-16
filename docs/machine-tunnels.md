@@ -9,8 +9,8 @@ token.
 Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
 normally. A Trickle-dependent app can appear in discovery and fail for clients.
 
-See the [authentication rollout](discovery-auth-rollout.md) for signing
-configuration, key rotation and existing-resource migrations.
+See [discovery authentication](discovery-auth.md) for signing configuration
+and key rotation.
 
 ## Infrastructure and enablement
 
@@ -94,7 +94,8 @@ After certificate and Runtime readiness, three proxied CNAMEs point at the tunne
 TLS, public API routing, authenticated discovery, unauthenticated discovery
 rejection and public route isolation probes must succeed for each endpoint
 generation. API and discovery forwarding set Host to the private orchestrator;
-app forwarding preserves the original Host. The API host allows reservation,
+app forwarding preserves the original Host and application Authorization header.
+Traefik preserves the forwarded Host. The API host allows reservation,
 stop/payment and payment refresh; discovery allows `/discovery`. Other paths on
 those hosts return 404. App hosts deny discovery, runner, metrics, health and
 Trickle paths and forward the rest; Node checks HTTP methods.
@@ -126,7 +127,7 @@ DELETE /api/admin/machines/<NODE_ID>
 The administrator fleet response supplies the node ID. Connector rotation keeps
 the tunnel UUID, advances token generation and replaces the process. Compromise
 rotation also disconnects existing connectors: rotation alone leaves established
-connections active. Follow the [signing-key rotation procedure](discovery-auth-rollout.md#subsequent-key-rotation)
+connections active. Follow the [signing-key rotation procedure](discovery-auth.md#key-rotation)
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 

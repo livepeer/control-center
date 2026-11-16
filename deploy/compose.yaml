@@ -43,6 +43,10 @@ services:
       retries: 3
       start_period: 30s
     stop_grace_period: 30s
+    networks:
+      default:
+      secrets-control:
+        aliases: [control-metadata]
 
   redeemer:
     <<: *service
@@ -103,6 +107,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.secrets
     env_file: ./secrets-service.env
+    networks: [default, secrets-control]
     ports:
       - 127.0.0.1:23812:8080
     environment:
@@ -182,5 +187,7 @@ volumes:
   redeemer-data:
 
 networks:
+  secrets-control:
+    internal: true
   default:
     enable_ipv6: true

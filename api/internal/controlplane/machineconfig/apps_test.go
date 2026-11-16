@@ -1,17 +1,21 @@
 package machineconfig
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"github.com/livepeer/control-center/api/internal/testdb"
-	"github.com/livepeer/control-center/schema"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/livepeer/control-center/api/internal/testdb"
 	"github.com/livepeer/control-center/runtime/appbundle"
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/contract"
+	"github.com/livepeer/control-center/schema"
 )
 
 func TestIndependentManagementAndFullWorkloadDigest(t *testing.T) {
@@ -109,5 +113,139 @@ func TestTerminalAppFallbackRetainsAvailableIntent(t *testing.T) {
 	New(Config{}, Dependencies{DB: db}).prepareApps(t.Context(), &m, errors.New("lookup unavailable"))
 	if m.AppsError != "generation_failed" || !m.AppPayload.Index.Available || m.Apps == nil || m.Apps.Generation != intent.Generation {
 		t.Fatal("lost retained cleanup intent", m.AppsError, m.AppPayload)
+	}
+}
+
+type observationQueries struct{ count atomic.Int64 }
+
+func (q *observationQueries) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	q.count.Add(1)
+	return ctx
+}
+func (*observationQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestValidateObservationsDeliveryChecks(t *testing.T) {
+	db := testdb.Open(t)
+	if _, err := db.Exec(`CREATE SCHEMA lpcc; CREATE TABLE lpcc.machine_app_deliveries(
+ node_id text, apps_generation bigint, apps_digest text, bundle_sha256 text, terminal boolean, entries jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	otherDigest := "sha256:" + strings.Repeat("b", 64)
+	firstRevision := "11111111-1111-1111-1111-111111111111"
+	secondRevision := "22222222-2222-2222-2222-222222222222"
+	for _, delivery := range []struct {
+		node, digest, bundle, revision string
+		generation, activation         int64
+		terminal                       bool
+	}{
+		{"node", digest, strings.Repeat("a", 64), firstRevision, 1, 1, false},
+		{"node", digest, strings.Repeat("b", 64), secondRevision, 2, 2, true},
+		{"other", otherDigest, strings.Repeat("c", 64), firstRevision, 9, 9, true},
+	} {
+		if _, err := db.Exec(`INSERT INTO lpcc.machine_app_deliveries VALUES($1,$2,$3,$4,$5,
+ jsonb_build_array(jsonb_build_object('revision_id',$6::text,'generation',$2::bigint,'activation_generation',$7::bigint)))`,
+			delivery.node, delivery.generation, delivery.digest, delivery.bundle, delivery.terminal, delivery.revision, delivery.activation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config *pgx.ConnConfig
+	if err := conn.Raw(func(c any) error {
+		config = c.(*stdlib.Conn).Conn().Config()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	queries := &observationQueries{}
+	config.Tracer = queries
+	counted := stdlib.OpenDB(*config)
+	t.Cleanup(func() { counted.Close() })
+	manager := New(Config{}, Dependencies{DB: counted})
+	for _, tc := range []struct {
+		name   string
+		change func(*Report, *Machine)
+		stale  bool
+	}{
+		{"independent witnesses", func(*Report, *Machine) {}, false},
+		{"download only", func(r *Report, m *Machine) { r.Apps = nil }, false},
+		{"unknown artifact", func(r *Report, m *Machine) { r.Downloaded.ArtifactDigest = "sha256:" + strings.Repeat("c", 64) }, true},
+		{"missing artifact", func(r *Report, m *Machine) { r.Downloaded.ArtifactDigest = "" }, true},
+		{"unknown download generation", func(r *Report, m *Machine) { r.Downloaded.Generation = 9 }, true},
+		{"unknown staged generation", func(r *Report, m *Machine) { r.Apps.Staged.Generation = 9 }, true},
+		{"stage delivered to another node", func(r *Report, m *Machine) {
+			r.Apps.Published.AppsDigest = otherDigest
+			r.Apps.Published.Generation = 9
+		}, true},
+		{"unknown applied generation", func(r *Report, m *Machine) { r.Apps.Applied.Generation = 9 }, true},
+		{"assignment delivered to another node", func(r *Report, m *Machine) {
+			r.Apps.Assignments[0].Generation = 9
+			r.Apps.Assignments[0].ActivationGeneration = 9
+		}, true},
+		{"wrong activation", func(r *Report, m *Machine) { r.Apps.Instances[0].ActivationGeneration = 1 }, true},
+		{"wrong revision", func(r *Report, m *Machine) { r.Apps.Instances[0].RevisionID = firstRevision }, true},
+		{"terminal binding", func(r *Report, m *Machine) { r.Apps.DesiredGeneration = 1 }, true},
+		{"terminal wildcard refused", func(r *Report, m *Machine) { r.Apps.DesiredGeneration = 0 }, true},
+		{"nonterminal wildcard", func(r *Report, m *Machine) { m.Terminal = false; r.Apps.DesiredGeneration = 0 }, false},
+		{"reconciler unbound", func(r *Report, m *Machine) { r.Component = "app-reconciler"; r.Apps.DesiredGeneration = 1 }, false},
+		{"empty membership", func(r *Report, m *Machine) {
+			r.Apps = &contract.AppStatus{Instances: []contract.InstanceStatus{}}
+			m.Terminal = false
+		}, false},
+		{"no deliveries", func(r *Report, m *Machine) { m.NodeID = "missing" }, true},
+		{"missing terminal delivery", func(r *Report, m *Machine) {
+			m.NodeID = "missing"
+			r.Downloaded = nil
+			r.Apps = &contract.AppStatus{Instances: []contract.InstanceStatus{}}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := Machine{NodeID: "node", Terminal: true}
+			r := Report{Component: "runner", Downloaded: &contract.StageIdentity{AppsDigest: digest, ArtifactDigest: digest, Generation: 2},
+				Apps: &contract.AppStatus{DesiredGeneration: 2, DesiredDigest: digest,
+					Staged: &contract.StageIdentity{AppsDigest: digest}, Published: &contract.StageIdentity{AppsDigest: digest, Generation: 1}, Applied: &contract.StageIdentity{AppsDigest: digest, Generation: 2},
+					Assignments: []contract.AssignmentStatus{{RevisionID: firstRevision, Generation: 1, ActivationGeneration: 1}},
+					Instances:   []contract.InstanceStatus{{RevisionID: secondRevision, Generation: 2, ActivationGeneration: 2, InstanceID: "instance"}}, InstancesTotal: 1}}
+			tc.change(&r, &m)
+			queries.count.Store(0)
+			err := manager.validateObservations(t.Context(), m, r)
+			if (tc.stale && !errors.Is(err, ErrStaleStatus)) || (!tc.stale && err != nil) {
+				t.Fatalf("stale=%v: %v", tc.stale, err)
+			}
+			if got := queries.count.Load(); got != 1 {
+				t.Fatalf("validation queries = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestValidateObservationsWithoutDeliveryReads(t *testing.T) {
+	// A nil database also verifies that these paths never issue a query.
+	manager := New(Config{}, Dependencies{})
+	for _, r := range []Report{
+		{Component: "connector"}, {Component: "runtime"},
+		{Downloaded: &contract.StageIdentity{ArtifactDigest: "sha256:" + strings.Repeat("a", 64)}},
+	} {
+		if err := manager.validateObservations(t.Context(), Machine{}, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, r := range []Report{
+		{Software: []contract.SoftwareIdentity{}}, {ObserverID: "bad observer"}, {AppsError: "Bad"}, {DeliveryReason: "Bad"},
+		{Downloaded: &contract.StageIdentity{Generation: -1}},
+		{Downloaded: &contract.StageIdentity{Generation: 1}},
+		{Downloaded: &contract.StageIdentity{AppsDigest: "bad"}},
+		{Downloaded: &contract.StageIdentity{ArtifactDigest: "bad"}},
+		{Apps: &contract.AppStatus{}},
+		{Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}, InstancesTotal: 1}},
+		{Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}, StagedDigest: "bad"}},
+	} {
+		if err := manager.validateObservations(t.Context(), Machine{}, r); !errors.Is(err, ErrStaleStatus) {
+			t.Fatalf("malformed report returned %v", err)
+		}
 	}
 }

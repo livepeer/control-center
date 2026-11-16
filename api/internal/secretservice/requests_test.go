@@ -286,3 +286,46 @@ func TestRuntimeClientThroughTerminatingTLSProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestBatchRevocationAfterProofConsumesNonce(t *testing.T) {
+	s, key, m, _ := dbService(t)
+	id := enrolled(t, s, key, m)
+	body := []byte(`{"assignments":[]}`)
+	original := httptest.NewRequest("POST", s.Config.PublicURL+"/v1/runtime/batch", bytes.NewReader(body))
+	if err := protocol.SignRequest(original, body, id.Identity, key, s.Now()); err != nil {
+		t.Fatal(err)
+	}
+	observer, err := s.DB.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+	var before int
+	if err := observer.QueryRowContext(t.Context(), `SELECT count(*) FROM lpsecrets.request_nonces WHERE node_id=$1`, id.NodeID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.authenticated(func(w http.ResponseWriter, r *http.Request) {
+		// A separate connection must see consumption before handler authorization.
+		var consumed int
+		if err := observer.QueryRowContext(t.Context(), `SELECT count(*) FROM lpsecrets.request_nonces WHERE node_id=$1`, id.NodeID).Scan(&consumed); err != nil || consumed != before+1 {
+			t.Fatal("nonce not durable before handler", consumed, before, err)
+		}
+		if _, err := s.DB.Exec(`UPDATE lpsecrets.identities SET revoked=true WHERE node_id=$1`, id.NodeID); err != nil {
+			t.Fatal(err)
+		}
+		s.batchVersions(w, r)
+	})(w, original)
+	if w.Code != 403 || !bytes.Contains(w.Body.Bytes(), []byte(`"code":"identity_refused"`)) {
+		t.Fatal("batch reused identity from proof verification", w.Code, w.Body.String())
+	}
+	replica := New(s.DB, s.Config)
+	replica.Metadata = m
+	replay := original.Clone(t.Context())
+	replay.Body = io.NopCloser(bytes.NewReader(body))
+	w = httptest.NewRecorder()
+	replica.authenticated(replica.batchVersions)(w, replay)
+	if w.Code != 401 || !bytes.Contains(w.Body.Bytes(), []byte(`"code":"proof_refused"`)) {
+		t.Fatal("failed authorization revived proof after restart", w.Code, w.Body.String())
+	}
+}

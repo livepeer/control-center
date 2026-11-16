@@ -218,8 +218,6 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 				want := http.StatusNotFound
 				if host == endpointHost(state.ServiceURL) {
 					want = http.StatusMethodNotAllowed
-				} else if host == endpointHost(state.DiscoveryURL) {
-					want = http.StatusUnauthorized
 				}
 				if response.StatusCode != want {
 					t.Fatal("unexpected hostname routing", host, response.StatusCode)

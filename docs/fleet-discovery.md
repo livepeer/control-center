@@ -23,8 +23,8 @@ Keep the private signing key, bearer tokens and provisioning credentials out of
 machine bundles, ConfigMaps, browser responses, logs and command flags. Each
 machine's raw `/discovery` requires a machine-bound ingress bearer token. Public
 app hosts and direct origins deny discovery and management access. See the
-[authentication rollout](discovery-auth-rollout.md) for the two release stages
-and separate existing-resource migrations.
+[discovery authentication guide](discovery-auth.md) for signing configuration
+and key rotation.
 
 The aggregate returns 503 when disabled. When enabled it returns cached
 Node-compatible JSON, including `200 []` when no runners are advertised. An
@@ -56,9 +56,8 @@ or redirects, and Node's destination policy and 1 MiB source-body limit. The
 Collector ignores advertised peer metadata and never collects its own origin.
 Credential changes apply to the next scheduled poll. HTTP reads never poll sources.
 
-Rotate keys by distributing the next public key before switching signers, then
-retain the previous verification key for at least 24 hours after last issuance.
-See the rollout runbook for applied-digest checks.
+See [key rotation](discovery-auth.md#key-rotation) for public-key distribution
+and retention.
 
 ## Inventory and diagnosis
 

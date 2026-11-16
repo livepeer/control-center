@@ -29,8 +29,8 @@ non-root API and cloudflared processes can read their respective mounts.
 Keep the configuration readable by UID 65532 as well.
 
 Generate `secrets/jwt-signing-key.pem` as an Ed25519 PKCS#8 PEM key; see the
-[authentication rollout](../docs/discovery-auth-rollout.md). Preserve this key and machine credential secrets across upgrades. Stage 2 needs
-no discovery credential keyring. The registry uses the persistent
+[discovery authentication guide](../docs/discovery-auth.md). Preserve this key
+and machine credential secrets across upgrades. The registry uses the persistent
 `controlcenter_registry-data` Docker volume.
 
 Allow `https://controlcenter.livepeer.live/auth/callback` in the Supabase

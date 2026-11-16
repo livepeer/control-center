@@ -10,9 +10,21 @@ enrollment and tunnel; deletion and re-enrollment create a new enrollment.
 Cleanup of an earlier enrollment must finish before a later one can reuse its
 stable hostnames.
 
-See the [operator guide](../../../../docs/machine-tunnels.md) for host/path rules,
-credential boundaries, rotation and removal. The [authentication rollout](../../../../docs/discovery-auth-rollout.md)
-covers signing configuration and separate existing-resource migrations.
+| Host | Purpose |
+| --- | --- |
+| `api.<node>.<domain>` | Public orchestrator client API controls |
+| `*.<node>.<domain>` | Application traffic |
+| `discovery.<node>.<domain>/discovery` | Bearer-protected discovery |
+
+API and discovery forwarding use the private Node Host; application forwarding
+preserves the original Host and Authorization header. The API host permits only
+reservation, stop/payment and payment refresh controls. App hosts deny discovery,
+runner, metrics, health and Trickle paths; unmatched API and discovery paths
+return 404.
+
+See the [operator guide](../../../../docs/machine-tunnels.md) for credential
+boundaries, rotation and removal, and [discovery authentication](../../../../docs/discovery-auth.md)
+for signing configuration and key rotation.
 
 ## Cloudflare API token permissions
 
@@ -53,6 +65,13 @@ shared concurrency. This package prepares certificate coverage and coordinates
 endpoint replacement through its drain and configuration gates. The
 [discovery package](../discovery/README.md) owns the collector.
 
-Existing resources must be migrated separately before deployment reconciliation
-is enabled. Unsupported persisted routing is refused before provider I/O; the
-application contains no legacy-resource conversion or cleanup implementation.
+The backend API token provisions resources; the enrollment credential
+authenticates the machine; and the connector token joins its tunnel. A broker
+delivers the connector token without mounting the enrollment credential in
+`cloudflared`. Connector rotation preserves the tunnel UUID; compromise rotation
+also disconnects existing connectors.
+
+After normal removal drains the workload, cleanup installs deny-only ingress,
+revokes connector authentication, disconnects connections, and deletes owned
+DNS and tunnel resources. The machine separately receives a terminal bundle to
+remove its local workloads.

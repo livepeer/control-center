@@ -15,4 +15,4 @@ TLS; `Dependencies.SignToken` signs each managed request locally and tests can
 supply an in-process transport.
 
 See the [operator guide](../../../../docs/fleet-discovery.md) for configuration,
-credential handling and release checks.
+credential handling and diagnosis.

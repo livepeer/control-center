@@ -17,7 +17,7 @@ SupabasePublishableKey = "replace-with-publishable-key"
 # DefaultAdminEmail = "admin@example.com"
 
 # Generate the Ed25519 signing key once: openssl genpkey -algorithm ED25519
-# See docs/discovery-auth-rollout.md for mounted key configuration and rotation.
+# See docs/discovery-auth.md for mounted key configuration and rotation.
 # Keep stable. Changing MachineTokenSecret invalidates installed credentials.
 JWTSigningPrivateKeyFile = "secrets/jwt-signing-key.pem"
 # Keep old key IDs and keys in this JSON file for one-hour grants and 24-hour invitations.
@@ -35,8 +35,8 @@ ConfigReconcileInterval = "1m"
 CloudflareEnabled = false
 CloudflareIngressApproved = false
 
-# Fleet discovery shares the API process and existing TLS proxy. It requires
-# is needed when CloudflareEnabled is false.
+# Fleet discovery shares the API process and existing TLS proxy. A Cloudflare
+# provisioning token is not needed when CloudflareEnabled is false.
 DiscoveryEnabled = false
 DiscoveryRefreshInterval = "5m"
 DiscoveryMaxFailedRefreshes = 6

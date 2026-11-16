@@ -174,47 +174,58 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
 	}
-	record, err := (machineconfig.Store{DB: s.db}).Load(ctx, m.NodeID)
-	if errors.Is(err, sql.ErrNoRows) {
-		record.State = machineconfig.InitialState(m.Terminal)
-	} else if err != nil {
+	var record machineconfig.State
+	var rollout, routing, onchainConfig, bundle []byte
+	var ack *time.Time
+	var delivered contract.StageIdentity
+	var deliveredAt *time.Time
+	// Keep scalar status facts in one statement snapshot; assignments and reports
+	// remain separate, bounded projections.
+	err := s.db.QueryRowContext(ctx, `SELECT s.rollout,s.state,COALESCE(s.apps_generation,0),COALESCE(s.apps_error,''),
+ oc.config,CASE WHEN $2 THEN e.retained_bundle ELSE c.bundle END,e.removal_ack_at,
+ COALESCE(d.apps_generation,0),COALESCE(d.apps_digest,''),COALESCE('sha256:'||d.bundle_sha256,''),d.published_at
+ FROM (SELECT $1::text AS node_id) n
+ LEFT JOIN lpcc.enrollments e ON e.node_id=n.node_id
+ LEFT JOIN lpcc.machine_states s ON s.node_id=e.node_id
+ LEFT JOIN lpcc.onchain_state os ON os.fingerprint=e.fingerprint
+ LEFT JOIN lpcc.onchain_configs oc ON oc.fingerprint=os.fingerprint AND oc.generation=os.generation
+ LEFT JOIN lpcc.machine_configs c ON c.node_id=n.node_id AND NOT $2
+ LEFT JOIN LATERAL (
+ SELECT apps_generation,apps_digest,bundle_sha256,published_at FROM lpcc.machine_app_deliveries
+ WHERE node_id=n.node_id ORDER BY published_at DESC,apps_generation DESC LIMIT 1
+ ) d ON true
+ WHERE NOT $2 OR e.node_id IS NOT NULL`, m.NodeID, m.Terminal).Scan(&rollout, &routing, &v.Requested.Generation, &v.DeliveryReason,
+		&onchainConfig, &bundle, &ack, &delivered.Generation, &delivered.AppsDigest, &delivered.ArtifactDigest, &deliveredAt)
+	if err != nil {
 		return v, err
 	}
-	v.Onchain, err = s.onchainView(ctx, m)
+	if rollout == nil {
+		record = machineconfig.InitialState(m.Terminal)
+	} else if err = json.Unmarshal(rollout, &record); err != nil {
+		return v, err
+	}
+	v.Onchain, err = newOnchainView(onchainConfig, bundle)
 	if err != nil {
 		return v, err
 	}
 	v.Lifecycle, v.RolloutGeneration = record.Lifecycle, record.Generation
 	if m.Terminal {
-		var ack *time.Time
-		if err := s.db.QueryRowContext(ctx, `SELECT removal_ack_at FROM lpcc.enrollments WHERE node_id=$1`, m.NodeID).Scan(&ack); err != nil {
-			return v, err
-		}
 		v.Lifecycle = "cleanup_pending"
 		if ack != nil {
 			v.Lifecycle = "removed"
 		}
 	}
 	var route tunnel.RoutingState
-	if len(record.Routing) > 0 && json.Unmarshal(record.Routing, &route) != nil {
+	if len(routing) > 0 && json.Unmarshal(routing, &route) != nil {
 		return v, errors.New("invalid routing state")
 	}
 	v.Tunnel = tunnelObservation{Enabled: route.TunnelID != "" || s.params.CloudflareEnabled, Ready: route.Ready && route.ReadyGeneration == record.Generation && !route.VerifiedAt.IsZero() && now.Before(route.VerifiedAt.Add(ttl)), Reason: safeObservationReason(route.Reason), VerifiedAt: timePointer(route.VerifiedAt), SourceGeneration: route.SourceGeneration, CleanupComplete: route.CleanupComplete}
 	if !route.VerifiedAt.IsZero() {
 		v.Tunnel.ExpiresAt = timePointer(route.VerifiedAt.Add(ttl))
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT apps_generation,COALESCE(apps_error,'') FROM lpcc.machine_states WHERE node_id=$1`, m.NodeID).Scan(&v.Requested.Generation, &v.DeliveryReason)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return v, err
-	}
 	v.DeliveryReason = safeObservationReason(v.DeliveryReason)
-	var delivered contract.StageIdentity
-	var at time.Time
-	err = s.db.QueryRowContext(ctx, `SELECT apps_generation,apps_digest,'sha256:'||bundle_sha256,published_at FROM lpcc.machine_app_deliveries WHERE node_id=$1 ORDER BY published_at DESC,apps_generation DESC LIMIT 1`, m.NodeID).Scan(&delivered.Generation, &delivered.AppsDigest, &delivered.ArtifactDigest, &at)
-	if err == nil {
-		v.Delivered, v.DeliveredAt = &delivered, &at
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return v, err
+	if deliveredAt != nil {
+		v.Delivered, v.DeliveredAt = &delivered, deliveredAt
 	}
 	v.Assignments, v.AssignmentsOmitted, err = s.observedAssignments(ctx, m)
 	if err != nil {
@@ -447,29 +458,21 @@ type onchainView struct {
 	DeliveredGeneration int64          `json:"delivered_generation"`
 }
 
-func (s *Server) onchainView(ctx context.Context, m Machine) (onchainView, error) {
-	var v onchainView
-	var err error
-	v.Desired, err = loadOnchain(ctx, s.db, m.NodeID)
-	if err != nil {
-		return v, err
+func newOnchainView(config, bundle []byte) (onchainView, error) {
+	v := onchainView{Desired: onchain.Offchain()}
+	if config != nil {
+		if err := json.Unmarshal(config, &v.Desired); err != nil {
+			return v, err
+		}
+		if err := v.Desired.Validate(); err != nil {
+			return v, err
+		}
 	}
 	v.Desired.RPCSecret = ""
 	v.Desired.RPCGrants = nil
 	v.Desired.RedeemerGrants = nil
-	var b []byte
-	if m.Terminal {
-		err = s.db.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1`, m.NodeID).Scan(&b)
-	} else {
-		err = s.db.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&b)
+	if meta, _, err := machineconfig.ReadApplied(bundle); err == nil {
+		v.DeliveredGeneration = meta.Onchain.Generation
 	}
-	if err == nil {
-		if meta, _, e := machineconfig.ReadApplied(b); e == nil {
-			v.DeliveredGeneration = meta.Onchain.Generation
-		}
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		err = nil
-	}
-	return v, err
+	return v, nil
 }
