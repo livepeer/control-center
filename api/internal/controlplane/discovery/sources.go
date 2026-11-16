@@ -57,7 +57,7 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 			source = previous // Do not admit an unverified replacement generation.
 		}
 		u, e := canonicalEndpoint(source.URL)
-		if e != nil || source.AuthMode != AuthCloudflare && source.AuthMode != AuthNone || source.AuthMode == AuthCloudflare && u.Scheme != "https" || source.AuthMode == AuthNone && source.CredentialRef != "" {
+		if e != nil || source.AuthMode != AuthBearer && source.AuthMode != AuthNone || source.AuthMode == AuthBearer && u.Scheme != "https" {
 			f.reconciliationFailed()
 			return errors.New("invalid managed discovery source")
 		}
@@ -76,18 +76,11 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 	authorizations := map[string]*authorization{}
 	prior := f.transport.selection.Load()
 	for _, source := range next {
-		auth := &authorization{source: source, available: source.AuthMode == AuthNone}
-		if source.AuthMode == AuthCloudflare {
-			credential, e := f.backend.Resolve(ctx, source.CredentialRef)
-			if e == nil && validCredential(credential) {
-				auth.credential = credential
-				auth.available = true
-			}
-		}
-		// Reuse confirmation only for the same immutable source authorization.
+		auth := &authorization{source: source, available: source.AuthMode == AuthNone || f.transport.signToken != nil}
+		// Reuse diagnostics only for the same source identity and generation.
 		if prior != nil {
 			old := prior.sources[source.URL]
-			if old != nil && old.source.NodeID == source.NodeID && old.source.Generation == source.Generation && old.source.CredentialRef == source.CredentialRef && old.source.CredentialVersion == source.CredentialVersion && old.source.ServiceURL == source.ServiceURL && old.source.AuthMode == source.AuthMode && old.credential == auth.credential && old.available == auth.available {
+			if old != nil && old.source.NodeID == source.NodeID && old.source.Generation == source.Generation && old.source.ServiceURL == source.ServiceURL && old.source.AuthMode == source.AuthMode && old.available == auth.available {
 				auth = old
 			}
 		}
@@ -113,37 +106,11 @@ func (f *Manager) Reconcile(ctx context.Context) error {
 	f.reconciledAt = time.Now().UTC()
 	f.reconcileFailed = false
 	f.mu.Unlock()
-	f.acknowledge(ctx)
 	return nil
 }
 
 func (f *Manager) reconciliationFailed() { f.mu.Lock(); f.reconcileFailed = true; f.mu.Unlock() }
 
-// Acknowledgement asserts that this source authorization decoded successfully.
-// The backend rechecks the current credential and deployment generation atomically.
-func (f *Manager) acknowledge(ctx context.Context) {
-	f.mu.Lock()
-	selection := f.transport.selection.Load()
-	sources := append([]Source(nil), f.selected...)
-	f.mu.Unlock()
-	if selection == nil {
-		return
-	}
-	for _, source := range sources {
-		auth := selection.sources[source.URL]
-		f.transport.mu.Lock()
-		ready := auth.confirmed && !auth.acknowledged
-		f.transport.mu.Unlock()
-		if ready && source.AuthMode == AuthCloudflare && source.Lifecycle == "active" && f.backend.Acknowledge(ctx, source) == nil {
-			f.transport.mu.Lock()
-			auth.acknowledged = true
-			f.transport.mu.Unlock()
-		}
-	}
-}
-
-// Public routing comes from the same managed state as source selection. Do not
-// rewrite upstream URLs or publish a private/wrong-machine registration target.
 func publicEntry(source Source, entry shared.Entry[runner]) bool {
 	if !publicAddress(source, entry.Address) {
 		return false

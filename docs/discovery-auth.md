@@ -23,8 +23,6 @@ artifacts, ConfigMaps, logs and command arguments.
 
 ## Discovery ingress
 
-Machine discovery also requires Cloudflare Access Service Auth; see the
-[machine tunnel guide](machine-tunnels.md) for Access credential management.
 Control Center signs a token for each managed source request. The token has
 issuer `livepeer-control-center`, audience `livepeer-discovery`, scope
 `discovery:read`, the machine's node ID as subject, and issued-at and expiration

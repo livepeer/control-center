@@ -38,7 +38,6 @@ type SourceStatus struct {
 	TransportOutcome    string     `json:"transport_outcome,omitempty"`
 	HTTPStatus          int        `json:"http_status,omitempty"`
 	CredentialAvailable bool       `json:"credential_available"`
-	Acknowledged        bool       `json:"acknowledged"`
 	PublicationBlocked  bool       `json:"publication_blocked"`
 	OldestObservation   *time.Time `json:"oldest_observation,omitempty"`
 	NewestObservation   *time.Time `json:"newest_observation,omitempty"`
@@ -110,7 +109,6 @@ func (f *Manager) Status() Status {
 				s.TransportOutcome = a.attempt.outcome
 				s.HTTPStatus = a.attempt.status
 			}
-			s.Acknowledged = a.acknowledged
 		}
 		byID[source.NodeID] = s
 	}

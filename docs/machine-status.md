@@ -65,7 +65,7 @@ observation time:
   Pod and Service deletion, and registration cleanup. A maintenance deadline can
   initiate workload removal when Node is unavailable; Flux or Kubernetes outages
   can delay deletion.
-- **Access or collection failed:** check connector status, tunnel verification and
+- **Authentication or collection failed:** check connector status, tunnel verification and
   the source transport outcome separately. See [machine tunnels](machine-tunnels.md)
   and [fleet discovery](fleet-discovery.md).
 

@@ -61,8 +61,7 @@ data:
     APIOriginURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     RunnerServiceURL = "http://orchestrator.livepeer.svc.cluster.local:8935"
     ProxyURLTemplate = "@PROXY_URL_TEMPLATE@"
-    ExcludedHeaders = ["CF-Access-*", "Livepeer-Session-*", "X-Forwarded-*"]
-    ExcludedCookies = ["CF_Authorization"]
+    ExcludedHeaders = ["Livepeer-Session-*", "X-Forwarded-*"]
     BootstrapSecretFile = "/credentials/secret"
     HeartbeatInterval = "5s"
     HeartbeatTTL = "30s"

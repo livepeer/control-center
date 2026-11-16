@@ -13,7 +13,7 @@ import (
 
 func TestSharedBackendMembershipRequiresEveryApp(t *testing.T) {
 	source := testSource("one", "https://source.example")
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
 	var body atomic.Value
 	body.Store("[]")
@@ -51,7 +51,7 @@ func TestSharedBackendMembershipRequiresEveryApp(t *testing.T) {
 
 func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 	source := testSource("one", "https://source.example")
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"old-client", "secret-sentinel"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
 	var body atomic.Value
 	body.Store(`[{"address":"https://orch.example","runners":[{"url":"https://orch.example/apps/a/session","app":"test","version":"v1","observed_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}]}]`)
@@ -87,9 +87,6 @@ func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 	}
 	b.sources[0].Generation = 2
 	b.sources[0].VerifiedGeneration = 2
-	b.sources[0].CredentialVersion = 2
-	b.sources[0].CredentialRef = "new-ref"
-	b.credentials["new-ref"] = Credential{"new-client", "new-secret"}
 	body.Store("<html>not discovery</html>")
 	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
@@ -104,7 +101,7 @@ func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 		t.Fatal("valid empty snapshot was not authoritative", empty)
 	}
 	raw, _ := json.Marshal(empty)
-	for _, secret := range []string{"secret-sentinel", "new-secret", source.URL, source.CredentialRef} {
+	for _, secret := range []string{"secret-sentinel", "new-secret", source.URL} {
 		if strings.Contains(string(raw), secret) {
 			t.Fatal("unsafe membership projection")
 		}
@@ -126,7 +123,7 @@ func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 
 func TestMembershipMatchesPublicDuplicateWinner(t *testing.T) {
 	source := testSource("one", "https://source.example")
-	b := &simulatedDiscoveryBackend{sources: []Source{source}, credentials: map[string]Credential{source.CredentialRef: {"client", "secret"}}}
+	b := &simulatedDiscoveryBackend{sources: []Source{source}}
 	f, _ := testFleet(t, b)
 	now := time.Now().UTC()
 	endpoint := "https://orch.example/apps/a/session"

@@ -12,18 +12,19 @@ stable hostnames.
 
 | Host | Purpose |
 | --- | --- |
-| `api.<node>.<domain>` | Public orchestrator client API routes |
+| `api.<node>.<domain>` | Public orchestrator client API controls |
 | `*.<node>.<domain>` | Application traffic |
-| `discovery.<node>.<domain>/discovery` | Discovery, protected by Access and ingress bearer auth |
+| `discovery.<node>.<domain>/discovery` | Bearer-protected discovery |
 
-The API host allows only reserve, stop/payment and payment refresh controls.
-API and discovery forward with the private Node Host; application hosts preserve
-the original Host and application Authorization header. Traefik preserves the
-forwarded Host. Discovery, runner, metrics, health and Trickle paths are denied
-on API and app hosts; unknown hosts and unmatched API paths return 404.
+API and discovery forwarding use the private Node Host; application forwarding
+preserves the original Host and Authorization header. The API host permits only
+reservation, stop/payment and payment refresh controls. App hosts deny discovery,
+runner, metrics, health and Trickle paths; unmatched API and discovery paths
+return 404.
 
-See [discovery authentication](../../../../docs/discovery-auth.md) for signing
-configuration and key rotation.
+See the [operator guide](../../../../docs/machine-tunnels.md) for credential
+boundaries, rotation and removal, and [discovery authentication](../../../../docs/discovery-auth.md)
+for signing configuration and key rotation.
 
 ## Cloudflare API token permissions
 
@@ -32,8 +33,6 @@ Create a custom token scoped to the relevant account and zone:
 | Scope | Permission | Access | Why |
 | --- | --- | --- | --- |
 | Account | Cloudflare One Connector: cloudflared | Edit | Manage tunnels, connector credentials and connections |
-| Account | Access: Apps and Policies | Edit | Protect machines with Cloudflare Service Auth applications and policies |
-| Account | Access: Service Tokens | Edit | Authenticate discovery requests |
 | Zone | DNS | Edit | Manage machine and wildcard CNAMEs and any validation records |
 | Zone | SSL and Certificates | Edit | Manage Advanced Certificate packs for machine wildcard coverage |
 
@@ -67,20 +66,12 @@ endpoint replacement through its drain and configuration gates. The
 [discovery package](../discovery/README.md) owns the collector.
 
 The backend API token provisions resources; the enrollment credential
-authenticates the machine; the connector token joins its tunnel; and an Access
-credential authorizes discovery requests. A broker delivers the connector
-token without mounting the enrollment credential in `cloudflared`.
+authenticates the machine; and the connector token joins its tunnel. A broker
+delivers the connector token without mounting the enrollment credential in
+`cloudflared`. Connector rotation preserves the tunnel UUID; compromise rotation
+also disconnects existing connectors.
 
-Connector and Access credentials rotate independently. Normal Access rotation
-overlaps credentials until the collector acknowledges the replacement;
-compromise rotation revokes predecessors immediately. Connector rotation
-preserves the tunnel UUID; compromise rotation also disconnects existing
-connectors. Credential maintenance can continue while Runtime is offline.
-
-After normal removal drains the workload, external cleanup installs deny-only
-ingress, revokes connector authentication, disconnects connections, and deletes
-DNS, the tunnel, and Access resources. The machine separately receives a terminal
-bundle to remove its local workloads.
-
-See the [machine tunnel runbook](../../../../docs/machine-tunnels.md) for setup
-and release operations.
+After normal removal drains the workload, cleanup installs deny-only ingress,
+revokes connector authentication, disconnects connections, and deletes owned
+DNS and tunnel resources. The machine separately receives a terminal bundle to
+remove its local workloads.

@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,7 +12,7 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
-	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
+	"github.com/livepeer/control-center/runtime/ingressauth"
 )
 
 type fleetRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -27,175 +26,101 @@ func reconcileDiscovery(t *testing.T, s *Server) {
 	}
 }
 
-func TestFleetEncryptedStoreAPIAndRotation(t *testing.T) {
+func TestFleetLocalBearerSigningAPIAndRotation(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	a := enroll(t, s, ownerA, strings.Repeat("a", 64))
 	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
-	sourceA := readyTunnel(t, s, a)
+	readyTunnel(t, s, a)
 	readyTunnel(t, s, b)
 	adminA(t, s)
 	s.params.DiscoveryParams = DiscoveryParams{DiscoveryEnabled: true, DiscoveryRefreshInterval: time.Second, DiscoveryMaxFailedRefreshes: 6}
-	if err := s.ConfigureDiscovery(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.CloseDiscovery)
 	var calls atomic.Int32
-	var pauseNext atomic.Bool
-	started, release := make(chan struct{}), make(chan struct{})
-	// The real database/keyring resolver and Collector are used; only the remote
-	// Cloudflare/orchestrator response is simulated. TLS/policy has separate tests.
-	s.CloseDiscovery()
-	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger, Transport: fleetRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		if r.URL.String() == sourceA.DiscoveryURL && pauseNext.CompareAndSwap(true, false) {
-			close(started)
-			select {
-			case <-release:
-			case <-r.Context().Done():
-				return nil, r.Context().Err()
-			}
-		}
-		sources, err := s.tunnels.DiscoverySources(r.Context())
-		if err != nil {
-			return nil, err
-		}
-		for _, source := range sources {
-			if source.URL != r.URL.String() {
-				continue
-			}
-			// Rotation overlaps credentials until the replacement is acknowledged.
-			// Validate the presented token, not the source's newest credential.
-			var version int64
-			providerID := strings.TrimPrefix(r.Header.Get("CF-Access-Client-Id"), "client-")
-			if err := s.db.QueryRowContext(r.Context(), `SELECT version FROM lpcc.access_credentials WHERE node_id=$1 AND provider_id=$2`, source.NodeID, providerID).Scan(&version); err != nil {
-				return nil, err
-			}
-			credential, err := s.tunnels.ResolveAccessCredential(r.Context(), credentialRef(source.NodeID, version))
+	start := func() func() {
+		manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger, SignToken: func(source fleet.Source) (string, error) { return s.signDiscovery(source.NodeID) }, Transport: fleetRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			sources, err := s.tunnels.DiscoverySources(r.Context())
 			if err != nil {
 				return nil, err
 			}
-			if r.Header.Get("CF-Access-Client-Id") != credential.ClientID || r.Header.Get("CF-Access-Client-Secret") != credential.ClientSecret {
-				t.Error("wrong encrypted source credential")
+			for _, source := range sources {
+				if source.URL != r.URL.String() {
+					continue
+				}
+				if err := ingressauth.Verify(s.params.jwtKey.Keys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), source.NodeID, s.currentTime()); err != nil {
+					t.Error("invalid source bearer", err)
+				}
+				body := `[{"address":"` + source.ServiceURL + `","runners":[{"url":"` + source.ServiceURL + `/apps/a/session","app":"test","observed_at":"2000-01-01T00:00:00Z","extension":9007199254740993}]}]`
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
 			}
-			record := `{"url":"` + source.ServiceURL + `/apps/a/session","app":"test","observed_at":"2000-01-01T00:00:00Z","extension":9007199254740993}`
-			body := `[{"address":"` + source.ServiceURL + `","runners":[` + record + `]}]`
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+			return &http.Response{StatusCode: 404, Body: http.NoBody}, nil
+		})})
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Error("request to unknown managed source")
-		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(""))}, nil
-	})})
-	if err != nil {
-		t.Fatal(err)
+		s.discovery = manager
+		reconcileDiscovery(t, s)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { manager.Run(ctx); close(done) }()
+		stop := func() { cancel(); <-done; manager.Close() }
+		t.Cleanup(stop)
+		for deadline := time.Now().Add(4 * time.Second); ; {
+			status := s.DiscoveryStatus()
+			if len(status.Sources) == 2 && status.Sources[0].State == "healthy" && status.Sources[1].State == "healthy" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("sources did not initialize", status)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return stop
 	}
-	s.discovery = manager
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { manager.Run(ctx); close(done) }()
-	stop := func() { cancel(); <-done }
-	t.Cleanup(stop)
-	reconcileDiscovery(t, s)
-	deadline := time.After(3 * time.Second)
-	for {
-		status := s.DiscoveryStatus()
-		if len(status.Sources) == 2 && status.Sources[0].State == "healthy" && status.Sources[1].State == "healthy" {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("managed sources did not initialize", status)
-		case <-time.After(time.Millisecond):
-		}
-	}
-	reconcileDiscovery(t, s)
+	stop := start()
 	response := request(t, s, "GET", "/discovery", "", nil)
 	if response.Code != 200 || strings.Count(response.Body.String(), `"app":"test"`) != 2 || response.Header().Get("Cache-Control") != "no-store" {
-		t.Fatal("aggregate API unavailable", response.Code, response.Body.String())
+		t.Fatal("aggregate unavailable", response.Code, response.Body.String())
 	}
 	before := calls.Load()
 	request(t, s, "GET", "/discovery", "", nil)
 	if calls.Load() != before {
-		t.Fatal("HTTP endpoint started collection")
+		t.Fatal("HTTP reads started polling")
 	}
-	for _, token := range []string{"", a["token"], "session-b"} {
-		w := request(t, s, "GET", "/api/admin/discovery", token, nil)
-		if w.Code == 200 {
-			t.Fatal("source diagnostics bypassed administrator policy")
+	for _, credential := range []string{"", a["token"], "session-b"} {
+		if request(t, s, "GET", "/api/admin/discovery", credential, nil).Code == 200 {
+			t.Fatal("source status bypassed admin policy")
 		}
 	}
 	status := request(t, s, "GET", "/api/admin/discovery", "session-a", nil)
-	if status.Code != 200 || !strings.Contains(status.Body.String(), `"acknowledged":true`) {
-		t.Fatal("authorized freshness diagnostics missing", status.Code, status.Body.String())
-	}
-	sources, err := s.tunnels.DiscoverySources(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, source := range sources {
-		credential, err := s.tunnels.ResolveAccessCredential(t.Context(), source.CredentialRef)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, output := range []string{response.Body.String(), status.Body.String()} {
-			for _, secret := range []string{credential.ClientID, credential.ClientSecret, source.CredentialRef, source.URL, s.params.CloudflareKeyring, s.params.CloudflareAPIToken, tunnel.PrivateOrchestrator} {
-				if strings.Contains(output, secret) {
-					t.Fatal("secret/private source leaked into API")
-				}
+	requireStatus(t, status, 200)
+	for _, output := range []string{response.Body.String(), status.Body.String()} {
+		for _, secret := range []string{string(s.params.jwtKey.Private), s.params.CloudflareAPIToken, a["token"]} {
+			if strings.Contains(output, secret) {
+				t.Fatal("credential leaked")
 			}
 		}
 	}
-	managerBeforeRotation := s.tunnels
-	// Rotate while a request still carries the predecessor credential.
-	pauseNext.Store(true)
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("collection did not start before rotation")
-	}
-	rotate := request(t, s, "POST", "/api/admin/machines/"+a["node_id"]+"/tunnel/rotate", "session-a", map[string]any{"kind": "access"})
-	requireStatus(t, rotate, 202)
-	driveTunnels(t, s)
-	close(release)
-	reconcileDiscovery(t, s)
-	var acknowledged bool
-	for deadline := time.Now().Add(3 * time.Second); !acknowledged; {
-		reconcileDiscovery(t, s)
-		if err := s.db.QueryRow(`SELECT acknowledged_at IS NOT NULL FROM lpcc.access_credentials WHERE node_id=$1 AND version=2`, a["node_id"]).Scan(&acknowledged); err != nil {
-			t.Fatal(err)
-		}
-		if !acknowledged && time.Now().After(deadline) {
-			t.Fatal("replacement credential was not acknowledged after periodic collection")
-		}
-		if !acknowledged {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	driveTunnels(t, s)
-	if s.tunnels != managerBeforeRotation {
-		t.Fatal("ordinary reconciliation replaced manager with active discovery readers")
-	}
-	var active int
-	if err := s.db.QueryRow(`SELECT count(*) FROM lpcc.access_credentials WHERE node_id=$1 AND revoked_at IS NULL`, a["node_id"]).Scan(&active); err != nil || active != 1 {
-		t.Fatal("acknowledgement did not release predecessor token", err, active)
-	}
+	// Stop the old process before replacing its mounted signing configuration.
+	stop()
+	testRotateJWT(&s.params, 2, "next")
+	stop = start()
 	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+a["node_id"], "session-a", map[string]any{"force": true}), 202)
 	reconcileDiscovery(t, s)
 	if strings.Count(request(t, s, "GET", "/discovery", "", nil).Body.String(), `"app":"test"`) != 1 {
-		t.Fatal("machine removal did not withdraw only that source")
+		t.Fatal("source retirement did not withdraw inventory")
 	}
-	// Missing routing identity must withdraw a previously approved source,
-	// including before the tunnel worker runs again.
 	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=state-'service_url' WHERE node_id=$1`, b["node_id"])
 	reconcileDiscovery(t, s)
 	if strings.Contains(request(t, s, "GET", "/discovery", "", nil).Body.String(), `"app":"test"`) {
-		t.Fatal("source without routing identity remained advertised")
+		t.Fatal("missing source identity remained published")
 	}
-	// A process restart begins cold, then discovers from the same managed state.
 	stop()
 	if err := s.ConfigureDiscovery(); err != nil {
 		t.Fatal(err)
 	}
+	defer s.CloseDiscovery()
 	if request(t, s, "GET", "/discovery", "", nil).Body.String() != "[]\n" {
-		t.Fatal("restart reused in-memory cache")
+		t.Fatal("restart reused cache")
 	}
 }
 
@@ -213,11 +138,6 @@ func TestFleetConfigurationAndPublicDisabledRoute(t *testing.T) {
 		t.Fatal("discovery started without ingress approval")
 	}
 	s.params.CloudflareIngressApproved = true
-	if s.ConfigureDiscovery() == nil {
-		t.Fatal("discovery started without protected keyring")
-	}
-	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
-	s.params.CloudflareKeyring = `{"current":"test","keys":{"test":"` + key + `"}}`
 	if err := s.ConfigureTunnels(); err != nil {
 		t.Fatal(err)
 	}

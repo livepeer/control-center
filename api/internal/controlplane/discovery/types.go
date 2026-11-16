@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	AuthCloudflare = "cloudflare"
-	AuthNone       = "none"
+	AuthBearer = "bearer"
+	AuthNone   = "none"
 )
 
 // Config controls collection, not machine placement or qualification policy.
@@ -43,14 +43,6 @@ type Dependencies struct {
 // Store projects authoritative managed state; it is not another editable fleet list.
 type Store interface {
 	Sources(context.Context) ([]Source, error)
-	Resolve(context.Context, string) (Credential, error)
-	Acknowledge(context.Context, Source) error
-}
-
-// Credential is process-local transport material, never a JSON/status payload.
-type Credential struct {
-	ClientID     string `json:"-"`
-	ClientSecret string `json:"-"`
 }
 
 type Source struct {
@@ -63,7 +55,5 @@ type Source struct {
 	Ready              bool   `json:"ready"`
 	Blocked            bool   `json:"blocked"`
 	Generation         int64  `json:"generation"`
-	CredentialRef      string `json:"credential_ref"`
-	CredentialVersion  int64  `json:"credential_version"`
 	VerifiedGeneration int64  `json:"verified_generation"`
 }

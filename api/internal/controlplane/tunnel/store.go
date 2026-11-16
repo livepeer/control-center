@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -8,11 +9,11 @@ import (
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
 var errTunnelFenced = machineconfig.ErrFenced
+var errRoutingMigrationRequired = errors.New("unsupported persisted routing; complete the separate routing migration")
 
 func (s *Manager) Load(ctx context.Context, node string) (Snapshot, int64, error) {
 	r, err := (machineconfig.Store{DB: s.db}).Load(ctx, node)
@@ -57,6 +58,10 @@ func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, err
 		return nil, err
 	}
 	l := &tunnelLease{Lease: lease, s: s, state: Snapshot{State: lease.State}}
+	if err := requireMigratedRouting(lease.Routing); err != nil {
+		lease.Release(ctx)
+		return nil, err
+	}
 	initialized := false
 	if err = json.Unmarshal(lease.Routing, &l.state.RoutingState); err != nil {
 		lease.Release(ctx)
@@ -70,7 +75,6 @@ func (s *Manager) claimTunnel(ctx context.Context, m Machine) (*tunnelLease, err
 		initialized = initialized || s.params.CloudflareAccountID != ""
 		l.state.AccountID = s.params.CloudflareAccountID
 		l.state.ZoneID = s.params.CloudflareZoneID
-		l.state.TeamName = s.params.CloudflareTeamName
 	}
 	l.provider = s.providerFor(l.state.RoutingState)
 	if l.state.Resources == nil {
@@ -91,7 +95,6 @@ func (s *Manager) providerFor(state RoutingState) TunnelProvider {
 		copy := *cf
 		copy.params.CloudflareAccountID = state.AccountID
 		copy.params.CloudflareZoneID = state.ZoneID
-		copy.params.CloudflareTeamName = state.TeamName
 		return &copy
 	}
 	return s.provider
@@ -111,7 +114,7 @@ func resourceName(m Machine, purpose string) string {
 }
 func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string) (CFResource, error) {
 	r, exists := l.state.Resources[key]
-	if !exists && (kind == "app" || kind == "policy" || kind == "dns") {
+	if !exists && kind == "dns" {
 		var candidates []string
 		for oldKey, old := range l.state.Resources {
 			if old.Kind == kind && old.Host == host && !old.Absent {
@@ -151,10 +154,6 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 		if operation > 1 {
 			r.Name += "-op" + strconv.FormatInt(operation, 10)
 		}
-		if kind == "token" {
-			r.CredentialVersion = l.state.AccessVersion
-			r.Duration = l.s.params.CloudflareAccessLifetime.String()
-		}
 		l.state.Resources[key] = r
 		if e := l.save(ctx); e != nil {
 			return r, e
@@ -170,44 +169,11 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	if e != nil {
 		return r, e
 	}
-	if kind == "token" {
-		var bound string
-		e = l.s.db.QueryRowContext(ctx, `SELECT provider_id FROM lpcc.access_credentials WHERE node_id=$1 AND version=$2`, l.Machine.NodeID, r.CredentialVersion).Scan(&bound)
-		if e != nil && !errors.Is(e, sql.ErrNoRows) {
-			return r, e
-		}
-		if bound != "" {
-			if r.ID != "" && r.ID != bound {
-				return r, ErrResourceConflict
-			}
-			r.ID = bound
-		} else {
-			if r.ID != "" {
-				return r, errors.New("bound Access credential is unavailable")
-			}
-			// No durable secret exists: every result is stranded. Retain the
-			// operation marker so a crash after deletion can safely retry.
-			for _, v := range found {
-				if e = l.provider.Delete(ctx, v, l.state.TunnelID); e != nil {
-					return r, e
-				}
-			}
-			if len(found) > 0 {
-				r.Watch = true
-				r.Pending = false
-				l.state.Resources[key] = r
-				if e = l.save(ctx); e != nil {
-					return r, e
-				}
-			}
-			found = nil
-		}
-	}
 	if r.ID == "" && len(found) > 0 {
 		sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
 		r = found[0]
 		r.Watch = r.Watch || len(found) > 1
-		if e = l.storeResource(ctx, key, r, nil, time.Time{}); e != nil {
+		if e = l.storeResource(ctx, key, r); e != nil {
 			return r, e
 		}
 	}
@@ -233,7 +199,7 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 			r.Target = target + ".cfargotunnel.com"
 			r.Proxied = true
 		}
-		return r, l.storeResource(ctx, key, r, nil, time.Time{})
+		return r, l.storeResource(ctx, key, r)
 	}
 	if r.Pending && time.Since(r.AttemptAt) < createBackoff(r.Attempts) {
 		return r, errAmbiguousCreate
@@ -246,7 +212,7 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	if e = l.save(ctx); e != nil {
 		return r, e
 	}
-	created, credential, expiry, e := l.provider.Create(ctx, r, r.CreationTarget)
+	created, e := l.provider.Create(ctx, r, r.CreationTarget)
 	if e != nil {
 		var failure *ProviderError
 		if errors.As(e, &failure) && !failure.Ambiguous {
@@ -256,11 +222,11 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 		}
 		return r, e
 	}
-	if created.ID == "" || kind == "token" && (credential == nil || !expiry.After(time.Now())) {
+	if created.ID == "" {
 		return r, errAmbiguousCreate
 	}
 	created.Pending = false
-	if e = l.storeResource(ctx, key, created, credential, expiry); e != nil {
+	if e = l.storeResource(ctx, key, created); e != nil {
 		return r, e
 	}
 	if created.Watch {
@@ -275,8 +241,7 @@ func (l *tunnelLease) ensure(ctx context.Context, key, kind, host, target string
 	return created, nil
 }
 
-// DiscoverySources and ResolveAccessCredential are internal discovery
-// interfaces. No browser or machine endpoint exposes Collector credentials.
+// DiscoverySources projects the routing ledger without exposing private endpoints publicly.
 func (s *Manager) DiscoverySources(ctx context.Context) ([]DiscoverySource, error) {
 	rows, e := s.db.QueryContext(ctx, `SELECT node_id,state,rollout FROM lpcc.machine_states ORDER BY node_id`)
 	if e != nil {
@@ -300,7 +265,7 @@ func (s *Manager) DiscoverySources(ctx context.Context) ([]DiscoverySource, erro
 		if r.TunnelID == "" {
 			continue
 		}
-		blocked := r.ServiceURL == "" || r.ProxyURLTemplate == "" || r.DiscoveryURL == "" || r.Quarantined || r.Reason == "ownership_conflict" || r.Reason == "ingress_validation_required"
+		blocked := r.ServiceURL == "" || r.ProxyURLTemplate == "" || r.DiscoveryURL == "" || r.Reason == "ownership_conflict" || r.Reason == "ingress_validation_required"
 		r.applyRolloutStatus()
 		ready, reason := r.Ready, r.Reason
 		if r.VerifiedGeneration != r.SourceGeneration {
@@ -309,87 +274,10 @@ func (s *Manager) DiscoverySources(ctx context.Context) ([]DiscoverySource, erro
 		if ready && (r.VerifiedAt.IsZero() || time.Since(r.VerifiedAt) > s.params.TunnelStatusTTL) {
 			ready, reason = false, "observation_expired"
 		}
-		sources = append(sources, DiscoverySource{NodeID: node, URL: r.DiscoveryURL, ServiceURL: r.ServiceURL, ProxyURLTemplate: r.ProxyURLTemplate, Lifecycle: r.Lifecycle, Ready: ready, Blocked: blocked, Generation: r.SourceGeneration, VerifiedGeneration: r.VerifiedGeneration, CredentialVersion: r.AccessVersion, CredentialRef: credentialRef(node, r.AccessVersion), Reason: reason, RotationReason: r.RotationReason})
+		sources = append(sources, DiscoverySource{NodeID: node, URL: r.DiscoveryURL, ServiceURL: r.ServiceURL, ProxyURLTemplate: r.ProxyURLTemplate, Lifecycle: r.Lifecycle, Ready: ready, Blocked: blocked, Generation: r.SourceGeneration, VerifiedGeneration: r.VerifiedGeneration, Reason: reason, RotationReason: r.RotationReason})
 	}
 	return sources, rows.Err()
 }
-func (s *Manager) ResolveAccessCredential(ctx context.Context, ref string) (AccessCredential, error) {
-	var empty AccessCredential
-	parts := strings.Split(ref, "/")
-	if len(parts) != 3 || parts[0] != "access" || s.keys == nil {
-		return empty, errors.New("invalid Access credential reference")
-	}
-	version, e := strconv.ParseInt(parts[2], 10, 64)
-	if e != nil {
-		return empty, e
-	}
-	var key string
-	var b []byte
-	e = s.db.QueryRowContext(ctx, `SELECT c.key_id,c.ciphertext FROM lpcc.access_credentials c JOIN lpcc.enrollments e USING(node_id) WHERE c.node_id=$1 AND c.version=$2 AND c.revoked_at IS NULL AND c.expires_at>now() AND e.retired_at IS NULL`, parts[1], version).Scan(&key, &b)
-	if e != nil {
-		return empty, errors.New("access credential is unavailable")
-	}
-	return s.keys.open(key, ref, b)
-}
-func (s *Manager) AcknowledgeDiscovery(ctx context.Context, source DiscoverySource) error {
-	r, _, e := s.Load(ctx, source.NodeID)
-	if e != nil {
-		return e
-	}
-	if r.Lifecycle != "active" || r.SourceGeneration != source.Generation || r.AccessVersion != source.CredentialVersion || r.DiscoveryURL != source.URL || source.CredentialRef != credentialRef(source.NodeID, source.CredentialVersion) {
-		return errors.New("stale discovery acknowledgement")
-	}
-	result, e := s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET acknowledged_at=now(),acknowledged_generation=$3 WHERE node_id=$1 AND version=$2 AND revoked_at IS NULL AND expires_at>now() AND EXISTS(SELECT FROM lpcc.machine_states WHERE node_id=$1 AND rollout->>'lifecycle'='active' AND (state->>'source_generation')::bigint=$3 AND (state->>'access_version')::bigint=$2 AND state->>'discovery_url'=$4)`, source.NodeID, source.CredentialVersion, source.Generation, source.URL)
-	if e != nil {
-		return e
-	}
-	n, _ := result.RowsAffected()
-	if n != 1 {
-		return errors.New("credential version unavailable")
-	}
-	return nil
-}
-func (s *Manager) ReencryptAccessCredentials(ctx context.Context) error {
-	rows, e := s.db.QueryContext(ctx, `SELECT node_id,version,key_id,ciphertext FROM lpcc.access_credentials WHERE key_id<>$1`, s.keys.current)
-	if e != nil {
-		return e
-	}
-	type record struct {
-		node, key string
-		version   int64
-		b         []byte
-	}
-	var records []record
-	for rows.Next() {
-		var r record
-		if e = rows.Scan(&r.node, &r.version, &r.key, &r.b); e != nil {
-			rows.Close()
-			return e
-		}
-		records = append(records, r)
-	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return e
-	}
-	for _, r := range records {
-		ref := credentialRef(r.node, r.version)
-		v, e := s.keys.open(r.key, ref, r.b)
-		if e != nil {
-			return e
-		}
-		id, b, e := s.keys.seal(ref, v)
-		if e != nil {
-			return e
-		}
-		if _, e = s.db.ExecContext(ctx, `UPDATE lpcc.access_credentials SET key_id=$3,ciphertext=$4 WHERE node_id=$1 AND version=$2 AND key_id=$5`, r.node, r.version, id, b, r.key); e != nil {
-			return e
-		}
-	}
-	return nil
-}
-
 func (s *Manager) SecureRuntime(ctx context.Context, m Machine) (bool, error) {
 	var yes bool
 	e := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM lpcc.machine_reports r JOIN lpcc.machines m ON m.node_id=r.node_id WHERE r.node_id=$1 AND component='runtime' AND r.credential_version=$2 AND m.credential_version=$2 AND m.tunnel_eligible AND report->>'https'='true' AND received_at>now()-make_interval(secs=>$3) AND (report->>'report_version')::int=1 AND COALESCE((report->>'clock_uncertain')::boolean,false)=false AND (report->>'observed_at')::timestamptz>now()-make_interval(secs=>$3) AND (report->>'observed_at')::timestamptz<=now()+interval '5 seconds')`, m.NodeID, m.CredentialVersion, s.params.TunnelStatusTTL.Seconds()).Scan(&yes)
@@ -397,4 +285,30 @@ func (s *Manager) SecureRuntime(ctx context.Context, m Machine) (bool, error) {
 }
 func (s *Manager) report(ctx context.Context, m Machine, component string) (MachineReport, time.Time, error) {
 	return (machineconfig.Store{DB: s.db}).Report(ctx, m, component)
+}
+
+// Reject unsupported persisted routing shapes before provider I/O. Existing
+// resources are migrated separately before provisioning is enabled again.
+func requireMigratedRouting(raw []byte) error {
+	var persisted struct {
+		Resources map[string]CFResource `json:"resources"`
+		Applied   []json.RawMessage     `json:"applied_ingress"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		return err
+	}
+	for _, r := range persisted.Resources {
+		if r.Kind != "dns" && r.Kind != "tunnel" {
+			return errRoutingMigrationRequired
+		}
+	}
+	for _, data := range persisted.Applied {
+		var rule IngressRule
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&rule) != nil {
+			return errRoutingMigrationRequired
+		}
+	}
+	return nil
 }

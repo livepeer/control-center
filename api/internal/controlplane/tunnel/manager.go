@@ -21,23 +21,22 @@ type Dependencies struct {
 	Logger          *slog.Logger
 	Configurations  *machineconfig.Manager
 	Provider        TunnelProvider
-	VerifyEndpoints func(context.Context, RoutingState, AccessCredential) error
+	VerifyEndpoints func(context.Context, RoutingState, string) error
 }
 
 type Manager struct {
-	signDiscovery    func(string) (string, error)
-	db               *sql.DB
-	params           Config
-	logger           *slog.Logger
-	rollout          *machineconfig.Manager
-	provider         TunnelProvider
-	keys             *accessKeyring
-	endpointVerifier func(context.Context, RoutingState, AccessCredential) error
+	signDiscovery func(string) (string, error)
+	db            *sql.DB
+	params        Config
+	logger        *slog.Logger
+	rollout       *machineconfig.Manager
+	provider      TunnelProvider
+
+	endpointVerifier func(context.Context, RoutingState, string) error
 }
 
 // New also supports reading persisted state while provisioning is disabled.
-// Configure enables provisioning; ConfigureCredentials enables credential reads.
-// Both are startup operations and must finish before workers start.
+// Configure enables provisioning and must finish before workers start.
 func New(config Config, deps Dependencies) *Manager {
 	return &Manager{signDiscovery: deps.SignDiscovery, db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
 		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints}
@@ -53,25 +52,11 @@ func (s *Manager) Configure(publicAPIURL string) error {
 	if s.params.CloudflareAPIToken == "" {
 		return errors.New("missing Cloudflare provisioning credential")
 	}
-	if err := s.ConfigureCredentials(); err != nil {
-		return err
-	}
 	if s.provider == nil {
 		s.provider = &cloudflareHTTP{params: s.params, client: &http.Client{Timeout: 15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: "https://api.cloudflare.com/client/v4"}
 	}
 	return nil
-}
-
-func (s *Manager) ConfigureCredentials() error {
-	if s.keys != nil {
-		return nil
-	}
-	keys, err := parseAccessKeyring(s.params.CloudflareKeyring)
-	if err == nil {
-		s.keys = keys
-	}
-	return err
 }
 
 func (s *Manager) Enabled() bool { return s.provider != nil }

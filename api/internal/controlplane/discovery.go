@@ -7,13 +7,12 @@ import (
 	"time"
 
 	fleet "github.com/livepeer/control-center/api/internal/controlplane/discovery"
-	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
 // DiscoveryParams belongs to API configuration; the subsystem has no feature
 // flags, administrator policy, database, or machine enrollment dependencies.
 type DiscoveryParams struct {
-	DiscoveryEnabled            bool          `env:"DISCOVERY_ENABLED" default:"false" descr:"Serve fleet discovery from managed, Access-protected orchestrators"`
+	DiscoveryEnabled            bool          `env:"DISCOVERY_ENABLED" default:"false" descr:"Serve fleet discovery from managed, ingress-protected orchestrators"`
 	DiscoveryRefreshInterval    time.Duration `env:"DISCOVERY_REFRESH_INTERVAL" default:"5m" descr:"Node Collector refresh interval"`
 	DiscoveryMaxFailedRefreshes int           `env:"DISCOVERY_MAX_FAILED_REFRESHES" default:"6" descr:"Consecutive failures before eviction; zero evicts on first failure"`
 	DiscoveryGrants             []string      `env:"DISCOVERY_GRANTS" optional:"true" descr:"Explicit private destination IP/IP:port/CIDR grants for discovery only"`
@@ -35,9 +34,6 @@ func (s *Server) ConfigureDiscovery() error {
 	}
 	if !s.params.CloudflareIngressApproved {
 		return errors.New("fleet discovery requires approved protected machine ingress")
-	}
-	if err := s.tunnels.ConfigureCredentials(); err != nil {
-		return err
 	}
 	manager, err := fleet.New(s.discoveryConfig(), fleet.Dependencies{Store: discoveryStore{s}, Logger: s.logger, SignToken: func(source fleet.Source) (string, error) { return s.signDiscovery(source.NodeID) }})
 	if err != nil {
@@ -88,24 +84,12 @@ func (s discoveryStore) Sources(ctx context.Context) ([]fleet.Source, error) {
 	result := make([]fleet.Source, 0, len(sources))
 	for _, source := range sources {
 		result = append(result, fleet.Source{NodeID: source.NodeID, URL: source.URL,
-			ServiceURL: source.ServiceURL, ProxyURLTemplate: source.ProxyURLTemplate, AuthMode: fleet.AuthCloudflare,
+			ServiceURL: source.ServiceURL, ProxyURLTemplate: source.ProxyURLTemplate, AuthMode: fleet.AuthBearer,
 			Lifecycle: source.Lifecycle, Ready: source.Ready, Blocked: source.Blocked, Generation: source.Generation,
-			VerifiedGeneration: source.VerifiedGeneration, CredentialRef: source.CredentialRef, CredentialVersion: source.CredentialVersion})
+			VerifiedGeneration: source.VerifiedGeneration})
 	}
 	return result, nil
 }
-func (s discoveryStore) Resolve(ctx context.Context, ref string) (fleet.Credential, error) {
-	credential, err := s.server.tunnels.ResolveAccessCredential(ctx, ref)
-	if err != nil {
-		return fleet.Credential{}, err
-	}
-	return fleet.Credential{ClientID: credential.ClientID, ClientSecret: credential.ClientSecret}, nil
-}
-func (s discoveryStore) Acknowledge(ctx context.Context, source fleet.Source) error {
-	return s.server.tunnels.AcknowledgeDiscovery(ctx, tunnel.DiscoverySource{NodeID: source.NodeID,
-		URL: source.URL, Generation: source.Generation, CredentialRef: source.CredentialRef, CredentialVersion: source.CredentialVersion})
-}
-
 func (s *Server) signDiscovery(node string) (string, error) {
 	if s.params.jwtKey == nil {
 		return "", errors.New("JWT signing key is unavailable")
