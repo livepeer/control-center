@@ -40,7 +40,7 @@ type params struct {
 	VaultTokenFile             string  `secretfor:"VaultToken"`
 
 	SupabaseURL            string `pattern:"^https://"`
-	ControlURL             string `pattern:"^https://"`
+	ControlURL             string `pattern:"^https?://"`
 	VaultURL               string `pattern:"^https://"`
 	SupabaseKey, PublicURL string
 	AllowedOrigin          string `optional:"true"`

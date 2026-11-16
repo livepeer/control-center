@@ -19,20 +19,21 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node := r.PathValue("node_id")
-	var out protocol.Machine
-	out.NodeID = node
-	var retired bool
-	e := s.db.QueryRowContext(r.Context(), `SELECT orchestrator_address::text,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&out.Owner, &retired)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		fail(w, 503, "unavailable")
-		return
-	}
-	if e != nil || retired {
-		respond(w, 200, out)
-		return
-	}
-	out.Active = true
+	// Writes retain their enrollment and proof checks before reading the response.
 	if r.Method == "POST" {
+		var out protocol.Machine
+		var retired bool
+		e := s.db.QueryRowContext(r.Context(), `SELECT orchestrator_address::text,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&out.Owner, &retired)
+		if e != nil && !errors.Is(e, sql.ErrNoRows) {
+			fail(w, 503, "unavailable")
+			return
+		}
+		if e != nil || retired {
+			out.NodeID = node
+			respond(w, 200, out)
+			return
+		}
+
 		var in protocol.MachineBinding
 		if boundedInput(r, &in, 16384) != nil || in.NodeID != node || in.Owner != out.Owner {
 			fail(w, 400, "invalid enrollment")
@@ -87,66 +88,86 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	e = s.db.QueryRowContext(r.Context(), `SELECT public_key,managed,encryption_ready FROM lpcc.secret_machines WHERE node_id=$1`, node).Scan(&out.PublicKey, &out.Managed, &out.EncryptionReady)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		fail(w, 503, "unavailable")
-		return
-	}
-	e = s.db.QueryRowContext(r.Context(), `SELECT generation FROM lpcc.operator_policy_generation WHERE orchestrator_address=$1`, out.Owner).Scan(&out.PolicyGeneration)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		fail(w, 503, "unavailable")
-		return
-	}
-	denied, err := s.db.QueryContext(r.Context(), `SELECT v.revision_id::text FROM lpcc.machine_app_heads v JOIN lpcc.app_revisions r USING(revision_id) JOIN lpcc.operator_app_policy p ON p.orchestrator_address=$1 AND p.app_name=r.app_name WHERE v.node_id=$2 AND p.denied ORDER BY v.revision_id`, out.Owner, node)
+	out, err := secretMachineMetadata(r.Context(), s.db, node)
 	if err != nil {
 		fail(w, 503, "unavailable")
 		return
 	}
-	e = nil
-	for denied.Next() {
-		var id string
-		if e = denied.Scan(&id); e != nil {
-			break
-		}
-		out.DeniedRevisions = append(out.DeniedRevisions, id)
-	}
-	if e == nil {
-		e = denied.Err()
-	}
-	denied.Close()
-	if e != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
-	set, e := machineapps.Snapshot(r.Context(), s.db, node)
-	if e != nil {
-		fail(w, 503, "unavailable")
-		return
-	}
-	out.Assignments = []schema.AppAssignment{}
-	if set != nil {
-		out.Assignments = set.Entries
-		for _, a := range set.Entries {
-			if a.Desired != "absent" {
-				continue
-			}
-			var canonical []byte
-			if e = s.db.QueryRowContext(r.Context(), `SELECT canonical FROM lpcc.app_revisions WHERE revision_id=$1 AND digest=$2`, a.RevisionID, a.Digest).Scan(&canonical); e != nil {
-				fail(w, 503, "unavailable")
-				return
-			}
-			definition, err := schema.DecodeCanonical(canonical)
-			if err != nil {
-				fail(w, 503, "unavailable")
-				return
-			}
-			if len(definition.Container.Secrets) > 0 {
-				out.Consumers = append(out.Consumers, protocol.SecretConsumer{RevisionID: a.RevisionID, References: definition.Container.Secrets})
-			}
-		}
-	}
 	respond(w, 200, out)
 }
+
+func secretMachineMetadata(ctx context.Context, q machineapps.Querier, node string) (protocol.Machine, error) {
+	out := protocol.Machine{NodeID: node}
+	// Only the secrets service consumes this projection. Runtime snapshots retain
+	// full pinned definitions; authorization needs only their secret declarations.
+	rows, err := q.QueryContext(ctx, `SELECT e.orchestrator_address::text,e.retired_at IS NOT NULL,
+ COALESCE(m.public_key,''),COALESCE(m.managed,false),COALESCE(m.encryption_ready,false),
+ COALESCE(g.generation,0),COALESCE(s.apps_generation,0),v.revision_id::text,COALESCE(p.denied,false),
+ CASE WHEN v.intent->'revision' IS NULL OR v.intent->'revision'='null'::jsonb THEN v.intent
+ ELSE jsonb_set(v.intent,'{revision,definition}',jsonb_build_object('container',
+ jsonb_build_object('secrets',v.intent#>'{revision,definition,container,secrets}'))) END,
+ `+machineapps.StartAllowedSQL+`,COALESCE(`+machineapps.RemovalCompleteSQL+`,false),
+ CASE WHEN s.apps_generation>0 AND v.intent->>'desired'='absent' AND NOT `+machineapps.RemovalCompleteSQL+`
+ THEN convert_from(r.canonical,'UTF8')::jsonb#>'{container,secrets}' END,
+ COALESCE(r.digest=v.intent->>'digest',false)
+ FROM lpcc.enrollments e
+ LEFT JOIN lpcc.secret_machines m USING(node_id)
+ LEFT JOIN lpcc.operator_policy_generation g ON g.orchestrator_address=e.orchestrator_address
+ LEFT JOIN lpcc.machine_states s USING(node_id)
+ LEFT JOIN lpcc.machine_app_heads v ON v.node_id=e.node_id AND e.retired_at IS NULL
+ LEFT JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
+ LEFT JOIN lpcc.operator_app_policy p ON p.orchestrator_address=e.orchestrator_address AND p.app_name=r.app_name
+ WHERE e.node_id=$1 ORDER BY v.revision_id`, node)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var retired, denied, allowed, completed, digestMatches bool
+		var gen int64
+		var revision sql.NullString
+		var raw, refs []byte
+		if err = rows.Scan(&out.Owner, &retired, &out.PublicKey, &out.Managed, &out.EncryptionReady,
+			&out.PolicyGeneration, &gen, &revision, &denied, &raw, &allowed, &completed, &refs, &digestMatches); err != nil {
+			return out, err
+		}
+		if retired {
+			return protocol.Machine{NodeID: node, Owner: out.Owner}, nil
+		}
+		out.Active = true
+		if out.Assignments == nil {
+			out.Assignments = []schema.AppAssignment{}
+		}
+		if denied {
+			out.DeniedRevisions = append(out.DeniedRevisions, revision.String)
+		}
+		if gen == 0 || raw == nil || completed {
+			continue
+		}
+		var a schema.AppAssignment
+		if err = json.Unmarshal(raw, &a); err != nil {
+			return out, err
+		}
+		a.StartAllowed = allowed
+		out.Assignments = append(out.Assignments, a)
+		if a.Desired == "absent" {
+			if !digestMatches {
+				return out, errors.New("cleanup revision digest mismatch")
+			}
+			consumer := protocol.SecretConsumer{RevisionID: a.RevisionID}
+			if len(refs) > 0 {
+				if err = json.Unmarshal(refs, &consumer.References); err != nil {
+					return out, err
+				}
+			}
+			if len(consumer.References) > 0 {
+				out.Consumers = append(out.Consumers, consumer)
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
 func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 	u, e := s.user(r.Context(), bearer(r))
 	if e != nil {
@@ -185,6 +206,39 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
+	type appUsage struct {
+		node      string
+		canonical []byte
+		consuming bool
+	}
+	usageByApp := map[string][]appUsage{}
+	if len(catalog) > 0 {
+		names := make([]string, 0, len(catalog))
+		for _, app := range catalog {
+			names = append(names, app.name)
+		}
+		usage, err := s.db.QueryContext(r.Context(), `SELECT r.app_name,v.node_id,r.canonical,(v.intent->>'desired'='present' OR c.received_at IS NULL) FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) JOIN lpcc.app_revisions r USING(revision_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.orchestrator_address=$1 AND r.app_name=ANY($2) AND (v.intent->>'desired'='present' OR c.received_at IS NULL OR q.intent->>'desired'='present') ORDER BY v.node_id,v.revision_id`, address, names)
+		if err != nil {
+			s.databaseError(w, err)
+			return
+		}
+		for usage.Next() {
+			var name string
+			var item appUsage
+			if e = usage.Scan(&name, &item.node, &item.canonical, &item.consuming); e != nil {
+				break
+			}
+			usageByApp[name] = append(usageByApp[name], item)
+		}
+		if e == nil {
+			e = usage.Err()
+		}
+		usage.Close()
+		if e != nil {
+			s.databaseError(w, e)
+			return
+		}
+	}
 	out := []map[string]any{}
 	for _, app := range catalog {
 		name, raw, denied, gen := app.name, app.raw, app.denied, app.gen
@@ -199,22 +253,12 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 		seenRequested := map[string]bool{}
 		aliases := append([]schema.App(nil), d.Apps...)
 		references := []schema.SecretEnvironment{}
-		usage, e := s.db.QueryContext(r.Context(), `SELECT v.node_id,r.canonical,(v.intent->>'desired'='present' OR c.received_at IS NULL) FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) JOIN lpcc.app_revisions r USING(revision_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.orchestrator_address=$1 AND r.app_name=$2 AND (v.intent->>'desired'='present' OR c.received_at IS NULL OR q.intent->>'desired'='present') ORDER BY v.node_id,v.revision_id`, address, name)
-		if e != nil {
-			s.databaseError(w, e)
-			return
-		}
-		for usage.Next() {
-			var node string
-			var canonical []byte
-			var consuming bool
-			if e = usage.Scan(&node, &canonical, &consuming); e != nil {
-				break
-			}
-			pinned, err := schema.DecodeCanonical(canonical)
+		for _, item := range usageByApp[name] {
+			node, consuming := item.node, item.consuming
+			pinned, err := schema.DecodeCanonical(item.canonical)
 			if err != nil {
-				e = err
-				break
+				s.databaseError(w, err)
+				return
 			}
 			if !seenRequested[node] {
 				requestedMachines = append(requestedMachines, node)
@@ -246,14 +290,6 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 					aliases = append(aliases, alias)
 				}
 			}
-		}
-		if e == nil {
-			e = usage.Err()
-		}
-		usage.Close()
-		if e != nil {
-			s.databaseError(w, e)
-			return
 		}
 		if len(requestedMachines) == 0 {
 			references = d.Container.Secrets

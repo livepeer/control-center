@@ -145,13 +145,20 @@ func TestMetadataAvailabilityAndExplicitEligibility(t *testing.T) {
 		{200, `{"node_id":"wrong","active":false}`, protocol.ErrUnavailable},
 		{200, `not JSON`, protocol.ErrUnavailable},
 		{200, `{"node_id":"node","active":false}`, protocol.ErrDenied},
+		{200, `{"node_id":"node","orchestrator_address":"owner","active":true}`, nil},
 	} {
-		s := New(nil, Config{ControlURL: "https://control.invalid"})
-		s.HTTP.Transport = roundTrip(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: http.Header{}}, nil
-		})
-		if _, e := s.Metadata.Machine(context.Background(), "node", nil); !errors.Is(e, tc.want) {
-			t.Fatal(tc.status, tc.body, e)
+		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer metadata-token" {
+				t.Error("metadata callback lost its bearer token")
+			}
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		s := New(nil, Config{ControlURL: api.URL, ControlToken: "metadata-token"})
+		_, err := s.Metadata.Machine(context.Background(), "node", nil)
+		api.Close()
+		if !errors.Is(err, tc.want) {
+			t.Fatal(tc.status, tc.body, err)
 		}
 	}
 }

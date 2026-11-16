@@ -26,7 +26,7 @@ async function onboard(page: Page, apiURL: string, token = 'header.payload.signa
         return route.fulfill({ json: { public_api_url: apiURL, secrets_url: secretsURL } })
       case '/api/bootstrap-token': return route.fulfill({ json: { token, expires_at: new Date(expires * 1000).toISOString() } })
       case '/api/machines': return route.fulfill({ json: { machines: [] } })
-      case '/api/me': return route.fulfill({ json: { user_id: session.user.id, is_admin: false } })
+      case '/api/admin/overview': return route.fulfill({ json: { user_id: session.user.id, is_admin: false, administrators: [], machines: [] } })
       default: return route.fulfill({ status: 404, json: { error: 'Unexpected request' } })
     }
   })

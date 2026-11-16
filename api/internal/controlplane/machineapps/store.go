@@ -84,36 +84,47 @@ func CleanupComplete(ctx context.Context, q Querier, node string, p schema.AppSt
 	return yes, err
 }
 
+// StartAllowedSQL and RemovalCompleteSQL share the delivery snapshot's exact
+// cleanup fence with the internal secrets authorization projection (alias v).
+const StartAllowedSQL = `CASE WHEN v.intent->'start_after' IS NULL OR v.intent->'start_after'='null'::jsonb
+ THEN COALESCE((v.intent->>'start_allowed')::boolean,false)
+ ELSE EXISTS(SELECT FROM lpcc.machine_app_completions p WHERE p.node_id=v.node_id
+ AND p.revision_id=(v.intent#>>'{start_after,source_revision_id}')::uuid
+ AND p.generation=(v.intent#>>'{start_after,source_removal_generation}')::bigint AND p.phase='removed') END`
+
+const RemovalCompleteSQL = `(v.intent->>'desired'='absent' AND EXISTS(SELECT FROM lpcc.machine_app_completions c
+ WHERE c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation))`
+
 func Snapshot(ctx context.Context, q Querier, node string) (*schema.AppAssignmentSetV1, error) {
-	var gen int64
-	err := q.QueryRowContext(ctx, `SELECT apps_generation FROM lpcc.machine_states WHERE node_id=$1`, node).Scan(&gen)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && gen == 0 {
-		return nil, nil
-	}
+	rows, err := q.QueryContext(ctx, `SELECT s.apps_generation,v.intent,`+StartAllowedSQL+`
+ FROM lpcc.machine_states s LEFT JOIN lpcc.machine_app_heads v ON v.node_id=s.node_id
+ AND NOT `+RemovalCompleteSQL+` WHERE s.node_id=$1 AND s.apps_generation>0 ORDER BY v.revision_id`, node)
 	if err != nil {
 		return nil, err
 	}
-	versions, err := Heads(ctx, q, node)
-	if err != nil {
-		return nil, err
-	}
-	set := &schema.AppAssignmentSetV1{SchemaVersion: 1, NodeID: node, Generation: gen, Entries: []schema.AppAssignment{}}
-	for _, v := range versions {
-		// Keep completed removals in history, outside future desired snapshots.
-		// A terminal artifact already published is never rewritten.
-		if v.Desired == "absent" && v.CompletedAt != nil {
+	defer rows.Close()
+	var set *schema.AppAssignmentSetV1
+	for rows.Next() {
+		var gen int64
+		var raw []byte
+		var allowed bool
+		if err = rows.Scan(&gen, &raw, &allowed); err != nil {
+			return nil, err
+		}
+		if set == nil {
+			set = &schema.AppAssignmentSetV1{SchemaVersion: 1, NodeID: node, Generation: gen, Entries: []schema.AppAssignment{}}
+		}
+		if raw == nil {
 			continue
 		}
-		a := v.AppAssignment
-		if a.StartAfter != nil {
-			a.StartAllowed, err = CleanupComplete(ctx, q, node, *a.StartAfter)
-			if err != nil {
-				return nil, err
-			}
+		var a schema.AppAssignment
+		if err = json.Unmarshal(raw, &a); err != nil {
+			return nil, err
 		}
+		a.StartAllowed = allowed
 		set.Entries = append(set.Entries, a)
 	}
-	return set, nil
+	return set, rows.Err()
 }
 
 func Append(ctx context.Context, tx *sql.Tx, node, actor string, a schema.AppAssignment) error {

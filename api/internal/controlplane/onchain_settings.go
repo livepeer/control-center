@@ -158,38 +158,39 @@ func (s *Server) syncOnchainConfig(ctx context.Context, tx *sql.Tx, fingerprint,
 	if s.params.networkMode() != "onchain" {
 		return onchain.Offchain(), false, nil
 	}
-	if address == zeroAddress {
-		return onchain.Config{}, false, errors.New("onchain orchestrator address required")
-	}
 	next, err := s.loadOnchainTemplate()
 	if err != nil {
 		return onchain.Config{}, false, err
+	}
+	return syncOnchainTemplate(ctx, tx, fingerprint, address, next, nil)
+}
+
+func syncOnchainTemplate(ctx context.Context, tx *sql.Tx, fingerprint, address string, next onchain.Config, expectedGeneration *int64) (onchain.Config, bool, error) {
+	if address == zeroAddress {
+		return onchain.Config{}, false, errors.New("onchain orchestrator address required")
 	}
 	next.Recipient = address
 	var raw []byte
 	var recipient, controller string
 	var chainID, generation int64
-	err = tx.QueryRowContext(ctx, `SELECT s.recipient,s.chain_id,s.controller,s.generation,c.config
+	err := tx.QueryRowContext(ctx, `SELECT s.recipient,s.chain_id,s.controller,s.generation,c.config
  FROM lpcc.onchain_state s JOIN lpcc.onchain_configs c ON c.fingerprint=s.fingerprint AND c.generation=s.generation
  WHERE s.fingerprint=$1 FOR UPDATE OF s`, fingerprint).Scan(&recipient, &chainID, &controller, &generation, &raw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return onchain.Config{}, false, err
 	}
+	var current onchain.Config
 	if err == nil {
 		if recipient != address || chainID != 42161 || controller != mainnetController {
 			return onchain.Config{}, false, errors.New("onchain recipient and chain identity are immutable")
 		}
-		var current onchain.Config
 		if err = json.Unmarshal(raw, &current); err != nil {
 			return onchain.Config{}, false, err
 		}
-		compare := next
-		compare.Generation, compare.CredentialRevision = current.Generation, current.CredentialRevision
-		a, _ := json.Marshal(compare)
-		b, _ := json.Marshal(current)
-		if string(a) == string(b) {
-			return current, false, nil
-		}
+	}
+	// A cached pass must not overwrite settings committed since its inventory.
+	if expectedGeneration != nil && generation != *expectedGeneration || err == nil && sameOnchainSettings(next, current) {
+		return current, false, nil
 	}
 	next.Generation = generation + 1
 	next.CredentialRevision = uint64(next.Generation)
@@ -208,20 +209,52 @@ func (s *Server) syncOnchainConfig(ctx context.Context, tx *sql.Tx, fingerprint,
 	return next, err == nil, err
 }
 
+func sameOnchainSettings(next, current onchain.Config) bool {
+	next.Generation, next.CredentialRevision = current.Generation, current.CredentialRevision
+	a, _ := json.Marshal(next)
+	b, _ := json.Marshal(current)
+	return string(a) == string(b)
+}
+
 func (s *Server) reconcileOnchain(ctx context.Context) error {
 	if s.params.networkMode() != "onchain" {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT fingerprint,orchestrator_address,node_id FROM lpcc.machines ORDER BY fingerprint`)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.fingerprint,m.orchestrator_address,m.node_id,m.credential_version,
+ COALESCE(s.recipient=m.orchestrator_address AND s.chain_id=42161 AND s.controller=$1,false),
+ COALESCE(s.generation,0),c.config
+ FROM lpcc.machines m LEFT JOIN lpcc.onchain_state s ON s.fingerprint=m.fingerprint
+ LEFT JOIN lpcc.onchain_configs c ON c.fingerprint=s.fingerprint AND c.generation=s.generation
+ ORDER BY m.fingerprint`, mainnetController)
 	if err != nil {
 		return err
 	}
-	type machine struct{ fingerprint, address, node string }
+	type machine struct {
+		fingerprint, address, node    string
+		credentialVersion, generation int64
+	}
 	var machines []machine
+	var template onchain.Config
 	for rows.Next() {
 		var m machine
-		if err = rows.Scan(&m.fingerprint, &m.address, &m.node); err != nil {
+		var identityMatches bool
+		var raw []byte
+		if err = rows.Scan(&m.fingerprint, &m.address, &m.node, &m.credentialVersion, &identityMatches, &m.generation, &raw); err != nil {
 			break
+		}
+		// An empty active inventory must still allow retired cleanup. Otherwise,
+		// validate once; file changes apply on the next wake or periodic pass.
+		if template.Mode == "" {
+			template, err = s.loadOnchainTemplate()
+			if err != nil {
+				break
+			}
+		}
+		next := template
+		next.Recipient = m.address
+		var current onchain.Config
+		if identityMatches && json.Unmarshal(raw, &current) == nil && current.Validate() == nil && current.Generation == m.generation && sameOnchainSettings(next, current) {
+			continue
 		}
 		machines = append(machines, m)
 	}
@@ -237,7 +270,21 @@ func (s *Server) reconcileOnchain(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		next, changed, err := s.syncOnchainConfig(ctx, tx, m.fingerprint, m.address)
+		// Inventory only selects candidates. Recheck the active installation after
+		// acquiring the policy lock, then retain its row lock through commit.
+		var present int
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines
+ WHERE node_id=$1 AND fingerprint=$2 AND orchestrator_address=$3 AND credential_version=$4
+ FOR UPDATE`, m.node, m.fingerprint, m.address, m.credentialVersion).Scan(&present)
+		if errors.Is(err, sql.ErrNoRows) {
+			tx.Rollback()
+			continue
+		}
+		var next onchain.Config
+		var changed bool
+		if err == nil {
+			next, changed, err = syncOnchainTemplate(ctx, tx, m.fingerprint, m.address, template, &m.generation)
+		}
 		if err == nil && changed {
 			var a *schema.AppAssignmentSetV1
 			a, err = machineapps.Snapshot(ctx, tx, m.node)
