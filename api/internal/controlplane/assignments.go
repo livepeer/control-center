@@ -350,7 +350,11 @@ func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserI
 	ctx := r.Context()
 	node := r.PathValue("node_id")
 	var last *time.Time
-	err := s.db.QueryRowContext(ctx, `SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&last)
+	var gen, published int64
+	var failure *string
+	err := s.db.QueryRowContext(ctx, `SELECT m.last_config_fetch_at,COALESCE(s.apps_generation,0),
+ COALESCE((SELECT max(apps_generation) FROM lpcc.machine_app_deliveries WHERE node_id=m.node_id),0),s.apps_error
+ FROM lpcc.machines m LEFT JOIN lpcc.machine_states s USING(node_id) WHERE m.node_id=$1`, node).Scan(&last, &gen, &published, &failure)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = problem(404, "machine_not_found", "Machine not found.")
 	}
@@ -369,7 +373,17 @@ func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserI
 		return
 	}
 	// Read all current heads through a bounded database page, including completed history.
-	rows, err := s.db.QueryContext(ctx, `SELECT `+machineapps.VersionColumns+` FROM lpcc.machine_app_heads v `+machineapps.VersionJoins+` WHERE v.node_id=$1 AND ($2='' OR v.revision_id::text>$2) ORDER BY v.revision_id LIMIT $3`, node, after, limit+1)
+	// Repeat the node filter outside the page to keep evidence lookups indexed.
+	rows, err := s.db.QueryContext(ctx, `WITH page AS (
+ SELECT * FROM lpcc.machine_app_heads WHERE node_id=$1 AND ($2='' OR revision_id::text>$2) ORDER BY revision_id LIMIT $3
+ ) SELECT `+machineapps.VersionColumns+` FROM (
+ SELECT h.node_id,h.revision_id,h.generation,h.actor_id,h.created_at,
+ CASE WHEN h.intent->>'start_after' IS NULL THEN h.intent ELSE h.intent || jsonb_build_object('start_allowed',EXISTS(
+ SELECT FROM lpcc.machine_app_completions prerequisite WHERE prerequisite.node_id=$1
+ AND prerequisite.revision_id=(h.intent->'start_after'->>'source_revision_id')::uuid
+ AND prerequisite.generation=(h.intent->'start_after'->>'source_removal_generation')::bigint
+ AND prerequisite.phase='removed')) END AS intent
+ FROM page h) v `+machineapps.VersionJoins+` WHERE v.node_id=$1 ORDER BY v.revision_id`, node, after, limit+1)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -379,26 +393,10 @@ func (s *Server) listAssignments(w http.ResponseWriter, r *http.Request, _ UserI
 		s.respondError(w, err)
 		return
 	}
-	for i := range versions {
-		if versions[i].StartAfter != nil {
-			versions[i].StartAllowed, err = machineapps.CleanupComplete(ctx, s.db, node, *versions[i].StartAfter)
-			if err != nil {
-				s.respondError(w, err)
-				return
-			}
-		}
-	}
 	var next *string
 	if len(versions) > limit {
 		versions = versions[:limit]
 		next = &versions[len(versions)-1].RevisionID
-	}
-	var gen, published int64
-	var failure *string
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT apps_generation FROM lpcc.machine_states WHERE node_id=$1),0),COALESCE((SELECT max(apps_generation) FROM lpcc.machine_app_deliveries WHERE node_id=$1),0),(SELECT apps_error FROM lpcc.machine_states WHERE node_id=$1)`, node).Scan(&gen, &published, &failure)
-	if err != nil {
-		s.respondError(w, err)
-		return
 	}
 	respond(w, 200, map[string]any{"assignments": versions, "apps_generation": gen, "published_generation": published, "delivery_error": failure, "last_config_fetch_at": last, "next_after_revision_id": next})
 }
