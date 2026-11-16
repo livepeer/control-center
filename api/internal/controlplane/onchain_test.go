@@ -1,8 +1,10 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
@@ -12,6 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/consumer"
@@ -117,6 +123,254 @@ func TestAutomaticOnchainConfigurationAndUpdates(t *testing.T) {
 	}
 	if delivered := onchainMetadata(t, s, node).Onchain; delivered.Generation != 2 || delivered.TicketFaceValue != "2000" {
 		t.Fatal("template update was not delivered", delivered)
+	}
+}
+
+type onchainQueryTrace func(string)
+
+func (f onchainQueryTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, q pgx.TraceQueryStartData) context.Context {
+	f(q.SQL)
+	return ctx
+}
+func (onchainQueryTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestOnchainReconcileSkipsUnchangedMachines(t *testing.T) {
+	s, _, a := onchainMachine(t)
+	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var database string
+	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Database, cfg.DefaultQueryExecMode = database, pgx.QueryExecModeExec
+	var queries []string
+	cfg.Tracer = onchainQueryTrace(func(q string) { queries = append(queries, q) })
+	s.db = stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { s.db.Close() })
+	if err = s.reconcileOnchain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 || !strings.HasPrefix(queries[0], "SELECT m.fingerprint") {
+		t.Fatalf("unchanged pass issued %d commands: %v", len(queries), queries)
+	}
+	next, err := s.loadOnchainTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.TicketFaceValue = "2000"
+	writeOnchainTemplate(t, s, next)
+	// Align one machine first: only the other should enter a transaction.
+	tx, err := s.policyTx(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, _, err = s.syncOnchainConfig(t.Context(), tx, strings.Repeat("b", 64), orchB); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	beforeA := count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, a["node_id"])
+	beforeB := count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, b["node_id"])
+	queries = nil
+	if err = s.reconcileOnchain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	begins := 0
+	for _, q := range queries {
+		if strings.HasPrefix(q, "begin") {
+			begins++
+		}
+	}
+	if begins != 1 {
+		t.Fatalf("mixed pass opened %d transactions: %v", begins, queries)
+	}
+	if count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, a["node_id"]) != beforeA+1 || count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, b["node_id"]) != beforeB {
+		t.Fatal("mixed pass changed the wrong machine revisions")
+	}
+	for _, m := range []map[string]string{a, b} {
+		c, err := loadOnchain(t.Context(), s.db, m["node_id"])
+		if err != nil || c.Generation != 2 || c.CredentialRevision != 2 || c.TicketFaceValue != "2000" {
+			t.Fatal("wrong reconciled configuration", c, err)
+		}
+	}
+	queries = nil
+	if err = os.WriteFile(s.params.OnchainConfigFile, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.reconcileOnchain(t.Context()); err == nil || len(queries) != 1 || !strings.HasPrefix(queries[0], "SELECT m.fingerprint") {
+		t.Fatal("invalid template was not rejected before transactional work", err, queries)
+	}
+}
+
+func writeOnchainTemplate(t *testing.T, s *Server, c onchain.Config) {
+	t.Helper()
+	if err := os.WriteFile(s.params.OnchainConfigFile, onchainTemplateJSON(t, c), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOnchainReconcileRechecksCandidates(t *testing.T) {
+	for _, race := range []string{"already-updated", "newer-settings", "retired", "refreshed", "identity", "incompatible-app", "template"} {
+		t.Run(race, func(t *testing.T) {
+			s, _, m := onchainMachine(t)
+			if err := s.reconcile(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			node, fingerprint := m["node_id"], strings.Repeat("a", 64)
+			var revision CatalogRevision
+			if race == "incompatible-app" {
+				adminA(t, s)
+				revision = publishAssignmentRevision(t, s, registryFixture(t), "")
+				requireStatus(t, putApp(t, s, m, revision, 0, 1), 202)
+			}
+			next, err := s.loadOnchainTemplate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			next.TicketFaceValue = "2000"
+			writeOnchainTemplate(t, s, next)
+			plain := race == "retired" || race == "refreshed" || race == "newer-settings"
+			begin := s.policyTx
+			if plain {
+				begin = func(ctx context.Context) (*sql.Tx, error) { return s.db.BeginTx(ctx, nil) }
+			}
+			tx, err := begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if plain {
+				var present int
+				if err = tx.QueryRow(`SELECT 1 FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&present); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := make(chan error, 1)
+			go func() { done <- s.reconcileOnchain(t.Context()) }()
+			query := "SELECT pg_advisory_xact_lock(1129073483, 2)"
+			if plain {
+				query = "SELECT 1 FROM lpcc.machines%"
+			}
+			waitForStateLock(t, s, query, 1)
+			switch race {
+			case "already-updated", "newer-settings":
+				if race == "newer-settings" {
+					next.TicketFaceValue = "3000"
+					writeOnchainTemplate(t, s, next)
+				}
+				if _, changed, err := s.syncOnchainConfig(t.Context(), tx, fingerprint, orchA); err != nil || !changed {
+					t.Fatal(changed, err)
+				}
+			case "retired":
+				_, err = tx.Exec(`DELETE FROM lpcc.machines WHERE node_id=$1`, node)
+			case "refreshed":
+				_, err = tx.Exec(`UPDATE lpcc.machines SET credential_version=credential_version+1 WHERE node_id=$1`, node)
+			case "identity":
+				_, err = tx.Exec(`UPDATE lpcc.onchain_state SET recipient=$1 WHERE fingerprint=$2`, orchB, fingerprint)
+			case "incompatible-app":
+				// Simulate incompatible policy committed while inventory waited.
+				var head machineapps.Version
+				head, err = machineapps.Head(t.Context(), tx, node, revision.RevisionID)
+				if err == nil {
+					head.Generation++
+					head.Revision.Definition.Price.Amount = "0"
+					err = machineapps.AppendEffective(t.Context(), tx, node, ownerA, head.AppAssignment)
+				}
+			case "template":
+				next.TicketFaceValue = "3000"
+				writeOnchainTemplate(t, s, next)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wantRevision int
+			if err = tx.QueryRow(`SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, node).Scan(&wantRevision); err != nil {
+				t.Fatal(err)
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("queued reconciliation did not finish")
+			}
+			wantError := race == "identity" || race == "incompatible-app"
+			if (err != nil) != wantError {
+				t.Fatal("unexpected reconciliation result", err)
+			}
+			generation := 1
+			if race == "already-updated" || race == "newer-settings" || race == "template" {
+				generation = 2
+			}
+			if race == "template" {
+				wantRevision++
+			}
+			if count(t, s, `SELECT count(*) FROM lpcc.onchain_configs WHERE fingerprint=$1`, fingerprint) != generation || count(t, s, `SELECT generation FROM lpcc.onchain_state WHERE fingerprint=$1`, fingerprint) != generation || count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, node) != wantRevision {
+				t.Fatal("stale candidate changed generation or machine revision")
+			}
+			if race == "newer-settings" {
+				c, err := loadOnchain(t.Context(), s.db, node)
+				if err != nil || c.TicketFaceValue != "3000" || c.CredentialRevision != 2 {
+					t.Fatal("cached template overwrote newer settings", c, err)
+				}
+			}
+			if race == "template" {
+				c, err := loadOnchain(t.Context(), s.db, node)
+				if err != nil || c.TicketFaceValue != "2000" {
+					t.Fatal("pass did not retain its template snapshot", c, err)
+				}
+				if err = s.reconcileOnchain(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				c, err = loadOnchain(t.Context(), s.db, node)
+				if err != nil || c.TicketFaceValue != "3000" || c.Generation != 3 || c.CredentialRevision != 3 {
+					t.Fatal("next pass did not pick up the changed template", c, err)
+				}
+			}
+		})
+	}
+}
+
+func TestOnchainReconcileRejectsChangedIdentity(t *testing.T) {
+	s, _, m := onchainMachine(t)
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	before := count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, m["node_id"])
+	for _, set := range []string{"recipient='" + orchB + "'", "chain_id=1", "controller='" + orchB + "'"} {
+		t.Run(set, func(t *testing.T) {
+			execSQL(t, s.db, `UPDATE lpcc.onchain_state SET `+set)
+			if err := s.reconcileOnchain(t.Context()); err == nil {
+				t.Fatal("unchanged template hid an immutable identity change")
+			}
+			if count(t, s, `SELECT count(*) FROM lpcc.onchain_configs`) != 1 || count(t, s, `SELECT revision FROM lpcc.machine_states WHERE node_id=$1`, m["node_id"]) != before {
+				t.Fatal("identity rejection changed configuration or revision")
+			}
+			execSQL(t, s.db, `UPDATE lpcc.onchain_state SET recipient=$1,chain_id=42161,controller=$2`, orchA, mainnetController)
+		})
+	}
+}
+
+func TestOnchainReconcileEmptyInventoryAllowsRetiredCleanup(t *testing.T) {
+	s, _, m := onchainMachine(t)
+	execSQL(t, s.db, `DELETE FROM lpcc.machines WHERE node_id=$1`, m["node_id"])
+	if err := os.WriteFile(s.params.OnchainConfigFile, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, s, `SELECT count(*) FROM lpcc.enrollments WHERE node_id=$1 AND terminal_bundle IS NOT NULL`, m["node_id"]) != 1 {
+		t.Fatal("invalid template prevented retired cleanup publication")
 	}
 }
 
