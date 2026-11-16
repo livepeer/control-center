@@ -206,6 +206,39 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
+	type appUsage struct {
+		node      string
+		canonical []byte
+		consuming bool
+	}
+	usageByApp := map[string][]appUsage{}
+	if len(catalog) > 0 {
+		names := make([]string, 0, len(catalog))
+		for _, app := range catalog {
+			names = append(names, app.name)
+		}
+		usage, err := s.db.QueryContext(r.Context(), `SELECT r.app_name,v.node_id,r.canonical,(v.intent->>'desired'='present' OR c.received_at IS NULL) FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) JOIN lpcc.app_revisions r USING(revision_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.orchestrator_address=$1 AND r.app_name=ANY($2) AND (v.intent->>'desired'='present' OR c.received_at IS NULL OR q.intent->>'desired'='present') ORDER BY v.node_id,v.revision_id`, address, names)
+		if err != nil {
+			s.databaseError(w, err)
+			return
+		}
+		for usage.Next() {
+			var name string
+			var item appUsage
+			if e = usage.Scan(&name, &item.node, &item.canonical, &item.consuming); e != nil {
+				break
+			}
+			usageByApp[name] = append(usageByApp[name], item)
+		}
+		if e == nil {
+			e = usage.Err()
+		}
+		usage.Close()
+		if e != nil {
+			s.databaseError(w, e)
+			return
+		}
+	}
 	out := []map[string]any{}
 	for _, app := range catalog {
 		name, raw, denied, gen := app.name, app.raw, app.denied, app.gen
@@ -220,22 +253,12 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 		seenRequested := map[string]bool{}
 		aliases := append([]schema.App(nil), d.Apps...)
 		references := []schema.SecretEnvironment{}
-		usage, e := s.db.QueryContext(r.Context(), `SELECT v.node_id,r.canonical,(v.intent->>'desired'='present' OR c.received_at IS NULL) FROM lpcc.machine_app_heads v JOIN lpcc.machines m USING(node_id) JOIN lpcc.app_revisions r USING(revision_id) LEFT JOIN lpcc.machine_app_requests q ON q.node_id=v.node_id AND q.revision_id=v.revision_id LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation WHERE m.orchestrator_address=$1 AND r.app_name=$2 AND (v.intent->>'desired'='present' OR c.received_at IS NULL OR q.intent->>'desired'='present') ORDER BY v.node_id,v.revision_id`, address, name)
-		if e != nil {
-			s.databaseError(w, e)
-			return
-		}
-		for usage.Next() {
-			var node string
-			var canonical []byte
-			var consuming bool
-			if e = usage.Scan(&node, &canonical, &consuming); e != nil {
-				break
-			}
-			pinned, err := schema.DecodeCanonical(canonical)
+		for _, item := range usageByApp[name] {
+			node, consuming := item.node, item.consuming
+			pinned, err := schema.DecodeCanonical(item.canonical)
 			if err != nil {
-				e = err
-				break
+				s.databaseError(w, err)
+				return
 			}
 			if !seenRequested[node] {
 				requestedMachines = append(requestedMachines, node)
@@ -267,14 +290,6 @@ func (s *Server) operatorApps(w http.ResponseWriter, r *http.Request) {
 					aliases = append(aliases, alias)
 				}
 			}
-		}
-		if e == nil {
-			e = usage.Err()
-		}
-		usage.Close()
-		if e != nil {
-			s.databaseError(w, e)
-			return
 		}
 		if len(requestedMachines) == 0 {
 			references = d.Container.Secrets

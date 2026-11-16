@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
@@ -8,10 +9,15 @@ import (
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/schema"
 	protocol "github.com/livepeer/control-center/secrets"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"uuid"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestOwnerDenialRetainsIntentAndReallowWaitsForCleanup(t *testing.T) {
@@ -143,6 +149,100 @@ func TestRenderRepairAdvancesBeyondDeniedFallback(t *testing.T) {
 	}
 }
 
+type operatorQueryCount struct{ atomic.Int64 }
+
+func (c *operatorQueryCount) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.Add(1)
+	return ctx
+}
+func (*operatorQueryCount) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestOperatorAppsBatchesOwnerUsage(t *testing.T) {
+	s := newTestServer(t)
+	adminA(t, s)
+	conn, err := s.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config *pgx.ConnConfig
+	err = conn.Raw(func(raw any) error {
+		config = raw.(*stdlib.Conn).Conn().Config()
+		return nil
+	})
+	conn.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	queries := &operatorQueryCount{}
+	config.Tracer = queries
+	// Auth's fixture keeps its original pool; count only the handler's SQL reads.
+	s.db = stdlib.OpenDB(*config)
+	t.Cleanup(func() { s.db.Close() })
+	s.db.SetMaxOpenConns(1)
+	type appView struct {
+		Name      string                     `json:"name"`
+		Machines  []string                   `json:"machines"`
+		Requested []string                   `json:"requested_machines"`
+		Aliases   []schema.App               `json:"aliases"`
+		Secrets   []schema.SecretEnvironment `json:"secrets"`
+		Catalog   []schema.SecretEnvironment `json:"catalog_secrets"`
+	}
+	read := func(wantQueries int64, wantApps int) []appView {
+		t.Helper()
+		queries.Store(0)
+		w := request(t, s, "GET", "/api/operator/apps?orchestrator_address="+orchA, "session-a", nil)
+		requireStatus(t, w, 200)
+		if got := queries.Load(); got != wantQueries {
+			t.Fatalf("catalog SQL reads = %d, want %d", got, wantQueries)
+		}
+		var view struct {
+			Apps []appView `json:"apps"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if view.Apps == nil || len(view.Apps) != wantApps {
+			t.Fatal("unexpected catalog", w.Body.String())
+		}
+		return view.Apps
+	}
+	read(2, 0)
+	source := func(version, secret, alias string) string {
+		return strings.Replace(registryFixture(t), `app_version = "1"`, `app_version = "`+version+`"`, 1) +
+			"\n[[container.secrets]]\nname = \"TOKEN\"\nsecret = \"" + secret + "\"\nkey = \"token\"\n" +
+			"\n[[apps]]\nname = \"" + alias + "\"\npath = \"/alias\"\n"
+	}
+	foreign := publishAssignmentRevision(t, s, source("1", "lp-app-foreign", "foreign"), "")
+	view := read(3, 1)
+	if len(view[0].Secrets) != 1 || view[0].Secrets[0].Secret != "lp-app-foreign" || len(view[0].Machines) != 0 {
+		t.Fatal("unused app lost catalog declarations", view)
+	}
+	other := enroll(t, s, ownerB, strings.Repeat("a", 64))
+	requireStatus(t, putApp(t, s, other, foreign, 0, 1), 202)
+	pinned := publishAssignmentRevision(t, s, source("2", "lp-app-pinned", "pinned"), foreign.RevisionID)
+	a := enroll(t, s, ownerA, strings.Repeat("b", 64))
+	b := enroll(t, s, ownerA, strings.Repeat("c", 64))
+	requireStatus(t, putApp(t, s, a, pinned, 0, 1), 202)
+	requireStatus(t, putApp(t, s, b, pinned, 0, 1), 202)
+	_ = publishAssignmentRevision(t, s, source("3", "lp-app-head", "head"), pinned.RevisionID)
+	_ = publishAssignmentRevision(t, s, strings.Replace(source("1", "lp-app-unused", "unused"), `name = "whoami"`, `name = "aaa-unused"`, 1), "")
+	view = read(3, 2)
+	if view[0].Name != "aaa-unused" || len(view[0].Machines) != 0 || len(view[0].Requested) != 0 || len(view[0].Secrets) != 1 || view[0].Secrets[0].Secret != "lp-app-unused" {
+		t.Fatal("catalog order or unused declarations changed", view)
+	}
+	app := view[1]
+	wantMachines := []string{a["node_id"], b["node_id"]}
+	slices.Sort(wantMachines)
+	if app.Name != "whoami" || !slices.Equal(app.Machines, wantMachines) || !slices.Equal(app.Requested, wantMachines) || len(app.Secrets) != 1 || app.Secrets[0].Secret != "lp-app-pinned" || len(app.Catalog) != 1 || app.Catalog[0].Secret != "lp-app-head" || len(app.Aliases) != 2 || app.Aliases[0].Name != "head" || app.Aliases[1].Name != "pinned" {
+		t.Fatal("owner usage, pinned declarations, or deduplication changed", app)
+	}
+	queries.Store(0)
+	requireStatus(t, request(t, s, "GET", "/api/operator/apps?orchestrator_address="+orchA, "session-b", nil), 403)
+	if queries.Load() != 1 {
+		t.Fatal("unauthorized catalog queried usage")
+	}
+}
+
 func TestOwnerReferencesDescribePinnedAndCleanupRevisions(t *testing.T) {
 	s := newTestServer(t)
 
@@ -175,6 +275,14 @@ func TestOwnerReferencesDescribePinnedAndCleanupRevisions(t *testing.T) {
 		t.Fatal("catalog head obscured pinned declarations", w.Body.String())
 	}
 	requireStatus(t, request(t, s, "POST", appPath(c, first)+"/replace", "session-a", map[string]any{"expected_generation": 1, "target": map[string]any{"revision_id": second.RevisionID, "digest": second.Digest, "expected_generation": 0}}), 202)
+	w = request(t, s, "GET", "/api/operator/apps?orchestrator_address="+orchA, "session-a", nil)
+	requireStatus(t, w, 200)
+	if e := json.Unmarshal(w.Body.Bytes(), &view); e != nil {
+		t.Fatal(e)
+	}
+	if len(view.Apps) != 1 || len(view.Apps[0].Secrets) != 2 {
+		t.Fatal("pending cleanup lost pinned declarations", w.Body.String())
+	}
 	s.params.SecretsMetadataToken = strings.Repeat("m", 32)
 	w = request(t, s, "GET", "/internal/secrets/nodes/"+c["node_id"], s.params.SecretsMetadataToken, nil)
 	requireStatus(t, w, 200)
