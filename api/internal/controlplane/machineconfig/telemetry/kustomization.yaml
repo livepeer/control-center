@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [namespace.yaml, rbac.yaml, network.yaml, agent.yaml]
+# Generated names roll the agent whenever its configuration changes.
+configMapGenerator:
+- name: livepeer-telemetry-config
+  namespace: livepeer-telemetry
+  files: [vmagent.yaml, relabel.yaml, fluent-bit.conf, parsers.conf]

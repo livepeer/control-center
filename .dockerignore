@@ -17,6 +17,7 @@
 !deploy/
 !deploy/Dockerfile
 !deploy/Caddyfile
+!deploy/grafana/**
 **/._*
 **/.DS_Store
 

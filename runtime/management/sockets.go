@@ -20,7 +20,7 @@ type Sockets struct {
 }
 
 // Listen acquires the publisher lock before opening the fixed consumer endpoints.
-func Listen(root string, connector, apps, orchestrator http.Handler) (*Sockets, error) {
+func Listen(root string, connector, apps, orchestrator, telemetry http.Handler) (*Sockets, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, errors.New("management_socket_directory")
 	}
@@ -47,7 +47,7 @@ func Listen(root string, connector, apps, orchestrator http.Handler) (*Sockets, 
 	consumers := []struct {
 		name    string
 		handler http.Handler
-	}{{"connector", connector}, {"apps", apps}, {"orchestrator", orchestrator}}
+	}{{"connector", connector}, {"apps", apps}, {"orchestrator", orchestrator}, {"telemetry", telemetry}}
 	for _, consumer := range consumers {
 		directory := filepath.Join(root, consumer.name)
 		info, err := os.Lstat(directory)

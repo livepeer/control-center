@@ -143,3 +143,84 @@ func TestMountedKeysAndRotation(t *testing.T) {
 		}
 	}
 }
+
+const testOrchestrator = "0x1111111111111111111111111111111111111111"
+
+func TestTelemetryTokenBoundaries(t *testing.T) {
+	s := signer(t)
+	now := time.Now().Truncate(time.Second)
+	raw, expires, err := s.Telemetry("current", testNode, testOrchestrator, 3, time.Hour, now)
+	if err != nil || !expires.Equal(now.Add(time.Hour)) {
+		t.Fatal("telemetry token refused", err, expires)
+	}
+	claims, err := VerifyTelemetry(s.Keys, raw, now)
+	if err != nil || claims.Subject != testNode || claims.Orchestrator != testOrchestrator || claims.CredentialVersion != 3 {
+		t.Fatal("telemetry claims", claims, err)
+	}
+	if _, err := VerifyTelemetry(s.Keys, raw, now.Add(time.Hour+ClockTolerance)); err == nil {
+		t.Fatal("expired telemetry token accepted")
+	}
+	// Scope separation: each verifier refuses the other token kind.
+	if Verify(s.Keys, raw, testNode, now) == nil {
+		t.Fatal("ingress accepted a telemetry token")
+	}
+	discovery, _ := s.Discovery("current", testNode, now)
+	if _, err := VerifyTelemetry(s.Keys, discovery, now); err == nil {
+		t.Fatal("telemetry ingest accepted a discovery token")
+	}
+	h, _ := Handler(s.Keys, testNode)
+	r := httptest.NewRequest("GET", "/authorize", nil)
+	r.Header.Set("Authorization", "Bearer "+raw)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatal("ForwardAuth accepted a telemetry token", w.Code)
+	}
+	for name, args := range map[string]struct {
+		node, orchestrator string
+		version            int64
+		lifetime           time.Duration
+	}{
+		"node":           {"short", testOrchestrator, 1, time.Hour},
+		"orchestrator":   {testNode, "0xABC", 1, time.Hour},
+		"uppercase orch": {testNode, strings.ToUpper(testOrchestrator), 1, time.Hour},
+		"version":        {testNode, testOrchestrator, 0, time.Hour},
+		"lifetime":       {testNode, testOrchestrator, 1, MaxTelemetryLifetime + time.Second},
+		"no lifetime":    {testNode, testOrchestrator, 1, 0},
+	} {
+		if _, _, err := s.Telemetry("current", args.node, args.orchestrator, args.version, args.lifetime, now); err == nil {
+			t.Fatal("invalid telemetry identity minted", name)
+		}
+	}
+	base := TelemetryClaims{RegisteredClaims: jwt.RegisteredClaims{Issuer: Issuer, Subject: testNode, Audience: jwt.ClaimStrings{TelemetryAudience}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))}, Scope: TelemetryScope, Orchestrator: testOrchestrator, CredentialVersion: 1}
+	for name, mutate := range map[string]func(*TelemetryClaims){
+		"issuer":             func(c *TelemetryClaims) { c.Issuer = "other" },
+		"audience":           func(c *TelemetryClaims) { c.Audience = jwt.ClaimStrings{Audience} },
+		"multiple audiences": func(c *TelemetryClaims) { c.Audience = jwt.ClaimStrings{TelemetryAudience, Audience} },
+		"scope":              func(c *TelemetryClaims) { c.Scope = Scope },
+		"subject":            func(c *TelemetryClaims) { c.Subject = "not-a-node" },
+		"orchestrator":       func(c *TelemetryClaims) { c.Orchestrator = "" },
+		"credential version": func(c *TelemetryClaims) { c.CredentialVersion = 0 },
+		"missing issuance":   func(c *TelemetryClaims) { c.IssuedAt = nil },
+		"missing expiration": func(c *TelemetryClaims) { c.ExpiresAt = nil },
+		"excess lifetime": func(c *TelemetryClaims) {
+			c.ExpiresAt = jwt.NewNumericDate(now.Add(MaxTelemetryLifetime + time.Second))
+		},
+		"negative lifetime": func(c *TelemetryClaims) { c.ExpiresAt = c.IssuedAt },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base
+			mutate(&c)
+			raw, _ := s.Sign("current", c)
+			if _, err := VerifyTelemetry(s.Keys, raw, now); err == nil {
+				t.Fatal("invalid telemetry claims accepted")
+			}
+		})
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, base)
+	token.Header["kid"] = "current"
+	hmacRaw, _ := token.SignedString([]byte(s.Keys["current"]))
+	if _, err := VerifyTelemetry(s.Keys, hmacRaw, now); err == nil {
+		t.Fatal("symmetric telemetry token accepted")
+	}
+}

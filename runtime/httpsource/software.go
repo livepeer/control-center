@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
+	"strconv"
 	"time"
 
 	"github.com/livepeer/control-center/runtime/contract"
@@ -23,6 +26,46 @@ type installedRecord struct {
 	RecordedAt time.Time `json:"recorded_at"`
 	FluxCLI    string    `json:"flux_cli"`
 	GVisor     string    `json:"gvisor"`
+}
+
+type hostFeatureRecord struct {
+	RecordedAt time.Time      `json:"recorded_at"`
+	Features   map[string]int `json:"features"`
+}
+
+var hostFeatureName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// hostFeatures returns bootstrap-recorded host capabilities. An absent or
+// invalid record means the host has none, never a partial set.
+func (s *Source) hostFeatures() map[string]int {
+	record, ok := s.hostFeatureRecord()
+	if !ok {
+		return nil
+	}
+	return record.Features
+}
+
+func (s *Source) hostFeatureRecord() (hostFeatureRecord, bool) {
+	var record hostFeatureRecord
+	if s.HostFeaturesFile == "" {
+		return record, false
+	}
+	f, err := os.Open(s.HostFeaturesFile)
+	if err != nil {
+		return record, false
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(b) > 4096 || transport.Decode(b, &record) != nil || record.RecordedAt.IsZero() ||
+		record.RecordedAt.After(time.Now().Add(5*time.Second)) || len(record.Features) > 8 {
+		return hostFeatureRecord{}, false
+	}
+	for name, version := range record.Features {
+		if !hostFeatureName.MatchString(name) || version < 1 || version > 999 {
+			return hostFeatureRecord{}, false
+		}
+	}
+	return record, true
 }
 
 func (s *Source) software(ctx context.Context, node string) []contract.SoftwareIdentity {
@@ -59,6 +102,16 @@ func (s *Source) software(ctx context.Context, node string) []contract.SoftwareI
 		var i installedRecord
 		if err == nil && len(b) <= 8192 && transport.Decode(b, &i) == nil && !i.RecordedAt.IsZero() && !i.RecordedAt.After(time.Now().Add(5*time.Second)) {
 			o = append(o, contract.SoftwareIdentity{Component: "flux-cli", Scope: "installed", Version: i.FluxCLI, RecordedAt: &i.RecordedAt}, contract.SoftwareIdentity{Component: "gvisor", Scope: "installed", Version: i.GVisor, RecordedAt: &i.RecordedAt})
+		}
+	}
+	if record, ok := s.hostFeatureRecord(); ok {
+		names := make([]string, 0, len(record.Features))
+		for name := range record.Features {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			o = append(o, contract.SoftwareIdentity{Component: "host-" + name, Scope: "installed", Version: strconv.Itoa(record.Features[name]), RecordedAt: &record.RecordedAt})
 		}
 	}
 	return o

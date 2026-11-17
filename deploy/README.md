@@ -1,8 +1,9 @@
 # Staging deployment
 
 Docker Compose runs the Go API, built web UI with Caddy, persistent image
-registry, payment redeemer, operator secrets service, Vault, and Cloudflare
-Tunnel connector.
+registry, payment redeemer, operator secrets service, Vault, machine telemetry
+storage (VictoriaMetrics, VictoriaLogs and Grafana), and Cloudflare Tunnel
+connector.
 PostgreSQL and authentication use the Supabase project selected in the private
 `config.toml`.
 
@@ -12,6 +13,7 @@ PostgreSQL and authentication use the Supabase project selected in the private
 | `controlcenter-api.livepeer.live` | `http://localhost:43812` | API, `/v1/*`, `/discovery` |
 | `controlcenter-registry.livepeer.live` | `http://localhost:53812` | Read-only OCI registry `/v2/*` |
 | `controlcenter-secrets.livepeer.live` | `http://localhost:23812` | Operator secrets API |
+| `controlcenter-grafana.livepeer.live` | `http://localhost:13812` | Telemetry dashboards; Cloudflare Access required |
 
 The application ports and the registry upload port `63812` bind only to
 `127.0.0.1`. The cloudflared container uses host networking so the configured
@@ -93,6 +95,46 @@ and node address exclusions. Update `TunnelNodeAddresses` with the public and
 management addresses of every machine before enrollment; the bootstrap
 installer's origin firewall remains required.
 
+## Telemetry storage
+
+Machines push metrics and logs to the API, which checks each machine's
+telemetry token and stamps its identity before writing to VictoriaMetrics and
+VictoriaLogs. Both stores are on the internal `telemetry` network and are not
+published. See [machine telemetry](../docs/telemetry.md).
+
+Create the data directories, owned by UID 65532, before the first start:
+
+```sh
+sudo install -d -m 0700 -o 65532 -g 65532 /opt/controlcenter-telemetry \
+  /opt/controlcenter-telemetry/victoriametrics \
+  /opt/controlcenter-telemetry/victorialogs \
+  /opt/controlcenter-telemetry/grafana
+```
+
+Retention defaults to 30 days for metrics and 14 days for logs, with logs also
+capped at 50 GiB. Override them in `.env` with `TELEMETRY_METRICS_RETENTION`,
+`TELEMETRY_LOGS_RETENTION` and `TELEMETRY_LOGS_MAX_DISK`. Plan about 6 MB of
+metrics per machine per day; log volume depends mostly on app output. Back up
+`/opt/controlcenter-telemetry/grafana` with the deployment; the stores can be
+rebuilt from new data if lost.
+
+Grafana accepts only Cloudflare Access logins:
+
+1. Add the `controlcenter-grafana.livepeer.live` public hostname to the
+   deployment tunnel with origin `http://localhost:13812`.
+2. Create a self-hosted Cloudflare Access application for that hostname. Allow
+   only the administrator emails; this list is separate from Control Center's
+   administrator grants, so update both when administrators change.
+3. Set `CF_ACCESS_TEAM_DOMAIN` (the `<team>` in `<team>.cloudflareaccess.com`),
+   `CF_ACCESS_AUD` (the application's audience tag) and, for another hostname,
+   `GRAFANA_ROOT_URL` in `.env`.
+
+Grafana verifies each Access assertion against the team's signing keys and the
+audience tag. Without these settings the container exits instead of starting.
+Signed-in administrators get the Editor role. Dashboards come from
+`deploy/grafana/dashboards` and cannot be changed in the UI. Set
+`TelemetryEnabled = false` in `config.toml` to stop telemetry fleet-wide.
+
 Deployment mode and chain identity are fixed at first startup. Local development
 opts out with `Mode = "offchain"`; see [API configuration](../api/config.example.toml).
 
@@ -161,6 +203,7 @@ cd /opt/controlcenter/deploy
 docker compose ps
 docker compose logs --tail=100 api web cloudflared
 curl --fail http://127.0.0.1:43812/readyz
+curl --fail http://127.0.0.1:13812/api/health
 curl --fail http://127.0.0.1:33812/api/config
 curl --fail http://127.0.0.1:23813/ready
 docker compose up -d --build --wait

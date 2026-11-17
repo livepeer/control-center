@@ -9,6 +9,13 @@ import (
 
 func (s *Server) Reconcile(ctx context.Context) {
 	run := func() {
+		// Telemetry revocation follows enrollment changes on every pass. A failed
+		// read keeps the previous identities instead of rejecting the fleet.
+		telemetryCtx, stopTelemetry := context.WithTimeout(ctx, 10*time.Second)
+		if err := s.refreshTelemetry(telemetryCtx); err != nil && ctx.Err() == nil {
+			s.logger.Error("telemetry enrollment refresh failed", "error", err)
+		}
+		stopTelemetry()
 		if s.discovery != nil {
 			sourceCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 			err := s.discovery.Reconcile(sourceCtx)

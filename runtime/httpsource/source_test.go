@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -593,5 +594,53 @@ func TestSoftwareObservations(t *testing.T) {
 	o = f.source.software(t.Context(), "host")
 	if find(o, "gvisor") != nil || find(o, "livepeer-node") == nil {
 		t.Fatal("missing installation record contaminated live observations")
+	}
+}
+
+func TestHostFeaturesGateTelemetryObservationAndCleanup(t *testing.T) {
+	f := newFixture(t)
+	f.source.HostFeaturesFile = filepath.Join(t.TempDir(), "host-features.json")
+	var paths []string
+	f.kube.reply = func(path string) any {
+		paths = append(paths, path)
+		if strings.Contains(path, "/pods?") {
+			return json.RawMessage(`{"items":[]}`)
+		}
+		return nil
+	}
+	telemetryRead := func() bool {
+		paths = nil
+		f.source.gc(t.Context(), "sha256:"+strings.Repeat("a", 64))
+		return slices.Contains(paths, fluxPath+"livepeer-telemetry")
+	}
+	feature := func(o []contract.SoftwareIdentity) *contract.SoftwareIdentity {
+		for _, i := range o {
+			if i.Component == "host-telemetry" {
+				return &i
+			}
+		}
+		return nil
+	}
+	if telemetryRead() || feature(f.source.software(t.Context(), "host")) != nil {
+		t.Fatal("host without the recorded feature used telemetry RBAC")
+	}
+	recorded := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	for _, invalid := range []string{`{}`, `{"recorded_at":"` + recorded.Format(time.RFC3339) + `","features":{"Telemetry":1}}`,
+		`{"recorded_at":"` + recorded.Format(time.RFC3339) + `","features":{"telemetry":0}}`, `{"recorded_at":"2999-01-01T00:00:00Z","features":{"telemetry":1}}`} {
+		if err := os.WriteFile(f.source.HostFeaturesFile, []byte(invalid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if telemetryRead() || feature(f.source.software(t.Context(), "host")) != nil {
+			t.Fatal("invalid host feature record accepted", invalid)
+		}
+	}
+	if err := os.WriteFile(f.source.HostFeaturesFile, []byte(`{"recorded_at":"`+recorded.Format(time.RFC3339)+`","features":{"telemetry":1}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !telemetryRead() {
+		t.Fatal("telemetry inputs unpinned on a capable host")
+	}
+	if i := feature(f.source.software(t.Context(), "host")); i == nil || i.Scope != "installed" || i.Version != "1" || !i.RecordedAt.Equal(recorded) {
+		t.Fatalf("host feature observation: %+v", i)
 	}
 }

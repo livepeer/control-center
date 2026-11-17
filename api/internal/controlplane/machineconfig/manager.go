@@ -22,6 +22,8 @@ type Config struct {
 	NodeDrainTimeout        *time.Duration
 	NodeImage               string
 	StopSignals             bool
+	Telemetry               bool
+	TelemetryAppLogs        bool
 }
 
 type Dependencies struct {
@@ -62,11 +64,20 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 		cancel()
 	}
 
-	d := Desired{IngressPublicKeys: s.config.IngressPublicKeys, Onchain: p, OnchainError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout()}
-	if p.Onchain() && s.store.DB != nil {
+	d := Desired{IngressPublicKeys: s.config.IngressPublicKeys, Onchain: p, OnchainError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout(),
+		TelemetryEnabled: s.config.Telemetry, TelemetryAppLogs: s.config.TelemetryAppLogs}
+	var r Report
+	var at time.Time
+	e := sql.ErrNoRows
+	if s.store.DB != nil && (p.Onchain() || (s.config.Telemetry && !m.Terminal)) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		r, at, e := s.store.Report(ctx, m, "runtime")
+		r, at, e = s.store.Report(ctx, m, "runtime")
 		cancel()
+	}
+	// The latest report decides capability regardless of age: host features
+	// change only when bootstrap reruns, not when a machine goes offline.
+	d.TelemetryCapable = e == nil && TelemetryCapable(r.Software)
+	if p.Onchain() && s.store.DB != nil {
 		target := d
 		target.State.HeldOrchestrator, target.State.HeldUpgradePlan = "", ""
 		d.OnchainReady = e == nil && !r.ClockUncertain && time.Since(ObservationTime(r, at)) <= s.config.StatusTTL && r.Ready && r.Onchain != nil && r.Onchain.Ready && r.Onchain.Applied && r.Onchain.Generation == p.Generation && r.ConfigDigest == Digest(target)

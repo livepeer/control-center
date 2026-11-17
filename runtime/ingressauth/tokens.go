@@ -1,4 +1,6 @@
-// Package ingressauth implements local discovery token signing and verification.
+// Package ingressauth implements local discovery and telemetry token signing
+// and verification. The two token kinds have distinct audiences and scopes and
+// neither verifier accepts the other's tokens.
 package ingressauth
 
 import (
@@ -23,7 +25,14 @@ const Scope = "discovery:read"
 const Lifetime = 5 * time.Minute
 const ClockTolerance = 30 * time.Second
 
+// Telemetry write tokens are minted for one enrollment credential and verified
+// only by Control Center's ingest endpoints, never by machine ingress.
+const TelemetryAudience = "livepeer-telemetry"
+const TelemetryScope = "telemetry:write"
+const MaxTelemetryLifetime = time.Hour
+
 var machineID = regexp.MustCompile(`^[a-z2-7]{26}$`)
+var orchestratorAddress = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
 
 type Keys map[string]ed25519.PublicKey
 
@@ -137,6 +146,47 @@ func Verify(keys Keys, raw, node string, now time.Time) error {
 		return errors.New("invalid discovery bearer token")
 	}
 	return nil
+}
+
+// TelemetryClaims bind a write token to one machine credential version so that
+// credential refresh and retirement can revoke it before expiry.
+type TelemetryClaims struct {
+	jwt.RegisteredClaims
+	Scope             string `json:"scope"`
+	Orchestrator      string `json:"orch"`
+	CredentialVersion int64  `json:"cv"`
+}
+
+func (s *Signer) Telemetry(id, node, orchestrator string, credentialVersion int64, lifetime time.Duration, now time.Time) (string, time.Time, error) {
+	if !machineID.MatchString(node) || !orchestratorAddress.MatchString(orchestrator) || credentialVersion < 1 {
+		return "", time.Time{}, errors.New("invalid telemetry machine identity")
+	}
+	if lifetime < time.Second || lifetime > MaxTelemetryLifetime {
+		return "", time.Time{}, errors.New("invalid telemetry token lifetime")
+	}
+	now = now.Truncate(time.Second)
+	expires := now.Add(lifetime)
+	raw, err := s.Sign(id, TelemetryClaims{RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: Issuer, Audience: jwt.ClaimStrings{TelemetryAudience}, Subject: node,
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(expires),
+	}, Scope: TelemetryScope, Orchestrator: orchestrator, CredentialVersion: credentialVersion})
+	return raw, expires, err
+}
+
+// VerifyTelemetry returns the authenticated machine identity of a write token.
+// Callers must still confirm the identity matches a current enrollment.
+func VerifyTelemetry(keys Keys, raw string, now time.Time) (TelemetryClaims, error) {
+	c := new(TelemetryClaims)
+	_, err := jwt.ParseWithClaims(raw, c, keys.Key, jwt.WithValidMethods([]string{"EdDSA"}),
+		jwt.WithIssuer(Issuer), jwt.WithAudience(TelemetryAudience), jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(), jwt.WithLeeway(ClockTolerance), jwt.WithTimeFunc(func() time.Time { return now }))
+	if err != nil || !machineID.MatchString(c.Subject) || c.Scope != TelemetryScope ||
+		!orchestratorAddress.MatchString(c.Orchestrator) || c.CredentialVersion < 1 ||
+		len(c.Audience) != 1 || c.Audience[0] != TelemetryAudience || c.IssuedAt == nil || c.ExpiresAt == nil ||
+		!c.ExpiresAt.After(c.IssuedAt.Time) || c.ExpiresAt.Sub(c.IssuedAt.Time) > MaxTelemetryLifetime {
+		return TelemetryClaims{}, errors.New("invalid telemetry bearer token")
+	}
+	return *c, nil
 }
 
 // Handler is a persistent ForwardAuth endpoint. Authorization uses only the

@@ -34,6 +34,14 @@ TunnelNodeAddresses = ["<FLEET_NODE_IP/CIDR>"]
 DiscoveryRefreshInterval = "5m"
 DiscoveryMaxFailedRefreshes = 6
 
+# Machine telemetry is on by default. The URLs name the private compose
+# services; see docs/telemetry.md. Set false to stop ingest fleet-wide.
+TelemetryEnabled = true
+TelemetryMetricsURL = "http://victoriametrics:8428"
+TelemetryLogsURL = "http://victorialogs:9428"
+# Set false to keep app container output on machines.
+TelemetryAppLogsEnabled = true
+
 OnchainConfigFile = "/etc/controlcenter/onchain.json"
 OnchainSecretsDir = "/run/onchain-rpc"
 OnchainWebhookSecretFile = "/run/secrets/onchain-webhook-auth"

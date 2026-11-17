@@ -1,0 +1,11 @@
+# VictoriaMetrics scrapes Control Center's own components over the private
+# telemetry network. Machine metrics arrive by remote write instead.
+global:
+  scrape_interval: 30s
+scrape_configs:
+  - job_name: controlcenter-api
+    static_configs:
+      - targets: [api:43812]
+  - job_name: victorialogs
+    static_configs:
+      - targets: [victorialogs:9428]

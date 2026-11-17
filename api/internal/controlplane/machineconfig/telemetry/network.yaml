@@ -1,0 +1,8 @@
+# Agents listen only on the Pod loopback; nothing may connect to the Pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: livepeer-telemetry-agent, namespace: livepeer-telemetry}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress: []

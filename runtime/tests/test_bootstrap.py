@@ -277,12 +277,24 @@ stage_manifests() { echo manifests; }
 write_host_configuration() { echo host; }
 bootstrap_cluster() { echo cluster; }
 smoke_test() { echo smoke; }
+record_host_features() { echo features; }
 main --install-dir "$1"
 ''', str(self.root / 'installation'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines()[:10],
+        self.assertEqual(result.stdout.splitlines()[:11],
                          ['eligibility', 'lock', 'recheck', 'authentication', 'prepare', 'install',
-                          'manifests', 'host', 'cluster', 'smoke'])
+                          'manifests', 'host', 'cluster', 'smoke', 'features'])
+
+    def test_host_features_are_recorded_for_control_center_gating(self):
+        target = self.root / 'volumes/installed-software'
+        target.mkdir(parents=True)
+        result = self.shell('INSTALL_DIR="$1"; record_host_features', str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = target / 'host-features.json'
+        record = json.loads(path.read_text())
+        self.assertEqual(record['features'], {'telemetry': 1})
+        self.assertRegex(record['recorded_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 
     def test_checksums_and_supported_versions(self):
         (self.root / 'binary').write_bytes(b'corrupt')

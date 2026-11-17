@@ -1,0 +1,65 @@
+# %{HOST_IP} and %{NODE_NAME} come from the Pod's downward API environment.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+scrape_configs:
+- job_name: node-exporter
+  static_configs: [{targets: ['127.0.0.1:20242']}]
+- job_name: kube-state-metrics
+  static_configs: [{targets: ['127.0.0.1:20246']}]
+- job_name: telemetry-agent
+  static_configs:
+  - {targets: ['127.0.0.1:20243'], labels: {component: vmagent}}
+  - {targets: ['127.0.0.1:20244'], labels: {component: relay}}
+- job_name: fluent-bit
+  metrics_path: /api/v2/metrics/prometheus
+  static_configs: [{targets: ['127.0.0.1:20245'], labels: {component: fluent-bit}}]
+# The kubelet serving certificate is not issued for the node address; the
+# loopback-equivalent hop never leaves the host.
+- job_name: kubelet
+  scheme: https
+  authorization: {credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token}
+  tls_config: {insecure_skip_verify: true}
+  static_configs: [{targets: ['%{HOST_IP}:10250']}]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: 'kubelet_(running_pods|running_containers|evictions|node_name|pleg_relist_duration_seconds_(bucket|sum|count)|runtime_operations_errors_total|volume_stats_.*)|process_(cpu_seconds_total|resident_memory_bytes)'
+    action: keep
+- job_name: kubelet-cadvisor
+  scheme: https
+  metrics_path: /metrics/cadvisor
+  authorization: {credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token}
+  tls_config: {insecure_skip_verify: true}
+  static_configs: [{targets: ['%{HOST_IP}:10250']}]
+  metric_relabel_configs:
+  # id="/" series describe the whole host, including its network interfaces.
+  - source_labels: [__name__]
+    regex: 'container_(cpu_usage_seconds_total|cpu_cfs_(periods|throttled_periods)_total|memory_(working_set|rss|cache)_bytes|oom_events_total|network_(receive|transmit)_(bytes|packets|errors|packets_dropped)_total|fs_(reads|writes)_bytes_total|spec_(memory_limit_bytes|cpu_quota|cpu_period)|start_time_seconds)|machine_(cpu_cores|memory_bytes)'
+    action: keep
+  - regex: 'name|image'
+    action: labeldrop
+- job_name: kubelet-resource
+  scheme: https
+  metrics_path: /metrics/resource
+  authorization: {credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token}
+  tls_config: {insecure_skip_verify: true}
+  static_configs: [{targets: ['%{HOST_IP}:10250']}]
+- job_name: system-pods
+  kubernetes_sd_configs:
+  - role: pod
+    namespaces: {names: [livepeer, kube-system, flux-system]}
+    selectors: [{role: pod, field: 'spec.nodeName=%{NODE_NAME}'}]
+  relabel_configs:
+  # namespace;app;app.kubernetes.io/name;k8s-app;container port
+  - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_app, __meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_label_k8s_app, __meta_kubernetes_pod_container_port_number]
+    regex: 'livepeer;orchestrator;[^;]*;[^;]*;8936|kube-system;[^;]*;traefik;[^;]*;9100|kube-system;[^;]*;[^;]*;kube-dns;9153|flux-system;(source-controller|kustomize-controller);[^;]*;[^;]*;8080'
+    action: keep
+  - source_labels: [__meta_kubernetes_pod_phase]
+    regex: Running
+    action: keep
+  - {source_labels: [__meta_kubernetes_namespace], regex: livepeer, replacement: orchestrator, target_label: job}
+  - {source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_app_kubernetes_io_name], regex: 'kube-system;traefik', replacement: traefik, target_label: job}
+  - {source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_k8s_app], regex: 'kube-system;kube-dns', replacement: coredns, target_label: job}
+  - {source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_app], regex: 'flux-system;(.+)', replacement: '$1', target_label: job}
+  - {source_labels: [__meta_kubernetes_namespace], target_label: namespace}
+  - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}

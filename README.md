@@ -53,9 +53,11 @@ flowchart TB
         api["Go API<br/>App catalog, assignments and configuration"]
         db[(PostgreSQL)]
         discovery["Fleet discovery collector"]
+        storage[("Telemetry storage<br/>VictoriaMetrics, VictoriaLogs, Grafana")]
         ui --> api
         api <--> db
         api --> discovery
+        api -->|Stamped machine identity| storage
     end
 
     subgraph host["Orchestrator host / Runtime (K3s)"]
@@ -64,6 +66,7 @@ flowchart TB
         reconciler["App Reconciler"]
         node["Livepeer Node<br/>Orchestrator"]
         apps["Application Pods<br/>gVisor isolation"]
+        telemetry["Telemetry agents<br/>vmagent and Fluent Bit"]
 
         agent -->|Management bundles| flux
         agent -->|App intent| reconciler
@@ -78,6 +81,7 @@ flowchart TB
 
     api -->|Desired configuration, polled by agent| agent
     agent -->|Applied state and status| api
+    telemetry -->|Pushed metrics and logs| api
     discovery -->|Poll protected discovery| node
 ```
 
@@ -87,6 +91,7 @@ flowchart TB
 - [App registry](docs/app-registry.md): publish app definitions and assign revisions to machines.
 - [Fleet discovery](docs/fleet-discovery.md): expose managed orchestrators through an aggregate inventory.
 - [Machine status](docs/machine-status.md): inspect rollout, configured health, registration, discovery and cleanup evidence.
+- [Machine telemetry](docs/telemetry.md): collect machine metrics and logs into Control Center.
 - [Machine ingress](docs/machine-tunnels.md): configure protected tunnels and routing.
 - [Operations](docs/operations.md): configure authentication, administrator access and onchain operation.
 - [Development](docs/development.md): run locally, build, and test.

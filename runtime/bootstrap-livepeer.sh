@@ -176,9 +176,15 @@ prepare_installation() {
     "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator" \
+    "$INSTALL_DIR/volumes/management-sockets/telemetry"
   chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator" \
+    "$INSTALL_DIR/volumes/management-sockets/telemetry"
+  # Telemetry agents buffer here while Control Center is unreachable. The log
+  # reader runs as UID 0 without capabilities, so its buffer is root-owned.
+  install -d -m 0700 "$INSTALL_DIR/volumes/telemetry" "$INSTALL_DIR/volumes/telemetry-logs"
+  chown 65532:65532 "$INSTALL_DIR/volumes/telemetry"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   chmod 0700 "$INSTALL_DIR/k3s" "$INSTALL_DIR/kubelet"
   write_once "$INSTALL_DIR/credentials/fingerprint" "$INSTALLATION_FINGERPRINT"
@@ -247,6 +253,16 @@ write_host_configuration() {
   "$INSTALL_DIR/bin/livepeer-record-version" "$INSTALL_DIR/bin/k3s" "$INSTALL_DIR/state/k3s-version" "$INSTALL_DIR/lib/recovery.sh" "$INSTALL_DIR"
   mv "$INSTALL_DIR/state/host-config.new" "$INSTALL_DIR/state/host-config.sha256"
   rm -f -- "$INSTALL_DIR/state/k3s-restart-required"
+}
+
+# Host features name host-owned prerequisites that Control Center gates
+# workloads on: telemetry needs its management socket and http-source RBAC.
+# Record them only after the bootstrap that applied them has succeeded.
+HOST_FEATURES='{"telemetry":1}'
+record_host_features() {
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson features "$HOST_FEATURES" \
+    '{recorded_at:$at,features:$features}' |
+    atomic_write "$INSTALL_DIR/volumes/installed-software/host-features.json" 0644
 }
 
 kube() { "$INSTALL_DIR/bin/k3s" kubectl --kubeconfig "$INSTALL_DIR/config/kubeconfig.yaml" --request-timeout=30s "$@"; }
@@ -356,6 +372,7 @@ main() {
   run_phase cluster bootstrap_cluster
   run_phase secrets enroll_secrets
   run_phase smoke smoke_test
+  run_phase features record_host_features
   run_phase complete true
   log "Ready. Kubeconfig: $INSTALL_DIR/config/kubeconfig.yaml"
   log "Configuration is managed by the Livepeer API; Flux polls every minute."

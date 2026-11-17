@@ -70,7 +70,7 @@ func (c *Control) Request(ctx context.Context, endpoint string, payload any, lim
 	if c.ConfigURL != c.approvedURL || c.Base != c.approvedBase {
 		return nil, nil, errors.New("control_origin_changed")
 	}
-	if endpoint != "config" && endpoint != "status" && endpoint != "removal-ack" && endpoint != "tunnel/connector-token" && endpoint != "onchain/credentials" && !appReportPath.MatchString(endpoint) {
+	if endpoint != "config" && endpoint != "status" && endpoint != "removal-ack" && endpoint != "tunnel/connector-token" && endpoint != "onchain/credentials" && endpoint != "telemetry/token" && !appReportPath.MatchString(endpoint) {
 		return nil, nil, errors.New("control_endpoint")
 	}
 	token, err := os.ReadFile(c.TokenFile)

@@ -61,13 +61,14 @@ type Server struct {
 	tunnels        *tunnel.Manager
 	configs        *machineconfig.Manager
 	discovery      *fleet.Manager
+	telemetry      *telemetryState
 	reconcileWake  chan struct{}
 	activeCheck    func(context.Context, string) (bool, error)
 }
 
 func New(db *sql.DB, p Params, logger *slog.Logger) *Server {
 	_ = p.loadJWTKeys() // Serve startup validates this; direct embeddings fail closed when keys are unavailable.
-	s := &Server{db: db, params: p, logger: logger, build: machineconfig.Build, reconcileWake: make(chan struct{}, 1), client: &http.Client{
+	s := &Server{db: db, params: p, logger: logger, build: machineconfig.Build, telemetry: newTelemetryState(), reconcileWake: make(chan struct{}, 1), client: &http.Client{
 		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
@@ -153,6 +154,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/{node_id}/tunnel/connector-token", s.connectorToken)
 	mux.HandleFunc("POST /v1/nodes/{node_id}/status", s.machineStatus)
 	mux.HandleFunc("POST /v1/nodes/{node_id}/removal-ack", s.removalAck)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/telemetry/token", s.telemetryToken)
+	mux.HandleFunc("POST /v1/nodes/{node_id}/telemetry/metrics", s.telemetryIngest(telemetryMetrics))
+	mux.HandleFunc("POST /v1/nodes/{node_id}/telemetry/logs", s.telemetryIngest(telemetryLogs))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()

@@ -214,6 +214,29 @@ Pods to reach the kubelet on TCP 10250 while blocking public and gVisor app
 traffic. Existing installations pick this up when rerunning an updated bootstrap
 bundle, which reloads the firewall and restarts K3s for the changed configuration.
 
+### Telemetry
+
+Control Center collects metrics and logs from each machine; see
+[machine telemetry](../docs/telemetry.md). It delivers the
+`livepeer-telemetry` workload only after this bootstrap release records the
+`telemetry` host feature in `volumes/installed-software/host-features.json`.
+Existing installations receive telemetry after rerunning an updated bootstrap
+bundle. The bundle adds the telemetry management socket, the RBAC the
+management agent needs, root-owned and 65532-owned buffer directories under
+`volumes/`, and a private Traefik metrics port.
+
+The agent Pod runs on the Pod network and opens no host ports. Its containers
+listen only on the Pod loopback. It requests about 75m CPU and 170 MiB of memory
+from the management reserve, and buffers up to 256 MB of metrics and 128 MB of
+logs on disk while Control Center is unreachable.
+
+```sh
+sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml \
+  -n livepeer-telemetry get pods
+sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml \
+  -n livepeer-telemetry logs deployment/livepeer-telemetry-agent -c relay
+```
+
 For a planned K3s upgrade, set the target `spec.version` in the backend-owned
 `api/internal/controlplane/machineconfig/templates/upgrade-plan/plan.yaml` and
 redeploy the backend. After Flux applies the bundle, opt the node in with
