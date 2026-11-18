@@ -28,23 +28,15 @@ export type MachineReadinessSummary = ReadinessSnapshot & { report_state?: strin
 function useReadiness(snapshot: ReadinessSnapshot) {
   const { readiness_evidence: evidence, readinessRequestedAt: started } = snapshot
   const [, setTick] = useState(0)
+  const now = performance.now()
+  const age = now - (started ?? -Infinity)
+  const expiresAt = evidence && started !== undefined ? started + nextReadinessExpiry(evidence, age) : Infinity
   useEffect(() => {
-    if (!evidence || started === undefined) return
-    let timer: number | undefined
-    const schedule = () => {
-      const age = performance.now() - started
-      const next = nextReadinessExpiry(evidence, age)
-      if (Number.isFinite(next)) {
-        timer = window.setTimeout(() => {
-          setTick(tick => tick + 1)
-          schedule()
-        }, Math.ceil(next - age))
-      }
-    }
-    schedule()
+    if (!Number.isFinite(expiresAt)) return
+    const timer = window.setTimeout(() => setTick(tick => tick + 1), Math.max(0, Math.ceil(expiresAt - performance.now())))
     return () => window.clearTimeout(timer)
-  }, [evidence, started])
-  return classifyReadiness(snapshot, performance.now())
+  }, [expiresAt])
+  return { state: classifyReadiness(snapshot, now), age }
 }
 
 function machineStatusSummary(machine: MachineReadinessSummary) {
@@ -53,7 +45,7 @@ function machineStatusSummary(machine: MachineReadinessSummary) {
 }
 
 export function MachineReadinessBadge({ machine }: { machine: MachineReadinessSummary }) {
-  const state = useReadiness(machine)
+  const { state } = useReadiness(machine)
   return <div className="machine-readiness"><span className={`machine-status ${state}`}><span className="status-dot" />{readinessLabels[state]}</span><span className="machine-report-state">{machineStatusSummary(machine)}</span></div>
 }
 
@@ -82,9 +74,8 @@ function currentAssignment(view: MachineObservation, runner: Component | undefin
 }
 
 function WorkReadiness({ view }: { view: MachineObservation }) {
-  const state = useReadiness(view)
+  const { state, age } = useReadiness(view)
   const evidence = view.readiness_evidence
-  const age = performance.now() - (view.readinessRequestedAt ?? -Infinity)
   const inactive = state === 'inactive'
   const title = state === 'unverified' ? 'Work readiness unverified' : readinessLabels[state]
   const HeadingIcon = state === 'ready' ? CircleCheck : inactive || state === 'blocked' ? CircleAlert : CircleHelp
@@ -99,12 +90,12 @@ function WorkReadiness({ view }: { view: MachineObservation }) {
     add('Node deployment', evidence.node)
     if (evidence.onchain) add('Onchain admission', evidence.onchain)
     const { apps } = evidence
-    const { state, admitted, someCurrent, blocker, pending } = appEvidenceAt(apps, age)
+    const { state, admitted, blocker, pending } = appEvidenceAt(apps, age)
     const appIssue = reason((blocker ? apps.blocker : pending ? apps.pending : undefined)?.reason)
     checks.push({
       label: 'Apps', state,
       detail: apps.complete && apps.requested === 0 ? 'No apps assigned.' :
-        `${someCurrent ? 'At least ' : ''}${admitted} of ${apps.requested} requested replicas have current Node admission evidence.${appIssue ? ` ${appIssue}.` : ''}`,
+        `${admitted > 0 && admitted < apps.requested ? 'At least ' : ''}${admitted} of ${apps.requested} requested replicas have current Node admission evidence.${appIssue ? ` ${appIssue}.` : ''}`,
     })
     add('Tunnel provisioning', evidence.ingress)
     add('Discovery inventory', evidence.discovery)

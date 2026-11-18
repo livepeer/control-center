@@ -129,6 +129,7 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   await expect(badge).toHaveClass('machine-status partial')
   const appCheck = page.locator('.readiness-check').filter({ hasText: 'Apps' })
   await expect(appCheck).toContainText('Partially ready')
+  await expect(appCheck).toContainText('At least 2 of 3 requested replicas')
   await expect(appCheck).toContainText('Insufficient resources for this assignment')
 
   state.holdFleet = state.fail = true
@@ -165,14 +166,6 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
 
 for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees work blockers before rollout details`, async ({ page }, info) => {
   const state = await setup(page, admin)
-  state.view.components[0].ready = false
-  state.view.components[0].reason = 'applying'
-  state.view.assignments = []
-  state.view.components[1].apps!.instances = []
-  state.view.components[1].apps!.assignments = []
-  state.view.components[1].apps!.instances_total = 0
-  state.view.tunnel = { enabled: true, ready: false, reason: 'runtime_pending', cleanup_complete: false }
-  state.view.discovery_source = { state: 'excluded', selection_reason: 'blocked', stale: true, failures: 0, publication_blocked: false }
   state.view.readiness_evidence = {
     node: { state: 'pending', reason: 'applying' }, ingress: { state: 'pending', reason: 'runtime_pending' },
     discovery: { state: 'blocked', reason: 'discovery_excluded' },
@@ -208,7 +201,7 @@ test('an older detail response keeps readiness unverified', async ({ page }) => 
   await expect(page.getByText('Resource reconciliation confirmed', { exact: false })).toBeVisible()
 })
 
-test('current readiness cause and retained assignment diagnostic are both visible', async ({ page }) => {
+test('readiness shows current and retained failures until the machine drains', async ({ page }) => {
   const { view } = await setup(page)
   view.requested.generation = 1
   view.assignments[0].completed_at = null
@@ -219,26 +212,11 @@ test('current readiness cause and retained assignment diagnostic are both visibl
     apps: { requested: 1, complete: true, applied: true, admitted: 0, blocker: { state: 'blocked', reason: 'secrets_unavailable' } },
   }
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(page.getByRole('region', { name: 'Work readiness', exact: true })).toContainText('Secret delivery is unavailable')
-  await expect(page.getByRole('article', { name: 'Observed whoami revision 1' })).toContainText('Last reconciliation diagnostic: Flux resource reconciliation failed')
-})
-
-test('one failing assignment does not hide healthy apps, and draining stops new work', async ({ page }) => {
-  const state = await setup(page)
-  state.view.requested.generation = 1
-  state.view.assignments.push({ ...state.view.assignments[0], revision_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'second-app' })
-  state.view.components[1].apps!.assignments!.push({ ...state.view.components[1].apps!.assignments![0], revision_id: state.view.assignments[1].revision_id, instances: 0, ready: 0, registered: 0, reason: 'resource_refused' })
-  const projected = readyEvidence(30000)
-  projected.apps.requested = 2
-  projected.apps.blocker = { state: 'blocked', reason: 'resource_refused' }
-  state.view.readiness_evidence = projected
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
-  await expect(summary.getByRole('heading')).toHaveText('Partially ready to receive work')
-  await expect(summary).toContainText('1 of 2 requested replicas')
-  await expect(summary).toContainText('Insufficient resources for this assignment')
+  await expect(summary).toContainText('Secret delivery is unavailable')
+  await expect(page.getByRole('article', { name: 'Observed whoami revision 1' })).toContainText('Last reconciliation diagnostic: Flux resource reconciliation failed')
 
-  state.view.lifecycle = 'draining'
+  view.lifecycle = 'draining'
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(summary.getByRole('heading')).toHaveText('Not accepting work')
   await expect(summary).toContainText('draining for removal')

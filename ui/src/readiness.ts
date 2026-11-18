@@ -38,8 +38,7 @@ export function observationState(observation: ReadinessObservation | undefined, 
 
 export function appEvidenceAt(apps: ReadinessEvidence['apps'], age: number) {
   const countCurrent = age < (apps.admitted_valid_for_ms ?? 0)
-  const someCurrent = !countCurrent && age < (apps.last_admission_for_ms ?? 0)
-  const admitted = countCurrent ? apps.admitted : someCurrent ? 1 : 0
+  const admitted = countCurrent ? apps.admitted : age < (apps.last_admission_for_ms ?? 0) ? 1 : 0
   const blocker = observationState(apps.blocker, age) === 'blocked'
   const pending = observationState(apps.pending, age) === 'pending'
   let state: Exclude<ReadinessState, 'inactive'> = 'unverified'
@@ -47,7 +46,7 @@ export function appEvidenceAt(apps: ReadinessEvidence['apps'], age: number) {
   else if (admitted > 0) state = countCurrent && apps.complete && apps.applied && admitted === apps.requested && !blocker && !pending ? 'ready' : 'partial'
   else if (blocker) state = 'blocked'
   else if (pending) state = 'pending'
-  return { state, admitted, someCurrent, blocker, pending }
+  return { state, admitted, blocker, pending }
 }
 
 export function classifyReadiness(snapshot: ReadinessSnapshot, now: number): ReadinessState {

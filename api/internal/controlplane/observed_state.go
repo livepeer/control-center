@@ -278,7 +278,7 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 				break
 			}
 		}
-		observeDiscovery(&v, route, status, s.discovery.Memberships, false)
+		observeDiscovery(&v, route, status, s.discovery.MembershipSnapshot, false)
 	}
 	v.ReadinessEvidence = v.readinessEvidence()
 	return v, nil
@@ -381,7 +381,7 @@ func (s *Server) composeMachineObservation(m Machine, facts machineObservationFa
 	return v, route, nil
 }
 
-func observeDiscovery(v *machineObservation, route tunnel.RoutingState, status fleet.Status, memberships func(string, []fleet.MembershipQuery) map[string]fleet.Membership, readinessOnly bool) {
+func observeDiscovery(v *machineObservation, route tunnel.RoutingState, status fleet.Status, snapshot func() *fleet.MembershipSnapshot, readinessOnly bool) {
 	v.DiscoveryEnabled, v.DiscoveryInitialized, v.DiscoverySelectionStale = status.Enabled, status.Initialized, status.SelectionStale
 	v.DiscoverySelectionExpiresAt = status.SelectionExpiresAt
 	runner := v.component("runner")
@@ -408,7 +408,7 @@ func observeDiscovery(v *machineObservation, route tunnel.RoutingState, status f
 		queries = append(queries, a.membershipQueries(i, route.ServiceURL, route.ProxyURLTemplate)...)
 	}
 	if len(queries) > 0 {
-		v.Membership = memberships(v.NodeID, queries)
+		v.Membership = snapshot().Memberships(v.NodeID, queries)
 	}
 }
 
@@ -490,7 +490,7 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 	}
 	defer rows.Close()
 	var discovery fleet.Status
-	var memberships func(string, []fleet.MembershipQuery) map[string]fleet.Membership
+	var snapshot func() *fleet.MembershipSnapshot
 	var sources map[string]*fleet.SourceStatus
 	result := []observedMachineSummary{}
 	for rows.Next() {
@@ -529,13 +529,10 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 					source := &discovery.Sources[i]
 					sources[source.NodeID] = source
 				}
-				snapshot := sync.OnceValue(s.discovery.MembershipSnapshot)
-				memberships = func(node string, queries []fleet.MembershipQuery) map[string]fleet.Membership {
-					return snapshot().Memberships(node, queries)
-				}
+				snapshot = sync.OnceValue(s.discovery.MembershipSnapshot)
 			}
 			view.DiscoverySource = sources[m.NodeID]
-			observeDiscovery(&view, route, discovery, memberships, true)
+			observeDiscovery(&view, route, discovery, snapshot, true)
 		}
 		m.ReadinessEvidence = view.readinessEvidence()
 		result = append(result, m)

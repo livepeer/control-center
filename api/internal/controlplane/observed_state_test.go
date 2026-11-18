@@ -196,6 +196,26 @@ func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfi
 	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
 }
 
+func readReadinessEvidence(t *testing.T, s *Server, path string) *machineReadinessEvidence {
+	t.Helper()
+	w := request(t, s, "GET", path, "session-a", nil)
+	requireStatus(t, w, 200)
+	var result struct {
+		ReadinessEvidence *machineReadinessEvidence `json:"readiness_evidence"`
+		Machines          []observedMachineSummary
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Machines) == 1 {
+		result.ReadinessEvidence = result.Machines[0].ReadinessEvidence
+	}
+	if result.ReadinessEvidence == nil {
+		t.Fatalf("missing readiness evidence for %s: %s", path, w.Body.String())
+	}
+	return result.ReadinessEvidence
+}
+
 func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	s, c, m, a := observationFixture(t)
 	runtime := currentReport(t, s, m.NodeID, machineconfig.Report{
@@ -212,39 +232,22 @@ func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	runner.Apps.Assignments[0].NodeExpiresAt = runner.Apps.Instances[0].NodeExpiresAt
 	runner.Apps.Assignments[0].ProbeExpiresAt = expiry
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
-	check := func(wantNode string, admitted int, pending bool) {
+	check := func(path, wantNode string, admitted int, pending bool) {
 		t.Helper()
-		checkEvidence := func(e *machineReadinessEvidence) {
-			t.Helper()
-			if e == nil || e.Node.State != wantNode || !e.Apps.Complete || !e.Apps.Applied || e.Apps.Requested != 1 ||
-				e.Apps.Admitted != admitted || (e.Apps.Pending != nil) != pending ||
-				(admitted > 0 && (e.Apps.AdmittedValidForMS <= 0 || e.Apps.AdmittedValidForMS > 15000)) {
-				t.Fatalf("readiness evidence = %+v", e)
-			}
+		e := readReadinessEvidence(t, s, path)
+		if e.Node.State != wantNode || !e.Apps.Complete || !e.Apps.Applied || e.Apps.Requested != 1 ||
+			e.Apps.Admitted != admitted || (e.Apps.Pending != nil) != pending ||
+			(admitted > 0 && (e.Apps.AdmittedValidForMS <= 0 || e.Apps.AdmittedValidForMS > 15000)) {
+			t.Fatalf("readiness evidence for %s = %+v", path, e)
 		}
-		for _, path := range []string{"/api/machines?orchestrator_address=" + orchA, "/api/admin/overview"} {
-			w := request(t, s, "GET", path, "session-a", nil)
-			requireStatus(t, w, 200)
-			var got struct{ Machines []observedMachineSummary }
-			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got.Machines) != 1 {
-				t.Fatalf("unexpected fleet response for %s: %v (%v)", path, got.Machines, err)
-			}
-			checkEvidence(got.Machines[0].ReadinessEvidence)
-		}
-		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
-		requireStatus(t, w, 200)
-		var detail machineObservation
-		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
-			t.Fatal(err)
-		}
-		checkEvidence(detail.ReadinessEvidence)
 	}
+	const overview = "/api/admin/overview"
 
-	check("ready", 0, false) // An older report attests health and registration alone.
+	check(overview, "ready", 0, false) // An older report attests health and registration alone.
 	runner = currentReport(t, s, m.NodeID, runner)
 	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{}
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
-	check("ready", 0, true)
+	check(overview, "ready", 0, true)
 	runner = currentReport(t, s, m.NodeID, runner)
 	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{Ready: 1, ExpiresAt: expiry}
 	runner.Apps.Instances[0].AdmissionExpiresAt = expiry
@@ -253,13 +256,14 @@ func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 409)
 	runner.Apps.Assignments[0].Admission.ExpiresAt = expiry
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
-	check("ready", 1, false)
-	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,admission,expires_at}',to_jsonb(now()-interval '1 second'))
- WHERE node_id=$1 AND component='runner'`, m.NodeID)
-	check("ready", 0, false)
+	for _, path := range []string{overview, "/api/machines?orchestrator_address=" + orchA, "/api/machines/" + m.NodeID + "/status"} {
+		check(path, "ready", 1, false)
+	}
 	runner = currentReport(t, s, m.NodeID, runner)
 	first := runner.Apps.Instances[0]
-	first.InstanceID, first.AdmissionExpiresAt = "instance-2", expiry.Add(-time.Second)
+	first.InstanceID, first.AdmissionExpiresAt = "instance-2", runner.ObservedAt.Add(-time.Second)
+	first.NodeObservedAt, first.NodeExpiresAt = first.AdmissionExpiresAt.Add(-10*time.Second), first.AdmissionExpiresAt
+	first.Probe = &contract.ProbeStatus{ObservedAt: first.NodeObservedAt, ExpiresAt: first.AdmissionExpiresAt, Success: true, Started: true}
 	runner.Apps.Instances = append(runner.Apps.Instances, first)
 	runner.Apps.InstancesTotal = 2
 	assignment := &runner.Apps.Assignments[0]
@@ -268,14 +272,12 @@ func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 409)
 	assignment.Admission.LastExpiresAt = expiry
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
-	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,admission,expires_at}',to_jsonb(now()-interval '1 second'))
- WHERE node_id=$1 AND component='runner'`, m.NodeID)
-	check("ready", 1, false)
+	check(overview, "ready", 1, false)
 
 	runtime = currentReport(t, s, m.NodeID, runtime)
 	runtime.Ready, runtime.Reason = false, "onchain_not_ready"
 	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
-	check("pending", 1, false)
+	check(overview, "pending", 1, false)
 }
 
 func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
@@ -343,6 +345,8 @@ func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
 	if e := view.readinessEvidence().Apps; e.AdmittedValidForMS != 58000 {
 		t.Fatalf("fresh poll lost the surviving replica deadline: %+v", e)
 	}
+	view.ServerTime = expires
+	check("unverified", "unverified", 0)
 	view.ServerTime = now
 	a.Replicas = 1
 	reported.Admission.ExpiresAt, reported.Admission.LastExpiresAt = expires, time.Time{}
@@ -693,21 +697,10 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 	recordDelivery(rejected)
 	checkBlocker := func(want string) {
 		t.Helper()
-		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
-		requireStatus(t, w, 200)
-		var detail machineObservation
-		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
-			t.Fatal(err)
-		}
-		w = request(t, s, "GET", "/api/admin/overview", "session-a", nil)
-		requireStatus(t, w, 200)
-		var overview struct{ Machines []observedMachineSummary }
-		if err := json.Unmarshal(w.Body.Bytes(), &overview); err != nil || len(overview.Machines) != 1 {
-			t.Fatalf("invalid overview: %v %s", err, w.Body.String())
-		}
-		for _, evidence := range []*machineReadinessEvidence{detail.ReadinessEvidence, overview.Machines[0].ReadinessEvidence} {
-			if issue := evidence.Apps.Blocker; (issue == nil) != (want == "") || (issue != nil && issue.Reason != want) {
-				t.Fatalf("want app blocker %q, got %+v", want, issue)
+		for _, path := range []string{"/api/machines/" + m.NodeID + "/status", "/api/admin/overview"} {
+			issue := readReadinessEvidence(t, s, path).Apps.Blocker
+			if (issue == nil) != (want == "") || (issue != nil && issue.Reason != want) {
+				t.Fatalf("want app blocker %q for %s, got %+v", want, path, issue)
 			}
 		}
 	}

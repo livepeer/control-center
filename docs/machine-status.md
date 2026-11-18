@@ -12,10 +12,6 @@ The machine list and **Work readiness** section use the same readiness criteria.
 Each fleet poll makes one HTTP request. The browser fetches detailed status
 only for the selected machine.
 
-No schema migration is required. Deploy the Control Center API first because
-older APIs reject the new Runtime report fields. If reverting both, roll back
-Runtime before the API.
-
 - **Green — Ready to receive work.** The current Node deployment is ready,
   onchain admission is ready when configured, and all active assignments have
   fresh health evidence and Node has accepted the requested replicas as ready.
@@ -44,13 +40,10 @@ Compare the stages and their timestamps for the same enrollment and app:
 An external client completing a session requires separate verification. The
 readiness badge uses the control plane's operational evidence.
 
-Reports expire after `TunnelStatusTTL` (two minutes by default). Individual
-probes, Node and connector observations, and Collector snapshots expire
-independently. Each expired observation becomes unverified. A fresh report or
-retry cannot extend an older observation. Only successful discovery collection
-for the current source and credentials can verify inventory membership. Reports include at most 128
-instance details, with omissions identified, so a healthy subset does not prove
-all instances are ready.
+Reports expire after `TunnelStatusTTL` (two minutes by default). Probes, Node
+and connector observations, and discovery snapshots have their own deadlines.
+Only fresh discovery for the current source and credentials verifies membership.
+Reports show at most 128 instance details and indicate any omissions.
 
 ## Diagnose a failure
 
@@ -96,6 +89,10 @@ authorized logs or events. Do not paste credentials, bearer URLs, app environmen
 values or sensitive app output into issue evidence.
 
 ## Recovery and rollout
+
+Deploy the Control Center API first because older APIs reject the new Runtime
+report fields. Roll back Runtime first when reverting both. No schema migration
+is required.
 
 A status report HTTP 412 indicates lost or regressed ordering state. Restore
 trustworthy state; do not delete counters or repeatedly increment them until the
