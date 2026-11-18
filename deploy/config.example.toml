@@ -12,6 +12,8 @@ DefaultAdminEmail = "admin@example.com"
 
 Listen = "0.0.0.0:43812"
 PublicAPIURL = "https://controlcenter-api.livepeer.live"
+# The UI is a separate origin and calls PublicAPIURL with CORS.
+AllowedOrigins = ["https://controlcenter.livepeer.live"]
 ConfigReconcileInterval = "1m"
 
 # Publish both images to the bundled registry and use the returned digests.

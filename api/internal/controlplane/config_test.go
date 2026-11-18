@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,9 @@ RuntimeNodeImage = "registry.invalid/node@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 OnchainConfigFile = "onchain.json"
 OnchainSecretsDir = "/run/onchain-rpc"
 OnchainWebhookSecretFile = "webhook"
+PublicListen = "0.0.0.0:43811"
+AllowedOrigins = ["https://ui.example", "http://localhost:5173"]
+RedeemerUpstreamURL = "http://redeemer:8941"
 `,
 	}
 	for name, contents := range files {
@@ -161,6 +165,9 @@ OnchainWebhookSecretFile = "webhook"
 		t.Fatal("configuration fields were not loaded")
 	}
 
+	if p.PublicListen != "0.0.0.0:43811" || !slices.Equal(p.AllowedOrigins, []string{"https://ui.example", "http://localhost:5173"}) || p.RedeemerUpstreamURL != "http://redeemer:8941" {
+		t.Fatal("edge configuration was not loaded", p.PublicListen, p.AllowedOrigins, p.RedeemerUpstreamURL)
+	}
 	if p.DefaultAdminEmail != "first@example.invalid" {
 		t.Fatal("default admin config missing")
 	}
