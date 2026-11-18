@@ -32,18 +32,27 @@ flowchart LR
 Control Center delivers the `livepeer-telemetry` Flux Kustomization only when
 `TelemetryEnabled` is true and the machine's latest runtime report lists the
 installed `host-telemetry` software entry. Bootstrap records that entry after
-applying the telemetry management socket and the management agent's RBAC.
-Older installations keep running unchanged until they rerun an updated
-bootstrap. The Kustomization uses `deletionPolicy: Delete`: disabling telemetry
-removes the agents. Telemetry never changes Node's drain digest.
+applying the telemetry management socket and the management agent's RBAC, and
+the management agent reports it only from this release's Runtime image. Older
+installations keep running unchanged until they rerun an updated bootstrap with
+`--upgrade-runtime`; a plain rerun keeps the saved Runtime image. The
+Kustomization uses `deletionPolicy: Delete`: disabling telemetry removes the
+agents. Telemetry never changes Node's drain digest.
 
-One Deployment, `livepeer-telemetry/livepeer-telemetry-agent`, runs on the Pod
-network with no host ports. Its containers listen on the Pod loopback only, and
-its NetworkPolicy admits no connections.
+Two Deployments in the `livepeer-telemetry` namespace run on the Pod network
+with no host ports:
+
+- `livepeer-telemetry-agent` holds every agent except node_exporter. Its
+  containers listen on the Pod loopback only, and nothing may connect to it.
+- `livepeer-telemetry-node-exporter` reads the host's `/proc`, `/sys` and `/`
+  read-only. It runs as UID 65533 with no service-account token and no shared
+  group, so it reaches only world-accessible host paths, never the 65532-owned
+  management sockets or workload state. Its NetworkPolicy admits only the agent
+  Pod, on TCP 9100.
 
 | Container | Collects |
 | --- | --- |
-| `node-exporter` | Host CPU, memory, disk, filesystems, pressure and hardware sensors from read-only host `/proc`, `/sys` and `/` mounts |
+| `node-exporter` | Host CPU, memory, disk, filesystems, pressure and hardware sensors |
 | `kube-state-metrics` | Pod, Deployment, DaemonSet, ReplicaSet and node state |
 | `vmagent` | Scrapes the above, kubelet and cAdvisor (host network traffic comes from the root cgroup, `id="/"`), Node, Traefik, CoreDNS and Flux every 30 seconds |
 | `fluent-bit` | System Pod logs, app container output, `logs/k3s.log`, `logs/bootstrap.log`, kernel and Runtime unit journal entries, and Kubernetes events |
@@ -54,13 +63,16 @@ passwords or credentials before it writes. Fluent Bit truncates lines at
 16 KiB and throttles app output to 200 lines per second per machine. Kubelet and
 journald write root-owned `0640` files, so Fluent Bit runs as UID 0 with every
 capability dropped and a read-only root filesystem: it reads through owner
-permissions only. The other containers run as UID 65532.
+permissions only. The other agents run as UID 65532.
 
 Both agents buffer on disk while Control Center is unreachable: vmagent up to
-256 MB in `volumes/telemetry`, and Fluent Bit up to 128 MB in
-`volumes/telemetry-logs`. When a buffer is full, the oldest data is dropped.
-After an outage the agents resend from the buffer, within each machine's ingest
-budget.
+about 512 MiB in `volumes/telemetry/<NODE_ID>` (its smallest supported queue),
+and Fluent Bit up to 128 MiB in `volumes/telemetry-logs/<NODE_ID>`. When a
+buffer is full, the oldest data is dropped. After an outage the agents resend
+from the buffer, within each machine's ingest budget. Buffers belong to one
+enrollment: re-enrollment stops the agents and deletes the previous
+enrollment's buffers before new credentials are issued, so no data is sent
+under another identity.
 
 ## Credentials and identity
 
@@ -71,9 +83,12 @@ machine credential. It exchanges that credential for a telemetry token at
 destination URLs built from its approved Control Center origin. The relay
 accepts only HTTPS destinations (plain HTTP only on development installations)
 on one origin under `/v1/nodes/<NODE_ID>/`, so
-neither the bundle nor the relay can redirect telemetry. It renews the token at
-half its lifetime. When Control Center answers 401, the relay drops the token
-and returns 503, so the agent retries from its buffer with a fresh token. The token is an Ed25519 JWT signed
+neither the bundle nor the relay can redirect telemetry. The relay is pinned to
+its bundle's node ID and refuses a grant for any other node; after
+re-enrollment, an old relay cannot send under the new identity. It renews the
+token at half its lifetime. When Control Center answers 401, the relay drops
+the token and returns 503, so the agent retries from its buffer with a fresh
+token. The token is an Ed25519 JWT signed
 with the [discovery signing key](discovery-auth.md). It has audience
 `livepeer-telemetry`, scope `telemetry:write`, the node ID as subject, and the
 orchestrator address and credential version as claims. Its lifetime is
@@ -104,21 +119,29 @@ Log entries carry `time` and `message`. VictoriaLogs streams are keyed by
 `node_id`, `source`, `namespace`, `pod` and `container`.
 
 Requests need `Content-Length` and at most `TelemetryMaxBodyBytes` (8 MiB by
-default). Each machine has a separate byte budget for metrics and for logs:
-`TelemetryNodeRateBytes` per second (1 MiB by default), with a burst of two
-maximum-size bodies. Budgets are per API replica.
+default). Bundles size agent writes from this setting: the relay uses the same
+limit, and vmagent's largest uncompressed block is 64 KiB below it (at most
+4 MB). Changing it restarts the agent Pod only. Each machine has a separate
+byte budget for metrics and for logs: `TelemetryNodeRateBytes` per second
+(1 MiB by default), with a burst of two maximum-size bodies. Budgets are per
+API replica.
 
-Responses are designed for agent retry behavior:
+Control Center answers, and the agents react:
 
-| Status | Meaning | Agent action |
-| --- | --- | --- |
-| 204 | Stored | Continue |
-| 400 | Empty body, or storage could not parse it | Drop the batch |
-| 401 | Missing, invalid, expired or revoked token | Request a new token |
-| 403 | Telemetry disabled, or the token names another machine | Retry later |
-| 411, 413, 415 | Missing length, oversized body or unsupported encoding | Fix the agent configuration |
-| 429 | Machine budget exceeded; see `Retry-After` | Retry after the delay |
-| 503 | Enrollments loading or storage unavailable | Retry from the disk buffer |
+| Status | Meaning | vmagent (through the relay) | Fluent Bit |
+| --- | --- | --- | --- |
+| 204 | Stored | Continue | Continue |
+| 400 | Empty body, or storage could not parse it | Drop the block | Drop the chunk |
+| 401 | Missing, invalid, expired or revoked token | The relay drops the token and answers 503; retry with a new token | Same |
+| 403 | Telemetry disabled, or the token names another machine | Retry | Drop the chunk |
+| 411, 415 | Missing length or unsupported encoding | Retry | Drop the chunk |
+| 413 | Body over `TelemetryMaxBodyBytes` | The relay answers 409; drop the block | Drop the chunk |
+| 429 | Machine budget exceeded; see `Retry-After` | Retry after the delay | Same |
+| 503 | Enrollments loading or storage unavailable | Retry from the disk buffer | Same |
+
+The 413 case arises only for blocks buffered before the limit was lowered;
+without the relay's 409, vmagent would retry such a block forever on its single
+queue.
 
 ## Configuration
 
@@ -143,8 +166,9 @@ The storage services, retention and Grafana access are described in the
 Grafana provisions read-only dashboards from `deploy/grafana/dashboards` into
 the **Telemetry** folder:
 
-- **Fleet overview:** machines reporting and silent, restarts, OOM kills, and
-  CPU, memory, disk and network for each machine.
+- **Fleet overview:** machines reporting, machines silent for 5 minutes (among
+  those seen in the last 7 days), restarts, OOM kills, and CPU, memory, disk
+  and network for each machine.
 - **Machine detail:** host stats, per-Pod usage, container restarts, Node app
   calls, ingress requests, log volume and recent logs for one machine.
 - **Machine logs:** logs filtered by machine, source and regular expression.
@@ -176,7 +200,9 @@ count of suppressed events. Logs and metric labels never contain tokens.
   `victorialogs` are running and on the `telemetry` network.
 - **`upstream_rejected`:** the API log entry includes the storage response.
 - **No telemetry from a machine:** confirm `host-telemetry` appears among the
-  installed software on its status page; if not, rerun the current bootstrap.
+  installed software on its status page; if not, rerun the current bootstrap
+  with `--upgrade-runtime`. A plain rerun keeps the saved Runtime image, which
+  may predate telemetry.
   Then check the agent Pod and the relay's metrics on the pipeline dashboard:
 
   ```sh

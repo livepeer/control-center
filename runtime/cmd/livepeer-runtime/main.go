@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -334,6 +335,8 @@ func serve(ctx context.Context, address string, handler http.Handler, loop func(
 	return err
 }
 
+var telemetryNodeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
 // telemetryRelay holds the telemetry token for agents in its Pod. It receives
 // the token and destinations only through the scoped management socket.
 func telemetryRelay(ctx context.Context, args []string) error {
@@ -342,10 +345,11 @@ func telemetryRelay(ctx context.Context, args []string) error {
 	socket := flags.String("socket", "/management/control.sock", "Scoped telemetry management socket")
 	mode := flags.String("transport", "https", "https or development-http")
 	maxBody := flags.Int64("max-body-bytes", 8<<20, "Largest agent write")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *socket == "" || *maxBody < 1<<20 || *maxBody > 64<<20 || (*mode != "https" && *mode != "development-http") {
+	node := flags.String("node-id", "", "Enrollment this relay may send as")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *socket == "" || !telemetryNodeID.MatchString(*node) || *maxBody < 1<<20 || *maxBody > 64<<20 || (*mode != "https" && *mode != "development-http") {
 		return errors.New("invalid telemetry-relay configuration")
 	}
-	relay := telemetry.NewRelay(transport.NewLocal(*socket), *mode == "development-http", *maxBody)
+	relay := telemetry.NewRelay(transport.NewLocal(*socket), *node, *mode == "development-http", *maxBody)
 	return relay.Serve(ctx, *listen)
 }
 

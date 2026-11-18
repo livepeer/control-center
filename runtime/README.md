@@ -80,8 +80,10 @@ The API URL must match the backend `PublicAPIURL` and be reachable from the
 host and Pods. With sudo, add exported override names to `--preserve-env`, for
 example `--preserve-env=LIVEPEER_ENROLLMENT_TOKEN,LIVEPEER_API_URL,LIVEPEER_RUNTIME_IMAGE`.
 Image selection uses the explicit override, then the saved image, then the
-bundle default. Reruns retain the saved selection; an invalid explicit or saved
-image causes installation to fail.
+bundle default. Reruns retain the saved selection and print a notice when this
+release ships a different image. Add `--upgrade-runtime` to switch to the
+release's image instead; the explicit override still wins. An invalid explicit
+or saved image causes installation to fail.
 
 The backend separately selects its system-services image with `RuntimeImage`
 (or `RUNTIME_IMAGE` in its environment). The connector Docker build argument
@@ -220,15 +222,25 @@ Control Center collects metrics and logs from each machine; see
 [machine telemetry](../docs/telemetry.md). It delivers the
 `livepeer-telemetry` workload only after this bootstrap release records the
 `telemetry` host feature in `volumes/installed-software/host-features.json`.
-Existing installations receive telemetry after rerunning an updated bootstrap
-bundle. The bundle adds the telemetry management socket, the RBAC the
-management agent needs, root-owned and 65532-owned buffer directories under
-`volumes/`, and a private Traefik metrics port.
+The management agent reports that feature only from this release's Runtime
+image, so existing installations receive telemetry after rerunning an updated
+bootstrap with `--upgrade-runtime`:
 
-The agent Pod runs on the Pod network and opens no host ports. Its containers
-listen only on the Pod loopback. It requests about 75m CPU and 170 MiB of memory
-from the management reserve, and buffers up to 256 MB of metrics and 128 MB of
-logs on disk while Control Center is unreachable.
+```sh
+curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sudo sh -s -- --upgrade-runtime
+```
+
+The bundle adds the telemetry management socket, the RBAC the management agent
+needs, root-owned and 65532-owned buffer directories under `volumes/`, and a
+private Traefik metrics port.
+
+The agent Pod and the node_exporter Pod run on the Pod network and open no host
+ports. The agents listen only on the Pod loopback; node_exporter accepts only
+the agent Pod. Together they request about 75m CPU and 170 MiB of memory from
+the management reserve. While Control Center is unreachable they buffer up to
+about 512 MiB of metrics and 128 MiB of logs on disk, separately for each
+enrollment; re-enrollment discards the previous enrollment's buffers.
+node_exporter runs as UID 65533, which must not own files on the host.
 
 ```sh
 sudo /opt/livepeer/bin/k3s kubectl --kubeconfig /opt/livepeer/config/kubeconfig.yaml \

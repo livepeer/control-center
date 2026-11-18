@@ -12,14 +12,26 @@ api_url() {
   printf '%s' "$api"
 }
 
+# Image precedence: explicit override, the release image with
+# --upgrade-runtime, the saved image, then the release image.
 runtime_image() {
   RUNTIME_IMAGE=''
+  local release=''
+  if [[ -n ${SCRIPT_DIR:-} && -f "$SCRIPT_DIR/release-runtime-image" ]]; then
+    release=$(cat "$SCRIPT_DIR/release-runtime-image")
+  fi
   if [[ ${LIVEPEER_RUNTIME_IMAGE+x} ]]; then
     RUNTIME_IMAGE=$LIVEPEER_RUNTIME_IMAGE
+  elif (( ${UPGRADE_RUNTIME:-0} )); then
+    [[ -n "$release" ]] || die '--upgrade-runtime requires a bootstrap release that names a Runtime image'
+    RUNTIME_IMAGE=$release
   elif [[ -f "$INSTALL_DIR/state/runtime-image" ]]; then
     RUNTIME_IMAGE=$(cat "$INSTALL_DIR/state/runtime-image")
-  elif [[ -n ${SCRIPT_DIR:-} && -f "$SCRIPT_DIR/release-runtime-image" ]]; then
-    RUNTIME_IMAGE=$(cat "$SCRIPT_DIR/release-runtime-image")
+    if [[ -n "$release" && "$RUNTIME_IMAGE" != "$release" ]]; then
+      log "Keeping the saved Runtime image $RUNTIME_IMAGE; this release ships $release. Rerun with --upgrade-runtime to switch."
+    fi
+  else
+    RUNTIME_IMAGE=$release
   fi
   [[ "$RUNTIME_IMAGE" =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || die 'set LIVEPEER_RUNTIME_IMAGE to a built Go Runtime image pinned by digest'
 }
@@ -90,6 +102,15 @@ stop_credential_consumers() {
       kube -n livepeer scale deployment/orchestrator --replicas=0
     fi
     kube -n livepeer wait pod -l app=orchestrator --for=delete --timeout=120s
+    # Telemetry buffers hold the old enrollment's unsent data. Stop the agents
+    # and drop the buffers so nothing is sent under the new identity.
+    kube -n livepeer-telemetry delete deployment/livepeer-telemetry-agent deployment/livepeer-telemetry-node-exporter --ignore-not-found --wait=true
+    kube -n livepeer-telemetry wait pod -l app=livepeer-telemetry-agent --for=delete --timeout=120s
+    kube -n livepeer-telemetry wait pod -l app=livepeer-telemetry-node-exporter --for=delete --timeout=120s
+    local buffer
+    for buffer in "$INSTALL_DIR/volumes/telemetry" "$INSTALL_DIR/volumes/telemetry-logs"; do
+      if [[ -d "$buffer" && ! -L "$buffer" ]]; then find "$buffer" -mindepth 1 -delete; fi
+    done
   fi
   # Replica count alone does not prove old HTTP-speaking processes terminated.
   kube -n flux-system wait pod -l app=livepeer-http-source --for=delete --timeout=120s
@@ -144,9 +165,11 @@ transition_credentials() {
   install -d -m 0700 "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/app-reconciler"
   install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator" \
+    "$INSTALL_DIR/volumes/management-sockets/telemetry"
   chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator" \
+    "$INSTALL_DIR/volumes/management-sockets/telemetry"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
   CONFIG_URL="$api/v1/nodes/$NODE_ID/config"

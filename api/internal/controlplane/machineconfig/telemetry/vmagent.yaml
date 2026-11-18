@@ -3,8 +3,18 @@ global:
   scrape_interval: 30s
   scrape_timeout: 10s
 scrape_configs:
+# node_exporter runs in its own Pod on this node; instance stays stable across
+# Pod restarts.
 - job_name: node-exporter
-  static_configs: [{targets: ['127.0.0.1:20242']}]
+  kubernetes_sd_configs:
+  - role: pod
+    namespaces: {names: [livepeer-telemetry]}
+    selectors: [{role: pod, label: app=livepeer-telemetry-node-exporter, field: 'spec.nodeName=%{NODE_NAME}'}]
+  relabel_configs:
+  - source_labels: [__meta_kubernetes_pod_container_port_name, __meta_kubernetes_pod_phase]
+    regex: 'metrics;Running'
+    action: keep
+  - {source_labels: [__meta_kubernetes_pod_node_name], target_label: instance}
 - job_name: kube-state-metrics
   static_configs: [{targets: ['127.0.0.1:20246']}]
 - job_name: telemetry-agent

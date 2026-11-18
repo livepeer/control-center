@@ -101,7 +101,7 @@
             "uid": "victorialogs"
           },
           "refId": "A",
-          "expr": "{node_id=~\"$node_id\", source=~\"$source\"} ~\"$search\" | stats by (source) count()",
+          "expr": "{node_id=~\"$node_id\", source=~\"$source\"} orchestrator:~\"$orchestrator\" ~\"$search\" | stats by (source) count()",
           "queryType": "statsRange"
         }
       ],
@@ -133,7 +133,7 @@
             "uid": "victorialogs"
           },
           "refId": "A",
-          "expr": "{node_id=~\"$node_id\", source=~\"$source\"} ~\"$search\"",
+          "expr": "{node_id=~\"$node_id\", source=~\"$source\"} orchestrator:~\"$orchestrator\" ~\"$search\"",
           "queryType": "instant",
           "maxLines": 1000
         }

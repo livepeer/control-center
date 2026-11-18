@@ -70,7 +70,7 @@
     },
     {
       "type": "stat",
-      "title": "Machines silent for 5m",
+      "title": "Silent for 5m (seen in 7d)",
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
@@ -88,7 +88,7 @@
             "uid": "victoriametrics"
           },
           "refId": "A",
-          "expr": "count(max by (node_id) (time() - timestamp(up{job=\"node-exporter\", orchestrator=~\"$orchestrator\"})) > 300) or vector(0)",
+          "expr": "count((time() - max by (node_id) (tlast_over_time(up{job=\"node-exporter\", orchestrator=~\"$orchestrator\"}[7d]))) > 300) or vector(0)",
           "instant": true
         }
       ],
@@ -98,7 +98,8 @@
         "w": 6,
         "h": 4
       },
-      "id": 2
+      "id": 2,
+      "description": "Machines that pushed within the last 7 days but not in the last 5 minutes. Machines silent for longer drop out."
     },
     {
       "type": "stat",
@@ -178,7 +179,7 @@
             "uid": "victoriametrics"
           },
           "refId": "A",
-          "expr": "max by (node_id, orchestrator) (time() - timestamp(up{job=\"node-exporter\", orchestrator=~\"$orchestrator\"}))",
+          "expr": "max by (node_id, orchestrator) (time() - tlast_over_time(up{job=\"node-exporter\", orchestrator=~\"$orchestrator\"}[7d]))",
           "instant": true,
           "format": "table"
         },
@@ -222,6 +223,12 @@
           "options": {
             "excludeByName": {
               "Time": true
+            },
+            "renameByName": {
+              "Value #A": "Seconds since last push",
+              "Value #B": "CPU used",
+              "Value #C": "Memory used",
+              "Value #D": "Root disk used"
             }
           }
         }
@@ -232,7 +239,8 @@
         "w": 24,
         "h": 8
       },
-      "id": 5
+      "id": 5,
+      "description": "Machines that pushed within the last 7 days. Silent machines show their last push age and no current stats."
     },
     {
       "type": "timeseries",

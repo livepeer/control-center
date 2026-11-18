@@ -56,6 +56,7 @@ type Server struct {
 	logger         *slog.Logger
 	client         *http.Client
 	build          func(machineconfig.Desired) ([]byte, string, error)
+	machineReport  func(context.Context, machineconfig.Machine, string) (machineconfig.Report, time.Time, error)
 	denialMu       sync.Mutex
 	denials        map[AdminAction]denialWindow
 	tunnels        *tunnel.Manager

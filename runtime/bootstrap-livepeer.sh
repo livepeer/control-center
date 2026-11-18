@@ -14,6 +14,7 @@ INSTALL_DIR='/opt/livepeer'
 CHECK_ONLY=0
 STATUS_ONLY=0
 CREDENTIAL_TRANSITION=''
+UPGRADE_RUNTIME=0
 UNIT='livepeer-k3s.service'
 case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR=${BASH_SOURCE[0]%/*} ;; *) SCRIPT_DIR=. ;; esac
 SCRIPT_DIR=$(cd -- "$SCRIPT_DIR" && pwd -P)
@@ -45,6 +46,7 @@ The API must be reachable from this host and its pods.
   --status            Show local installation progress without changing anything.
   --refresh-credentials  Refresh via a fresh enrollment token and HTTPS, preserving identity.
   --reenroll           Enroll a removed installation as a new lifetime; retain data.
+  --upgrade-runtime    Switch to this release's Runtime image instead of the saved one.
   -h, --help          Show this help without requiring root.
 
 Requires Debian/Ubuntu amd64, systemd, 2 CPUs, 4 GiB RAM,
@@ -62,6 +64,7 @@ parse_args() {
       --status) STATUS_ONLY=1; shift ;;
       --refresh-credentials) CREDENTIAL_TRANSITION=refresh; shift ;;
       --reenroll) CREDENTIAL_TRANSITION=reenroll; shift ;;
+      --upgrade-runtime) UPGRADE_RUNTIME=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac

@@ -67,8 +67,12 @@ func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func grantFor(base string, token string, expires time.Time) management.TelemetryGrant {
-	prefix := base + "/v1/nodes/" + node
-	return management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: node, MetricsURL: prefix + "/telemetry/metrics", LogsURL: prefix + "/telemetry/logs"}
+	return grantForNode(base, node, token, expires)
+}
+
+func grantForNode(base, id, token string, expires time.Time) management.TelemetryGrant {
+	prefix := base + "/v1/nodes/" + id
+	return management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: id, MetricsURL: prefix + "/telemetry/metrics", LogsURL: prefix + "/telemetry/logs"}
 }
 
 func setup(t *testing.T) (*Relay, *grants, *upstream, *time.Time, string) {
@@ -80,7 +84,7 @@ func setup(t *testing.T) (*Relay, *grants, *upstream, *time.Time, string) {
 	g := &grants{next: func(call int) (management.TelemetryGrant, error) {
 		return grantFor(server.URL, "token-"+string(rune('a'+call-1)), now.Add(time.Hour)), nil
 	}}
-	r := NewRelay(g, true, 1<<20)
+	r := NewRelay(g, node, true, 1<<20)
 	r.Now = func() time.Time { return now }
 	return r, g, up, &now, server.URL
 }
@@ -145,6 +149,8 @@ func TestRelayResponses(t *testing.T) {
 		"unavailable": {503, http.Header{"Retry-After": {"30"}}, 503, "30", false},
 		"rejected":    {400, nil, 400, "", false},
 		"disabled":    {403, nil, 403, "", false},
+		// vmagent retries 413 forever; 409 makes it drop the block.
+		"too large": {413, nil, 409, "", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, g, up, _, _ := setup(t)
@@ -162,20 +168,59 @@ func TestRelayResponses(t *testing.T) {
 	}
 	r, _, up, _, _ := setup(t)
 	for _, tc := range []struct {
+		path   string
 		body   []byte
 		length int64
 		want   int
-	}{{[]byte("x"), -1, 411}, {nil, 0, 400}, {make([]byte, 1<<20+1), 1<<20 + 1, 413}} {
-		req := httptest.NewRequest(http.MethodPost, "/metrics/write", bytes.NewReader(tc.body))
+	}{
+		{"/metrics/write", []byte("x"), -1, 411},
+		{"/metrics/write", nil, 0, 400},
+		{"/metrics/write", make([]byte, 1<<20+1), 1<<20 + 1, 409},
+		// Fluent Bit already drops a chunk on 413.
+		{"/logs/insert", make([]byte, 1<<20+1), 1<<20 + 1, 413},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(tc.body))
 		req.ContentLength = tc.length
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		if w.Code != tc.want {
-			t.Fatal(tc.length, w.Code)
+			t.Fatal(tc.path, tc.length, w.Code)
 		}
 	}
 	if len(up.requests) != 0 {
 		t.Fatal("invalid writes forwarded")
+	}
+	up.status = 413
+	if w := write(t, r, "/logs/insert", []byte("x"), nil); w.Code != 413 {
+		t.Fatal("logs 413 changed", w.Code)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(w.Body.String(), "livepeer_telemetry_relay_oversize_dropped_total 1\n") {
+		t.Fatal("oversize drops not counted", w.Body.String())
+	}
+}
+
+// After re-enrollment the management agent grants for the new node. The old
+// bundle's relay must not send its buffered data under that identity.
+func TestRelayPinnedToEnrollment(t *testing.T) {
+	r, g, up, now, base := setup(t)
+	g.next = func(int) (management.TelemetryGrant, error) {
+		return grantForNode(base, "zyxwvutsrqponmlkjihgfedcba", "new-node", now.Add(time.Hour)), nil
+	}
+	for _, path := range []string{"/metrics/write", "/logs/insert"} {
+		if w := write(t, r, path, []byte("x"), nil); w.Code != 503 {
+			t.Fatal(path, w.Code)
+		}
+		*now = now.Add(6 * time.Second)
+	}
+	if len(up.requests) != 0 {
+		t.Fatal("wrote with another node's grant")
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(w.Body.String(), "livepeer_telemetry_relay_grant_node_mismatch_total 2\n") {
+		t.Fatal("mismatch not counted", w.Body.String())
 	}
 }
 
@@ -233,7 +278,7 @@ func TestRelayGrantFailuresAndValidation(t *testing.T) {
 	if !r.validGrant(valid, *now) {
 		t.Fatal("refused valid development grant")
 	}
-	strict := NewRelay(nil, false, 1<<20)
+	strict := NewRelay(nil, node, false, 1<<20)
 	if strict.validGrant(valid, *now) {
 		t.Fatal("HTTP destination accepted without development transport")
 	}

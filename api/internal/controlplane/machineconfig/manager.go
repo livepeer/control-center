@@ -24,6 +24,7 @@ type Config struct {
 	StopSignals             bool
 	Telemetry               bool
 	TelemetryAppLogs        bool
+	TelemetryMaxBody        int64
 }
 
 type Dependencies struct {
@@ -32,6 +33,7 @@ type Dependencies struct {
 	Logger   *slog.Logger
 	Exposure func(json.RawMessage) (*Exposure, error)
 	Build    func(Desired) ([]byte, string, error)
+	Report   func(context.Context, Machine, string) (Report, time.Time, error)
 }
 
 type Manager struct {
@@ -47,7 +49,11 @@ func New(config Config, deps Dependencies) *Manager {
 	if deps.Build == nil {
 		deps.Build = Build
 	}
-	return &Manager{config: config, store: Store{deps.DB}, deps: deps}
+	store := Store{deps.DB}
+	if deps.Report == nil {
+		deps.Report = store.Report
+	}
+	return &Manager{config: config, store: store, deps: deps}
 }
 
 func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
@@ -65,18 +71,21 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	}
 
 	d := Desired{IngressPublicKeys: s.config.IngressPublicKeys, Onchain: p, OnchainError: err, Machine: m, State: state, Exposure: exposure, Connector: connector, ControlAPIURL: s.config.APIURL, RuntimeImage: s.config.RuntimeImage, NodeImage: s.config.NodeImage, NodeDrainTimeout: s.config.NodeDrainTimeout, StopSignals: s.config.StopSignals, DrainTimeout: s.drainTimeout(),
-		TelemetryEnabled: s.config.Telemetry, TelemetryAppLogs: s.config.TelemetryAppLogs}
+		TelemetryEnabled: s.config.Telemetry, TelemetryAppLogs: s.config.TelemetryAppLogs, TelemetryMaxBody: s.config.TelemetryMaxBody}
 	var r Report
 	var at time.Time
 	e := sql.ErrNoRows
 	if s.store.DB != nil && (p.Onchain() || (s.config.Telemetry && !m.Terminal)) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		r, at, e = s.store.Report(ctx, m, "runtime")
+		r, at, e = s.deps.Report(ctx, m, "runtime")
 		cancel()
 	}
 	// The latest report decides capability regardless of age: host features
 	// change only when bootstrap reruns, not when a machine goes offline.
 	d.TelemetryCapable = e == nil && TelemetryCapable(r.Software)
+	if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		d.ReportError = e
+	}
 	if p.Onchain() && s.store.DB != nil {
 		target := d
 		target.State.HeldOrchestrator, target.State.HeldUpgradePlan = "", ""
@@ -199,6 +208,12 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		return err
 	}
 	desired := s.Desired(m, record.State, exposure)
+	if desired.ReportError != nil && desired.TelemetryEnabled && !m.Terminal {
+		// Without the report, telemetry capability is unknown; publishing
+		// would remove a running agent.
+		s.deps.Logger.Warn("keeping previous configuration", "node_id", m.NodeID, "reason", "report_unavailable")
+		return nil
+	}
 	if m.Terminal {
 		var prior []byte
 		if s.store.DB.QueryRowContext(ctx, `SELECT retained_bundle FROM lpcc.enrollments WHERE node_id=$1`, m.NodeID).Scan(&prior) == nil {

@@ -248,6 +248,30 @@ install_machine_secret
         stopped = next(i for i, x in enumerate(steps) if 'wait pod -l app=orchestrator' in x)
         self.assertLess(stopped, steps.index('refresh'))
 
+    def test_reenrollment_drops_telemetry_backlog_before_issuing_credentials(self):
+        outside = self.root / 'outside'
+        outside.write_text('keep')
+        buffers = [self.root / 'volumes/telemetry', self.root / 'volumes/telemetry-logs']
+        for buffer in buffers:
+            (buffer / ('a' * 26)).mkdir(parents=True)
+            (buffer / ('a' * 26) / 'chunk').write_text('old enrollment')
+            (buffer / 'link').symlink_to(outside)
+        result = self.transition(mode='refresh')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((buffers[0] / ('a' * 26) / 'chunk').exists(), 'refresh keeps the same identity')
+        result = self.transition(mode='reenroll')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for buffer in buffers:
+            self.assertTrue(buffer.is_dir())
+            self.assertEqual(list(buffer.iterdir()), [])
+        self.assertEqual(outside.read_text(), 'keep')
+        steps = (self.root / 'steps').read_text().splitlines()
+        reenroll = steps[next(i for i, x in enumerate(steps) if 'wait pod -l app=orchestrator' in x):]
+        deleted = next(i for i, x in enumerate(reenroll) if 'delete deployment/livepeer-telemetry-agent deployment/livepeer-telemetry-node-exporter' in x)
+        gone = max(i for i, x in enumerate(reenroll) if 'wait pod -l app=livepeer-telemetry' in x)
+        self.assertLess(deleted, gone)
+        self.assertLess(gone, reenroll.index('refresh'))
+
     def test_reenrollment_rejects_empty_or_multinode_clusters_before_issuance(self):
         for nodes in ('', 'node/one\nnode/two'):
             result = self.transition(mode='reenroll', nodes=nodes)

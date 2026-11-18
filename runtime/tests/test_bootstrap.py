@@ -404,13 +404,34 @@ authenticate_node
             return self.shell(setup + extra + '; runtime_image; printf "%s" "$RUNTIME_IMAGE"', str(install), str(release))
         result = selected(':')
         self.assertEqual(result.stdout, default, result.stderr)
+        self.assertNotIn('Keeping the saved Runtime image', result.stderr)
         (install / 'state/runtime-image').write_text(saved + '\n')
-        self.assertEqual(selected(':').stdout, saved)
+        result = selected(':')
+        self.assertEqual(result.stdout, saved)
+        # Reruns keep the saved image but say how to adopt the release's.
+        self.assertIn('Keeping the saved Runtime image ' + saved, result.stderr)
+        self.assertIn('ships ' + default, result.stderr)
+        self.assertIn('--upgrade-runtime', result.stderr)
+        self.assertEqual(selected('UPGRADE_RUNTIME=1').stdout, default)
         self.assertEqual(selected('LIVEPEER_RUNTIME_IMAGE=' + override).stdout, override)
+        self.assertEqual(selected('UPGRADE_RUNTIME=1 LIVEPEER_RUNTIME_IMAGE=' + override).stdout, override)
         for value in ('', 'registry.example/runtime:latest'):
             self.assertNotEqual(selected('LIVEPEER_RUNTIME_IMAGE=' + value).returncode, 0)
+        (release / 'release-runtime-image').unlink()
+        result = selected('UPGRADE_RUNTIME=1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--upgrade-runtime requires', result.stderr)
+        self.assertNotIn('Keeping the saved', selected(':').stderr)
         (install / 'state/runtime-image').write_text('invalid-saved-image\n')
         self.assertNotEqual(selected(':').returncode, 0)
+
+    def test_upgrade_runtime_flag_is_parsed_and_documented(self):
+        result = self.shell('parse_args --upgrade-runtime; printf "%s" "$UPGRADE_RUNTIME"')
+        self.assertEqual(result.stdout, '1', result.stderr)
+        result = self.shell('parse_args; printf "%s" "$UPGRADE_RUNTIME"')
+        self.assertEqual(result.stdout, '0', result.stderr)
+        help_text = subprocess.run(['bash', str(SCRIPT), '--help'], text=True, capture_output=True).stdout
+        self.assertIn('--upgrade-runtime', help_text)
 
     def test_direct_entry_consumes_environment_before_helpers_even_with_export_and_trace(self):
         for options in ([], ['-a'], ['-x'], ['-ax']):

@@ -29,8 +29,11 @@ const (
 var results = []string{"2xx", "4xx", "5xx", "unavailable"}
 
 type Relay struct {
-	Grants    transport.Requester
-	Client    *http.Client
+	Grants transport.Requester
+	Client *http.Client
+	// NodeID pins the relay to its bundle's enrollment. A grant for any other
+	// node is refused, so buffered data never leaves under a new identity.
+	NodeID    string
 	AllowHTTP bool
 	MaxBody   int64
 	Now       func() time.Time
@@ -42,9 +45,11 @@ type Relay struct {
 
 	requests      map[[2]string]*atomic.Uint64
 	grantFailures atomic.Uint64
+	grantMismatch atomic.Uint64
+	oversizeDrops atomic.Uint64
 }
 
-func NewRelay(grants transport.Requester, allowHTTP bool, maxBody int64) *Relay {
+func NewRelay(grants transport.Requester, nodeID string, allowHTTP bool, maxBody int64) *Relay {
 	client := &http.Client{
 		Timeout:       45 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -58,7 +63,7 @@ func NewRelay(grants transport.Requester, allowHTTP bool, maxBody int64) *Relay 
 			ForceAttemptHTTP2:     true,
 		},
 	}
-	r := &Relay{Grants: grants, Client: client, AllowHTTP: allowHTTP, MaxBody: maxBody, requests: map[[2]string]*atomic.Uint64{}}
+	r := &Relay{Grants: grants, Client: client, NodeID: nodeID, AllowHTTP: allowHTTP, MaxBody: maxBody, requests: map[[2]string]*atomic.Uint64{}}
 	for _, kind := range []string{kindMetrics, kindLogs} {
 		for _, result := range results {
 			r.requests[[2]string{kind, result}] = new(atomic.Uint64)
@@ -77,7 +82,7 @@ func (r *Relay) now() time.Time {
 // validGrant requires both destinations to share one origin and the approved
 // machine operation paths, so a grant cannot point writes anywhere else.
 func (r *Relay) validGrant(g management.TelemetryGrant, now time.Time) bool {
-	if g.Token == "" || len(g.Token) > 4096 || g.NodeID == "" || !g.ExpiresAt.After(now) {
+	if g.Token == "" || len(g.Token) > 4096 || g.NodeID == "" || g.NodeID != r.NodeID || !g.ExpiresAt.After(now) {
 		return false
 	}
 	metrics, err1 := url.Parse(g.MetricsURL)
@@ -114,6 +119,12 @@ func (r *Relay) current(ctx context.Context) (*management.TelemetryGrant, error)
 	var g management.TelemetryGrant
 	if err == nil && (transport.Decode(b, &g) != nil || !r.validGrant(g, now)) {
 		err = errors.New("telemetry_grant_invalid")
+		if g.NodeID != "" && g.NodeID != r.NodeID {
+			// After re-enrollment the management agent grants for the new
+			// node while this relay still belongs to the old bundle.
+			r.grantMismatch.Add(1)
+			err = errors.New("telemetry_grant_node_mismatch")
+		}
 	}
 	if err != nil {
 		r.grantFailures.Add(1)
@@ -176,7 +187,7 @@ func (r *Relay) forward(w http.ResponseWriter, req *http.Request, kind string) {
 		http.Error(w, "empty body", http.StatusBadRequest)
 		return
 	case size > r.MaxBody:
-		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		r.tooLarge(w, kind)
 		return
 	}
 	g, err := r.current(req.Context())
@@ -221,6 +232,9 @@ func (r *Relay) forward(w http.ResponseWriter, req *http.Request, kind string) {
 		w.Header().Set("Retry-After", "1")
 	case status/100 == 3:
 		status = http.StatusBadGateway
+	case status == http.StatusRequestEntityTooLarge:
+		r.tooLarge(w, kind)
+		return
 	case status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable:
 		if retry := resp.Header.Get("Retry-After"); retry != "" && len(retry) <= 16 {
 			w.Header().Set("Retry-After", retry)
@@ -237,6 +251,19 @@ func (r *Relay) forward(w http.ResponseWriter, req *http.Request, kind string) {
 	w.WriteHeader(status)
 }
 
+// tooLarge refuses a write that exceeds the body limit. vmagent retries 413
+// forever on its single queue, so a metrics block buffered before the limit
+// was lowered gets 409, which vmagent drops. Fluent Bit already drops 413.
+func (r *Relay) tooLarge(w http.ResponseWriter, kind string) {
+	status := http.StatusRequestEntityTooLarge
+	if kind == kindMetrics {
+		status = http.StatusConflict
+		r.oversizeDrops.Add(1)
+	}
+	r.requests[[2]string{kind, "4xx"}].Add(1)
+	http.Error(w, "body too large", status)
+}
+
 func (r *Relay) metrics(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	for _, kind := range []string{kindMetrics, kindLogs} {
@@ -245,6 +272,8 @@ func (r *Relay) metrics(w http.ResponseWriter) {
 		}
 	}
 	fmt.Fprintf(w, "livepeer_telemetry_relay_grant_failures_total %d\n", r.grantFailures.Load())
+	fmt.Fprintf(w, "livepeer_telemetry_relay_grant_node_mismatch_total %d\n", r.grantMismatch.Load())
+	fmt.Fprintf(w, "livepeer_telemetry_relay_oversize_dropped_total %d\n", r.oversizeDrops.Load())
 	r.mu.Lock()
 	expires := int64(0)
 	if r.grant != nil {

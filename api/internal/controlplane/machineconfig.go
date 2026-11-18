@@ -19,7 +19,7 @@ func (s *Server) newConfigurationManager() *machineconfig.Manager {
 	if p.jwtKey != nil {
 		public = p.jwtKey.Keys.JSON()
 	}
-	return machineconfig.New(machineconfig.Config{IngressPublicKeys: public, APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Telemetry: p.TelemetryEnabled, TelemetryAppLogs: p.TelemetryAppLogsEnabled, Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
+	return machineconfig.New(machineconfig.Config{IngressPublicKeys: public, APIURL: p.PublicAPIURL, DrainTimeout: p.TunnelDrainTimeout, StatusTTL: p.TunnelStatusTTL, RuntimeImage: p.RuntimeImage, NodeImage: p.RuntimeNodeImage, NodeDrainTimeout: &p.RuntimeNodeDrainTimeout, StopSignals: p.AppStopSignals, Telemetry: p.TelemetryEnabled, TelemetryAppLogs: p.TelemetryAppLogsEnabled, TelemetryMaxBody: int64(p.TelemetryMaxBodyBytes), Connector: machineconfig.ConnectorConfig{Image: p.RuntimeConnectorImage, NodeAddresses: p.TunnelNodeAddresses}}, machineconfig.Dependencies{DB: s.db, Logger: s.logger,
 		Onchain: func(ctx context.Context, m machineconfig.Machine) (onchain.Config, error) {
 			var c onchain.Config
 			var err error
@@ -38,7 +38,8 @@ func (s *Server) newConfigurationManager() *machineconfig.Manager {
 			err := json.Unmarshal(raw, &r)
 			return exposure(r), err
 		},
-		Build: func(d machineconfig.Desired) ([]byte, string, error) { return s.build(d) },
+		Build:  func(d machineconfig.Desired) ([]byte, string, error) { return s.build(d) },
+		Report: s.machineReport,
 	})
 }
 

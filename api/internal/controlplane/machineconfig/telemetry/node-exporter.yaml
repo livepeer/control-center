@@ -1,0 +1,71 @@
+# node_exporter reads the host's /proc, /sys and / in its own Pod. UID 65533 owns
+# nothing on the host, and the Pod gets no service-account token, shared group or
+# shared loopback, so it reaches only world-accessible host paths. It never sees
+# 65532-owned management sockets or workload state.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: livepeer-telemetry-node-exporter, namespace: livepeer-telemetry}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: livepeer-telemetry-node-exporter}}
+  template:
+    metadata:
+      labels: {app: livepeer-telemetry-node-exporter}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {livepeer.io/node-id: '@NODE_ID@'}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65533
+        runAsGroup: 65533
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: node-exporter
+        # node_exporter v1.12.1. Host network counters come from kubelet cAdvisor.
+        image: quay.io/prometheus/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+        args:
+        - --web.listen-address=:9100
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        - --path.rootfs=/host/root
+        - --collector.disable-defaults
+        - --collector.cpu
+        - --collector.cpufreq
+        - --collector.diskstats
+        - --collector.filefd
+        - --collector.filesystem
+        - --collector.hwmon
+        - --collector.loadavg
+        - --collector.meminfo
+        - --collector.os
+        - --collector.pressure
+        - --collector.stat
+        - --collector.thermal_zone
+        - --collector.time
+        - --collector.uname
+        - --collector.vmstat
+        - --collector.filesystem.mount-points-exclude=^(/(dev|proc|run|sys|var/lib/containerd|var/lib/kubelet)|@INSTALL_DIR@/(k3s|kubelet))($|/)
+        - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tmpfs|tracefs)$
+        ports:
+        - {name: metrics, containerPort: 9100, protocol: TCP}
+        resources:
+          requests: {cpu: 10m, memory: 24Mi}
+          limits: {memory: 64Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: proc, mountPath: /host/proc, readOnly: true}
+        - {name: sys, mountPath: /host/sys, readOnly: true}
+        - {name: root, mountPath: /host/root, readOnly: true, mountPropagation: HostToContainer}
+      volumes:
+      - name: proc
+        hostPath: {path: /proc, type: Directory}
+      - name: sys
+        hostPath: {path: /sys, type: Directory}
+      - name: root
+        hostPath: {path: /, type: Directory}

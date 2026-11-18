@@ -1,5 +1,6 @@
-# One Pod collects host and workload telemetry on the Pod network. Every agent
-# listens on the Pod loopback only; the relay alone holds the write token.
+# One Pod collects workload telemetry and host logs on the Pod network. Every
+# agent listens on the Pod loopback only; the relay alone holds the write token.
+# node_exporter runs in its own Pod; see node-exporter.yaml.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: livepeer-telemetry-agent, namespace: livepeer-telemetry}
@@ -26,7 +27,8 @@ spec:
       - name: relay
         image: '@RUNTIME_IMAGE@'
         command: [/usr/local/bin/livepeer-runtime, telemetry-relay]
-        args: [--listen, '127.0.0.1:20244', --socket, /management/control.sock, --transport, '@CONTROL_TRANSPORT@']
+        # The relay accepts grants only for this enrollment's node.
+        args: [--listen, '127.0.0.1:20244', --socket, /management/control.sock, --transport, '@CONTROL_TRANSPORT@', --node-id, '@NODE_ID@', --max-body-bytes, '@TELEMETRY_MAX_BODY@']
         resources:
           requests: {cpu: 5m, memory: 16Mi}
           limits: {memory: 64Mi}
@@ -45,10 +47,15 @@ spec:
         - -remoteWrite.url=http://127.0.0.1:20244/metrics/write
         - -remoteWrite.relabelConfig=/etc/telemetry/relabel.yaml
         - -remoteWrite.forceVMProto=true
-        - -remoteWrite.maxBlockSize=4MB
+        # Uncompressed blocks stay below Control Center's body limit.
+        - -remoteWrite.maxBlockSize=@TELEMETRY_BLOCK_BYTES@
         - -remoteWrite.queues=1
-        - -remoteWrite.tmpDataPath=/buffer/vmagent
-        - -remoteWrite.maxDiskUsagePerURL=256MB
+        # Each enrollment buffers separately, so a backlog is never sent as
+        # another identity.
+        - -remoteWrite.tmpDataPath=/buffer/@NODE_ID@
+        # vmagent's minimum queue size (16 chunk files of 32 MiB + 8 bytes);
+        # smaller values are rounded up to this.
+        - -remoteWrite.maxDiskUsagePerURL=536871040
         - -loggerLevel=WARN
         env:
         - name: HOST_IP
@@ -66,43 +73,6 @@ spec:
         - {name: config, mountPath: /etc/telemetry, readOnly: true}
         - {name: buffer, mountPath: /buffer}
         - {name: tmp, mountPath: /tmp}
-      - name: node-exporter
-        # node_exporter v1.12.1. Host network counters come from kubelet cAdvisor.
-        image: quay.io/prometheus/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
-        args:
-        - --web.listen-address=127.0.0.1:20242
-        - --path.procfs=/host/proc
-        - --path.sysfs=/host/sys
-        - --path.rootfs=/host/root
-        - --collector.disable-defaults
-        - --collector.cpu
-        - --collector.cpufreq
-        - --collector.diskstats
-        - --collector.filefd
-        - --collector.filesystem
-        - --collector.hwmon
-        - --collector.loadavg
-        - --collector.meminfo
-        - --collector.os
-        - --collector.pressure
-        - --collector.stat
-        - --collector.thermal_zone
-        - --collector.time
-        - --collector.uname
-        - --collector.vmstat
-        - --collector.filesystem.mount-points-exclude=^(/(dev|proc|run|sys|var/lib/containerd|var/lib/kubelet)|@INSTALL_DIR@/(k3s|kubelet))($|/)
-        - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tmpfs|tracefs)$
-        resources:
-          requests: {cpu: 10m, memory: 24Mi}
-          limits: {memory: 64Mi}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: {drop: [ALL]}
-        volumeMounts:
-        - {name: proc, mountPath: /host/proc, readOnly: true}
-        - {name: sys, mountPath: /host/sys, readOnly: true}
-        - {name: root, mountPath: /host/root, readOnly: true, mountPropagation: HostToContainer}
       - name: kube-state-metrics
         # kube-state-metrics v2.20.0
         image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0@sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b
@@ -161,9 +131,3 @@ spec:
         hostPath: {path: /run/log, type: Directory}
       - name: machine-id
         hostPath: {path: /etc/machine-id, type: File}
-      - name: proc
-        hostPath: {path: /proc, type: Directory}
-      - name: sys
-        hostPath: {path: /sys, type: Directory}
-      - name: root
-        hostPath: {path: /, type: Directory}

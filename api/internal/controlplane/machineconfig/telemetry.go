@@ -49,6 +49,8 @@ func addTelemetry(files map[string][]byte, m Desired) error {
 		}
 		appLogs = string(input)
 	}
+	body, block := telemetryWriteLimits(m.TelemetryMaxBody)
+	limits := strings.NewReplacer("@TELEMETRY_MAX_BODY@", strconv.FormatInt(body, 10), "@TELEMETRY_BLOCK_BYTES@", strconv.FormatInt(block, 10))
 	return fs.WalkDir(telemetryTemplates, "telemetry", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || path == "telemetry/app-logs.conf" {
 			return err
@@ -58,13 +60,32 @@ func addTelemetry(files map[string][]byte, m Desired) error {
 			return err
 		}
 		// App container output is collected only while TelemetryAppLogs allows it.
-		data = []byte(templateValues(m).Replace(strings.ReplaceAll(string(data), "@APP_LOGS_INPUT@\n", appLogs)))
-		if bytes.Contains(data, []byte("@INSTALL_DIR@")) || bytes.Contains(data, []byte("@NODE_ID@")) || bytes.Contains(data, []byte("@RUNTIME_IMAGE@")) || bytes.Contains(data, []byte("@APP_LOGS_INPUT@")) {
-			return fmt.Errorf("unresolved telemetry template value")
+		data = []byte(limits.Replace(templateValues(m).Replace(strings.ReplaceAll(string(data), "@APP_LOGS_INPUT@\n", appLogs))))
+		for _, value := range []string{"@INSTALL_DIR@", "@NODE_ID@", "@RUNTIME_IMAGE@", "@CONTROL_TRANSPORT@", "@APP_LOGS_INPUT@", "@TELEMETRY_MAX_BODY@", "@TELEMETRY_BLOCK_BYTES@"} {
+			if bytes.Contains(data, []byte(value)) {
+				return fmt.Errorf("unresolved telemetry template value")
+			}
 		}
 		files["system/"+path] = data
 		return nil
 	})
+}
+
+const (
+	defaultTelemetryMaxBody = 8 << 20
+	maxTelemetryBlock       = 4_000_000
+	// Compression and framing can add a little to a full block.
+	telemetryBlockMargin = 64 << 10
+)
+
+// telemetryWriteLimits returns the relay's body limit and vmagent's largest
+// uncompressed block for Control Center's ingest limit. vmagent splits larger
+// blocks, so a compressed write never exceeds the limit.
+func telemetryWriteLimits(maxBody int64) (body, block int64) {
+	if maxBody <= 0 {
+		maxBody = defaultTelemetryMaxBody
+	}
+	return maxBody, min(maxTelemetryBlock, maxBody-telemetryBlockMargin)
 }
 
 // telemetryNodeIngress admits the telemetry agent to Node's metrics port.

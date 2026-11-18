@@ -1,6 +1,7 @@
 package machineconfig
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,59 @@ func telemetryDesired() Desired {
 	return Desired{IngressPublicKeys: []byte(`{"1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`), Machine: Machine{NodeID: "vkvkvkvkvkvkuaaaaaaaaaaaaa", CredentialVersion: 1, InstallDir: "/opt/livepeer", K3sVersion: "v1.37.2+k3s1"},
 		RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), ControlAPIURL: "https://api.example", State: State{Lifecycle: "active"},
 		TelemetryEnabled: true, TelemetryCapable: true, TelemetryAppLogs: true}
+}
+
+type telemetryContainer struct {
+	Name            string
+	Image           string
+	Args            []string
+	Ports           []map[string]any
+	SecurityContext struct {
+		RunAsUser                *int  `yaml:"runAsUser"`
+		AllowPrivilegeEscalation *bool `yaml:"allowPrivilegeEscalation"`
+		ReadOnlyRootFilesystem   bool  `yaml:"readOnlyRootFilesystem"`
+		Capabilities             struct{ Drop, Add []string }
+	} `yaml:"securityContext"`
+}
+
+type telemetryPod struct {
+	HostNetwork                  bool  `yaml:"hostNetwork"`
+	HostPID                      bool  `yaml:"hostPID"`
+	AutomountServiceAccountToken *bool `yaml:"automountServiceAccountToken"`
+	SecurityContext              struct {
+		RunAsUser          *int  `yaml:"runAsUser"`
+		FSGroup            *int  `yaml:"fsGroup"`
+		SupplementalGroups []int `yaml:"supplementalGroups"`
+	} `yaml:"securityContext"`
+	Containers []telemetryContainer
+	Volumes    []struct {
+		Name     string
+		HostPath *struct{ Path string } `yaml:"hostPath"`
+	}
+}
+
+func telemetryPodSpec(t *testing.T, data []byte) telemetryPod {
+	t.Helper()
+	var deployment struct {
+		Spec struct {
+			Template struct{ Spec telemetryPod }
+		}
+	}
+	if err := yaml.Unmarshal(data, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	return deployment.Spec.Template.Spec
+}
+
+func restricted(t *testing.T, c telemetryContainer) {
+	t.Helper()
+	sc := c.SecurityContext
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation || !sc.ReadOnlyRootFilesystem || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" || len(sc.Capabilities.Add) != 0 {
+		t.Fatal("container not restricted", c.Name)
+	}
+	if c.Name != "relay" && !strings.Contains(c.Image, "@sha256:") {
+		t.Fatal("unpinned image", c.Image)
+	}
 }
 
 func bundleFiles(t *testing.T, m Desired) map[string][]byte {
@@ -72,51 +126,31 @@ func TestTelemetryBundleIsGatedAndNeverDrainsNode(t *testing.T) {
 	}
 	agent := string(files["system/telemetry/agent.yaml"])
 	for _, want := range []string{"image: 'registry.invalid/runtime@sha256:", "livepeer.io/node-id: 'vkvkvkvkvkvkuaaaaaaaaaaaaa'", "path: '/opt/livepeer/volumes/management-sockets/telemetry'",
-		"path: '/opt/livepeer/volumes/telemetry'", "--transport, 'https'", "/opt/livepeer/(k3s|kubelet))"} {
+		"path: '/opt/livepeer/volumes/telemetry'", "--transport, 'https'", "--node-id, 'vkvkvkvkvkvkuaaaaaaaaaaaaa'",
+		"-remoteWrite.tmpDataPath=/buffer/vkvkvkvkvkvkuaaaaaaaaaaaaa\n", "-remoteWrite.maxDiskUsagePerURL=536871040\n"} {
 		if !strings.Contains(agent, want) {
 			t.Fatal("agent missing", want)
 		}
 	}
-	var deployment struct {
-		Spec struct {
-			Template struct {
-				Spec struct {
-					HostNetwork bool `yaml:"hostNetwork"`
-					HostPID     bool `yaml:"hostPID"`
-					Containers  []struct {
-						Name            string
-						Image           string
-						Args            []string
-						Ports           []map[string]any
-						SecurityContext struct {
-							RunAsUser                *int  `yaml:"runAsUser"`
-							AllowPrivilegeEscalation *bool `yaml:"allowPrivilegeEscalation"`
-							ReadOnlyRootFilesystem   bool  `yaml:"readOnlyRootFilesystem"`
-							Capabilities             struct{ Drop, Add []string }
-						} `yaml:"securityContext"`
-					}
-				}
-			}
-		}
-	}
-	if err := yaml.Unmarshal(files["system/telemetry/agent.yaml"], &deployment); err != nil {
-		t.Fatal(err)
-	}
-	spec := deployment.Spec.Template.Spec
-	if spec.HostNetwork || spec.HostPID || len(spec.Containers) != 5 {
+	spec := telemetryPodSpec(t, files["system/telemetry/agent.yaml"])
+	if spec.HostNetwork || spec.HostPID || len(spec.Containers) != 4 {
 		t.Fatal("telemetry Pod must stay on the Pod network", spec.HostNetwork, spec.HostPID, len(spec.Containers))
 	}
+	// The host's root, /proc and /sys are visible only to node_exporter.
+	for _, v := range spec.Volumes {
+		if v.HostPath != nil && (v.HostPath.Path == "/" || v.HostPath.Path == "/proc" || v.HostPath.Path == "/sys") {
+			t.Fatal("agent Pod mounts host", v.HostPath.Path)
+		}
+	}
 	for _, c := range spec.Containers {
-		sc := c.SecurityContext
-		if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation || !sc.ReadOnlyRootFilesystem || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" || len(sc.Capabilities.Add) != 0 || len(c.Ports) != 0 {
-			t.Fatal("container not restricted", c.Name)
+		restricted(t, c)
+		if len(c.Ports) != 0 {
+			t.Fatal("agent container exposes a port", c.Name)
 		}
 		// Only the log reader runs as UID 0, and it has no capabilities.
+		sc := c.SecurityContext
 		if (sc.RunAsUser != nil && *sc.RunAsUser == 0) != (c.Name == "fluent-bit") {
 			t.Fatal("unexpected root container", c.Name)
-		}
-		if c.Name != "relay" && !strings.Contains(c.Image, "@sha256:") {
-			t.Fatal("unpinned image", c.Image)
 		}
 		// Agents listen only on the Pod loopback.
 		for i, arg := range c.Args {
@@ -131,10 +165,32 @@ func TestTelemetryBundleIsGatedAndNeverDrainsNode(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(string(files["system/telemetry/network.yaml"]), "ingress: []") {
-		t.Fatal("telemetry Pod accepts connections")
+	exporter := telemetryPodSpec(t, files["system/telemetry/node-exporter.yaml"])
+	// node_exporter shares no UID, group, token or loopback with management
+	// workloads, so host paths owned by 65532 stay out of its reach.
+	es := exporter.SecurityContext
+	if exporter.HostNetwork || exporter.HostPID || exporter.AutomountServiceAccountToken == nil || *exporter.AutomountServiceAccountToken ||
+		es.RunAsUser == nil || *es.RunAsUser != 65533 || es.FSGroup != nil || len(es.SupplementalGroups) != 0 || len(exporter.Containers) != 1 {
+		t.Fatal("node_exporter Pod not isolated", exporter)
+	}
+	restricted(t, exporter.Containers[0])
+	if c := exporter.Containers[0]; c.SecurityContext.RunAsUser != nil || !strings.Contains(strings.Join(c.Args, " "), "--web.listen-address=:9100 ") ||
+		!strings.Contains(strings.Join(c.Args, " "), "/opt/livepeer/(k3s|kubelet))") {
+		t.Fatal("node_exporter container", c.Args)
+	}
+	network := string(files["system/telemetry/network.yaml"])
+	if !strings.Contains(network, "ingress: []") || !strings.Contains(network, "podSelector: {matchLabels: {app: livepeer-telemetry-node-exporter}}") ||
+		!strings.Contains(network, "- podSelector: {matchLabels: {app: livepeer-telemetry-agent}}\n    ports: [{protocol: TCP, port: 9100}]") {
+		t.Fatal("telemetry network policy", network)
+	}
+	if !strings.Contains(string(files["system/telemetry/vmagent.yaml"]), "label: app=livepeer-telemetry-node-exporter, field: 'spec.nodeName=%{NODE_NAME}'") {
+		t.Fatal("vmagent does not scrape this node's node_exporter")
 	}
 	logs := string(files["system/telemetry/fluent-bit.conf"])
+	// Log buffers and tail positions belong to this enrollment.
+	if strings.Contains(logs, "/buffer/fluent-bit") || strings.Count(logs, "/buffer/vkvkvkvkvkvkuaaaaaaaaaaaaa") != 6 {
+		t.Fatal("log buffers not scoped to the enrollment", logs)
+	}
 	if !strings.Contains(logs, "tag                 pod.app") || !strings.Contains(logs, "/opt/livepeer/logs/pods/livepeer-apps_*/*/*.log") || files["system/telemetry/app-logs.conf"] != nil {
 		t.Fatal("app log input missing", logs)
 	}
@@ -197,9 +253,33 @@ func TestTelemetryKustomizationBuilds(t *testing.T) {
 		t.Fatal(string(out))
 	}
 	rendered := string(out)
-	for _, want := range []string{"name: livepeer-telemetry-config-", "kind: ClusterRole", "kind: NetworkPolicy", "kind: Deployment", "-remoteWrite.url=http://127.0.0.1:20244/metrics/write"} {
+	for _, want := range []string{"name: livepeer-telemetry-config-", "kind: ClusterRole", "kind: NetworkPolicy", "kind: Deployment", "-remoteWrite.url=http://127.0.0.1:20244/metrics/write", "name: livepeer-telemetry-node-exporter\n  namespace: livepeer-telemetry"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatal("rendered telemetry missing", want)
+		}
+	}
+}
+
+// Agents never send a body larger than Control Center accepts, so vmagent's
+// single queue cannot stall on a 413.
+func TestTelemetryWriteLimitsFollowIngestLimit(t *testing.T) {
+	for _, tc := range []struct {
+		max, body, block int64
+	}{{0, 8 << 20, 4_000_000}, {8 << 20, 8 << 20, 4_000_000}, {64 << 20, 64 << 20, 4_000_000}, {1 << 20, 1 << 20, 1<<20 - 64<<10}, {4 << 20, 4 << 20, 4_000_000}} {
+		body, block := telemetryWriteLimits(tc.max)
+		if body != tc.body || block != tc.block || block > body-telemetryBlockMargin {
+			t.Fatal(tc.max, body, block)
+		}
+		m := telemetryDesired()
+		m.TelemetryMaxBody = tc.max
+		agent := string(bundleFiles(t, m)["system/telemetry/agent.yaml"])
+		if !strings.Contains(agent, fmt.Sprintf("--max-body-bytes, '%d'", tc.body)) || !strings.Contains(agent, fmt.Sprintf("-remoteWrite.maxBlockSize=%d\n", tc.block)) {
+			t.Fatal("rendered limits", tc.max, agent)
+		}
+		without := m
+		without.TelemetryEnabled = false
+		if Digest(m) != Digest(without) {
+			t.Fatal("ingest limit changed the Node drain digest")
 		}
 	}
 }

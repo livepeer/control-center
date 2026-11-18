@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -608,6 +611,35 @@ func TestTelemetryDeliveredOnlyAfterHostFeatureReport(t *testing.T) {
 	if !strings.Contains(bundle(capable["node_id"])["system/node/network.yaml"], "livepeer-telemetry") {
 		t.Fatal("telemetry agent cannot reach Node metrics")
 	}
+	// A failed report read leaves capability unknown. Publishing would remove
+	// the running agent, so the previous bundle stays even when it is stale.
+	digest := func() (d string) {
+		t.Helper()
+		if err := s.db.QueryRow(`SELECT sha256 FROM lpcc.machine_configs WHERE node_id=$1`, capable["node_id"]).Scan(&d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	published := digest()
+	s.machineReport = func(context.Context, machineconfig.Machine, string) (machineconfig.Report, time.Time, error) {
+		return machineconfig.Report{}, time.Time{}, context.DeadlineExceeded
+	}
+	s.params.TelemetryAppLogsEnabled = false
+	s.configs = s.newConfigurationManager()
+	if err := s.configs.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !delivered(capable["node_id"]) || digest() != published {
+		t.Fatal("report read failure changed the published bundle")
+	}
+	s.machineReport = nil
+	s.configs = s.newConfigurationManager()
+	if err := s.configs.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !delivered(capable["node_id"]) || digest() == published {
+		t.Fatal("bundle not updated once the report was readable")
+	}
 	s.params.TelemetryEnabled = false
 	s.configs = s.newConfigurationManager()
 	if err := s.configs.Reconcile(t.Context()); err != nil {
@@ -642,7 +674,7 @@ func TestTelemetryVmagentThroughRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	relay := telemetry.NewRelay(relayGrants{management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: telemetryNode, MetricsURL: base + "/telemetry/metrics", LogsURL: base + "/telemetry/logs"}}, true, 8<<20)
+	relay := telemetry.NewRelay(relayGrants{management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: telemetryNode, MetricsURL: base + "/telemetry/metrics", LogsURL: base + "/telemetry/logs"}}, telemetryNode, true, 8<<20)
 	relayAddress := freeAddress(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -687,6 +719,77 @@ func TestTelemetryVmagentThroughRelay(t *testing.T) {
 	}
 }
 
+// Blocks buffered before the ingest limit was lowered exceed it. Control
+// Center answers 413, which vmagent retries forever on its single queue; the
+// relay turns it into 409 so vmagent drops the block and later data flows.
+func TestTelemetryVmagentDropsBlocksOverIngestLimit(t *testing.T) {
+	vmagent, vmBinary := os.Getenv("VMAGENT_BINARY"), os.Getenv("VICTORIAMETRICS_BINARY")
+	if vmagent == "" || vmBinary == "" {
+		t.Skip("set VMAGENT_BINARY and VICTORIAMETRICS_BINARY to the pinned v1.155.0 releases")
+	}
+	metricsURL := startVictoria(t, vmBinary)
+	s, _ := telemetryServer(t)
+	s.params.TelemetryMetricsURL = metricsURL
+	s.params.TelemetryMaxBodyBytes = 1 << 20
+	cc := httptest.NewServer(s.Handler())
+	t.Cleanup(cc.Close)
+	base := cc.URL + "/v1/nodes/" + telemetryNode
+	token, expires, err := s.params.jwtKey.Telemetry(s.params.signingKeyID(), telemetryNode, orchA, 2, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The relay keeps the old, larger limit, so Control Center itself refuses.
+	relay := telemetry.NewRelay(relayGrants{management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: telemetryNode, MetricsURL: base + "/telemetry/metrics", LogsURL: base + "/telemetry/logs"}}, telemetryNode, true, 8<<20)
+	relayAddress := freeAddress(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go relay.Serve(ctx, relayAddress)
+
+	// The first scrape is about 4 MB of incompressible labels: every block
+	// it produces compresses to more than 1 MiB.
+	var scrapes atomic.Int64
+	random := rand.New(rand.NewPCG(1, 2))
+	exporter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if scrapes.Add(1) == 1 {
+			pad := make([]byte, 200)
+			for i := range 10000 {
+				for j := range pad {
+					pad[j] = "0123456789abcdef"[random.IntN(16)]
+				}
+				fmt.Fprintf(w, "oversize_probe{i=\"%d\",pad=\"%s\"} 1\n", i, pad)
+			}
+			return
+		}
+		io.WriteString(w, "after_oversize 1\n")
+	}))
+	t.Cleanup(exporter.Close)
+	dir := t.TempDir()
+	scrape := filepath.Join(dir, "scrape.yaml")
+	os.WriteFile(scrape, []byte("global: {scrape_interval: 1s}\nscrape_configs:\n- job_name: probe\n  static_configs: [{targets: ['"+strings.TrimPrefix(exporter.URL, "http://")+"']}]\n"), 0600)
+	vmagentAddress := freeAddress(t)
+	cmd := exec.Command(vmagent, "-httpListenAddr="+vmagentAddress, "-promscrape.config="+scrape, "-remoteWrite.url=http://"+relayAddress+"/metrics/write",
+		"-remoteWrite.forceVMProto=true", "-remoteWrite.queues=1", "-remoteWrite.tmpDataPath="+filepath.Join(dir, "buffer"), "-remoteWrite.flushInterval=200ms", "-loggerLevel=ERROR")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	arrived := false
+	for deadline := time.Now().Add(45 * time.Second); time.Now().Before(deadline) && !arrived; time.Sleep(500 * time.Millisecond) {
+		get(t, metricsURL+"/internal/force_flush")
+		arrived = len(bytes.TrimSpace(get(t, metricsURL+"/api/v1/export?"+url.Values{"match[]": {"after_oversize"}}.Encode()))) > 0
+	}
+	if !arrived {
+		t.Fatal("vmagent queue stalled behind an oversized block", string(get(t, "http://"+vmagentAddress+"/metrics")))
+	}
+	if s.telemetry.rejected[[2]string{telemetryMetrics, "too_large"}].Load() == 0 {
+		t.Fatal("Control Center did not refuse the oversized block")
+	}
+	if !bytes.Contains(get(t, "http://"+vmagentAddress+"/metrics"), []byte("vmagent_remotewrite_packets_dropped_total")) {
+		t.Fatal("vmagent did not drop the block")
+	}
+}
+
 func freeAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -713,7 +816,7 @@ func TestTelemetryFluentBitThroughRelay(t *testing.T) {
 	t.Cleanup(cc.Close)
 	base := cc.URL + "/v1/nodes/" + telemetryNode
 	token, expires, _ := s.params.jwtKey.Telemetry(s.params.signingKeyID(), telemetryNode, orchA, 2, time.Hour, time.Now())
-	relay := telemetry.NewRelay(relayGrants{management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: telemetryNode, MetricsURL: base + "/telemetry/metrics", LogsURL: base + "/telemetry/logs"}}, true, 8<<20)
+	relay := telemetry.NewRelay(relayGrants{management.TelemetryGrant{Token: token, ExpiresAt: expires, NodeID: telemetryNode, MetricsURL: base + "/telemetry/metrics", LogsURL: base + "/telemetry/logs"}}, telemetryNode, true, 8<<20)
 	relayAddress := freeAddress(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -725,7 +828,8 @@ func TestTelemetryFluentBitThroughRelay(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	install := filepath.Join(dir, "install")
-	for _, d := range []string{"etc", "buffer/fluent-bit", "install/logs/pods/livepeer_orchestrator-1_uid-1/orchestrator", "install/logs/pods/livepeer-apps_app-1_uid-2/app"} {
+	// Fluent Bit creates its enrollment-scoped buffer and tail databases.
+	for _, d := range []string{"etc", "buffer", "install/logs/pods/livepeer_orchestrator-1_uid-1/orchestrator", "install/logs/pods/livepeer-apps_app-1_uid-2/app"} {
 		os.MkdirAll(filepath.Join(dir, d), 0777)
 	}
 	read := func(name string) string {
@@ -737,6 +841,7 @@ func TestTelemetryFluentBitThroughRelay(t *testing.T) {
 	}
 	conf := strings.ReplaceAll(read("fluent-bit.conf"), "@APP_LOGS_INPUT@\n", read("app-logs.conf"))
 	conf = strings.ReplaceAll(conf, "@INSTALL_DIR@", install)
+	conf = strings.ReplaceAll(conf, "@NODE_ID@", telemetryNode)
 	conf = strings.ReplaceAll(conf, "port                     20244", "port                     "+strings.Split(relayAddress, ":")[1])
 	// No journal or Kubernetes API exists in this fixture.
 	for _, input := range []string{"name                systemd", "name                kubernetes_events"} {

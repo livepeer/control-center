@@ -82,6 +82,12 @@ type Desired struct {
 	TelemetryEnabled        bool
 	TelemetryAppLogs        bool
 	TelemetryCapable        bool
+	// TelemetryMaxBody is Control Center's ingest body limit; agents size
+	// their writes below it.
+	TelemetryMaxBody int64
+	// ReportError is a failed runtime report read. Capability is then
+	// unknown, so the published bundle is kept.
+	ReportError error
 }
 
 var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
