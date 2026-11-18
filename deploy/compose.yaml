@@ -63,33 +63,26 @@ services:
       - ./secrets/redeemer:/run/redeemer:ro
     stop_grace_period: 30s
 
-  web:
+  # Read-only public registry endpoint. Remove together with the registry
+  # when the bundled registry is retired (naap-ops#124).
+  registry-proxy:
     <<: *service
-    image: controlcenter-web:staging
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      target: web
+    image: caddy:2-alpine
+    user: "65532:65532"
+    environment:
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
     volumes:
-      - type: bind
-        source: ./bootstrap
-        target: /srv/bootstrap
-        read_only: true
-        bind:
-          create_host_path: false
+      - ./Caddyfile.registry:/etc/caddy/Caddyfile:ro
     ports:
-      - 127.0.0.1:33812:8080
-      - 127.0.0.1:43812:8081
       - 127.0.0.1:53812:8082
     tmpfs:
       - /tmp:uid=65532,gid=65532,mode=0700
     depends_on:
-      api:
-        condition: service_healthy
       registry:
         condition: service_started
     healthcheck:
-      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/]
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8082/v2/]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -163,8 +156,12 @@ services:
       TUNNEL_TOKEN_FILE: /run/secrets/cloudflare-tunnel-token
     secrets:
       - cloudflare-tunnel-token
+    # Tunnel origins: API localhost:43811, secrets localhost:23812, registry
+    # localhost:53812. The UI hostname is served by Cloudflare Workers.
     depends_on:
-      web:
+      api:
+        condition: service_healthy
+      registry-proxy:
         condition: service_healthy
     stop_grace_period: 30s
 

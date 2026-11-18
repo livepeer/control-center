@@ -6,18 +6,8 @@
 !api/internal/**
 !schema/**
 !runtime/**
-!ui/
-!ui/package.json
-!ui/package-lock.json
-!ui/tsconfig.json
-!ui/vite.config.ts
-!ui/index.html
-!ui/.env.production
-!ui/src/**
-!ui/public/**
 !deploy/
 !deploy/Dockerfile
-!deploy/Caddyfile
 **/._*
 **/.DS_Store
 
