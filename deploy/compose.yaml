@@ -40,8 +40,10 @@ services:
     # Listen (43812) serves internal callbacks on the Compose networks only.
     ports:
       - 127.0.0.1:43811:43811
+    # Probe the tunnel origin so a missing PublicListen keeps cloudflared down.
+    # The API exits if either listener fails, so this also covers Listen.
     healthcheck:
-      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:43812/readyz]
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:43811/readyz]
       interval: 30s
       timeout: 5s
       retries: 3
