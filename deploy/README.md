@@ -129,9 +129,11 @@ Cloudflare account prerequisites:
   request.
 - A GitHub `production` environment for the [deploy workflow](../.github/workflows/ui-deploy.yml),
   limited to `main` with required reviewers. It holds the secret
-  `CLOUDFLARE_API_TOKEN`, scoped to account *Workers Scripts: Edit* and zone
-  *Workers Routes: Edit* only, and the variable `CLOUDFLARE_ACCOUNT_ID`. This
-  token can publish the JavaScript that seals operator secrets; keep it there.
+  `CLOUDFLARE_API_TOKEN`, scoped to account *Workers Scripts: Edit* and, on the
+  `livepeer.live` zone only, *Workers Routes: Edit* and *Zone: Read* (wrangler
+  looks up the route's `zone_name`). It also holds the variable
+  `CLOUDFLARE_ACCOUNT_ID`. This token can publish the JavaScript that seals
+  operator secrets; keep it there.
 
 Run **Deploy UI** from `main` with `deploy` to build and release that commit.
 The run summary lists recent Worker versions. To roll back, run it with

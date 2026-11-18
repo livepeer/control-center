@@ -5,9 +5,10 @@ name: Deploy UI
 #
 # Repository configuration (Settings → Environments → production):
 #   - Required reviewers, and deployment branches limited to main.
-#   - Secret CLOUDFLARE_API_TOKEN: account "Workers Scripts: Edit" and
-#     zone livepeer.live "Workers Routes: Edit" only. This token can ship
-#     the JavaScript that seals operator secrets; keep it in this environment.
+#   - Secret CLOUDFLARE_API_TOKEN: account "Workers Scripts: Edit", and
+#     zone livepeer.live "Workers Routes: Edit" and "Zone: Read" (wrangler
+#     resolves the route's zone_name) only. This token can ship the
+#     JavaScript that seals operator secrets; keep it in this environment.
 #   - Variable CLOUDFLARE_ACCOUNT_ID.
 #   - Optional variable CONTROLCENTER_API_URL (default in ui/.env.production).
 
