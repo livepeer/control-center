@@ -120,7 +120,7 @@ func TestNodeReadinessIgnoresBrokenPeerReconciliation(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})
-	if err := f.source.report(t.Context(), m, current, ""); err != nil {
+	if err := f.source.report(t.Context(), &delivery{Metadata: m, Digest: current}); err != nil {
 		t.Fatal(err)
 	}
 	if report := f.lastReport(); report["ready"] != true || report["bundle_sha256"] != old[7:] {
@@ -443,7 +443,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})
-	if err := f.source.report(context.Background(), m, current, ""); err != nil {
+	if err := f.source.report(context.Background(), &delivery{Metadata: m, Digest: current}); err != nil {
 		t.Fatal(err)
 	}
 	report := f.lastReport()
@@ -486,7 +486,7 @@ func TestAppOnlyApplicationReportsActualAppliedArchive(t *testing.T) {
 		t.Fatal("ignored infrastructure change")
 	}
 	os.WriteFile(filepath.Join(f.source.Store.Directory, old[7:]+".tar.gz"), []byte("corrupt"), 0600)
-	if err := f.source.report(context.Background(), m, current, ""); err != nil {
+	if err := f.source.report(context.Background(), &delivery{Metadata: m, Digest: current}); err != nil {
 		t.Fatal(err)
 	}
 	if f.lastReport()["ready"] != false {
@@ -516,7 +516,7 @@ func TestComponentComparisonCannotBorrowCrossEnrollmentOrCorruptEvidence(t *test
 
 func TestAppValidationFailureRemainsReportableWithoutPayloadExcerpt(t *testing.T) {
 	f := newFixture(t)
-	if err := f.source.report(t.Context(), f.meta, "", "payload excerpt credential-sentinel"); err != nil {
+	if err := f.source.report(t.Context(), &delivery{Metadata: f.meta, AppError: "payload excerpt credential-sentinel"}); err != nil {
 		t.Fatal(err)
 	}
 	report := f.lastReport()

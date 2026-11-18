@@ -2,6 +2,7 @@ import { mockSecrets, secretsURL } from './secrets-fixture'
 import { test, expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import type { MachineObservation } from '../src/machine-status'
+import type { ReadinessEvidence } from '../src/readiness'
 
 const user = '11111111-1111-4111-8111-111111111111'
 const node = 'vkvkvkvkvkvkuaaaaaaaaaaaaa'
@@ -25,9 +26,9 @@ function evidence(): MachineObservation {
     discovery_source: { state: 'fresh', selection_reason: 'selected', stale: false, expires_at: expires, failures: 0, last_success: stamp, transport_outcome: 'response_received', publication_blocked: false }, membership: { 'instance-preserved': { state: 'present', queried_at: stamp, observed_at: stamp, expires_at: expires } }, external_reachability: 'unverified' }
 }
 
-async function setup(page: Page, admin = false, reportState = 'observed', terminal = false) {
+async function setup(page: Page, admin = false, reportState = 'observed', terminal = false, openStatus = true) {
   const listedMachine = { ...machine, report_state: reportState, terminal }
-  const state = { view: evidence(), fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], writes: [] as string[], admin }
+  const state = { view: evidence(), readiness: undefined as ReadinessEvidence | undefined, fleetReads: 0, holdFleet: false, heldFleet: undefined as Route | undefined, fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], writes: [] as string[], admin }
   if (terminal) { state.view.lifecycle = 'cleanup_pending'; state.view.assignments[0].desired = 'absent'; state.view.assignments[0].completed_at = null }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
@@ -42,9 +43,14 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example', secrets_url: secretsURL } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
-    if (path === '/api/admin/overview') return route.fulfill({ json: { user_id: user, is_admin: state.admin, administrators: [], machines: [listedMachine] } })
+    const summary = { ...listedMachine, readiness_evidence: state.readiness }
+    if (path === (admin ? '/api/admin/overview' : '/api/machines')) {
+      state.fleetReads++
+      if (state.holdFleet) { state.heldFleet = route; return }
+    }
+    if (path === '/api/admin/overview') return route.fulfill({ json: { user_id: user, is_admin: state.admin, administrators: [], machines: [summary] } })
     if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], onchain_mode: 'offchain', next_after_name: null } })
-    if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [listedMachine, { ...machine, node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker', }] } })
+    if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [summary, { ...machine, node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker', }] } })
     if (path.startsWith('/api/admin/machines/') && path.endsWith('/apps')) return route.fulfill({ json: { assignments: [], apps_generation: 2, published_generation: 1, next_after_revision_id: null, last_config_fetch_at: null } })
     if (path.endsWith('/status')) {
       state.reads++
@@ -58,11 +64,90 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
   })
   await mockSecrets(page)
   await page.goto('/')
+  if (!openStatus) return state
   await page.getByRole('button', { name: admin ? 'Inspect Runtime for worker-status' : 'View status for worker-status' }).click()
   await expect(page.getByRole('heading', { name: 'Runtime status on worker-status' })).toBeVisible()
   await expect(page.getByText('External app reachability: unverified.', { exact: false })).toBeVisible()
   return state
 }
+
+function readyEvidence(validForMS: number): ReadinessEvidence {
+  return {
+    node: { state: 'ready', valid_for_ms: validForMS },
+    apps: { requested: 1, complete: true, applied: true, admitted: 1, admitted_valid_for_ms: validForMS },
+  }
+}
+
+for (const admin of [false, true]) test(`${admin ? 'admin' : 'owner'} polls the list once and only fetches details for the selected machine`, async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page, admin, 'observed', false, false)
+  const inspect = page.getByRole('button', { name: admin ? 'Inspect Runtime for worker-status' : 'View status for worker-status' })
+  await expect(inspect).toBeVisible()
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 50)))
+  const initial = state.fleetReads
+  expect(state.statusNodes).toEqual([])
+  await page.clock.fastForward(5000)
+  await expect.poll(() => state.fleetReads).toBe(initial + 1)
+  expect(state.statusNodes).toEqual([])
+
+  await inspect.click()
+  await expect(page.getByRole('heading', { name: 'Runtime status on worker-status' })).toBeVisible()
+  expect(state.statusNodes).toEqual([node])
+  await page.clock.fastForward(5000)
+  await expect.poll(() => state.fleetReads).toBe(initial + 2)
+  await expect.poll(() => state.statusNodes).toEqual([node, node])
+})
+
+for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees the readiness badge change and expire`, async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page, admin)
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 50)))
+  const badge = page.getByRole('row').filter({ hasText: 'worker-status' }).locator('.machine-status')
+  const title = page.getByRole('region', { name: 'Work readiness', exact: true }).getByRole('heading')
+  const refresh = async () => {
+    state.view.server_time = new Date(await page.evaluate(() => Date.now())).toISOString()
+    state.view.readiness_evidence = state.readiness
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  }
+
+  state.readiness = readyEvidence(3000)
+  await refresh()
+  await expect(badge).toHaveClass('machine-status ready')
+  await expect(badge).toHaveText('Ready to receive work')
+  await expect(title).toHaveText('Ready to receive work')
+
+  await page.clock.fastForward(3500)
+  await expect(badge).toHaveText('Readiness unverified')
+  await expect(title).toHaveText('Work readiness unverified')
+
+  state.readiness = readyEvidence(10000)
+  Object.assign(state.readiness.apps, {
+    requested: 3, admitted: 2, admitted_valid_for_ms: 1000, last_admission_for_ms: 2000,
+    blocker: { state: 'blocked', reason: 'resource_refused' },
+  })
+  await refresh()
+  await expect(badge).toHaveClass('machine-status partial')
+  const appCheck = page.locator('.readiness-check').filter({ hasText: 'Apps' })
+  await expect(appCheck).toContainText('Partially ready')
+  await expect(appCheck).toContainText('At least 2 of 3 requested replicas')
+  await expect(appCheck).toContainText('Insufficient resources for this assignment')
+
+  state.holdFleet = state.fail = true
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect.poll(() => !!state.heldFleet).toBe(true)
+  await page.clock.fastForward(1250)
+  await expect(title).toHaveText('Partially ready to receive work')
+  await expect(page.getByRole('region', { name: 'Work readiness', exact: true })).toContainText('At least 1 of 3 requested replicas')
+  await expect(badge).toHaveClass('machine-status partial')
+  await page.clock.fastForward(1250)
+  await expect(badge).toHaveClass('machine-status blocked')
+  await expect(badge).toHaveText('Not ready to receive work')
+  await expect(title).toHaveText('Not ready to receive work')
+
+  const delayed = { ...machine, hostname: 'delayed-worker', readiness_evidence: readyEvidence(2000) }
+  await state.heldFleet!.fulfill({ json: { user_id: user, is_admin: admin, administrators: [], machines: [delayed] } })
+  await expect(page.getByRole('row').filter({ hasText: 'delayed-worker' }).locator('.machine-status')).toHaveText('Readiness unverified')
+})
 
 for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees distinct rollout and configured-health evidence`, async ({ page }, info) => {
   await setup(page, admin)
@@ -81,22 +166,19 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
 
 for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees work blockers before rollout details`, async ({ page }, info) => {
   const state = await setup(page, admin)
-  state.view.components[0].ready = false
-  state.view.components[0].reason = 'applying'
-  state.view.assignments = []
-  state.view.components[1].apps!.instances = []
-  state.view.components[1].apps!.assignments = []
-  state.view.components[1].apps!.instances_total = 0
-  state.view.tunnel = { enabled: true, ready: false, reason: 'runtime_pending', cleanup_complete: false }
-  state.view.discovery_source = { state: 'excluded', selection_reason: 'unverified', stale: true, failures: 0, publication_blocked: false }
+  state.view.readiness_evidence = {
+    node: { state: 'pending', reason: 'applying' }, ingress: { state: 'pending', reason: 'runtime_pending' },
+    discovery: { state: 'blocked', reason: 'discovery_excluded' },
+    apps: { requested: 0, admitted: 0, complete: true, applied: false },
+  }
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
 
   const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
   await expect(summary.getByRole('heading', { name: 'Not ready to receive work', exact: true })).toBeVisible()
   await expect(summary.getByRole('listitem').filter({ hasText: 'Node deployment' }).first()).toContainText('Resource reconciliation is pending')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Tunnel provisioning' })).toContainText('Waiting for Node deployment to become ready. Provisioning has not been observed.')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Tunnel provisioning' })).toContainText('Waiting for Node deployment to become ready')
   await expect(summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()).toContainText('No apps assigned')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Discovery inventory' })).toContainText('Excluded')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Discovery inventory' })).toContainText('This node is excluded from fleet discovery')
   const row = page.getByRole('row').filter({ hasText: 'worker-status' })
   await expect(row.getByText('Readiness unverified', { exact: true })).toBeVisible()
   await expect(row.getByText('Runtime reporting', { exact: true })).toBeVisible()
@@ -112,104 +194,29 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   expect(state.writes.filter(path => path !== '/api/bootstrap-token')).toEqual([])
 })
 
-test('app readiness requires current healthy and registered assignments and expires with evidence', async ({ page }) => {
-  await page.clock.install()
-  const state = await setup(page)
-  state.view.requested.generation = 1
-  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
-  const apps = summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()
-  const observed = state.view.components[1].apps!.assignments![0]
-  observed.reason = 'secrets_unavailable'
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('Healthy and registered')
-  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
-  await expect(summary).toContainText('External app reachability remains unverified.')
-
-  observed.instances = 0; observed.ready = 0; observed.registered = 0
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('no app instances loaded')
-  await expect(summary.getByRole('heading')).toHaveText('Not ready to receive work')
-
-  observed.instances = 1; observed.ready = 1; observed.registered = 0
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('1 healthy and 0 registered')
-  observed.registered = 1; state.view.requested.generation++
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('no fresh observation for the current assignment')
-
-  state.view.requested.generation--
-  const at = await page.evaluate(() => Date.now())
-  state.view.server_time = new Date(at).toISOString()
-  observed.probe_expires_at = new Date(at + 3000).toISOString()
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('Healthy and registered')
-  state.fail = true
-  await page.clock.fastForward(4000)
-  await expect(apps).toContainText('health or Node registration evidence is missing or expired')
-  await expect(apps).not.toContainText('Healthy and registered')
+test('an older detail response keeps readiness unverified', async ({ page }) => {
+  await setup(page)
+  const panel = page.getByRole('region', { name: 'Work readiness', exact: true })
+  await expect(panel.getByRole('heading')).toHaveText('Work readiness unverified')
+  await expect(page.getByText('Resource reconciliation confirmed', { exact: false })).toBeVisible()
 })
 
-test('current assignment blockers take precedence over retained reconciliation diagnostics', async ({ page }) => {
-  const state = await setup(page), view = state.view
+test('readiness shows current and retained failures until the machine drains', async ({ page }) => {
+  const { view } = await setup(page)
   view.requested.generation = 1
-  view.assignments[0].completed_at = null; view.assignments[0].failure = 'reconcile_failed'
-  Object.assign(view.components[1].apps!.assignments![0], { instances: 0, ready: 0, registered: 0, reason: 'secrets_unavailable' })
-  view.components[1].apps!.instances = []; view.components[1].apps!.instances_total = 0
-  const baseline = structuredClone(view)
-  const assignment = page.getByRole('article', { name: 'Observed whoami revision 1' })
-  const readiness = page.getByRole('region', { name: 'Work readiness', exact: true })
-  const blocker = 'Secret delivery is unavailable; startup is waiting for secret preflight'
-  const failure = 'Last reconciliation diagnostic: Flux resource reconciliation failed'
-  const cases: [string, (view: MachineObservation) => void][] = [
-    ['stale report', v => { v.components[1].fresh = false; v.components[1].expires_at = v.server_time }],
-    ['earlier machine rollout', v => { v.rollout_generation++; v.components[1].current = false }],
-    ['older app input', v => { v.requested.generation++ }],
-    ['no current blocker', v => { v.components[1].apps!.assignments![0].reason = undefined }],
-  ]
-  for (const [name, mutate] of cases) await test.step(name, async () => {
-    state.view = structuredClone(baseline)
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-    await expect(assignment.getByRole('alert')).toHaveText(`Current assignment blocker: ${blocker}`)
-    await expect(readiness).toContainText(`no app instances loaded — ${blocker}`)
-    await expect(assignment).toContainText(failure)
-    mutate(state.view)
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-    await expect(assignment.getByRole('alert')).toHaveText(failure)
-    await expect(readiness).toContainText('last reconciliation diagnostic: Flux resource reconciliation failed')
-    await expect(readiness).not.toContainText(blocker)
-  })
-})
-
-test('disabled ingress and discovery do not become blockers, and old reports cannot prove readiness', async ({ page }) => {
-  const state = await setup(page)
-  state.view.requested.generation = 1
-  state.view.tunnel.enabled = false
-  state.view.discovery_enabled = false
-  state.view.components[0].current = false
+  view.assignments[0].completed_at = null
+  view.assignments[0].failure = 'reconcile_failed'
+  view.components[1].apps!.assignments![0].reason = 'secrets_unavailable'
+  view.readiness_evidence = {
+    node: { state: 'ready', valid_for_ms: 10000 },
+    apps: { requested: 1, complete: true, applied: true, admitted: 0, blocker: { state: 'blocked', reason: 'secrets_unavailable' } },
+  }
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
-  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Node deployment' })).toContainText('earlier rollout')
-  await expect(summary.getByText('Disabled', { exact: true })).toHaveCount(2)
-  state.view.assignments_omitted = true
-  state.view.components[0].current = true
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(summary).toContainText('Additional app assignments were omitted')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()).not.toContainText('Healthy and registered')
-})
+  await expect(summary).toContainText('Secret delivery is unavailable')
+  await expect(page.getByRole('article', { name: 'Observed whoami revision 1' })).toContainText('Last reconciliation diagnostic: Flux resource reconciliation failed')
 
-test('one failing assignment does not hide healthy apps, and draining stops new work', async ({ page }) => {
-  const state = await setup(page)
-  state.view.requested.generation = 1
-  state.view.assignments.push({ ...state.view.assignments[0], revision_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'second-app' })
-  state.view.components[1].apps!.assignments!.push({ ...state.view.components[1].apps!.assignments![0], revision_id: state.view.assignments[1].revision_id, instances: 0, ready: 0, registered: 0, reason: 'resource_refused' })
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
-  await expect(summary.getByRole('heading')).toHaveText('Not fully ready to receive work')
-  await expect(summary).toContainText('1 of 2 app assignments')
-  await expect(summary).toContainText('second-app: no app instances loaded — Insufficient resources for this assignment')
-
-  state.view.lifecycle = 'draining'
+  view.lifecycle = 'draining'
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
   await expect(summary.getByRole('heading')).toHaveText('Not accepting work')
   await expect(summary).toContainText('draining for removal')

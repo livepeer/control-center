@@ -20,6 +20,7 @@ type authorization struct {
 	source    Source
 	available bool
 	attempt   attempt
+	firstOK   time.Time
 }
 type attempt struct {
 	completed time.Time
@@ -85,6 +86,9 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	finish := func(status int, outcome string) {
 		t.mu.Lock()
 		auth.attempt = attempt{completed: time.Now().UTC(), status: status, outcome: outcome}
+		if status == http.StatusOK && auth.firstOK.IsZero() {
+			auth.firstOK = auth.attempt.completed
+		}
 		t.mu.Unlock()
 	}
 	clone := req.Clone(req.Context())

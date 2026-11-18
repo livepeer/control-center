@@ -61,8 +61,8 @@ func TestObservedStateScalarProjection(t *testing.T) {
 		queries.Store(0)
 		w := request(t, s, "GET", "/api/machines/"+node+"/status", "session-a", nil)
 		requireStatus(t, w, 200)
-		if got := queries.Load(); got != 5 {
-			t.Fatalf("status executed %d SQL statements, want 5", got)
+		if got := queries.Load(); got != 3 {
+			t.Fatalf("status executed %d SQL statements, want 3", got)
 		}
 		var v machineObservation
 		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
@@ -194,6 +194,214 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfig.Report {
 	now := time.Now().UTC()
 	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
+}
+
+func readReadinessEvidence(t *testing.T, s *Server, path string) *machineReadinessEvidence {
+	t.Helper()
+	w := request(t, s, "GET", path, "session-a", nil)
+	requireStatus(t, w, 200)
+	var result struct {
+		ReadinessEvidence *machineReadinessEvidence `json:"readiness_evidence"`
+		Machines          []observedMachineSummary
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Machines) == 1 {
+		result.ReadinessEvidence = result.Machines[0].ReadinessEvidence
+	}
+	if result.ReadinessEvidence == nil {
+		t.Fatalf("missing readiness evidence for %s: %s", path, w.Body.String())
+	}
+	return result.ReadinessEvidence
+}
+
+func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
+	s, c, m, a := observationFixture(t)
+	runtime := currentReport(t, s, m.NodeID, machineconfig.Report{
+		NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime",
+		Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: true, Reason: "ready",
+	})
+	path := "/v1/nodes/" + m.NodeID + "/status"
+	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
+	runner := observationReport(m, a)
+	runner.Apps.Applied = &contract.StageIdentity{
+		Generation: m.AppsGeneration, AppsDigest: m.AppsDigest, ArtifactDigest: "sha256:" + strings.Repeat("4", 64),
+	}
+	expiry := runner.ObservedAt.Add(15 * time.Second)
+	runner.Apps.Assignments[0].NodeExpiresAt = runner.Apps.Instances[0].NodeExpiresAt
+	runner.Apps.Assignments[0].ProbeExpiresAt = expiry
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	check := func(path, wantNode string, admitted int, pending bool) {
+		t.Helper()
+		e := readReadinessEvidence(t, s, path)
+		if e.Node.State != wantNode || !e.Apps.Complete || !e.Apps.Applied || e.Apps.Requested != 1 ||
+			e.Apps.Admitted != admitted || (e.Apps.Pending != nil) != pending ||
+			(admitted > 0 && (e.Apps.AdmittedValidForMS <= 0 || e.Apps.AdmittedValidForMS > 15000)) {
+			t.Fatalf("readiness evidence for %s = %+v", path, e)
+		}
+	}
+	const overview = "/api/admin/overview"
+
+	check(overview, "ready", 0, false) // An older report attests health and registration alone.
+	runner = currentReport(t, s, m.NodeID, runner)
+	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{}
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	check(overview, "ready", 0, true)
+	runner = currentReport(t, s, m.NodeID, runner)
+	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{Ready: 1, ExpiresAt: expiry}
+	runner.Apps.Instances[0].AdmissionExpiresAt = expiry
+	runner.Apps.Instances[0].Probe = &contract.ProbeStatus{ObservedAt: expiry.Add(-15 * time.Second), ExpiresAt: expiry, Success: true, Started: true}
+	runner.Apps.Assignments[0].Admission.ExpiresAt = expiry.Add(time.Second)
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 409)
+	runner.Apps.Assignments[0].Admission.ExpiresAt = expiry
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	for _, path := range []string{overview, "/api/machines?orchestrator_address=" + orchA, "/api/machines/" + m.NodeID + "/status"} {
+		check(path, "ready", 1, false)
+	}
+	runner = currentReport(t, s, m.NodeID, runner)
+	first := runner.Apps.Instances[0]
+	first.InstanceID, first.AdmissionExpiresAt = "instance-2", runner.ObservedAt.Add(-time.Second)
+	first.NodeObservedAt, first.NodeExpiresAt = first.AdmissionExpiresAt.Add(-10*time.Second), first.AdmissionExpiresAt
+	first.Probe = &contract.ProbeStatus{ObservedAt: first.NodeObservedAt, ExpiresAt: first.AdmissionExpiresAt, Success: true, Started: true}
+	runner.Apps.Instances = append(runner.Apps.Instances, first)
+	runner.Apps.InstancesTotal = 2
+	assignment := &runner.Apps.Assignments[0]
+	assignment.Instances, assignment.Ready, assignment.Registered = 2, 2, 2
+	assignment.Admission = &contract.ReplicaAdmission{Ready: 2, ExpiresAt: first.AdmissionExpiresAt, LastExpiresAt: expiry.Add(time.Second)}
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 409)
+	assignment.Admission.LastExpiresAt = expiry
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	check(overview, "ready", 1, false)
+
+	runtime = currentReport(t, s, m.NodeID, runtime)
+	runtime.Ready, runtime.Reason = false, "onchain_not_ready"
+	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
+	check(overview, "pending", 1, false)
+}
+
+func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
+	now := time.Now()
+	expires := now.Add(time.Minute)
+	instance := contract.InstanceStatus{RevisionID: "app", InstanceID: "instance", Generation: 1, ActivationGeneration: 1,
+		Ready: true, Registered: true, AdmissionExpiresAt: expires}
+	apps := &contract.AppStatus{DesiredGeneration: 1, Applied: &contract.StageIdentity{Generation: 1},
+		Instances: []contract.InstanceStatus{instance},
+		Assignments: []contract.AssignmentStatus{{RevisionID: "app", Generation: 2, ActivationGeneration: 1, Instances: 2,
+			Ready: 2, Registered: 2, Admission: &contract.ReplicaAdmission{Ready: 2, ExpiresAt: expires}}}}
+	report := componentObservation{Fresh: true, Current: true, Ready: true, ReceivedAt: &now, ExpiresAt: &expires}
+	runtime, runner, connector := report, report, report
+	runtime.Component, runner.Component, connector.Component = "runtime", "runner", "connector"
+	runner.Apps, connector.ConnectorExpiresAt = apps, &expires
+	view := machineObservation{
+		ServerTime: now, Lifecycle: "active", Requested: contract.StageIdentity{Generation: 1},
+		Components:       []componentObservation{runtime, runner, connector},
+		Assignments:      []observedAssignment{{RevisionID: "app", Generation: 2, ActivationGeneration: 1, Desired: "present", Replicas: 1, StartAllowed: true}},
+		Tunnel:           tunnelObservation{Enabled: true, Ready: true, IngressVerified: true, SourceGeneration: 2, ExpiresAt: &expires},
+		DiscoveryEnabled: true, DiscoveryInitialized: true, DiscoverySelectionExpiresAt: &expires,
+		DiscoverySource: &fleet.SourceStatus{State: "fresh", SelectedGeneration: 2, ExpiresAt: &expires, PublicationBlocked: true},
+		Membership:      map[string]fleet.Membership{"instance": {State: "present", ExpiresAt: &expires, SourceGeneration: 2}},
+	}
+	check := func(ingress, discovery string, admitted int) {
+		t.Helper()
+		e := view.readinessEvidence()
+		if e.Ingress.State != ingress || e.Discovery.State != discovery || e.Apps.Admitted != admitted {
+			t.Fatalf("ingress=%+v discovery=%+v apps=%+v", e.Ingress, e.Discovery, e.Apps)
+		}
+	}
+	check("ready", "ready", 1) // Retained instance and exact publication survive scale-down and unrelated filtering.
+	a := &view.Assignments[0]
+	a.Replicas, a.Failure = 2, "reconcile_failed"
+	reported := &apps.Assignments[0]
+	reported.Admission.Ready, reported.Reason = 1, "secrets_unavailable"
+	if e := view.readinessEvidence().Apps; e.Admitted != 1 || e.Blocker == nil || e.Blocker.Reason != "secrets_unavailable" {
+		t.Fatalf("current admission and cause were hidden by Flux failure: %+v", e)
+	}
+	a.Replicas, a.Failure, reported.Admission.Ready, reported.Reason = 1, "", 2, ""
+	view.Tunnel.IngressVerified = false
+	check("pending", "ready", 1)
+	view.Tunnel.IngressVerified = true
+	view.Tunnel.Ready = false
+	for _, code := range []string{"onchain_startup_pending", "drain_pending"} {
+		view.Tunnel.Reason = code
+		check("pending", "ready", 1)
+	}
+	view.Tunnel.Reason = "drain_timeout"
+	check("blocked", "ready", 1)
+	view.Tunnel.Ready, view.Tunnel.Reason = true, ""
+	view.Components[2].ConnectorExpiresAt = &now
+	check("unverified", "ready", 1)
+	view.Components[2].ConnectorExpiresAt = &expires
+	view.DiscoverySource.SelectedGeneration--
+	check("ready", "unverified", 1)
+	view.DiscoverySource.SelectedGeneration++
+	a.Replicas = 2
+	reported.Admission.ExpiresAt, reported.Admission.LastExpiresAt = now.Add(time.Second), expires
+	if e := view.readinessEvidence().Apps; e.Admitted != 2 || e.AdmittedValidForMS != 1000 || e.LastAdmissionForMS != 60000 {
+		t.Fatalf("cached observation lost staggered replica expiry: %+v", e)
+	}
+	view.ServerTime = now.Add(2 * time.Second)
+	check("ready", "ready", 1)
+	if e := view.readinessEvidence().Apps; e.AdmittedValidForMS != 58000 {
+		t.Fatalf("fresh poll lost the surviving replica deadline: %+v", e)
+	}
+	view.ServerTime = expires
+	check("unverified", "unverified", 0)
+	view.ServerTime = now
+	a.Replicas = 1
+	reported.Admission.ExpiresAt, reported.Admission.LastExpiresAt = expires, time.Time{}
+	apps.Instances[0].AdmissionExpiresAt = now
+	check("ready", "unverified", 1)
+	view.DiscoverySource.State, view.DiscoverySource.SelectionReason = "excluded", "blocked"
+	check("ready", "blocked", 1)
+	view.Requested.Generation = 2
+	apps.Reason = "resource_refused"
+	if e := view.readinessEvidence(); e.Apps.Blocker != nil || e.Apps.Admitted != 0 {
+		t.Fatalf("an old app report established current evidence: %+v", e.Apps)
+	}
+	view.Requested.Generation, apps.Reason = 1, ""
+	second := view.Assignments[0]
+	second.RevisionID = "second"
+	short := apps.Assignments[0]
+	short.RevisionID, short.Admission = second.RevisionID, &contract.ReplicaAdmission{Ready: 1, ExpiresAt: now.Add(time.Second)}
+	view.Assignments = append(view.Assignments, second)
+	apps.Assignments = append(apps.Assignments, short)
+	if e := view.readinessEvidence().Apps; e.Admitted != 2 || e.AdmittedValidForMS != 1000 || e.LastAdmissionForMS != 60000 {
+		t.Fatalf("did not keep both admission deadlines: %+v", e)
+	}
+}
+
+func TestReplicaIssuesKeepTheirOwnFreshness(t *testing.T) {
+	now := time.Now()
+	probeExpiry := now.Add(3 * time.Second)
+	a := observedAssignment{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Replicas: 1}
+	i := contract.InstanceStatus{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Probe: &contract.ProbeStatus{ExpiresAt: probeExpiry}}
+	for _, tc := range []struct {
+		reason, phase, state, want string
+		clock                      time.Time
+		ttl                        int64
+	}{
+		{"readiness_failed", "", "blocked", "readiness_failed", now, 3000},
+		{"readiness_failed", "", "", "", probeExpiry, 0},
+		{"stop_signal_unverified", "", "blocked", "stop_signal_unverified", now, 30000},
+		{"secret_invalid", "", "blocked", "secret_invalid", now, 30000},
+		{"secrets_unavailable", "starting", "blocked", "secrets_unavailable", now, 30000},
+		{"sandbox_pending", "starting", "pending", "sandbox_pending", now, 30000},
+		{"", "starting", "pending", "startup_pending", now, 30000},
+	} {
+		i.Reason, i.Phase = tc.reason, tc.phase
+		_, _, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i}}, tc.clock, now.Add(30*time.Second))
+		if issue.ValidForMS != tc.ttl || issue.State != tc.state || issue.Reason != tc.want {
+			t.Fatalf("%s at %s: %+v", tc.reason, tc.clock, issue)
+		}
+	}
+	i.Reason = "readiness_failed"
+	sibling := i
+	sibling.Reason = "image_pull_failed"
+	_, _, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i, sibling}}, now, now.Add(30*time.Second))
+	if issue.Reason != sibling.Reason || issue.ValidForMS != 30000 {
+		t.Fatalf("short probe expiry hid a longer blocker: %+v", issue)
+	}
 }
 
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
@@ -470,9 +678,39 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.Components[0].AppsError != last.AppsError || strings.Contains(w.Body.String(), "invalid app input") {
-		t.Fatal("adapter validation classification lost or payload exposed", w.Body.String())
+	if view.Components[0].AppsError != last.AppsError || view.ReadinessEvidence.Apps.Blocker != nil ||
+		strings.Contains(w.Body.String(), "invalid app input") || strings.Contains(w.Body.String(), "apps_error_bundle_digest") {
+		t.Fatal("unexpected evidence for an unrecorded artifact", w.Body.String())
 	}
+	rejected := artifact.Digest(data)
+	if last.AppsErrorDigest != rejected {
+		t.Fatalf("rejection identified the wrong artifact: %s", last.AppsErrorDigest)
+	}
+
+	// Record the rejected artifact as the current delivery, as if it was
+	// delivered with a manifest Runtime understands but app input it rejects.
+	recordDelivery := func(digest string) {
+		execSQL(t, s.db, `INSERT INTO lpcc.machine_app_deliveries (node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal)
+ SELECT node_id,apps_digest,$2,apps_generation,entries,terminal FROM lpcc.machine_app_deliveries
+ WHERE node_id=$1 AND bundle_sha256=$3`, m.NodeID, strings.TrimPrefix(digest, "sha256:"), strings.TrimPrefix(first.Downloaded.ArtifactDigest, "sha256:"))
+	}
+	recordDelivery(rejected)
+	checkBlocker := func(want string) {
+		t.Helper()
+		for _, path := range []string{"/api/machines/" + m.NodeID + "/status", "/api/admin/overview"} {
+			issue := readReadinessEvidence(t, s, path).Apps.Blocker
+			if (issue == nil) != (want == "") || (issue != nil && issue.Reason != want) {
+				t.Fatalf("want app blocker %q for %s, got %+v", want, path, issue)
+			}
+		}
+	}
+	checkBlocker(last.AppsError)
+	last = currentReport(t, s, m.NodeID, last)
+	last.Downloaded, last.DownloadedAt = nil, time.Time{}
+	requireStatus(t, request(t, s, "POST", p+"/status", c["token"], last), 200)
+	checkBlocker(last.AppsError)
+	recordDelivery(artifact.Digest([]byte("superseding test artifact")))
+	checkBlocker("")
 }
 
 func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {

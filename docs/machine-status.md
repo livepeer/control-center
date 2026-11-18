@@ -8,12 +8,21 @@ enrollment does not inherit access to the previous enrollment's diagnostics.
 
 ## Reading status
 
-The **Work readiness** summary appears before rollout details. It distinguishes
-known blockers from missing or expired evidence for Node deployment, apps,
-tunnel provisioning and discovery. Runtime reporting alone does not establish
-readiness. Apps need current health and Node registration evidence; a verified
-tunnel connector does not establish that tunnel provisioning is complete.
-Disabled tunnel or discovery services are shown separately from blockers.
+The machine list and **Work readiness** section use the same readiness criteria.
+Each fleet poll makes one HTTP request. The browser fetches detailed status
+only for the selected machine.
+
+- **Green — Ready to receive work.** The current Node deployment is ready,
+  onchain admission is ready when configured, and all active assignments have
+  fresh health evidence and Node has accepted the requested replicas as ready.
+  Managed tunnels require verified ingress and a ready connector. With
+  discovery enabled, the fresh inventory must include a current admitted replica.
+- **Amber — Pending, partially ready, or unverified.** Readiness evidence is
+  missing or expired, startup or rollout is in progress, or only some
+  requested app replicas are confirmed ready. Older Runtime reports can show
+  healthy or registered replicas while admission evidence is still pending.
+- **Red — Not ready or not accepting work.** A confirmed blocker prevents work,
+  there are no active assignments, or the enrollment is draining or retired.
 
 Compare the stages and their timestamps for the same enrollment and app:
 
@@ -28,17 +37,13 @@ Compare the stages and their timestamps for the same enrollment and app:
 | Registered | Node confirmed this runner and app while that observation remains valid |
 | Discovery | The published fleet inventory contained the exact public app endpoint and version at the snapshot time |
 
-Public app reachability remains **unverified**. Local checks, a verified tunnel
-and successful discovery collection do not establish that an external client can
-run the app. External probes and their freshness are separate observability work.
+An external client completing a session requires separate verification. The
+readiness badge uses the control plane's operational evidence.
 
-Reports use `TunnelStatusTTL` (two minutes by default); individual probes,
-Node and connector observations, and Collector snapshots have their own expiry.
-An exact report retry does not renew older evidence. A successful empty discovery
-snapshot differs from failed or stale collection; retained inventory cannot prove
-membership after source or credential rotation. Reports include at most 128
-instance details, with omissions identified, so a healthy subset does not prove
-all instances are ready.
+Reports expire after `TunnelStatusTTL` (two minutes by default). Probes, Node
+and connector observations, and discovery snapshots have their own deadlines.
+Only fresh discovery for the current source and credentials verifies membership.
+Reports show at most 128 instance details and indicate any omissions.
 
 ## Diagnose a failure
 
@@ -84,6 +89,10 @@ authorized logs or events. Do not paste credentials, bearer URLs, app environmen
 values or sensitive app output into issue evidence.
 
 ## Recovery and rollout
+
+Deploy the Control Center API first because older APIs reject the new Runtime
+report fields. Roll back Runtime first when reverting both. No schema migration
+is required.
 
 A status report HTTP 412 indicates lost or regressed ordering state. Restore
 trustworthy state; do not delete counters or repeatedly increment them until the

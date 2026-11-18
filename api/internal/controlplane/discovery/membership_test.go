@@ -76,7 +76,7 @@ func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 		t.Fatal("batch mixed instance evidence", batch)
 	}
 	first := lookup()
-	if first.State != "present" {
+	if first.State != "present" || first.SourceGeneration != 1 {
 		t.Fatal("did not confirm exact publication", first)
 	}
 	if other := f.Membership("another-node", "https://orch.example/apps/a/session", "test", "v1"); other.State != "excluded" {
@@ -91,7 +91,7 @@ func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 	reconcileFleet(t, f)
 	f.collector.Refresh(t.Context(), false)
 	retained := lookup()
-	if retained.State != "present" || !retained.QueriedAt.Equal(*first.QueriedAt) {
+	if retained.State != "present" || retained.SourceGeneration != 0 || !retained.QueriedAt.Equal(*first.QueriedAt) {
 		t.Fatal("relabeled retained membership after rotation", retained)
 	}
 	body.Store("[]")
@@ -116,7 +116,7 @@ func TestMembershipFreshnessEmptyAndRecovery(t *testing.T) {
 	}
 	body.Store(validBody)
 	f.collector.Refresh(t.Context(), false)
-	if recovered := lookup(); recovered.State != "present" {
+	if recovered := lookup(); recovered.State != "present" || recovered.SourceGeneration != 2 {
 		t.Fatal("evicted source did not recover", recovered)
 	}
 }

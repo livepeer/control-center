@@ -10,11 +10,11 @@ import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { OrchestratorWorkspace } from './orchestrators'
 import { clearInvitation, pendingInvitation } from './orchestrator-members'
-import { MachineStatus, MachineReadinessBadge } from './machine-status'
+import { MachineStatus, MachineReadinessBadge, type MachineReadinessSummary } from './machine-status'
 
 type AuthConfig = { supabase_url: string; supabase_publishable_key: string }
 type OperatorConfig = { public_api_url: string; secrets_url: string }
-type Machine = { node_id: string; terminal?: boolean; lifecycle?: string; report_state?: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
+type Machine = MachineReadinessSummary & { node_id: string; hostname: string; created_at: string }
 type Enrollment = { token: string; expires_at: string }
 
 function Brand({ dark = false }: { dark?: boolean }) {
@@ -129,9 +129,10 @@ function MachineConsole({ session, address, authorityFailure }: { session: Sessi
     const refresh = async () => {
       if (pending || document.hidden) return
       pending = true
+      const readinessRequestedAt = performance.now()
       try {
         const data = await api<{ machines: Machine[] }>(session, `/api/machines?orchestrator_address=${encodeURIComponent(address)}`, { signal: controller.signal })
-        if (!controller.signal.aborted) { setMachines(data.machines); setMachineProblem('') }
+        if (!controller.signal.aborted) { setMachines(data.machines.map(machine => ({ ...machine, readinessRequestedAt }))); setMachineProblem('') }
       } catch (error) { if (!controller.signal.aborted) { setMachineProblem(error instanceof Error ? error.message : 'Could not load machines.'); authorityFailure(error) } }
       finally { pending = false }
     }
