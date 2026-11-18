@@ -68,7 +68,7 @@ gvisor_matches() {
   diff -qr --no-dereference "$expected" "$installed" >/dev/null || return 1
   while IFS= read -r -d '' executable; do
     [[ -x "$installed/${executable#"$expected/"}" ]] || return 1
-  done < <(find "$expected" -type f -perm /111 -print0)
+  done < <(find "$expected" -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print0)
 }
 
 install_gvisor() {

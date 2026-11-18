@@ -76,10 +76,14 @@ parse_args() {
     die 'installation directory cannot contain repeated or trailing slashes, . or .. directory names, or symlinks'
 }
 
+read_machine_id() {
+  [[ -s /etc/machine-id ]] && cat /etc/machine-id
+}
+
 # Enrollment credentials are separate from the short-lived bootstrap JWT.
 # Reruns reuse the saved machine credential and never require another JWT.
 authenticate_node() {
-  local credentials="$INSTALL_DIR/credentials" key request response api status
+  local credentials="$INSTALL_DIR/credentials" key request response api status machine_id
   NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; IDENTITY_NODE_ID=''; INSTALLATION_FINGERPRINT=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
     ENROLLMENT_TOKEN=''
@@ -101,8 +105,8 @@ authenticate_node() {
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
     api=$(api_url)
     [[ "$api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS; development HTTP must be explicit'
-    [[ -s /etc/machine-id ]] || die '/etc/machine-id must be initialized'
-    INSTALLATION_FINGERPRINT=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
+    machine_id=$(read_machine_id) || die '/etc/machine-id must be initialized'
+    INSTALLATION_FINGERPRINT=$(printf '%s' "$machine_id" | sha256sum)
     INSTALLATION_FINGERPRINT=${INSTALLATION_FINGERPRINT:0:64}
     request=$(jq -nc --arg fingerprint "$INSTALLATION_FINGERPRINT" --arg hostname "$(hostname)" \
       --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" --argjson development_http "${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0}" \
@@ -136,8 +140,9 @@ authenticate_node() {
   [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
   [[ "$CONFIG_URL" =~ ^https?://[a-zA-Z0-9/_.:-]+$ ]] || die 'invalid configuration URL'
   [[ "$CONFIG_URL" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'saved HTTP credential requires --refresh-credentials over HTTPS'
-  [[ ! "${CONFIG_URL,,}" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]] ||
+  if (shopt -s nocasematch; [[ "$CONFIG_URL" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]]); then
     die 'configuration URL uses loopback; Kubernetes pods need a reachable API address'
+  fi
   ENROLLMENT_TOKEN=''
 }
 

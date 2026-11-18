@@ -54,13 +54,10 @@ activation follow the [deployment process](../deploy/README.md).
 python3 -m unittest discover -s runtime/tests
 ```
 
-These tests run bootstrap shell code with fakes and also work on macOS. There,
-run `brew install bash coreutils jq` first. Bootstrap targets Debian/Ubuntu, so
-it needs Bash 4.4+ and GNU-only coreutils options; the tests put Homebrew's GNU
-coreutils first on their PATH. Without these tools, tests that run bootstrap
-code are skipped rather than failing. Checks that need Linux host facilities, such as
-`/run/lock` file locks and the firewall container, run only on Linux or through
-`make test-runtime`.
+On macOS, the host-safe tests use the system Bash and test fixtures for GNU
+commands. They use Python 3 and jq, and the Secrets signature test requires
+an `openssl` that supports Ed25519. Run the Linux host checks and firewall
+container with `make test-runtime`.
 
 ## Remote Runtime tests
 

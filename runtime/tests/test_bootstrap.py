@@ -20,8 +20,6 @@ from unittest import mock
 import urllib.error
 import urllib.request
 
-import hosttools
-
 SCRIPT = Path(__file__).resolve().parents[1] / 'bootstrap-livepeer.sh'
 PROJECT = SCRIPT.parent
 try:
@@ -63,7 +61,11 @@ class TempTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = hosttools.temporary_root(self.temp)
+        self.root = Path(self.temp.name).resolve()
+        self.env = os.environ.copy()
+        if sys.platform == 'darwin':
+            self.env.update(BASH_ENV=str(Path(__file__).with_name('macos-bootstrap.sh').resolve()),
+                            BOOTSTRAP_TEST_PYTHON=sys.executable)
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
 
@@ -93,7 +95,6 @@ class SoftwareRecordingTests(TempTest):
         self.assertEqual(record()['flux_cli'], '')
 
 
-@hosttools.requires_gnu_userland
 class ShellTests(TempTest):
     def test_managed_kubeconfig_compatibility_directory(self):
         install = self.root.resolve() / 'install'
@@ -198,19 +199,18 @@ python3() { echo 'host Python is forbidden' >&2; exit 199; }
 ENROLLMENT_TOKEN='header.payload.signature'
 SECRET_PUBLIC=public-key-fixture
 registration_key_proof() { cat >/dev/null; printf registration-proof-fixture; }
+read_machine_id() { printf '%s\\n' machine-id-fixture; }
 LIVEPEER_API_URL='http://127.0.0.1:41932'
 LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
 RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 LIVEPEER_RUNTIME_IMAGE=$RUNTIME_IMAGE
 curl() {
-  local digest
-  digest=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
   printf '{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","token":"%s","config_url":"%s","credential_version":1}' "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/config}"
   printf '\\n200'
 }
 '''
         return subprocess.run(['bash', '-c', setup + commands, 'test', str(SCRIPT), *args],
-                              text=True, capture_output=True)
+                              env=self.env, text=True, capture_output=True)
 
     def test_help_and_invalid_arguments(self):
         result = self.shell('usage')
@@ -383,7 +383,8 @@ authenticate_node
 
     def test_fresh_enrollment_requires_token_and_valid_api(self):
         for setup, message in [("ENROLLMENT_TOKEN=''", 'LIVEPEER_ENROLLMENT_TOKEN'),
-                               ("LIVEPEER_API_URL='file:///invalid'", 'LIVEPEER_API_URL')]:
+                               ("LIVEPEER_API_URL='file:///invalid'", 'LIVEPEER_API_URL'),
+                               ('read_machine_id() { return 1; }', '/etc/machine-id must be initialized')]:
             result = self.shell('INSTALL_DIR="$1"; ' + setup + '; authenticate_node', str(self.root / 'new'))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(message, result.stderr)
@@ -466,7 +467,6 @@ python3 -c 'import os; assert "LIVEPEER_ENROLLMENT_TOKEN" not in os.environ; ass
             self.assertNotIn('header.payload.signature', result.stderr)
 
 
-@hosttools.requires_gnu_userland
 class EnrollmentHTTPTests(TempTest):
     shell = ShellTests.shell
 
@@ -479,7 +479,6 @@ class EnrollmentHTTPTests(TempTest):
                 received['path'] = self.path
                 received['authorization'] = self.headers.get('Authorization')
                 received['body'] = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                fingerprint = received['body']['fingerprint']
                 response = {'node_id': 'a' * 26, 'token': 'c' * 64,
                             'config_url': 'https://api.example/v1/nodes/' + 'a' * 26 + '/config',
                             'credential_version': 1}
@@ -498,7 +497,7 @@ prepare_installation
         self.assertEqual(received['path'], '/v1/nodes/register')
         self.assertEqual(received['authorization'], 'Bearer header.payload.signature')
         self.assertEqual(received['body']['install_dir'], str(self.root / 'install'))
-        self.assertRegex(received['body']['fingerprint'], r'^[a-f0-9]{64}$')
+        self.assertEqual(received['body']['fingerprint'], hashlib.sha256(b'machine-id-fixture').hexdigest())
         self.assertEqual((self.root / 'install/credentials/service-token').read_text(), 'c' * 64)
         self.assertNotIn('c' * 64, result.stdout + result.stderr)
         self.assertNotIn('header.payload.signature', result.stdout + result.stderr)
@@ -617,7 +616,6 @@ check_ports
         self.assertIn('incompatible', result.stderr)
 
 
-@hosttools.requires_gnu_userland
 class RecoveryTests(TempTest):
     shell = ShellTests.shell
 
@@ -627,7 +625,10 @@ class RecoveryTests(TempTest):
             if existing:
                 target.mkdir()
             failed = self.shell('''INSTALL_DIR="$1"
-mv() { if [[ "${*: -1}" == "$INSTALL_DIR" ]]; then exit 71; fi; command mv "$@"; }
+mv() {
+  if [[ "${*: -1}" == "$INSTALL_DIR" ]]; then exit 71; fi
+  if declare -F macos_mv >/dev/null; then macos_mv "$@"; else command mv "$@"; fi
+}
 initialize_installation
 ''', str(target))
             self.assertEqual(failed.returncode, 71, failed.stderr)
@@ -743,6 +744,7 @@ install_k3s
         for name in ('runsc', 'containerd-shim-runsc-v1', 'gvisor-bin/helper'):
             (tree / name).write_text('#!/bin/sh\nexit 0\n')
             (tree / name).chmod(0o755)
+        (tree / 'gvisor-bin/helper').chmod(0o700)
         archive = upstream / 'gvisor-x86_64.tar.bz2'
         with tarfile.open(archive, 'w:bz2') as tar:
             for path in tree.iterdir():
@@ -801,7 +803,7 @@ install_k3s
         record = self.root / 'version'
         record.write_text('v1.37.2+k3s1\n')
         result = subprocess.run(['bash', str(PROJECT / 'lib/record-version.sh'), str(binary),
-                                 str(record), str(PROJECT / 'lib/recovery.sh')], capture_output=True, text=True)
+                                 str(record), str(PROJECT / 'lib/recovery.sh')], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(record.read_text().strip(), 'v1.38.0+k3s1')
 
@@ -844,7 +846,6 @@ class FirewallTests(TempTest):
         self.assertFalse(touched.exists())
 
 
-@hosttools.requires_gnu_userland
 class StagingTests(TempTest):
     shell = ShellTests.shell
 

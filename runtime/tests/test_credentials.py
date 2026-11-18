@@ -7,8 +7,6 @@ import subprocess
 import tempfile
 import unittest
 
-import hosttools
-
 LIBRARY = Path(__file__).resolve().parents[1] / 'lib/credentials.sh'
 
 
@@ -17,7 +15,7 @@ class CredentialTransitions(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = hosttools.temporary_root(self.temp)
+        self.root = Path(self.temp.name).resolve()
         for name in ('credentials', 'state', 'config', 'volumes/http-source'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / 'credentials/node-id').write_text('a' * 26)
