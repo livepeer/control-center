@@ -189,6 +189,49 @@ func TestAssignmentRefusalIsSpecificBeforeInstanceCreation(t *testing.T) {
 	}
 }
 
+func TestReportAdmissionRequiresCurrentNodeReadyAndProbe(t *testing.T) {
+	c, _, k, _, reports, now := fixtureController(t)
+	registerApps(t, c, k)
+	c.Probes = NewProbes()
+	ready := map[string]bool{}
+	for id, i := range c.Journal.View().Instances {
+		ready[id] = true
+		c.Probes.values[id] = &health{uid: i.PodUID, ready: true, observedAt: *now, success: true, started: true}
+		p, ok := c.proofs[id]
+		if !ok {
+			t.Fatalf("fixture did not register instance %s", id)
+		}
+		p.App.Status = "not-ready"
+		c.proofs[id] = p
+	}
+	check := func(want int) {
+		t.Helper()
+		if err := c.report(t.Context(), ready, k.view, *now); err != nil {
+			t.Fatal(err)
+		}
+		apps := reports.reports[len(reports.reports)-1].Apps
+		a := apps.Assignments[0]
+		if a.Ready != len(ready) || a.Registered != len(ready) || a.Admission == nil || a.Admission.Ready != want {
+			t.Fatalf("report admission evidence: %+v", a)
+		}
+		for _, i := range apps.Instances {
+			if i.AdmissionExpiresAt.IsZero() != (want == 0) {
+				t.Fatalf("instance %s admission expiry = %v, count = %d", i.InstanceID, i.AdmissionExpiresAt, want)
+			}
+		}
+	}
+	check(0)
+	for id, p := range c.proofs {
+		p.App.Status = "ready"
+		c.proofs[id] = p
+	}
+	check(len(ready))
+	for _, h := range c.Probes.values {
+		h.observedAt = now.Add(-time.Minute)
+	}
+	check(0)
+}
+
 func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()

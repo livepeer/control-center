@@ -46,7 +46,11 @@ func DiagnoseMetadata(ctx context.Context, m contract.Metadata, reporter Reporte
 	if reason == "" {
 		status = "ready"
 	}
-	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: contract.AppStatus{SecretsProtocol: 1, Reason: reason, Instances: []contract.InstanceStatus{}}})
+	apps := contract.AppStatus{SecretsProtocol: 1, Reason: reason, Instances: []contract.InstanceStatus{}}
+	if m.AppsDigest != "" {
+		apps.DesiredGeneration, apps.DesiredDigest = m.AppsGeneration, m.AppsDigest
+	}
+	_ = reporter.Status(ctx, Report{ObservedAt: time.Now().UTC(), ClockUncertain: reason == "clock_uncertain", NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "app-reconciler", Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: reason == "", Reason: status, Apps: apps})
 }
 
 func (r ControlReporter) Status(ctx context.Context, value Report) error {
@@ -104,7 +108,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 	assignments := map[string]*contract.AssignmentStatus{}
 	if s.Payload.Intent != nil {
 		for _, a := range s.Payload.Intent.Entries {
-			status.Assignments = append(status.Assignments, contract.AssignmentStatus{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Reason: s.AssignmentReasons[a.RevisionID]})
+			status.Assignments = append(status.Assignments, contract.AssignmentStatus{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Reason: s.AssignmentReasons[a.RevisionID], Admission: &contract.ReplicaAdmission{}})
 		}
 		for n := range status.Assignments {
 			assignments[status.Assignments[n].RevisionID] = &status.Assignments[n]
@@ -140,6 +144,13 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		if c.Probes != nil {
 			probe = c.Probes.Status(id, i.PodUID)
 		}
+		var admissionExpiry time.Time
+		if ready[id] && i.WithdrawalID == "" && registeredInstances[id] && probe != nil && now.Before(probe.ExpiresAt) {
+			admissionExpiry = nodeExpiry
+			if probe.ExpiresAt.Before(admissionExpiry) {
+				admissionExpiry = probe.ExpiresAt
+			}
+		}
 		if a := assignments[i.Group.RevisionID]; a != nil && a.ActivationGeneration == i.Group.ActivationGeneration {
 			a.Instances++
 			if ready[id] && i.WithdrawalID == "" {
@@ -157,6 +168,12 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 			if i.WithdrawalID != "" && (i.Phase != "removed" || !i.RegistrationGone) {
 				a.CleanupPending++
 			}
+			if !admissionExpiry.IsZero() {
+				a.Admission.Ready++
+				if a.Admission.ExpiresAt.IsZero() || admissionExpiry.Before(a.Admission.ExpiresAt) {
+					a.Admission.ExpiresAt = admissionExpiry
+				}
+			}
 		}
 		if len(status.Instances) >= 128 {
 			continue
@@ -166,7 +183,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		if i.PodUID != "" && i.Definition.Lifecycle.StopSignal != nil && !i.StopVerified {
 			workload = "stop_signal_unverified"
 		}
-		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
+		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AdmissionExpiresAt: admissionExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
 	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
 	status.SecretRollouts = map[string]contract.SecretRollout{}

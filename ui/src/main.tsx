@@ -129,9 +129,10 @@ function MachineConsole({ session, address, authorityFailure }: { session: Sessi
     const refresh = async () => {
       if (pending || document.hidden) return
       pending = true
+      const readinessRequestedAt = performance.now()
       try {
         const data = await api<{ machines: Machine[] }>(session, `/api/machines?orchestrator_address=${encodeURIComponent(address)}`, { signal: controller.signal })
-        if (!controller.signal.aborted) { setMachines(data.machines); setMachineProblem('') }
+        if (!controller.signal.aborted) { setMachines(data.machines.map(machine => ({ ...machine, readinessRequestedAt }))); setMachineProblem('') }
       } catch (error) { if (!controller.signal.aborted) { setMachineProblem(error instanceof Error ? error.message : 'Could not load machines.'); authorityFailure(error) } }
       finally { pending = false }
     }

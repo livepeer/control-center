@@ -57,6 +57,10 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 			if i.Probe != nil && (i.Probe.Failures < 0 || i.Probe.Failures > 1000000 || i.Probe.ExpiresAt.Before(i.Probe.ObservedAt)) {
 				return ErrStaleStatus
 			}
+			if !i.AdmissionExpiresAt.IsZero() && (!i.Ready || !i.Registered || i.WithdrawalID != "" || i.Probe == nil ||
+				i.AdmissionExpiresAt.After(i.NodeExpiresAt) || i.AdmissionExpiresAt.After(i.Probe.ExpiresAt)) {
+				return ErrStaleStatus
+			}
 		}
 		seen = map[string]bool{}
 		for _, a := range a.Assignments {
@@ -64,6 +68,10 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 				return ErrStaleStatus
 			}
 			seen[a.RevisionID] = true
+			if proof := a.Admission; proof != nil && (proof.Ready < 0 || proof.Ready > min(a.Ready, a.Registered) ||
+				(proof.Ready > 0) == proof.ExpiresAt.IsZero()) {
+				return ErrStaleStatus
+			}
 		}
 		// Both current summaries and retained incarnation identities must have
 		// actually been delivered to this enrollment, not merely exist in the catalog.

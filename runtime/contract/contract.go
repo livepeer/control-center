@@ -82,6 +82,7 @@ type InstanceStatus struct {
 	RegistrationGone     bool         `json:"registration_gone,omitempty"`
 	NodeObservedAt       time.Time    `json:"node_observed_at,omitempty"`
 	NodeExpiresAt        time.Time    `json:"node_expires_at,omitempty"`
+	AdmissionExpiresAt   time.Time    `json:"admission_expires_at,omitzero"`
 	AcceptedSequence     *uint64      `json:"accepted_sequence,omitempty"`
 	StartupDeadline      time.Time    `json:"startup_deadline,omitempty"`
 	Probe                *ProbeStatus `json:"probe,omitempty"`
@@ -108,16 +109,24 @@ type ProbeStatus struct {
 }
 
 type AssignmentStatus struct {
-	NodeExpiresAt        time.Time `json:"node_expires_at,omitempty"`
-	ProbeExpiresAt       time.Time `json:"probe_expires_at,omitempty"`
-	RevisionID           string    `json:"revision_id"`
-	Generation           int64     `json:"generation"`
-	ActivationGeneration int64     `json:"activation_generation"`
-	Reason               string    `json:"reason,omitempty"`
-	Instances            int       `json:"instances"`
-	Ready                int       `json:"ready"`
-	Registered           int       `json:"registered"`
-	CleanupPending       int       `json:"cleanup_pending"`
+	NodeExpiresAt        time.Time         `json:"node_expires_at,omitempty"`
+	ProbeExpiresAt       time.Time         `json:"probe_expires_at,omitempty"`
+	RevisionID           string            `json:"revision_id"`
+	Generation           int64             `json:"generation"`
+	ActivationGeneration int64             `json:"activation_generation"`
+	Reason               string            `json:"reason,omitempty"`
+	Instances            int               `json:"instances"`
+	Ready                int               `json:"ready"`
+	Registered           int               `json:"registered"`
+	CleanupPending       int               `json:"cleanup_pending"`
+	Admission            *ReplicaAdmission `json:"admission,omitempty"`
+}
+
+// ReplicaAdmission counts replicas with fresh health and matching Node-ready
+// registration evidence. ExpiresAt is the earliest expiry in that set.
+type ReplicaAdmission struct {
+	Ready     int       `json:"ready"`
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
 type SecretRollout struct {

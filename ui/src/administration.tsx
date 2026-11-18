@@ -47,12 +47,13 @@ export function Administration({ session }: { session: Session }) {
       const controller = new AbortController()
       requests.current.add(controller)
       const current = () => alive && ticket === version.current && !controller.signal.aborted
+      const readinessRequestedAt = performance.now()
       try {
         const overview = await api<{ user_id: string; is_admin: boolean; administrators: Grant[]; machines: FleetMachine[] }>(session, '/api/admin/overview', { signal: controller.signal })
         if (!current()) return
         if (overview.user_id !== session.user.id) throw new APIError(401, 'Sign in again to verify your account.')
         if (!overview.is_admin) { invalidate('ordinary'); return }
-        setCapability('admin'); setGrants(overview.administrators); setMachines(overview.machines); setAccessProblem('')
+        setCapability('admin'); setGrants(overview.administrators); setMachines(overview.machines.map(machine => ({ ...machine, readinessRequestedAt }))); setAccessProblem('')
       } catch (error) {
         if (!current()) return
         invalidate(error instanceof APIError && [401, 403].includes(error.status) ? 'ordinary' : 'unavailable')

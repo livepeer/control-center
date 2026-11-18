@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { CircleAlert, CircleCheck, CircleHelp, Minus } from 'lucide-react'
 import { api, APIError } from './api'
+import { appEvidenceAt, classifyReadiness, nextReadinessExpiry, observationState, type ReadinessSnapshot } from './readiness'
 
 type Stage = { generation: number; apps_digest?: string; artifact_digest?: string }
 type Probe = { observed_at: string; due_at: string; expires_at: string; success: boolean; failures: number; started: boolean }
@@ -12,7 +13,7 @@ type OnchainEvidence = { generation: number; mode: string; applied: boolean; rea
 type Component = { onchain?: OnchainEvidence; observer_id?: string; observer_started_at?: string; component: string; generation: number; observed_at?: string; received_at?: string; expires_at?: string; fresh: boolean; current: boolean; ready: boolean; reason: string; clock_uncertain: boolean; bundle_sha256?: string; downloaded?: Stage; downloaded_at?: string; delivery_reason?: string; apps_error?: string; apps?: Apps; connector_observed_at?: string; connector_expires_at?: string }
 type Assignment = { revision_id: string; digest: string; name: string; version: string; revision: number; generation: number; activation_generation: number; desired: string; replicas: number; start_allowed: boolean; completed_at: string | null; failure?: string; health: { type: string; interval: string; timeout: string; failure_threshold: number } }
 type Membership = { state: string; queried_at?: string; observed_at?: string; expires_at?: string }
-export type MachineObservation = { readiness?: Readiness;  onchain?: { desired: { mode: string; generation: number; network?: string; chain_id?: number; recipient?: string; controller?: string; wei_per_usd?: string; eth_usd_feed?: string; ticket_face_value?: string; ticket_win_prob?: string }; delivered_generation: number }; node_id: string; hostname: string; lifecycle: string; rollout_generation: number; requested: Stage; delivered?: Stage; delivered_at?: string; delivery_reason?: string; assignments: Assignment[]; assignments_omitted: boolean; components: Component[]; tunnel: { enabled: boolean; ready: boolean; reason: string; verified_at?: string; expires_at?: string; cleanup_complete: boolean }; discovery_enabled: boolean; discovery_initialized: boolean; discovery_selection_stale: boolean; discovery_selection_expires_at?: string; discovery_source?: { state: string; selection_reason: string; stale: boolean; expires_at?: string; failures: number; transport_outcome?: string; last_attempt?: string; last_success?: string; publication_blocked: boolean }; membership: Record<string, Membership>; external_reachability: string; server_time: string }
+export type MachineObservation = ReadinessSnapshot & { onchain?: { desired: { mode: string; generation: number; network?: string; chain_id?: number; recipient?: string; controller?: string; wei_per_usd?: string; eth_usd_feed?: string; ticket_face_value?: string; ticket_win_prob?: string }; delivered_generation: number }; node_id: string; hostname: string; lifecycle: string; rollout_generation: number; requested: Stage; delivered?: Stage; delivered_at?: string; delivery_reason?: string; assignments: Assignment[]; assignments_omitted: boolean; components: Component[]; tunnel: { enabled: boolean; ready: boolean; reason: string; verified_at?: string; expires_at?: string; cleanup_complete: boolean }; discovery_enabled: boolean; discovery_initialized: boolean; discovery_selection_stale: boolean; discovery_selection_expires_at?: string; discovery_source?: { state: string; selection_reason: string; stale: boolean; expires_at?: string; failures: number; transport_outcome?: string; last_attempt?: string; last_success?: string; publication_blocked: boolean }; membership: Record<string, Membership>; external_reachability: string; server_time: string }
 
 const readinessLabels = {
   ready: 'Ready to receive work',
@@ -22,11 +23,28 @@ const readinessLabels = {
   blocked: 'Not ready to receive work',
   inactive: 'Not accepting work',
 }
-type Readiness = { state: keyof typeof readinessLabels; valid_for_ms?: number }
-export type MachineReadinessSummary = { terminal?: boolean; lifecycle?: string; report_state?: string; last_config_fetch_at?: string | null; readiness?: Readiness }
+export type MachineReadinessSummary = ReadinessSnapshot & { report_state?: string; last_config_fetch_at?: string | null }
 
-function requiresFreshEvidence(state?: Readiness['state']) {
-  return state === 'ready' || state === 'partial'
+function useReadiness(snapshot: ReadinessSnapshot) {
+  const { readiness_evidence: evidence, readinessRequestedAt: started } = snapshot
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!evidence || started === undefined) return
+    let timer: number | undefined
+    const schedule = () => {
+      const age = performance.now() - started
+      const next = nextReadinessExpiry(evidence, age)
+      if (Number.isFinite(next)) {
+        timer = window.setTimeout(() => {
+          setTick(tick => tick + 1)
+          schedule()
+        }, Math.ceil(next - age))
+      }
+    }
+    schedule()
+    return () => window.clearTimeout(timer)
+  }, [evidence, started])
+  return classifyReadiness(snapshot, performance.now())
 }
 
 function machineStatusSummary(machine: MachineReadinessSummary) {
@@ -35,21 +53,15 @@ function machineStatusSummary(machine: MachineReadinessSummary) {
 }
 
 export function MachineReadinessBadge({ machine }: { machine: MachineReadinessSummary }) {
-  const { readiness } = machine
-  const [expired, setExpired] = useState<Readiness>()
-  useEffect(() => {
-    if (!readiness?.valid_for_ms || !requiresFreshEvidence(readiness.state)) return
-    const timer = window.setTimeout(() => setExpired(readiness), readiness.valid_for_ms)
-    return () => window.clearTimeout(timer)
-  }, [readiness])
-
-  let state = machine.terminal || machine.lifecycle === 'draining' ? 'inactive' as const : readiness?.state || 'unverified'
-  if (requiresFreshEvidence(state) && (!readiness?.valid_for_ms || expired === readiness)) state = 'unverified'
+  const state = useReadiness(machine)
   return <div className="machine-readiness"><span className={`machine-status ${state}`}><span className="status-dot" />{readinessLabels[state]}</span><span className="machine-report-state">{machineStatusSummary(machine)}</span></div>
 }
 
 const reasons: Record<string, string> = {
   runtime_pending: 'Waiting for Node deployment to become ready',
+  certificate_pending: 'Waiting for tunnel certificates',
+  tls_or_route_pending: 'Waiting for tunnel endpoints to pass verification',
+  discovery_excluded: 'This node is excluded from fleet discovery',
   secrets_unavailable: 'Secret delivery is unavailable; startup is waiting for secret preflight', secrets_denied: 'Secret delivery was denied; check assignment access', secret_missing: 'A required secret or key is missing', secret_invalid: 'Delivered secret data could not be validated',
   onchain_not_ready: 'Onchain Node is not ready; inspect credential delivery, retained onchain state, RPC and rate source', sandbox_pending: 'Sandbox or Pod network setup is pending', invalid_app_payload: 'Downloaded app input is invalid',
   onchain_pending: 'Waiting for the target onchain configuration', onchain_incompatible: 'App price is incompatible with the target onchain mode', resource_refused: 'Insufficient resources for this assignment', cleanup_prerequisite: 'Waiting for previous revision cleanup', cleanup_pending: 'Waiting for earlier instance cleanup', generation_failed: 'App configuration could not be rendered', invalid_definition: 'App definition is invalid', unsupported_instance_mode: 'Instance lifetime is not supported', unsupported_stop_signal: 'Configured stop signal is not supported', image_pull_failed: 'Container image could not be pulled', container_start_failed: 'Container could not start', startup_failed: 'Startup deadline expired', readiness_failed: 'Configured readiness check failed', memory_limit: 'Container exceeded its memory limit', scheduling_refused: 'Kubernetes refused scheduling', isolation_failed: 'Sandbox isolation could not start', state_recovery_failed: 'App Reconciler state recovery failed; management repair remains available', registration_reset: 'Node registration was lost or expired', node_registration_recreated: 'Node registration was recreated; previous work is unconfirmed', clock_uncertain: 'Observation clock is uncertain', process_lost: 'App process disappeared', process_failed: 'App process failed', observation_pending: 'App state could not be observed', fetch_or_publication_failed: 'Configuration fetch or artifact publication failed', access_denied: 'Discovery bearer authentication was denied', credential_unavailable: 'Discovery credential is unavailable', unreported: 'No observation received', input_regression: 'Older app input was refused', registration_failed: 'Node registration failed', registration_pending: 'Node registration is pending', node_unavailable: 'Node registration service is unreachable', node_request_failed: 'Node rejected the registration request', heartbeat_response: 'Node registration response is invalid', heartbeat_ttl: 'Node registration expiry is invalid', registration_auth_failed: 'Node rejected registration credentials', tls_pending: 'Waiting for TLS', drain_pending: 'Drain or cleanup is pending', runtime_offline: 'Runtime has no fresh report', reconcile_failed: 'Flux resource reconciliation failed', cleanup_failed: 'Resource cleanup failed', ownership_conflict: 'Tunnel resource ownership conflicts', provisioning_pending: 'Tunnel provisioning is pending', ingress_pending: 'Waiting for ingress authentication configuration', denied_destination: 'Discovery destination was refused', dns: 'Discovery DNS lookup failed', timeout: 'Discovery collection timed out', http_error: 'Discovery source returned an error', redirect: 'Discovery source redirected the request', transport_error: 'Discovery source could not be reached', unsupported_stop_signal_field: 'Host does not support the requested stop signal', stop_signal_unverified: 'The configured stop signal could not be verified; admission is withheld', process_failed_to_start: 'App process failed to start', registration_cleanup_failed: 'Registration cleanup failed', clock_state_unavailable: 'Clock state is unavailable', app_cleanup_pending: 'App cleanup remains pending', drain_timeout: 'Drain deadline expired', input_unavailable: 'App input is unavailable', publication_failed: 'App artifact publication failed', serving_failed: 'App artifact serving failed', failed: 'Component reported failure', offline: 'Component has no ready observation', connector_observation_stale: 'No fresh connector readiness observation', applying: 'Resource reconciliation is pending', ready: 'Ready', removed: 'Removed', rollout_pending: 'Waiting for the new configuration to apply', cleanup_unconfirmed: 'Cleanup is unconfirmed',
@@ -71,6 +83,9 @@ function currentAssignment(view: MachineObservation, runner: Component | undefin
 type ReadinessCheck = { label: string; state: 'ready' | 'blocked' | 'unverified' | 'disabled'; status: string; detail: string }
 
 function WorkReadiness({ view, clock }: { view: MachineObservation; clock: number }) {
+  const state = useReadiness(view)
+  const evidence = view.readiness_evidence
+  const age = view.readinessRequestedAt === undefined ? Infinity : performance.now() - view.readinessRequestedAt
   const fresh = (c?: Component) => freshObservation(c, clock)
   const runtime = view.components.find(c => c.component === 'runtime')
   const runner = view.components.find(c => c.component === 'runner')
@@ -83,7 +98,7 @@ function WorkReadiness({ view, clock }: { view: MachineObservation; clock: numbe
     if (!fresh(c)) return { label, state: 'unverified', status: 'Status stale', detail: 'No fresh report. Current readiness cannot be confirmed.' }
     if (!c.current) return { label, state: 'unverified', status: 'Rollout pending', detail: 'The latest report describes an earlier rollout.' }
     return c.ready ? { label, state: 'ready', status: 'Ready', detail: 'Confirmed by a fresh report for the current rollout.' }
-      : { label, state: 'blocked', status: c.reason === 'applying' ? 'Pending' : 'Not ready', detail: reason(c.reason) || 'The component has not reported ready.' }
+      : { label, state: c.reason === 'applying' ? 'unverified' : 'blocked', status: c.reason === 'applying' ? 'Pending' : 'Not ready', detail: reason(c.reason) || 'The component has not reported ready.' }
   }
   checks.push(componentCheck('Node deployment', runtime))
 
@@ -98,7 +113,7 @@ function WorkReadiness({ view, clock }: { view: MachineObservation; clock: numbe
   const appProblems: { state: 'blocked' | 'unverified'; detail: string }[] = []
   for (const a of active) {
     const observed = currentAssignment(view, runner, a, clock)
-    if (!a.start_allowed) appProblems.push({ state: 'blocked', detail: `${a.name}: startup is not permitted for this assignment.` })
+    if (!a.start_allowed) appProblems.push({ state: 'unverified', detail: `${a.name}: waiting for previous revision cleanup.` })
     else if (observed?.reason && (observed.ready < a.replicas || observed.registered < a.replicas)) appProblems.push({ state: 'blocked', detail: `${a.name}: ${observed.instances === 0 ? 'no app instances loaded' : `${observed.ready} healthy and ${observed.registered} registered of ${a.replicas} requested instances`} — ${reason(observed.reason)}.${a.failure && a.failure !== observed.reason ? ` Last reconciliation diagnostic: ${reason(a.failure)}.` : ''}` })
     else if (a.failure) appProblems.push({ state: 'blocked', detail: `${a.name}: last reconciliation diagnostic: ${reason(a.failure)}.` })
     else if (!observed) appProblems.push({ state: 'unverified', detail: `${a.name}: no fresh observation for the current assignment.` })
@@ -111,13 +126,20 @@ function WorkReadiness({ view, clock }: { view: MachineObservation; clock: numbe
   if (view.assignments_omitted) appProblems.push({ state: 'unverified', detail: 'Additional app assignments were omitted from this report.' })
   if (active.length && runner?.apps?.applied?.generation !== view.requested.generation) appProblems.push({ state: 'unverified', detail: 'The requested app configuration has not been confirmed applied.' })
   const appError = fresh(runtime) && runtime?.current && runtime.apps_error || fresh(runner) && runner?.current && (runner.apps?.reason || (!runner.ready && runner.reason)) || fresh(diagnosis) && diagnosis?.current && !diagnosis.ready && (diagnosis.apps?.reason || diagnosis.reason)
-  if (appError) {
-    appProblems.push({ state: 'blocked', detail: reason(appError) })
-  }
+  if (!evidence && appError) appProblems.push({ state: 'blocked', detail: reason(appError) })
   const appState = appProblems.some(p => p.state === 'blocked') ? 'blocked' : appProblems.length ? 'unverified' : 'ready'
-  checks.push(active.length === 0 && !view.assignments_omitted
-    ? { label: 'Apps', state: 'blocked', status: 'No apps assigned', detail: 'No active app assignments. There are no apps configured to receive new work.' }
-    : { label: 'Apps', state: appState, status: appState === 'ready' ? 'Healthy and registered' : appState === 'blocked' ? 'Apps not ready' : 'Unverified', detail: `${readyApps} of ${active.length} app assignments have all requested instances healthy and registered.${appProblems.length ? ` ${appProblems[0].detail}` : ''}` })
+  if (active.length === 0 && !view.assignments_omitted) {
+    checks.push({ label: 'Apps', state: 'blocked', status: 'No apps assigned', detail: 'No active app assignments. There are no apps configured to receive new work.' })
+  } else if (evidence) {
+    const { apps } = evidence
+    const { admitted, blocker, pending, ready } = appEvidenceAt(apps, age)
+    const issue = (blocker ? apps.blocker : pending ? apps.pending : undefined)?.reason
+    checks.push({ label: 'Apps', state: ready ? 'ready' : blocker ? 'blocked' : 'unverified',
+      status: ready ? 'Healthy and accepting work' : blocker ? 'Apps not ready' : pending ? 'Pending' : 'Unverified',
+      detail: `${admitted} of ${apps.requested} requested replicas have current Node admission evidence.${issue ? ` ${reason(issue)}.` : ''}` })
+  } else {
+    checks.push({ label: 'Apps', state: appState, status: appState === 'ready' ? 'Healthy and registered' : appState === 'blocked' ? 'Apps not ready' : 'Unverified', detail: `${readyApps} of ${active.length} app assignments have all requested instances healthy and registered.${appProblems.length ? ` ${appProblems[0].detail}` : ''}` })
+  }
 
   const tunnel = view.tunnel
   const tunnelReady = tunnel.ready && alive(tunnel.expires_at, clock)
@@ -128,6 +150,11 @@ function WorkReadiness({ view, clock }: { view: MachineObservation; clock: numbe
     const c = componentCheck('Tunnel connector', connector)
     if (c.state !== 'ready' || !alive(connector?.connector_expires_at, clock)) tunnelCheck = { ...tunnelCheck, state: c.state === 'blocked' ? 'blocked' : 'unverified', status: 'Connector not verified', detail: c.state !== 'ready' ? c.detail : reason('connector_observation_stale') }
   }
+  if (evidence?.ingress) {
+    const ingressState = observationState(evidence.ingress, age)
+    if (ingressState !== 'ready') tunnelCheck = { ...tunnelCheck, state: ingressState === 'blocked' ? 'blocked' : 'unverified',
+      status: ingressState === 'pending' ? 'Pending' : 'Unverified', detail: reason(evidence.ingress.reason) || tunnelCheck.detail }
+  }
   checks.push(tunnelCheck)
 
   const source = view.discovery_source
@@ -137,19 +164,20 @@ function WorkReadiness({ view, clock }: { view: MachineObservation; clock: numbe
   else if (view.discovery_selection_stale || !alive(view.discovery_selection_expires_at, clock)) discovery = { ...discovery, state: 'unverified', status: 'Selection stale', detail: 'The current discovery source selection cannot be confirmed.' }
   else if (!source || source.state === 'excluded') discovery = { ...discovery, state: 'blocked', status: 'Excluded', detail: `This node is excluded from fleet discovery${source?.selection_reason && source.selection_reason !== 'selected' ? ` (${reason(source.selection_reason)})` : ''}. Its apps are not being advertised for work.` }
   else if (source.stale || !alive(source.expires_at, clock)) discovery = { ...discovery, state: 'unverified', status: 'Inventory stale', detail: `No fresh discovery inventory${source.transport_outcome ? ` — ${reason(source.transport_outcome)}` : ''}.` }
-  else if (source.publication_blocked) discovery = { ...discovery, state: 'blocked', status: 'Publication blocked', detail: 'Some app records were blocked from the published inventory.' }
-  else if (active.length && !runner?.apps?.instances.some(i => active.some(a => a.revision_id === i.revision_id && a.generation === i.generation && a.activation_generation === i.activation_generation) && view.membership[i.instance_id]?.state === 'present' && alive(view.membership[i.instance_id]?.expires_at, clock))) discovery = { ...discovery, state: 'unverified', status: 'Apps unverified', detail: 'No current app instance is confirmed in the published inventory.' }
+  else if (!evidence && source.publication_blocked) discovery = { ...discovery, state: 'blocked', status: 'Publication blocked', detail: 'Some app records were blocked from the published inventory.' }
+  else if (!evidence && active.length && !runner?.apps?.instances.some(i => active.some(a => a.revision_id === i.revision_id && a.generation === i.generation && a.activation_generation === i.activation_generation) && view.membership[i.instance_id]?.state === 'present' && alive(view.membership[i.instance_id]?.expires_at, clock))) discovery = { ...discovery, state: 'unverified', status: 'Apps unverified', detail: 'No current app instance is confirmed in the published inventory.' }
+  if (evidence?.discovery) {
+    const discoveryState = observationState(evidence.discovery, age)
+    if (discoveryState !== 'ready') discovery = { ...discovery, state: discoveryState === 'blocked' ? 'blocked' : 'unverified',
+      status: discoveryState === 'blocked' ? 'Excluded' : 'Apps unverified', detail: reason(evidence.discovery.reason) || 'No current admitted replica is confirmed in the published inventory.' }
+    if (source?.publication_blocked) discovery.detail += ' Some app records were filtered from the inventory.'
+  }
   checks.push(discovery)
 
   const retired = view.lifecycle === 'cleanup_pending' || view.lifecycle === 'removed'
   const draining = view.lifecycle === 'draining'
-  const blocked = checks.some(c => c.state === 'blocked')
-  const partiallyReady = readyApps > 0 && checks.every(c => c.label === 'Apps' || c.state !== 'blocked')
-  const reported = view.readiness
-  const state = reported && requiresFreshEvidence(reported.state) && clock >= Date.parse(view.server_time) + (reported.valid_for_ms ?? 0) ? 'unverified' : reported?.state
-  const fallback = retired || draining ? 'Not accepting work' : blocked ? partiallyReady ? 'Not fully ready to receive work' : 'Not ready to receive work' : 'Work readiness unverified'
-  const title = state && state !== 'unverified' ? readinessLabels[state] : state ? 'Work readiness unverified' : fallback
-  const HeadingIcon = state === 'ready' ? CircleCheck : retired || draining || blocked ? CircleAlert : CircleHelp
+  const title = state === 'unverified' ? 'Work readiness unverified' : readinessLabels[state]
+  const HeadingIcon = state === 'ready' ? CircleCheck : state === 'inactive' || state === 'blocked' ? CircleAlert : CircleHelp
   return <section className={`work-readiness ${state || ''}`} aria-label="Work readiness">
     <div className="readiness-heading"><HeadingIcon size={23} aria-hidden="true" /><div><h4>{title}</h4>{retired ? <p>This enrollment is retired. Cleanup evidence is shown below.</p> : draining ? <p>This node is draining for removal.</p> : null}</div></div>
     <ul className="readiness-checks">{checks.map(check => {
@@ -183,7 +211,7 @@ export function MachineStatus({ session, machine, authorityFailure }: { session:
         if (data.node_id !== machine.node_id) { setView(null); setProblem('Machine enrollment changed. Select the machine again.'); return }
         const arrived = Date.now()
         setOffset(Date.parse(data.server_time) + performance.now() - started - arrived)
-        setNow(arrived); setView(data); setProblem('')
+        setNow(arrived); setView({ ...data, readinessRequestedAt: started }); setProblem('')
       } catch (error) {
         if (!current || controller.signal.aborted) return
         if (error instanceof APIError && [401, 403, 404].includes(error.status)) { setView(null); if (error.status !== 404) authorityFailure?.(error) }

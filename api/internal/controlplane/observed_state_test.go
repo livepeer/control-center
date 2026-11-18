@@ -196,7 +196,7 @@ func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfi
 	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
 }
 
-func TestFleetReadinessUsesCurrentHealthAndRegistration(t *testing.T) {
+func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	s, c, m, a := observationFixture(t)
 	runtime := currentReport(t, s, m.NodeID, machineconfig.Report{
 		NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime",
@@ -208,55 +208,67 @@ func TestFleetReadinessUsesCurrentHealthAndRegistration(t *testing.T) {
 	runner.Apps.Applied = &contract.StageIdentity{
 		Generation: m.AppsGeneration, AppsDigest: m.AppsDigest, ArtifactDigest: "sha256:" + strings.Repeat("4", 64),
 	}
+	expiry := runner.ObservedAt.Add(15 * time.Second)
 	runner.Apps.Assignments[0].NodeExpiresAt = runner.Apps.Instances[0].NodeExpiresAt
-	runner.Apps.Assignments[0].ProbeExpiresAt = time.Now().Add(15 * time.Second).UTC()
+	runner.Apps.Assignments[0].ProbeExpiresAt = expiry
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
-
-	check := func(want readinessState) {
+	check := func(wantNode string, admitted int, pending bool) {
 		t.Helper()
+		checkEvidence := func(e *machineReadinessEvidence) {
+			t.Helper()
+			if e == nil || e.Node.State != wantNode || !e.Apps.Complete || !e.Apps.Applied || e.Apps.Requested != 1 ||
+				e.Apps.Admitted != admitted || (e.Apps.Pending != nil) != pending ||
+				(admitted > 0 && (e.Apps.AdmittedValidForMS <= 0 || e.Apps.AdmittedValidForMS > 15000)) {
+				t.Fatalf("readiness evidence = %+v", e)
+			}
+		}
 		for _, path := range []string{"/api/machines?orchestrator_address=" + orchA, "/api/admin/overview"} {
 			w := request(t, s, "GET", path, "session-a", nil)
 			requireStatus(t, w, 200)
 			var got struct{ Machines []observedMachineSummary }
-			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-				t.Fatal(err)
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got.Machines) != 1 {
+				t.Fatalf("unexpected fleet response for %s: %v (%v)", path, got.Machines, err)
 			}
-			if len(got.Machines) != 1 || got.Machines[0].Readiness.State != want ||
-				(want == readinessReady && (got.Machines[0].Readiness.ValidForMS <= 0 || got.Machines[0].Readiness.ValidForMS > 15000)) {
-				t.Fatalf("%s readiness = %+v, want %s", path, got.Machines, want)
-			}
+			checkEvidence(got.Machines[0].ReadinessEvidence)
 		}
 		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
 		requireStatus(t, w, 200)
 		var detail machineObservation
-		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail.Readiness.State != want {
-			t.Fatalf("detail readiness = %+v, want %s (%v)", detail.Readiness, want, err)
+		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
 		}
+		checkEvidence(detail.ReadinessEvidence)
 	}
 
-	check(readinessReady)
-	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,probe_expires_at}',to_jsonb(now()-interval '1 second'))
+	check("ready", 0, false) // An older report attests health and registration alone.
+	runner = currentReport(t, s, m.NodeID, runner)
+	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{}
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	check("ready", 0, true)
+	runner = currentReport(t, s, m.NodeID, runner)
+	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{Ready: 1, ExpiresAt: expiry}
+	runner.Apps.Instances[0].AdmissionExpiresAt = expiry
+	runner.Apps.Instances[0].Probe = &contract.ProbeStatus{ObservedAt: expiry.Add(-15 * time.Second), ExpiresAt: expiry, Success: true, Started: true}
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	check("ready", 1, false)
+	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,admission,expires_at}',to_jsonb(now()-interval '1 second'))
  WHERE node_id=$1 AND component='runner'`, m.NodeID)
-	check(readinessUnverified)
+	check("ready", 0, false)
 	runtime = currentReport(t, s, m.NodeID, runtime)
 	runtime.Ready, runtime.Reason = false, "applying"
 	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
-	check(readinessPending)
-	runtime = currentReport(t, s, m.NodeID, runtime)
-	runtime.Reason = "reconcile_failed"
-	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
-	check(readinessBlocked)
+	check("pending", 0, false)
 }
 
-func TestWorkReadinessRequiresFreshConfiguredIngress(t *testing.T) {
+func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
 	now := time.Now()
 	expires := now.Add(time.Minute)
 	instance := contract.InstanceStatus{RevisionID: "app", InstanceID: "instance", Generation: 1, ActivationGeneration: 1,
-		Ready: true, Registered: true, NodeExpiresAt: expires}
+		Ready: true, Registered: true, AdmissionExpiresAt: expires}
 	apps := &contract.AppStatus{DesiredGeneration: 1, Applied: &contract.StageIdentity{Generation: 1},
 		Instances: []contract.InstanceStatus{instance},
-		Assignments: []contract.AssignmentStatus{{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Instances: 1,
-			Ready: 1, Registered: 1, NodeExpiresAt: expires, ProbeExpiresAt: expires}}}
+		Assignments: []contract.AssignmentStatus{{RevisionID: "app", Generation: 2, ActivationGeneration: 1, Instances: 2,
+			Ready: 2, Registered: 2, Admission: &contract.ReplicaAdmission{Ready: 2, ExpiresAt: expires}}}}
 	report := componentObservation{Fresh: true, Current: true, Ready: true, ReceivedAt: &now, ExpiresAt: &expires}
 	runtime, runner, connector := report, report, report
 	runtime.Component, runner.Component, connector.Component = "runtime", "runner", "connector"
@@ -264,35 +276,38 @@ func TestWorkReadinessRequiresFreshConfiguredIngress(t *testing.T) {
 	view := machineObservation{
 		ServerTime: now, Lifecycle: "active", Requested: contract.StageIdentity{Generation: 1},
 		Components:       []componentObservation{runtime, runner, connector},
-		Assignments:      []observedAssignment{{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Desired: "present", Replicas: 1, StartAllowed: true}},
-		Tunnel:           tunnelObservation{Enabled: true, Ready: true, ExpiresAt: &expires},
+		Assignments:      []observedAssignment{{RevisionID: "app", Generation: 2, ActivationGeneration: 1, Desired: "present", Replicas: 1, StartAllowed: true}},
+		Tunnel:           tunnelObservation{Enabled: true, Ready: true, IngressVerified: true, SourceGeneration: 2, ExpiresAt: &expires},
 		DiscoveryEnabled: true, DiscoveryInitialized: true, DiscoverySelectionExpiresAt: &expires,
-		DiscoverySource: &fleet.SourceStatus{State: "fresh", ExpiresAt: &expires},
-		Membership:      map[string]fleet.Membership{"instance": {State: "present", ExpiresAt: &expires}},
+		DiscoverySource: &fleet.SourceStatus{State: "fresh", SelectedGeneration: 2, ExpiresAt: &expires, PublicationBlocked: true},
+		Membership:      map[string]fleet.Membership{"instance": {State: "present", ExpiresAt: &expires, SourceGeneration: 2}},
 	}
-	check := func(want readinessState) {
+	check := func(ingress, discovery string, admitted int) {
 		t.Helper()
-		if got := workReadiness(view); got.State != want {
-			t.Fatalf("readiness = %+v, want %s", got, want)
+		e := view.readinessEvidence()
+		if e.Ingress.State != ingress || e.Discovery.State != discovery || e.Apps.Admitted != admitted {
+			t.Fatalf("ingress=%+v discovery=%+v apps=%+v", e.Ingress, e.Discovery, e.Apps)
 		}
 	}
-	check(readinessReady)
+	check("ready", "ready", 1) // Retained instance and exact publication survive scale-down and unrelated filtering.
+	view.Tunnel.IngressVerified = false
+	check("pending", "ready", 1)
+	view.Tunnel.IngressVerified = true
 	view.Components[2].ConnectorExpiresAt = &now
-	check(readinessUnverified)
+	check("unverified", "ready", 1)
 	view.Components[2].ConnectorExpiresAt = &expires
-	view.Membership["instance"] = fleet.Membership{State: "absent", ExpiresAt: &expires}
-	check(readinessUnverified)
-	view.DiscoverySource.State = "excluded"
-	check(readinessBlocked)
-	view.Tunnel.Enabled, view.DiscoveryEnabled = false, false
-	check(readinessReady)
-	view.Assignments[0].Replicas = 2
-	check(readinessPartial)
-	view.Assignments[0].Replicas = 1
-	view.Assignments = append(view.Assignments, observedAssignment{RevisionID: "blocked", Desired: "present", Replicas: 1})
-	check(readinessPartial)
-	view.Lifecycle = "draining"
-	check(readinessInactive)
+	view.DiscoverySource.SelectedGeneration--
+	check("ready", "unverified", 1)
+	view.DiscoverySource.SelectedGeneration++
+	apps.Instances[0].AdmissionExpiresAt = now
+	check("ready", "unverified", 1)
+	view.DiscoverySource.State, view.DiscoverySource.SelectionReason = "excluded", "blocked"
+	check("ready", "blocked", 1)
+	view.Requested.Generation = 2
+	apps.Reason = "resource_refused"
+	if e := view.readinessEvidence(); e.Apps.Blocker != nil || e.Apps.Admitted != 0 {
+		t.Fatalf("an old app report established current evidence: %+v", e.Apps)
+	}
 }
 
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {

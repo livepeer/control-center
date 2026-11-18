@@ -8,17 +8,18 @@ enrollment does not inherit access to the previous enrollment's diagnostics.
 
 ## Reading status
 
-The machine list and **Work readiness** section use the same readiness status.
+The machine list and **Work readiness** section use the same browser calculation.
+Both receive readiness evidence in their existing status responses.
 
 - **Green — Ready to receive work.** The current Node deployment is ready,
   onchain admission is ready when configured, and all active assignments have
-  current health and Node registration evidence for the requested replicas.
-  Managed tunnels require verified provisioning and a ready connector. With
-  discovery enabled, the inventory must be fresh and include a current, ready
-  app instance.
+  fresh health evidence and Node has accepted the requested replicas as ready.
+  Managed tunnels require verified ingress and a ready connector. With
+  discovery enabled, the fresh inventory must include a current admitted replica.
 - **Amber — Pending, partially ready, or unverified.** Readiness evidence is
   missing or expired, startup or rollout is in progress, or only some
-  requested app replicas are confirmed ready.
+  requested app replicas are confirmed ready. Older Runtime reports can show
+  healthy or registered replicas while admission evidence is still pending.
 - **Red — Not ready or not accepting work.** A confirmed blocker prevents work,
   there are no active assignments, or the enrollment is draining or retired.
 
