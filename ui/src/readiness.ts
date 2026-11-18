@@ -17,6 +17,7 @@ export type ReadinessEvidence = {
     applied: boolean
     admitted: number
     admitted_valid_for_ms?: number
+    last_admission_for_ms?: number
     blocker?: ReadinessObservation
     pending?: ReadinessObservation
   }
@@ -36,11 +37,13 @@ export function observationState(observation: ReadinessObservation | undefined, 
 }
 
 export function appEvidenceAt(apps: ReadinessEvidence['apps'], age: number) {
-  const admitted = age < (apps.admitted_valid_for_ms ?? 0) ? apps.admitted : 0
+  const countCurrent = age < (apps.admitted_valid_for_ms ?? 0)
+  const someCurrent = !countCurrent && age < (apps.last_admission_for_ms ?? 0)
+  const admitted = countCurrent ? apps.admitted : someCurrent ? 1 : 0
   const blocker = observationState(apps.blocker, age) === 'blocked'
   const pending = observationState(apps.pending, age) === 'pending'
-  const ready = apps.complete && apps.applied && apps.requested > 0 && admitted === apps.requested && !blocker && !pending
-  return { admitted, blocker, pending, ready }
+  const ready = countCurrent && apps.complete && apps.applied && apps.requested > 0 && admitted === apps.requested && !blocker && !pending
+  return { admitted, someCurrent, blocker, pending, ready }
 }
 
 export function classifyReadiness(snapshot: ReadinessSnapshot, now: number): ReadinessState {
@@ -64,6 +67,6 @@ export function classifyReadiness(snapshot: ReadinessSnapshot, now: number): Rea
 export function nextReadinessExpiry(evidence: ReadinessEvidence, age: number) {
   const { node, onchain, ingress, discovery, apps } = evidence
   return Math.min(...[node?.valid_for_ms, onchain?.valid_for_ms, ingress?.valid_for_ms, discovery?.valid_for_ms,
-    apps.blocker?.valid_for_ms, apps.pending?.valid_for_ms, apps.admitted_valid_for_ms]
+    apps.blocker?.valid_for_ms, apps.pending?.valid_for_ms, apps.admitted_valid_for_ms, apps.last_admission_for_ms]
     .filter((expiry): expiry is number => expiry !== undefined && expiry > age))
 }

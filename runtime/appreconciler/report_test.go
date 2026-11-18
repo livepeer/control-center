@@ -238,6 +238,10 @@ func TestReportAdmissionRequiresCurrentNodeReadyAndProbe(t *testing.T) {
 		h.ready, h.failures = false, 3 // The copied ready map still says true.
 	}
 	check(0, 0)
+	for id, h := range c.Probes.values {
+		ready[id], h.ready, h.success, h.failures = false, true, true, 0
+	}
+	check(0, len(ready))
 }
 
 func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {

@@ -142,13 +142,11 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		registeredInstances[id] = registered && p.PodUID == i.PodUID && p.App.Status == "ready" && p.Observation.Accepted && p.Observation.RunnerID == s.Identity.RunnerID && p.Observation.Credential == s.Identity.Credential && s.Identity.Sequence != nil && p.Observation.Sequence == *s.Identity.Sequence
 		healthy := ready[id]
 		var probe *contract.ProbeStatus
-		var probeReady bool
 		if c.Probes != nil {
-			probe, probeReady = c.Probes.Status(id, i.PodUID)
-			healthy = healthy && probeReady
+			probe, healthy = c.Probes.Status(id, i.PodUID)
 		}
 		var admissionExpiry time.Time
-		if healthy && i.WithdrawalID == "" && registeredInstances[id] && probe != nil && now.Before(probe.ExpiresAt) {
+		if ready[id] && healthy && i.WithdrawalID == "" && registeredInstances[id] && probe != nil && now.Before(probe.ExpiresAt) {
 			admissionExpiry = nodeExpiry
 			if probe.ExpiresAt.Before(admissionExpiry) {
 				admissionExpiry = probe.ExpiresAt

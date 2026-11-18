@@ -20,6 +20,7 @@ type appReadinessEvidence struct {
 	Applied            bool                  `json:"applied"`
 	Admitted           int                   `json:"admitted"`
 	AdmittedValidForMS int64                 `json:"admitted_valid_for_ms,omitempty"`
+	LastAdmissionForMS int64                 `json:"last_admission_for_ms,omitempty"`
 	Blocker            *readinessObservation `json:"blocker,omitempty"`
 	Pending            *readinessObservation `json:"pending,omitempty"`
 }
@@ -207,6 +208,7 @@ func (v machineObservation) appEvidence(runtime, runner componentObservation, ap
 					e.AdmittedValidForMS = ttl
 				}
 				e.Admitted += admitted
+				e.LastAdmissionForMS = max(e.LastAdmissionForMS, ttl)
 			}
 			issue = observed
 		}
@@ -214,6 +216,9 @@ func (v machineObservation) appEvidence(runtime, runner componentObservation, ap
 			issue = readinessObservation{State: "blocked", Reason: a.Failure}
 		}
 		addIssue(issue)
+	}
+	if e.LastAdmissionForMS == e.AdmittedValidForMS {
+		e.LastAdmissionForMS = 0
 	}
 	return e
 }
@@ -247,6 +252,7 @@ func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, report
 	if o != nil && o.Reason != "" {
 		return admitted, ttl, timedObservation(issueState(o.Reason), o.Reason, now, reportExpiry)
 	}
+	var lastFailedProbe time.Time
 	for _, i := range apps.Instances {
 		if !a.matchesInstance(i) || now.Before(i.AdmissionExpiresAt) {
 			continue
@@ -254,14 +260,17 @@ func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, report
 		for _, reason := range []string{i.WorkloadReason, i.Reason} {
 			switch reason {
 			case "readiness_failed":
-				if i.Probe != nil && now.Before(i.Probe.ExpiresAt) {
-					return admitted, ttl, timedObservation("blocked", reason, now, earlier(i.Probe.ExpiresAt, reportExpiry))
+				if i.Probe != nil && i.Probe.ExpiresAt.After(lastFailedProbe) {
+					lastFailedProbe = i.Probe.ExpiresAt
 				}
 			case "image_pull_failed", "container_start_failed", "startup_failed", "memory_limit", "scheduling_refused",
 				"isolation_failed", "process_failed_to_start", "process_failed", "process_lost", "stop_signal_unverified", "secret_invalid":
 				return admitted, ttl, timedObservation("blocked", reason, now, reportExpiry)
 			}
 		}
+	}
+	if now.Before(lastFailedProbe) {
+		return admitted, ttl, timedObservation("blocked", "readiness_failed", now, earlier(lastFailedProbe, reportExpiry))
 	}
 	if o != nil && o.Admission != nil && (o.Instances < a.Replicas || o.CleanupPending > 0 ||
 		(o.Admission.Ready == 0 && now.Before(o.ProbeExpiresAt) && now.Before(o.NodeExpiresAt))) {

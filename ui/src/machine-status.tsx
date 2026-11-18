@@ -98,12 +98,12 @@ function WorkReadiness({ view }: { view: MachineObservation }) {
     add('Node deployment', evidence.node)
     if (evidence.onchain) add('Onchain admission', evidence.onchain)
     const { apps } = evidence
-    const { admitted, blocker, pending, ready } = appEvidenceAt(apps, age)
+    const { admitted, someCurrent, blocker, pending, ready } = appEvidenceAt(apps, age)
     const appIssue = reason((blocker ? apps.blocker : pending ? apps.pending : undefined)?.reason)
     checks.push({
       label: 'Apps', state: ready ? 'ready' : blocker || (apps.complete && apps.requested === 0) ? 'blocked' : pending ? 'pending' : 'unverified',
       detail: apps.complete && apps.requested === 0 ? 'No apps assigned.' :
-        `${admitted} of ${apps.requested} requested replicas have current Node admission evidence.${appIssue ? ` ${appIssue}.` : ''}`,
+        `${someCurrent ? 'At least ' : ''}${admitted} of ${apps.requested} requested replicas have current Node admission evidence.${appIssue ? ` ${appIssue}.` : ''}`,
     })
     add('Tunnel provisioning', evidence.ingress)
     add('Discovery inventory', evidence.discovery)

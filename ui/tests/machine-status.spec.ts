@@ -122,20 +122,25 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
 
   state.readiness = readyEvidence(10000)
   Object.assign(state.readiness.apps, {
-    requested: 2, admitted_valid_for_ms: 2000, blocker: { state: 'blocked', reason: 'resource_refused' },
+    requested: 3, admitted: 2, admitted_valid_for_ms: 1000, last_admission_for_ms: 2000,
+    blocker: { state: 'blocked', reason: 'resource_refused' },
   })
   await refresh()
   await expect(badge).toHaveClass('machine-status partial')
-  await page.clock.fastForward(2500)
+
+  state.holdFleet = state.fail = true
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect.poll(() => !!state.heldFleet).toBe(true)
+  await page.clock.fastForward(1250)
+  await expect(title).toHaveText('Partially ready to receive work')
+  await expect(page.getByRole('region', { name: 'Work readiness', exact: true })).toContainText('At least 1 of 3 requested replicas')
+  await expect(badge).toHaveClass('machine-status partial')
+  await page.clock.fastForward(1250)
   await expect(badge).toHaveClass('machine-status blocked')
   await expect(badge).toHaveText('Not ready to receive work')
   await expect(title).toHaveText('Not ready to receive work')
 
-  state.holdFleet = true
-  await refresh()
-  await expect.poll(() => !!state.heldFleet).toBe(true)
-  await page.clock.fastForward(3500)
-  const delayed = { ...machine, hostname: 'delayed-worker', readiness_evidence: readyEvidence(3000) }
+  const delayed = { ...machine, hostname: 'delayed-worker', readiness_evidence: readyEvidence(2000) }
   await state.heldFleet!.fulfill({ json: { user_id: user, is_admin: admin, administrators: [], machines: [delayed] } })
   await expect(page.getByRole('row').filter({ hasText: 'delayed-worker' }).locator('.machine-status')).toHaveText('Readiness unverified')
 })

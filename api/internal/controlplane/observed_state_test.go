@@ -319,6 +319,16 @@ func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
 	if e := view.readinessEvidence(); e.Apps.Blocker != nil || e.Apps.Admitted != 0 {
 		t.Fatalf("an old app report established current evidence: %+v", e.Apps)
 	}
+	view.Requested.Generation, apps.Reason = 1, ""
+	second := view.Assignments[0]
+	second.RevisionID = "second"
+	short := apps.Assignments[0]
+	short.RevisionID, short.Admission = second.RevisionID, &contract.ReplicaAdmission{Ready: 1, ExpiresAt: now.Add(time.Second)}
+	view.Assignments = append(view.Assignments, second)
+	apps.Assignments = append(apps.Assignments, short)
+	if e := view.readinessEvidence().Apps; e.Admitted != 2 || e.AdmittedValidForMS != 1000 || e.LastAdmissionForMS != 60000 {
+		t.Fatalf("did not keep both admission deadlines: %+v", e)
+	}
 }
 
 func TestReplicaIssuesKeepTheirOwnFreshness(t *testing.T) {
@@ -339,6 +349,13 @@ func TestReplicaIssuesKeepTheirOwnFreshness(t *testing.T) {
 		if issue.ValidForMS != tc.ttl || (tc.ttl > 0 && issue.Reason != tc.reason) {
 			t.Fatalf("%s at %s: %+v", tc.reason, tc.clock, issue)
 		}
+	}
+	i.Reason = "readiness_failed"
+	sibling := i
+	sibling.Reason = "image_pull_failed"
+	_, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i, sibling}}, now, now.Add(30*time.Second))
+	if issue.Reason != sibling.Reason || issue.ValidForMS != 30000 {
+		t.Fatalf("short probe expiry hid a longer blocker: %+v", issue)
 	}
 }
 
