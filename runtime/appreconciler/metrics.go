@@ -72,7 +72,7 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{MaxRequestsInFlight: 1})
 }
 
-func (m *Metrics) observeHeartbeat(event runner.HeartbeatEvent, callbackStarted time.Time) {
+func (m *Metrics) observeHeartbeatRequest(event runner.HeartbeatEvent, callbackStarted time.Time) {
 	if event.At.IsZero() {
 		return
 	}
@@ -81,13 +81,19 @@ func (m *Metrics) observeHeartbeat(event runner.HeartbeatEvent, callbackStarted 
 		return
 	}
 	m.heartbeatRequest.WithLabelValues("success").Observe(callbackStarted.Sub(event.At).Seconds())
+}
+
+func (m *Metrics) observeAcceptedHeartbeat(sent time.Time) {
+	if sent.IsZero() {
+		return
+	}
 	m.heartbeatMu.Lock()
 	defer m.heartbeatMu.Unlock()
 	if previous := m.lastHeartbeatSent; !previous.IsZero() {
-		m.heartbeatGap.Observe(event.At.Sub(previous).Seconds())
+		m.heartbeatGap.Observe(sent.Sub(previous).Seconds())
 	}
-	m.lastHeartbeatSent = event.At
-	m.lastHeartbeat.Set(float64(event.At.UnixNano()) / float64(time.Second))
+	m.lastHeartbeatSent = sent
+	m.lastHeartbeat.Set(float64(sent.UnixNano()) / float64(time.Second))
 }
 
 type diagnosticMetrics struct {
@@ -190,6 +196,11 @@ func resolveMemoryCgroup(groups []procfs.Cgroup, mounts []*procfs.MountInfo) mem
 			groupPath = group.Path
 		}
 	}
+	// Namespace-relative ancestors can appear as /.. in procfs. Cleaning
+	// them before comparing would turn them into the namespace root.
+	if !filepath.IsAbs(groupPath) || filepath.Clean(groupPath) != groupPath {
+		return memoryCgroup{legacy: legacy}
+	}
 	var directory string
 	longestRoot := 0
 	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
@@ -199,7 +210,7 @@ func resolveMemoryCgroup(groups []procfs.Cgroup, mounts []*procfs.MountInfo) mem
 			continue
 		}
 		root := unescape.Replace(mount.Root)
-		if len(root) <= longestRoot {
+		if len(root) <= longestRoot || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 			continue
 		}
 		relative, err := filepath.Rel(root, groupPath)

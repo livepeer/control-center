@@ -226,7 +226,7 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 	if o.Metrics != nil {
 		started := time.Now()
 		defer func() { o.Metrics.heartbeatCallback.Observe(time.Since(started).Seconds()) }()
-		o.Metrics.observeHeartbeat(event, started)
+		o.Metrics.observeHeartbeatRequest(event, started)
 	}
 	o.mu.Lock()
 	h, r, lineage := o.hooks, copyRequest(o.request), o.lineage
@@ -298,7 +298,8 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		}
 	}
 	o.mu.Unlock()
-	if err := h.Observe(obs); err != nil && !errors.Is(err, ErrSuperseded) {
+	observeErr := h.Observe(obs)
+	if observeErr != nil && !errors.Is(observeErr, ErrSuperseded) {
 		o.Fatal(errors.New("identity_persistence_failed"))
 		panic("fatal handler returned")
 	}
@@ -314,6 +315,9 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		}
 	}
 	o.accepted = Identity{RunnerID: resp.RunnerID, Credential: obs.Credential, Confirmed: obs.Accepted && !obs.Bootstrap, Sequence: event.AcceptedSeq}
+	if o.Metrics != nil && observeErr == nil && o.accepted.Confirmed {
+		o.Metrics.observeAcceptedHeartbeat(event.At)
+	}
 	if time.Now().Before(o.rejectedUntil) && len(obs.Entries) < len(o.request.Entries) && h.Failure != nil {
 		h.Failure(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: o.rejectedReason, Partial: true})
 	}
