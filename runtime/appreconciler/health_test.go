@@ -46,37 +46,6 @@ func TestCanceledProbeDoesNotBlockReadinessRecovery(t *testing.T) {
 	})
 }
 
-func TestProbeRefreshOnlyOnReadinessChange(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		p := NewProbes()
-		refreshes := 0
-		p.OnChange = func() { refreshes++ }
-		p.Client.Transport = regressionTransport(func(*http.Request) (*http.Response, error) {
-			return httptest.NewRecorder().Result(), nil
-		})
-		instance := &Instance{ID: "i", Name: "one", Definition: testutil.Assignment(t).Entries[0].Revision.Definition}
-		instances := map[string]*Instance{"i": instance}
-		view := View{Pods: map[string]Pod{"one": {UID: "uid", Phase: "Running"}}, Endpoints: map[string]map[string]bool{"one": {"uid": true}}}
-		p.Configure(instances, view)
-		go p.Run(ctx)
-		time.Sleep(4 * time.Second)
-		synctest.Wait()
-		if !p.Ready("i", "uid") || refreshes != 1 {
-			t.Fatalf("successful readiness should refresh once, got %d", refreshes)
-		}
-		// Reconciliation can consume a readiness change before the independent loop.
-		p.Configure(instances, View{})
-		p.Poll(ctx, instances, View{}, time.Now())
-		time.Sleep(2 * time.Second)
-		synctest.Wait()
-		if p.Ready("i", "uid") || refreshes != 2 {
-			t.Fatalf("endpoint loss should refresh once, got %d", refreshes)
-		}
-	})
-}
-
 func TestProbesHonorThresholdAndOneSuccessRecovery(t *testing.T) {
 	var code atomic.Int64
 	code.Store(200)

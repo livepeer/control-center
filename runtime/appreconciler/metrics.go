@@ -5,15 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	runner "github.com/livepeer/golang-runner"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/procfs"
 )
 
 const metricNamespace = "livepeer_app_reconciler"
@@ -25,7 +27,8 @@ type Metrics struct {
 	heartbeatGap      prometheus.Histogram
 	lastHeartbeat     prometheus.Gauge
 	journalCommit     prometheus.Histogram
-	lastHeartbeatNS   atomic.Int64
+	heartbeatMu       sync.Mutex
+	lastHeartbeatSent time.Time
 }
 
 func NewMetrics() *Metrics {
@@ -50,6 +53,7 @@ func NewMetrics() *Metrics {
 		diagnosticMetrics{
 			sockets: prometheus.NewDesc(metricNamespace+"_open_sockets", "Socket descriptors open in the reconciler.", nil, nil),
 			memory:  prometheus.NewDesc(metricNamespace+"_cgroup_memory_bytes", "Memory charged to the reconciler cgroup by category.", []string{"category"}, nil),
+			cgroup:  ownMemoryCgroup(),
 		},
 	)
 	return m
@@ -77,15 +81,18 @@ func (m *Metrics) observeHeartbeat(event runner.HeartbeatEvent, callbackStarted 
 		return
 	}
 	m.heartbeatRequest.WithLabelValues("success").Observe(callbackStarted.Sub(event.At).Seconds())
-	sent := event.At.UnixNano()
-	if previous := m.lastHeartbeatNS.Swap(sent); previous != 0 && previous <= sent {
-		m.heartbeatGap.Observe(time.Duration(sent - previous).Seconds())
+	m.heartbeatMu.Lock()
+	defer m.heartbeatMu.Unlock()
+	if previous := m.lastHeartbeatSent; !previous.IsZero() {
+		m.heartbeatGap.Observe(event.At.Sub(previous).Seconds())
 	}
-	m.lastHeartbeat.Set(float64(sent) / float64(time.Second))
+	m.lastHeartbeatSent = event.At
+	m.lastHeartbeat.Set(float64(event.At.UnixNano()) / float64(time.Second))
 }
 
 type diagnosticMetrics struct {
 	sockets, memory *prometheus.Desc
+	cgroup          memoryCgroup
 }
 
 func (d diagnosticMetrics) Describe(ch chan<- *prometheus.Desc) {
@@ -105,17 +112,42 @@ func (d diagnosticMetrics) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(d.sockets, prometheus.GaugeValue, float64(count))
 	}
-	const memoryDirectory = "/sys/fs/cgroup/"
-	if raw, err := os.ReadFile(memoryDirectory + "memory.current"); err == nil {
-		d.emitMemory(ch, "total", strings.TrimSpace(string(raw)))
+	dir := d.cgroup.directory
+	if dir == "" {
+		return
 	}
-	if raw, err := os.ReadFile(memoryDirectory + "memory.stat"); err == nil {
-		for line := range strings.Lines(string(raw)) {
-			category, value, ok := strings.Cut(strings.TrimSpace(line), " ")
-			if ok && (category == "anon" || category == "file" || category == "kernel" || category == "sock" || category == "slab_reclaimable") {
-				d.emitMemory(ch, category, value)
-			}
+	total := "memory.current"
+	if d.cgroup.legacy {
+		total = "memory.usage_in_bytes"
+		d.emitMemoryFile(ch, "kernel", "memory.kmem.usage_in_bytes")
+		d.emitMemoryFile(ch, "sock", "memory.kmem.tcp.usage_in_bytes")
+	}
+	d.emitMemoryFile(ch, "total", total)
+	raw, err := os.ReadFile(filepath.Join(dir, "memory.stat"))
+	if err != nil {
+		return
+	}
+	for line := range strings.Lines(string(raw)) {
+		category, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
 		}
+		if d.cgroup.legacy {
+			switch category {
+			case "total_rss":
+				d.emitMemory(ch, "rss", value)
+			case "total_cache":
+				d.emitMemory(ch, "cache", value)
+			}
+		} else if slices.Contains([]string{"anon", "file", "kernel", "sock", "slab_reclaimable"}, category) {
+			d.emitMemory(ch, category, value)
+		}
+	}
+}
+
+func (d diagnosticMetrics) emitMemoryFile(ch chan<- prometheus.Metric, category, file string) {
+	if raw, err := os.ReadFile(filepath.Join(d.cgroup.directory, file)); err == nil {
+		d.emitMemory(ch, category, strings.TrimSpace(string(raw)))
 	}
 }
 
@@ -123,4 +155,59 @@ func (d diagnosticMetrics) emitMemory(ch chan<- prometheus.Metric, category, val
 	if bytes, err := strconv.ParseUint(value, 10, 64); err == nil {
 		ch <- prometheus.MustNewConstMetric(d.memory, prometheus.GaugeValue, float64(bytes), category)
 	}
+}
+
+type memoryCgroup struct {
+	directory string
+	legacy    bool
+}
+
+func ownMemoryCgroup() memoryCgroup {
+	process, err := procfs.Self()
+	if err != nil {
+		return memoryCgroup{}
+	}
+	groups, err := process.Cgroups()
+	if err != nil {
+		return memoryCgroup{}
+	}
+	mounts, err := process.MountInfo()
+	if err != nil {
+		return memoryCgroup{}
+	}
+	return resolveMemoryCgroup(groups, mounts)
+}
+
+func resolveMemoryCgroup(groups []procfs.Cgroup, mounts []*procfs.MountInfo) memoryCgroup {
+	var groupPath string
+	var legacy bool
+	for _, group := range groups {
+		if slices.Contains(group.Controllers, "memory") {
+			groupPath, legacy = group.Path, true
+			break
+		}
+		if group.HierarchyID == 0 {
+			groupPath = group.Path
+		}
+	}
+	var directory string
+	longestRoot := 0
+	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	for _, mount := range mounts {
+		_, hasMemory := mount.SuperOptions["memory"]
+		if (legacy && (mount.FSType != "cgroup" || !hasMemory)) || (!legacy && mount.FSType != "cgroup2") {
+			continue
+		}
+		root := unescape.Replace(mount.Root)
+		if len(root) <= longestRoot {
+			continue
+		}
+		relative, err := filepath.Rel(root, groupPath)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, "../") {
+			continue
+		}
+		longestRoot = len(root)
+		directory = filepath.Join(unescape.Replace(mount.MountPoint), relative)
+	}
+	return memoryCgroup{directory: directory, legacy: legacy}
 }

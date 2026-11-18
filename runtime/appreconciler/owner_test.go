@@ -243,6 +243,55 @@ func TestNativeOwnerCatchupAndIndependentHealth(t *testing.T) {
 		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
 	})
 }
+func TestProbeLoopRefreshesJournalOnlyWithdrawal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		instance := &Instance{ID: "one", Name: "one", PodUID: "pod", AppID: "assigned", StopVerified: true}
+		journal, err := OpenJournal(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer journal.Close()
+		if err := journal.Update(func(s *State) error {
+			s.Instances[instance.ID] = instance
+			s.Identity.Confirmed = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		probes := NewProbes()
+		probes.values[instance.ID] = &health{uid: instance.PodUID, ready: true, next: time.Now().Add(time.Hour)}
+		probes.Configure(map[string]*Instance{instance.ID: instance}, View{
+			Pods:      map[string]Pod{"one": {UID: "pod", Phase: "Running"}},
+			Endpoints: map[string]map[string]bool{"one": {"pod": true}},
+		})
+		options := runner.AppOptions{ID: "assigned", App: "app", RunnerURL: "http://immutable.invalid:8080", Mode: "persistent", Status: "ready"}
+		current, err := runner.New(runner.Options{
+			OrchestratorURL: "http://node.invalid", BootstrapSecret: "bootstrap", HeartbeatSecret: "issued", Apps: []runner.AppOptions{options},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := &Controller{Journal: journal, Probes: probes}
+		owner := &SDKOwner{current: current, publishedApps: []runner.AppOptions{options}, hooks: controller.hooks(),
+			request: OwnerRequest{Entries: []Registration{{InstanceID: instance.ID, PodUID: instance.PodUID, Options: options}}}}
+		probes.OnChange = owner.Refresh
+		go probes.Run(ctx)
+		if err := journal.Update(func(s *State) error {
+			s.Instances[instance.ID].WithdrawalID = "withdrawal"
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if !probes.Ready(instance.ID, instance.PodUID) || len(current.AppIDs()) != 0 {
+			t.Fatal("committed withdrawal must reach the SDK without a readiness change or Owner.Sync")
+		}
+	})
+}
+
 func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
 		o, n, r, h, ch := nativeFixture(t, server)

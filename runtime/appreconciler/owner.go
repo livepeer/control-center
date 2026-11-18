@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,7 @@ type SDKOwner struct {
 	base, bootstrap string
 	client          *http.Client
 	current         *runner.Runner
+	publishedApps   []runner.AppOptions
 	request         OwnerRequest
 	accepted        Identity
 	hooks           OwnerHooks
@@ -113,7 +115,7 @@ func (o *SDKOwner) Close(ctx context.Context) error {
 	defer o.lifecycle.Unlock()
 	o.mu.Lock()
 	value := o.current
-	o.current = nil
+	o.current, o.publishedApps = nil, nil
 	o.mu.Unlock()
 	if value != nil {
 		return value.Close(ctx)
@@ -158,13 +160,13 @@ func (o *SDKOwner) Sync(ctx context.Context, r OwnerRequest, h OwnerHooks) error
 		o.mu.Unlock()
 		return errors.New("sdk_configuration")
 	}
-	o.current = value
+	o.current, o.publishedApps = value, apps
 	o.mu.Unlock()
 	// Start invokes OnHeartbeat synchronously; no callback-needed mutex is held.
 	if err = value.Start(ctx); err != nil {
 		_ = value.Close(context.WithoutCancel(ctx))
 		o.mu.Lock()
-		o.current = nil
+		o.current, o.publishedApps = nil, nil
 		o.mu.Unlock()
 		return err
 	}
@@ -207,7 +209,15 @@ func (o *SDKOwner) setAppsLocked() error {
 	if o.current == nil {
 		return nil
 	}
-	return o.current.SetApps(o.appsLocked())
+	apps := o.appsLocked()
+	if slices.Equal(o.publishedApps, apps) {
+		return nil
+	}
+	if err := o.current.SetApps(apps); err != nil {
+		return err
+	}
+	o.publishedApps = apps
+	return nil
 }
 
 // Refresh applies independent probe/lifecycle downgrades without reconciling workloads.
