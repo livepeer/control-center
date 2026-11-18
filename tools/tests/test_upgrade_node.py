@@ -225,7 +225,7 @@ class UpgradeTests(unittest.TestCase):
 
     def test_activation_updates_only_node_records_and_recreates_only_api(self):
         result = self.job.activate(NEW, {'node_version': VERSION}, self.state)
-        self.assertEqual(self.http_mock.call_args.args[0], 'http://127.0.0.1:43812/readyz')
+        self.assertEqual(self.http_mock.call_args.args[0], 'http://127.0.0.1:43811/readyz')
         self.assertEqual(result['status'], 'api_loaded')
         self.assertEqual(tomllib.loads((self.deploy / 'config.toml').read_text())['RuntimeNodeImage'], NEW)
         record = json.loads((self.deploy / 'staging-images.json').read_bytes())

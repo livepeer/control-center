@@ -36,6 +36,8 @@ MODULE = 'github.com/livepeer/node'
 UPSTREAM = 'ghcr.io/livepeer/node'
 PUBLIC = 'controlcenter-registry.livepeer.live/controlcenter/node'
 UPLOAD = '127.0.0.1:63812/controlcenter/node'
+# The API's public listener on the deployment host (PublicListen in config.toml).
+API = 'http://127.0.0.1:43811'
 PLATFORM = 'linux/amd64'
 DIGEST = r'sha256:[0-9a-f]{64}'
 IMAGE = rf'[a-zA-Z0-9][a-zA-Z0-9./:_-]*@{DIGEST}'
@@ -220,7 +222,7 @@ class Upgrade:
         return repository + '@' + digest, repository + '@' + child, config
 
     def deployment(self):
-        request = Request('http://127.0.0.1:43812/api/admin/deployment',
+        request = Request(API + '/api/admin/deployment',
                           headers={'Authorization': 'Bearer ' + self.token})
         try:
             with build_opener(ProxyHandler({}), RejectRedirects()).open(request, timeout=30) as response:
@@ -492,7 +494,7 @@ class Upgrade:
             self.check_api(started)
             require(self.mounted_hash(started) == sha(config) and self.deployment() == image,
                     'API did not load the new RuntimeNodeImage')
-            with urlopen('http://127.0.0.1:43812/readyz', timeout=10) as response:
+            with urlopen(API + '/readyz', timeout=10) as response:
                 require(response.status == 200, 'API readiness failed')
             phase('api_loaded')
             return {'status': 'api_loaded', 'image': image, 'recovery_directory': str(directory)}

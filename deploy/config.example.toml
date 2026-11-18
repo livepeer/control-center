@@ -10,7 +10,12 @@ SupabaseURL = "https://PROJECT.supabase.co"
 SupabasePublishableKey = "replace-with-publishable-key"
 DefaultAdminEmail = "admin@example.com"
 
+# Listen serves every route to the Compose networks (internal callbacks from
+# the redeemer and secrets service). The tunnel reaches only PublicListen,
+# which omits /internal/* and /metrics and forwards POST /redemption/tickets.
 Listen = "0.0.0.0:43812"
+PublicListen = "0.0.0.0:43811"
+RedeemerUpstreamURL = "http://redeemer:8941"
 PublicAPIURL = "https://controlcenter-api.livepeer.live"
 # The UI is a separate origin and calls PublicAPIURL with CORS.
 AllowedOrigins = ["https://controlcenter.livepeer.live"]
