@@ -685,9 +685,12 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 
 	// Record the rejected artifact as the current delivery, as if it was
 	// delivered with a manifest Runtime understands but app input it rejects.
-	execSQL(t, s.db, `INSERT INTO lpcc.machine_app_deliveries (node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal)
+	recordDelivery := func(digest string) {
+		execSQL(t, s.db, `INSERT INTO lpcc.machine_app_deliveries (node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal)
  SELECT node_id,apps_digest,$2,apps_generation,entries,terminal FROM lpcc.machine_app_deliveries
- WHERE node_id=$1 AND bundle_sha256=$3`, m.NodeID, strings.TrimPrefix(rejected, "sha256:"), strings.TrimPrefix(first.Downloaded.ArtifactDigest, "sha256:"))
+ WHERE node_id=$1 AND bundle_sha256=$3`, m.NodeID, strings.TrimPrefix(digest, "sha256:"), strings.TrimPrefix(first.Downloaded.ArtifactDigest, "sha256:"))
+	}
+	recordDelivery(rejected)
 	checkBlocker := func(want string) {
 		t.Helper()
 		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
@@ -713,8 +716,7 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 	last.Downloaded, last.DownloadedAt = nil, time.Time{}
 	requireStatus(t, request(t, s, "POST", p+"/status", c["token"], last), 200)
 	checkBlocker(last.AppsError)
-	execSQL(t, s.db, `UPDATE lpcc.machine_app_deliveries SET published_at = now()
- WHERE node_id=$1 AND bundle_sha256=$2`, m.NodeID, strings.TrimPrefix(first.Downloaded.ArtifactDigest, "sha256:"))
+	recordDelivery(artifact.Digest([]byte("superseding test artifact")))
 	checkBlocker("")
 }
 

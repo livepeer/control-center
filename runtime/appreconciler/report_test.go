@@ -195,7 +195,7 @@ func TestReportAdmissionRequiresCurrentNodeReadyAndProbe(t *testing.T) {
 	c.Probes = NewProbes()
 	revision := c.Journal.View().Payload.Intent.Entries[0].RevisionID
 	if err := c.Journal.Update(func(s *State) error {
-		s.SecretRollouts[revision] = contract.SecretRollout{Desired: "updated"}
+		s.SecretRollouts = map[string]contract.SecretRollout{revision: {Desired: "updated"}}
 		for _, i := range s.Instances {
 			i.SecretVersion = "updated"
 		}
