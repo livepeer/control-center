@@ -11,6 +11,9 @@ enrollment does not inherit access to the previous enrollment's diagnostics.
 The machine list and **Work readiness** section use the same browser calculation.
 Both receive readiness evidence in their existing status responses.
 
+Deploy the Control Center API before updating Runtime. If reverting both,
+roll back Runtime before the API so the report format stays compatible.
+
 - **Green — Ready to receive work.** The current Node deployment is ready,
   onchain admission is ready when configured, and all active assignments have
   fresh health evidence and Node has accepted the requested replicas as ready.

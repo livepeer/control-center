@@ -189,13 +189,13 @@ consumed:
 	return ready
 }
 
-func (p *Probes) Status(id, uid string) *contract.ProbeStatus {
+func (p *Probes) Status(id, uid string) (*contract.ProbeStatus, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	h := p.values[id]
 	if h == nil || h.uid != uid || h.observedAt.IsZero() {
-		return nil
+		return nil, false
 	}
 	ttl := max(30*time.Second, h.observedDue.Sub(h.observedAt)+h.timeout+time.Second)
-	return &contract.ProbeStatus{ObservedAt: h.observedAt, DueAt: h.observedDue, ExpiresAt: h.observedAt.Add(ttl), Success: h.success, Failures: h.failures, Started: h.started}
+	return &contract.ProbeStatus{ObservedAt: h.observedAt, DueAt: h.observedDue, ExpiresAt: h.observedAt.Add(ttl), Success: h.success, Failures: h.failures, Started: h.started}, h.ready
 }

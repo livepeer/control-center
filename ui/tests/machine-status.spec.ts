@@ -120,8 +120,13 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   await expect(badge).toHaveText('Readiness unverified')
   await expect(title).toHaveText('Work readiness unverified')
 
-  state.readiness = { ...readyEvidence(3000), node: { state: 'blocked', valid_for_ms: 3000 } }
+  state.readiness = readyEvidence(10000)
+  Object.assign(state.readiness.apps, {
+    requested: 2, admitted_valid_for_ms: 2000, blocker: { state: 'blocked', reason: 'resource_refused' },
+  })
   await refresh()
+  await expect(badge).toHaveClass('machine-status partial')
+  await page.clock.fastForward(2500)
   await expect(badge).toHaveClass('machine-status blocked')
   await expect(badge).toHaveText('Not ready to receive work')
   await expect(title).toHaveText('Not ready to receive work')
@@ -130,9 +135,9 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   await refresh()
   await expect.poll(() => !!state.heldFleet).toBe(true)
   await page.clock.fastForward(3500)
-  const delayed = { ...machine, readiness_evidence: readyEvidence(3000) }
+  const delayed = { ...machine, hostname: 'delayed-worker', readiness_evidence: readyEvidence(3000) }
   await state.heldFleet!.fulfill({ json: { user_id: user, is_admin: admin, administrators: [], machines: [delayed] } })
-  await expect(badge).toHaveText('Readiness unverified')
+  await expect(page.getByRole('row').filter({ hasText: 'delayed-worker' }).locator('.machine-status')).toHaveText('Readiness unverified')
 })
 
 for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees distinct rollout and configured-health evidence`, async ({ page }, info) => {
@@ -161,7 +166,8 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   state.view.tunnel = { enabled: true, ready: false, reason: 'runtime_pending', cleanup_complete: false }
   state.view.discovery_source = { state: 'excluded', selection_reason: 'blocked', stale: true, failures: 0, publication_blocked: false }
   state.view.readiness_evidence = {
-    node: { state: 'pending' }, discovery: { state: 'blocked', reason: 'discovery_excluded' },
+    node: { state: 'pending', reason: 'applying' }, ingress: { state: 'pending', reason: 'runtime_pending' },
+    discovery: { state: 'blocked', reason: 'discovery_excluded' },
     apps: { requested: 0, admitted: 0, complete: true, applied: false },
   }
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
@@ -169,9 +175,9 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
   await expect(summary.getByRole('heading', { name: 'Not ready to receive work', exact: true })).toBeVisible()
   await expect(summary.getByRole('listitem').filter({ hasText: 'Node deployment' }).first()).toContainText('Resource reconciliation is pending')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Tunnel provisioning' })).toContainText('Waiting for Node deployment to become ready. Provisioning has not been observed.')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Tunnel provisioning' })).toContainText('Waiting for Node deployment to become ready')
   await expect(summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()).toContainText('No apps assigned')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Discovery inventory' })).toContainText('Excluded')
+  await expect(summary.getByRole('listitem').filter({ hasText: 'Discovery inventory' })).toContainText('This node is excluded from fleet discovery')
   const row = page.getByRole('row').filter({ hasText: 'worker-status' })
   await expect(row.getByText('Readiness unverified', { exact: true })).toBeVisible()
   await expect(row.getByText('Runtime reporting', { exact: true })).toBeVisible()
@@ -187,90 +193,26 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   expect(state.writes.filter(path => path !== '/api/bootstrap-token')).toEqual([])
 })
 
-test('app readiness requires current healthy and registered assignments and expires with evidence', async ({ page }) => {
-  await page.clock.install()
-  const state = await setup(page)
-  state.view.requested.generation = 1
-  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
-  const apps = summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()
-  const observed = state.view.components[1].apps!.assignments![0]
-  observed.reason = 'secrets_unavailable'
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('Healthy and registered')
-  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
-  await expect(summary).toContainText('External app reachability remains unverified.')
-
-  observed.instances = 0; observed.ready = 0; observed.registered = 0
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('no app instances loaded')
-  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
-
-  observed.instances = 1; observed.ready = 1; observed.registered = 0
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('1 healthy and 0 registered')
-  observed.registered = 1; state.view.requested.generation++
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('no fresh observation for the current assignment')
-
-  state.view.requested.generation--
-  const at = await page.evaluate(() => Date.now())
-  state.view.server_time = new Date(at).toISOString()
-  observed.probe_expires_at = new Date(at + 3000).toISOString()
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(apps).toContainText('Healthy and registered')
-  state.fail = true
-  await page.clock.fastForward(4000)
-  await expect(apps).toContainText('health or Node registration evidence is missing or expired')
-  await expect(apps).not.toContainText('Healthy and registered')
+test('an older detail response keeps readiness unverified', async ({ page }) => {
+  await setup(page)
+  const panel = page.getByRole('region', { name: 'Work readiness', exact: true })
+  await expect(panel.getByRole('heading')).toHaveText('Work readiness unverified')
+  await expect(page.getByText('Resource reconciliation confirmed', { exact: false })).toBeVisible()
 })
 
-test('current assignment blockers take precedence over retained reconciliation diagnostics', async ({ page }) => {
-  const state = await setup(page), view = state.view
+test('current readiness cause and retained assignment diagnostic are both visible', async ({ page }) => {
+  const { view } = await setup(page)
   view.requested.generation = 1
-  view.assignments[0].completed_at = null; view.assignments[0].failure = 'reconcile_failed'
-  Object.assign(view.components[1].apps!.assignments![0], { instances: 0, ready: 0, registered: 0, reason: 'secrets_unavailable' })
-  view.components[1].apps!.instances = []; view.components[1].apps!.instances_total = 0
-  const baseline = structuredClone(view)
-  const assignment = page.getByRole('article', { name: 'Observed whoami revision 1' })
-  const readiness = page.getByRole('region', { name: 'Work readiness', exact: true })
-  const blocker = 'Secret delivery is unavailable; startup is waiting for secret preflight'
-  const failure = 'Last reconciliation diagnostic: Flux resource reconciliation failed'
-  const cases: [string, (view: MachineObservation) => void][] = [
-    ['stale report', v => { v.components[1].fresh = false; v.components[1].expires_at = v.server_time }],
-    ['earlier machine rollout', v => { v.rollout_generation++; v.components[1].current = false }],
-    ['older app input', v => { v.requested.generation++ }],
-    ['no current blocker', v => { v.components[1].apps!.assignments![0].reason = undefined }],
-  ]
-  for (const [name, mutate] of cases) await test.step(name, async () => {
-    state.view = structuredClone(baseline)
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-    await expect(assignment.getByRole('alert')).toHaveText(`Current assignment blocker: ${blocker}`)
-    await expect(readiness).toContainText(`no app instances loaded — ${blocker}`)
-    await expect(assignment).toContainText(failure)
-    mutate(state.view)
-    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-    await expect(assignment.getByRole('alert')).toHaveText(failure)
-    await expect(readiness).toContainText('last reconciliation diagnostic: Flux resource reconciliation failed')
-    await expect(readiness).not.toContainText(blocker)
-  })
-})
-
-test('disabled ingress and discovery do not become blockers, and old reports cannot prove readiness', async ({ page }) => {
-  const state = await setup(page)
-  state.view.requested.generation = 1
-  state.view.tunnel.enabled = false
-  state.view.discovery_enabled = false
-  state.view.components[0].current = false
+  view.assignments[0].completed_at = null
+  view.assignments[0].failure = 'reconcile_failed'
+  view.components[1].apps!.assignments![0].reason = 'secrets_unavailable'
+  view.readiness_evidence = {
+    node: { state: 'ready', valid_for_ms: 10000 },
+    apps: { requested: 1, complete: true, applied: true, admitted: 0, blocker: { state: 'blocked', reason: 'secrets_unavailable' } },
+  }
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  const summary = page.getByRole('region', { name: 'Work readiness', exact: true })
-  await expect(summary.getByRole('heading')).toHaveText('Work readiness unverified')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Node deployment' })).toContainText('earlier rollout')
-  await expect(summary.getByText('Disabled', { exact: true })).toHaveCount(2)
-  state.view.assignments_omitted = true
-  state.view.components[0].current = true
-  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
-  await expect(summary).toContainText('Additional app assignments were omitted')
-  await expect(summary.getByRole('listitem').filter({ hasText: 'Apps' }).first()).not.toContainText('Healthy and registered')
+  await expect(page.getByRole('region', { name: 'Work readiness', exact: true })).toContainText('Secret delivery is unavailable')
+  await expect(page.getByRole('article', { name: 'Observed whoami revision 1' })).toContainText('Last reconciliation diagnostic: Flux resource reconciliation failed')
 })
 
 test('one failing assignment does not hide healthy apps, and draining stops new work', async ({ page }) => {

@@ -19,7 +19,6 @@ import (
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 	"github.com/livepeer/control-center/runtime/contract"
 	"github.com/livepeer/control-center/runtime/onchain"
-	"github.com/livepeer/control-center/schema"
 )
 
 type componentObservation struct {
@@ -188,9 +187,11 @@ const observationJoins = `
  ) d ON true
  LEFT JOIN LATERAL (
   SELECT jsonb_agg(to_jsonb(a) ORDER BY a.revision_id) AS data FROM (
-   SELECT v.revision_id,v.intent-'revision' AS intent,` + machineapps.StartAllowedSQL + ` AS start_allowed,r.app_name AS name,r.app_version AS version,r.revision,
-          c.received_at AS completed_at,CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END AS failure,
-          CASE WHEN i.detail THEN def.canonical->'health' END AS health,def.canonical->'runner'->>'mode' AS mode,
+   SELECT v.revision_id,v.intent->>'digest' AS digest,v.generation,(v.intent->>'activation_generation')::bigint AS activation_generation,
+          v.intent->>'desired' AS desired,(v.intent->>'replicas')::integer AS replicas,` + machineapps.StartAllowedSQL + ` AS start_allowed,
+          r.app_name AS name,r.app_version AS version,r.revision,c.received_at AS completed_at,
+          CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END AS failure,
+          CASE WHEN i.detail THEN def.canonical#>'{health,readiness}' END AS health,def.canonical->'runner'->>'mode' AS mode,
           jsonb_path_query_array(def.canonical,'$.apps[*].name') AS discovery_apps
    FROM lpcc.machine_app_heads v
    JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
@@ -215,7 +216,8 @@ const observationJoins = `
      'instances',(SELECT jsonb_agg(jsonb_build_object(
       'revision_id',inst->'revision_id','generation',inst->'generation','activation_generation',inst->'activation_generation',
       'instance_id',inst->'instance_id','app_id',inst->'app_id','admission_expires_at',inst->'admission_expires_at',
-      'reason',inst->'reason','workload_reason',inst->'workload_reason','withdrawal_id',inst->'withdrawal_id','phase',inst->'phase'
+      'reason',inst->'reason','workload_reason',inst->'workload_reason','withdrawal_id',inst->'withdrawal_id','phase',inst->'phase',
+      'probe',CASE WHEN inst#>'{probe,expires_at}' IS NOT NULL THEN jsonb_build_object('expires_at',inst#>'{probe,expires_at}') END
      )) FROM jsonb_array_elements(COALESCE(NULLIF(report#>'{apps,instances}','null'),'[]')) inst
      WHERE (i.discovery AND inst ? 'admission_expires_at') OR inst ? 'workload_reason' OR inst ? 'reason')
     ) END
@@ -432,9 +434,6 @@ func (a observedAssignment) membershipQueries(i contract.InstanceStatus, service
 func observedAssignments(raw []byte) ([]observedAssignment, bool, error) {
 	var rows []struct {
 		observedAssignment
-		Intent        schema.AppAssignment
-		Health        schema.Health `json:"health"`
-		StartAllowed  bool          `json:"start_allowed"`
 		Mode          string
 		DiscoveryApps []string `json:"discovery_apps"`
 	}
@@ -449,12 +448,8 @@ func observedAssignments(raw []byte) ([]observedAssignment, bool, error) {
 	}
 	result := make([]observedAssignment, 0, len(rows))
 	for _, row := range rows {
-		a, assignment := row.observedAssignment, row.Intent
-		a.RevisionID, a.Digest, a.Generation, a.ActivationGeneration = assignment.RevisionID, assignment.Digest, assignment.Generation, assignment.ActivationGeneration
-		a.Desired, a.Replicas, a.StartAllowed = assignment.Desired, assignment.Replicas, row.StartAllowed
+		a := row.observedAssignment
 		a.Failure = safeObservationReason(a.Failure)
-		health := row.Health.Readiness
-		a.Health.Type, a.Health.Interval, a.Health.Timeout, a.Health.FailureThreshold = health.Type, health.Interval, health.Timeout, health.FailureThreshold
 		if interval, _ := time.ParseDuration(a.Health.Interval); interval < 10*time.Second {
 			a.Health.Interval = "10s"
 		}
@@ -495,18 +490,7 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 	defer rows.Close()
 	var discovery fleet.Status
 	var memberships func(string, []fleet.MembershipQuery) map[string]fleet.Membership
-	sources := map[string]*fleet.SourceStatus{}
-	if s.discovery != nil {
-		discovery = s.discovery.Status()
-		snapshot := sync.OnceValue(s.discovery.MembershipSnapshot)
-		memberships = func(node string, queries []fleet.MembershipQuery) map[string]fleet.Membership {
-			return snapshot().Memberships(node, queries)
-		}
-		for i := range discovery.Sources {
-			source := &discovery.Sources[i]
-			sources[source.NodeID] = source
-		}
-	}
+	var sources map[string]*fleet.SourceStatus
 	result := []observedMachineSummary{}
 	for rows.Next() {
 		var m observedMachineSummary
@@ -537,6 +521,18 @@ func (s *Server) observedMachineList(ctx context.Context, owner string, admin bo
 			}
 		}
 		if s.discovery != nil && view.Lifecycle == "active" {
+			if sources == nil {
+				discovery = s.discovery.Status()
+				sources = make(map[string]*fleet.SourceStatus, len(discovery.Sources))
+				for i := range discovery.Sources {
+					source := &discovery.Sources[i]
+					sources[source.NodeID] = source
+				}
+				snapshot := sync.OnceValue(s.discovery.MembershipSnapshot)
+				memberships = func(node string, queries []fleet.MembershipQuery) map[string]fleet.Membership {
+					return snapshot().Memberships(node, queries)
+				}
+			}
 			view.DiscoverySource = sources[m.NodeID]
 			observeDiscovery(&view, route, discovery, memberships, true)
 		}

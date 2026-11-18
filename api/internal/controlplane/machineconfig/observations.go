@@ -68,9 +68,13 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 				return ErrStaleStatus
 			}
 			seen[a.RevisionID] = true
-			if proof := a.Admission; proof != nil && (proof.Ready < 0 || proof.Ready > min(a.Ready, a.Registered) ||
-				(proof.Ready > 0) == proof.ExpiresAt.IsZero()) {
-				return ErrStaleStatus
+			if proof := a.Admission; proof != nil {
+				if proof.Ready < 0 || proof.Ready > min(a.Ready, a.Registered) || (proof.Ready > 0) == proof.ExpiresAt.IsZero() {
+					return ErrStaleStatus
+				}
+				if r.Apps.InstancesOmitted == 0 && !matchesAdmission(a, r.Apps.Instances) {
+					return ErrStaleStatus
+				}
 			}
 		}
 		// Both current summaries and retained incarnation identities must have
@@ -121,6 +125,19 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 		return ErrStaleStatus
 	}
 	return nil
+}
+
+func matchesAdmission(a contract.AssignmentStatus, instances []contract.InstanceStatus) bool {
+	var proof contract.ReplicaAdmission
+	for _, i := range instances {
+		if i.RevisionID == a.RevisionID && i.ActivationGeneration == a.ActivationGeneration && i.Generation <= a.Generation && !i.AdmissionExpiresAt.IsZero() {
+			proof.Ready++
+			if proof.ExpiresAt.IsZero() || i.AdmissionExpiresAt.Before(proof.ExpiresAt) {
+				proof.ExpiresAt = i.AdmissionExpiresAt
+			}
+		}
+	}
+	return proof.Ready == a.Admission.Ready && proof.ExpiresAt.Equal(a.Admission.ExpiresAt)
 }
 
 // ObservationTime is shared by status projections and safety gates. Receipt

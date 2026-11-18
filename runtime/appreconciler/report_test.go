@@ -204,14 +204,14 @@ func TestReportAdmissionRequiresCurrentNodeReadyAndProbe(t *testing.T) {
 		p.App.Status = "not-ready"
 		c.proofs[id] = p
 	}
-	check := func(want int) {
+	check := func(want, healthy int) {
 		t.Helper()
 		if err := c.report(t.Context(), ready, k.view, *now); err != nil {
 			t.Fatal(err)
 		}
 		apps := reports.reports[len(reports.reports)-1].Apps
 		a := apps.Assignments[0]
-		if a.Ready != len(ready) || a.Registered != len(ready) || a.Admission == nil || a.Admission.Ready != want {
+		if a.Ready != healthy || a.Registered != len(ready) || a.Admission == nil || a.Admission.Ready != want {
 			t.Fatalf("report admission evidence: %+v", a)
 		}
 		for _, i := range apps.Instances {
@@ -220,16 +220,24 @@ func TestReportAdmissionRequiresCurrentNodeReadyAndProbe(t *testing.T) {
 			}
 		}
 	}
-	check(0)
+	check(0, len(ready))
 	for id, p := range c.proofs {
 		p.App.Status = "ready"
 		c.proofs[id] = p
 	}
-	check(len(ready))
+	check(len(ready), len(ready))
 	for _, h := range c.Probes.values {
 		h.observedAt = now.Add(-time.Minute)
 	}
-	check(0)
+	check(0, len(ready))
+	for _, h := range c.Probes.values {
+		h.observedAt, h.success, h.failures = *now, false, 1 // The configured threshold has not been crossed.
+	}
+	check(len(ready), len(ready))
+	for _, h := range c.Probes.values {
+		h.ready, h.failures = false, 3 // The copied ready map still says true.
+	}
+	check(0, 0)
 }
 
 func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {

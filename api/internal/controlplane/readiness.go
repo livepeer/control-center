@@ -162,7 +162,7 @@ func (v machineObservation) appEvidence(runtime, runner componentObservation, ap
 		default:
 			return
 		}
-		if *target == nil || ((*target).ValidForMS > 0 && (o.ValidForMS == 0 || o.ValidForMS > (*target).ValidForMS)) {
+		if *target == nil || ((*target).ValidForMS > 0 && (o.ValidForMS == 0 || o.ValidForMS >= (*target).ValidForMS)) {
 			*target = &o
 		}
 	}
@@ -195,23 +195,25 @@ func (v machineObservation) appEvidence(runtime, runner componentObservation, ap
 			continue
 		}
 		e.Requested += a.Replicas
-		switch {
-		case a.Failure != "":
-			addIssue(readinessObservation{State: "blocked", Reason: a.Failure})
-		case !a.StartAllowed:
+		if !a.StartAllowed {
 			addIssue(readinessObservation{State: "pending", Reason: "cleanup_prerequisite"})
-		case apps != nil:
-			admitted, ttl, reason := replicaEvidence(a, apps, now, *runner.ExpiresAt)
+			continue
+		}
+		var issue readinessObservation
+		if apps != nil {
+			admitted, ttl, observed := replicaEvidence(a, apps, now, *runner.ExpiresAt)
 			if admitted > 0 {
 				if e.Admitted == 0 || ttl < e.AdmittedValidForMS {
 					e.AdmittedValidForMS = ttl
 				}
 				e.Admitted += admitted
 			}
-			if reason != "" {
-				addIssue(timedObservation(issueState(reason), reason, now, *runner.ExpiresAt))
-			}
+			issue = observed
 		}
+		if (issue.State == "" || issue.State == "unverified" || issue.Reason == "registration_pending") && a.Failure != "" {
+			issue = readinessObservation{State: "blocked", Reason: a.Failure}
+		}
+		addIssue(issue)
 	}
 	return e
 }
@@ -231,7 +233,7 @@ func (a observedAssignment) report(apps *contract.AppStatus) *contract.Assignmen
 	return nil
 }
 
-func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, reportExpiry time.Time) (admitted int, ttl int64, reason string) {
+func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, reportExpiry time.Time) (admitted int, ttl int64, issue readinessObservation) {
 	o := a.report(apps)
 	if o != nil && o.Admission != nil {
 		ttl = earlier(o.Admission.ExpiresAt, reportExpiry).Sub(now).Milliseconds()
@@ -240,27 +242,32 @@ func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, report
 		}
 	}
 	if admitted == a.Replicas {
-		return admitted, ttl, ""
+		return admitted, ttl, issue
 	}
 	if o != nil && o.Reason != "" {
-		return admitted, ttl, o.Reason
+		return admitted, ttl, timedObservation(issueState(o.Reason), o.Reason, now, reportExpiry)
 	}
 	for _, i := range apps.Instances {
-		if a.matchesInstance(i) && !now.Before(i.AdmissionExpiresAt) {
-			for _, r := range []string{i.WorkloadReason, i.Reason} {
-				switch r {
-				case "image_pull_failed", "container_start_failed", "startup_failed", "readiness_failed", "memory_limit",
-					"scheduling_refused", "isolation_failed", "process_failed_to_start", "process_failed", "process_lost":
-					return admitted, ttl, r
+		if !a.matchesInstance(i) || now.Before(i.AdmissionExpiresAt) {
+			continue
+		}
+		for _, reason := range []string{i.WorkloadReason, i.Reason} {
+			switch reason {
+			case "readiness_failed":
+				if i.Probe != nil && now.Before(i.Probe.ExpiresAt) {
+					return admitted, ttl, timedObservation("blocked", reason, now, earlier(i.Probe.ExpiresAt, reportExpiry))
 				}
+			case "image_pull_failed", "container_start_failed", "startup_failed", "memory_limit", "scheduling_refused",
+				"isolation_failed", "process_failed_to_start", "process_failed", "process_lost", "stop_signal_unverified", "secret_invalid":
+				return admitted, ttl, timedObservation("blocked", reason, now, reportExpiry)
 			}
 		}
 	}
 	if o != nil && o.Admission != nil && (o.Instances < a.Replicas || o.CleanupPending > 0 ||
 		(o.Admission.Ready == 0 && now.Before(o.ProbeExpiresAt) && now.Before(o.NodeExpiresAt))) {
-		return admitted, ttl, "registration_pending"
+		return admitted, ttl, timedObservation("pending", "registration_pending", now, reportExpiry)
 	}
-	return admitted, ttl, ""
+	return admitted, ttl, issue
 }
 
 func (v machineObservation) discoveryEvidence(apps *contract.AppStatus) readinessObservation {
@@ -282,7 +289,7 @@ func (v machineObservation) discoveryEvidence(apps *contract.AppStatus) readines
 	var latest time.Time
 	for _, i := range apps.Instances {
 		m := v.Membership[i.InstanceID]
-		if !now.Before(i.AdmissionExpiresAt) || m.State != "present" || m.ExpiresAt == nil || !now.Before(*m.ExpiresAt) ||
+		if !now.Before(i.AdmissionExpiresAt) || m.State != "present" || m.ExpiresAt == nil || !now.Before(*m.ExpiresAt) || m.SourceGeneration == 0 ||
 			m.SourceGeneration != source.SelectedGeneration {
 			continue
 		}

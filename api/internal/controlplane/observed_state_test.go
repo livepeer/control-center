@@ -249,6 +249,9 @@ func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	runner.Apps.Assignments[0].Admission = &contract.ReplicaAdmission{Ready: 1, ExpiresAt: expiry}
 	runner.Apps.Instances[0].AdmissionExpiresAt = expiry
 	runner.Apps.Instances[0].Probe = &contract.ProbeStatus{ObservedAt: expiry.Add(-15 * time.Second), ExpiresAt: expiry, Success: true, Started: true}
+	runner.Apps.Assignments[0].Admission.ExpiresAt = expiry.Add(time.Second)
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 409)
+	runner.Apps.Assignments[0].Admission.ExpiresAt = expiry
 	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
 	check("ready", 1, false)
 	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,admission,expires_at}',to_jsonb(now()-interval '1 second'))
@@ -290,6 +293,14 @@ func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
 		}
 	}
 	check("ready", "ready", 1) // Retained instance and exact publication survive scale-down and unrelated filtering.
+	a := &view.Assignments[0]
+	a.Replicas, a.Failure = 2, "reconcile_failed"
+	reported := &apps.Assignments[0]
+	reported.Admission.Ready, reported.Reason = 1, "secrets_unavailable"
+	if e := view.readinessEvidence().Apps; e.Admitted != 1 || e.Blocker == nil || e.Blocker.Reason != "secrets_unavailable" {
+		t.Fatalf("current admission and cause were hidden by Flux failure: %+v", e)
+	}
+	a.Replicas, a.Failure, reported.Admission.Ready, reported.Reason = 1, "", 2, ""
 	view.Tunnel.IngressVerified = false
 	check("pending", "ready", 1)
 	view.Tunnel.IngressVerified = true
@@ -307,6 +318,27 @@ func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
 	apps.Reason = "resource_refused"
 	if e := view.readinessEvidence(); e.Apps.Blocker != nil || e.Apps.Admitted != 0 {
 		t.Fatalf("an old app report established current evidence: %+v", e.Apps)
+	}
+}
+
+func TestReplicaIssuesKeepTheirOwnFreshness(t *testing.T) {
+	now := time.Now()
+	probeExpiry := now.Add(3 * time.Second)
+	a := observedAssignment{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Replicas: 1}
+	i := contract.InstanceStatus{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Probe: &contract.ProbeStatus{ExpiresAt: probeExpiry}}
+	for _, tc := range []struct {
+		reason string
+		clock  time.Time
+		ttl    int64
+	}{
+		{"readiness_failed", now, 3000}, {"readiness_failed", probeExpiry, 0},
+		{"stop_signal_unverified", now, 30000}, {"secret_invalid", now, 30000},
+	} {
+		i.Reason = tc.reason
+		_, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i}}, tc.clock, now.Add(30*time.Second))
+		if issue.ValidForMS != tc.ttl || (tc.ttl > 0 && issue.Reason != tc.reason) {
+			t.Fatalf("%s at %s: %+v", tc.reason, tc.clock, issue)
+		}
 	}
 }
 

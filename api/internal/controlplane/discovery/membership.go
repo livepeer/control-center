@@ -41,6 +41,8 @@ func (f *Manager) MembershipSnapshot() *MembershipSnapshot {
 		queries[snapshot.URL] = snapshot.QueriedAt
 	}
 	s := &MembershipSnapshot{sources: make(map[string]Membership, len(f.selected)), published: map[membershipKey]Membership{}}
+	f.transport.mu.Lock()
+	selection := f.transport.selection.Load()
 	for _, source := range f.selected {
 		at, ok := queries[source.URL]
 		if !ok {
@@ -48,12 +50,18 @@ func (f *Manager) MembershipSnapshot() *MembershipSnapshot {
 			continue
 		}
 		expiry := at.Add(freshness)
-		m := Membership{State: "absent", QueriedAt: &at, ExpiresAt: &expiry, SourceGeneration: source.Generation}
+		m := Membership{State: "absent", QueriedAt: &at, ExpiresAt: &expiry}
+		// The collector serializes refreshes. A cache entry older than this
+		// authorization's first response came from a previous selection.
+		if auth := selection.sources[source.URL]; auth != nil && !auth.firstOK.IsZero() && !at.Before(auth.firstOK) {
+			m.SourceGeneration = source.Generation
+		}
 		if stale || !now.Before(expiry) {
 			m.State = "stale"
 		}
 		s.sources[source.NodeID] = m
 	}
+	f.transport.mu.Unlock()
 	for _, entry := range f.publicInventory(snapshots) {
 		for _, candidate := range entry.Runners {
 			m := s.sources[candidate.nodeID]

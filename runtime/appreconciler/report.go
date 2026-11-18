@@ -140,12 +140,15 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		registered := s.Identity.Confirmed && i.AppID != "" && !i.RegistrationGone && !nodeAt.IsZero()
 		p := proofs[id]
 		registeredInstances[id] = registered && p.PodUID == i.PodUID && p.App.Status == "ready" && p.Observation.Accepted && p.Observation.RunnerID == s.Identity.RunnerID && p.Observation.Credential == s.Identity.Credential && s.Identity.Sequence != nil && p.Observation.Sequence == *s.Identity.Sequence
+		healthy := ready[id]
 		var probe *contract.ProbeStatus
+		var probeReady bool
 		if c.Probes != nil {
-			probe = c.Probes.Status(id, i.PodUID)
+			probe, probeReady = c.Probes.Status(id, i.PodUID)
+			healthy = healthy && probeReady
 		}
 		var admissionExpiry time.Time
-		if ready[id] && i.WithdrawalID == "" && registeredInstances[id] && probe != nil && now.Before(probe.ExpiresAt) {
+		if healthy && i.WithdrawalID == "" && registeredInstances[id] && probe != nil && now.Before(probe.ExpiresAt) {
 			admissionExpiry = nodeExpiry
 			if probe.ExpiresAt.Before(admissionExpiry) {
 				admissionExpiry = probe.ExpiresAt
@@ -153,7 +156,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		}
 		if a := assignments[i.Group.RevisionID]; a != nil && a.ActivationGeneration == i.Group.ActivationGeneration {
 			a.Instances++
-			if ready[id] && i.WithdrawalID == "" {
+			if healthy && i.WithdrawalID == "" {
 				a.Ready++
 			}
 			if probe != nil && i.WithdrawalID == "" && (a.ProbeExpiresAt.IsZero() || probe.ExpiresAt.Before(a.ProbeExpiresAt)) {
@@ -183,7 +186,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		if i.PodUID != "" && i.Definition.Lifecycle.StopSignal != nil && !i.StopVerified {
 			workload = "stop_signal_unverified"
 		}
-		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: ready[id] && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, ready[id], now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AdmissionExpiresAt: admissionExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
+		status.Instances = append(status.Instances, contract.InstanceStatus{RevisionID: i.Group.RevisionID, Generation: i.Generation, ActivationGeneration: i.Group.ActivationGeneration, InstanceID: id, PodUID: i.PodUID, AppID: i.AppID, Phase: i.Phase, Ready: healthy && i.WithdrawalID == "", Registered: registered, Capacity: i.Definition.Instances.CapacityPerInstance, Sessions: sessions, Reason: instanceReason(i, healthy, now), Deadline: i.Deadline, Forced: i.Forced, RemovalPublishedAt: i.RemovalPublishedAt, TerminatedAt: i.TerminatedAt, RunnerID: s.Identity.RunnerID, WithdrawalID: i.WithdrawalID, DrainExpiredAt: i.DrainExpiredAt, RegistrationGone: i.RegistrationGone, NodeObservedAt: nodeAt, NodeExpiresAt: nodeExpiry, AdmissionExpiresAt: admissionExpiry, AcceptedSequence: sequencePointer(accepted, !nodeAt.IsZero()), StartupDeadline: i.CreatedAt.Add(timeout), Probe: probe, WorkloadReason: workload})
 	}
 	status.InstancesOmitted = status.InstancesTotal - len(status.Instances)
 	status.SecretRollouts = map[string]contract.SecretRollout{}

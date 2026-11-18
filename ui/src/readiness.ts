@@ -54,7 +54,7 @@ export function classifyReadiness(snapshot: ReadinessSnapshot, now: number): Rea
     .map(check => observationState(check, age))]
   const { admitted, blocker, pending, ready } = appEvidenceAt(apps, age)
   if (checks.includes('blocked') || (apps.complete && apps.requested === 0)) return 'blocked'
-  if (blocker && apps.admitted === 0) return 'blocked'
+  if (blocker && admitted === 0) return 'blocked'
   if (checks.every(state => state === 'ready') && admitted > 0) {
     return ready ? 'ready' : 'partial'
   }
