@@ -154,6 +154,7 @@ type Journal struct {
 	lock      *os.File
 	state     State
 	head      fence
+	Metrics   *Metrics
 }
 
 // OpenJournal recovers the exact full-state commit named by HEAD, never an older valid record.
@@ -244,6 +245,7 @@ func (j *Journal) Eligibility(r Registration) (member, ready bool) {
 	return member, member && i.AppID != "" && ownsAppID(i, r.Options.ID) && i.StopVerified &&
 		i.Phase != "retired" && !j.state.ClockUncertain &&
 		!j.state.Metadata.DrainRequested && !j.state.Metadata.Terminal &&
+		(!j.state.Metadata.Onchain.Onchain() || j.state.Metadata.OnchainActive) &&
 		j.state.Identity.Confirmed
 }
 func (j *Journal) Update(change func(*State) error) error {
@@ -267,6 +269,10 @@ func (j *Journal) Update(change func(*State) error) error {
 	}
 	if len(raw) > 2*artifact.MaxContent {
 		return errors.New("state_size")
+	}
+	if j.Metrics != nil {
+		started := time.Now()
+		defer func() { j.Metrics.journalCommit.Observe(time.Since(started).Seconds()) }()
 	}
 	// Each immutable write-ahead record is a complete state, including sequence reservations.
 	// HEAD is the authoritative commit fence; an orphan newer record has had no side effects.

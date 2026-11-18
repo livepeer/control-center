@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,6 +98,9 @@ func (n *nativeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := runner.HeartbeatResponse{RunnerID: "owner", Apps: apps, HeartbeatInterval: "5ms", HeartbeatTTL: "30s"}
+	if n.busy {
+		resp.O2R = &runner.Channel{URL: "http://" + r.Host + "/ai/trickle/events"}
+	}
 	if r.Header.Get("Authorization") == "bootstrap" {
 		resp.HeartbeatSecret = "issued"
 		if n.issued != "" {
@@ -185,6 +189,9 @@ func TestNativeOwnerSequenceZeroMembershipAndRetirement(t *testing.T) {
 		if len(draining.Entries) != 0 {
 			t.Fatal("retained apps copied into submitted membership")
 		}
+		if !slices.Equal(draining.Apps[0].SessionIDs, []string{"work"}) || current.O2RChannel() != nil {
+			t.Fatal("heartbeat must preserve active sessions without subscribing to O2R")
+		}
 		if err := o.Close(t.Context()); err != nil {
 			t.Fatal(err)
 		}
@@ -243,6 +250,55 @@ func TestNativeOwnerCatchupAndIndependentHealth(t *testing.T) {
 		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted && len(o.Apps) == 0 })
 	})
 }
+func TestProbeLoopRefreshesJournalOnlyWithdrawal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		instance := &Instance{ID: "one", Name: "one", PodUID: "pod", AppID: "assigned", StopVerified: true}
+		journal, err := OpenJournal(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer journal.Close()
+		if err := journal.Update(func(s *State) error {
+			s.Instances[instance.ID] = instance
+			s.Identity.Confirmed = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		probes := NewProbes()
+		probes.values[instance.ID] = &health{uid: instance.PodUID, ready: true, next: time.Now().Add(time.Hour)}
+		probes.Configure(map[string]*Instance{instance.ID: instance}, View{
+			Pods:      map[string]Pod{"one": {UID: "pod", Phase: "Running"}},
+			Endpoints: map[string]map[string]bool{"one": {"pod": true}},
+		})
+		options := runner.AppOptions{ID: "assigned", App: "app", RunnerURL: "http://immutable.invalid:8080", Mode: "persistent", Status: "ready"}
+		current, err := runner.New(runner.Options{
+			OrchestratorURL: "http://node.invalid", BootstrapSecret: "bootstrap", HeartbeatSecret: "issued", Apps: []runner.AppOptions{options},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := &Controller{Journal: journal, Probes: probes}
+		owner := &SDKOwner{current: current, publishedApps: []runner.AppOptions{options}, hooks: controller.hooks(),
+			request: OwnerRequest{Entries: []Registration{{InstanceID: instance.ID, PodUID: instance.PodUID, Options: options}}}}
+		probes.OnChange = owner.Refresh
+		go probes.Run(ctx)
+		if err := journal.Update(func(s *State) error {
+			s.Instances[instance.ID].WithdrawalID = "withdrawal"
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if !probes.Ready(instance.ID, instance.PodUID) || len(current.AppIDs()) != 0 {
+			t.Fatal("committed withdrawal must reach the SDK without a readiness change or Owner.Sync")
+		}
+	})
+}
+
 func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 	nativeSynctest(t, func(t *testing.T, server *httptest.Server) {
 		o, n, r, h, ch := nativeFixture(t, server)
@@ -258,20 +314,23 @@ func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 		result := make(chan error, 1)
 		go func() { result <- o.Sync(context.Background(), r, h) }()
 		<-entered
-		// Simulate an independent health update while Start is in flight.
+		// Replace the SDK app snapshot while Start is in flight.
 		o.mu.Lock()
-		o.request.Entries[0].Options.Status = "not-ready"
-		_ = o.setAppsLocked()
+		o.request.Entries[0].Options.Capacity = 2
+		updateErr := o.setAppsLocked()
 		o.mu.Unlock()
 		close(release)
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
 		if err := <-result; err != nil {
 			t.Fatal(err)
 		}
 		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
 		n.mu.Lock()
 		defer n.mu.Unlock()
-		if len(n.requests) < 2 || n.requests[1].Apps[0].ID != "assigned-0" {
-			t.Fatal("assigned ID lost across SetApps", n.requests)
+		if len(n.requests) < 2 || len(n.requests[1].Apps) != 1 || n.requests[1].Apps[0].Capacity != 2 || n.requests[1].Apps[0].ID != "assigned-0" {
+			t.Fatal("second heartbeat must carry updated capacity and assigned ID", n.requests)
 		}
 	})
 }
@@ -279,6 +338,7 @@ func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 type reviewRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f reviewRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 func TestNativeOriginGuardRejectsBeforeO2R(t *testing.T) {
 	var calls atomic.Int32
 	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))

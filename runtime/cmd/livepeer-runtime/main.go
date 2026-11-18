@@ -126,18 +126,23 @@ func appReconciler(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	store := artifact.Store{Directory: filepath.Join(*directory, "artifacts")}
+	metrics := appreconciler.NewMetrics()
+	var stateLost atomic.Bool
+	handler := http.NewServeMux()
+	handler.Handle("GET /metrics", metrics.Handler())
+	handler.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" && stateLost.Load() {
+			http.Error(w, "state_recovery_failed", http.StatusServiceUnavailable)
+			return
+		}
+		store.ServeHTTP(w, r)
+	})
 	journal, err := appreconciler.OpenJournal(filepath.Join(*directory, "state"))
 	if err != nil {
 		// Keep the artifact/probe endpoint alive for diagnostics and independent management repair.
 		slog.Error("App Reconciler state recovery failed")
-		store := artifact.Store{Directory: filepath.Join(*directory, "artifacts")}
-		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/readyz" {
-				http.Error(w, "state_recovery_failed", http.StatusServiceUnavailable)
-				return
-			}
-			store.ServeHTTP(w, r)
-		})
+		stateLost.Store(true)
 		input := appreconciler.Source{Kube: kube, Client: transport.HTTPClient(), ArtifactURL: *sourceURL, IdentityFile: *identity, NodeID: control.NodeID}
 		return serve(ctx, *listen, handler, func(ctx context.Context) {
 			ticker := time.NewTicker(time.Minute)
@@ -153,24 +158,16 @@ func appReconciler(ctx context.Context, args []string) error {
 		})
 	}
 	defer journal.Close()
+	journal.Metrics, owner.Metrics = metrics, metrics
 	defer func() {
 		stop, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		_ = owner.Close(stop)
 	}()
-	store := artifact.Store{Directory: filepath.Join(*directory, "artifacts")}
 	probes := appreconciler.NewProbes()
 	probes.OnChange = owner.Refresh
 	controller := appreconciler.Controller{Journal: journal, Input: appreconciler.Source{Kube: kube, Client: transport.HTTPClient(), ArtifactURL: *sourceURL, IdentityFile: *identity, NodeID: control.NodeID}, Cluster: appreconciler.Kubernetes{Client: kube, NodeID: control.NodeID}, Owner: owner, Store: store, ArtifactURL: *artifactURL, Reporter: appreconciler.ControlReporter{Client: reports}, Probes: probes}
 	controller.Secrets = &appreconciler.SecretDelivery{Client: &secretclient.Client{Directory: filepath.Join(*directory, "secrets")}, Kube: kube}
-	var stateLost atomic.Bool
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/readyz" && stateLost.Load() {
-			http.Error(w, "state_recovery_failed", http.StatusServiceUnavailable)
-			return
-		}
-		store.ServeHTTP(w, r)
-	})
 	return serve(ctx, *listen, handler, func(ctx context.Context) {
 		go probes.Run(ctx)
 		ticker := time.NewTicker(time.Second)
