@@ -20,6 +20,8 @@ from unittest import mock
 import urllib.error
 import urllib.request
 
+import hosttools
+
 SCRIPT = Path(__file__).resolve().parents[1] / 'bootstrap-livepeer.sh'
 PROJECT = SCRIPT.parent
 try:
@@ -61,7 +63,7 @@ class TempTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = hosttools.temporary_root(self.temp)
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
 
@@ -91,6 +93,7 @@ class SoftwareRecordingTests(TempTest):
         self.assertEqual(record()['flux_cli'], '')
 
 
+@hosttools.requires_gnu_userland
 class ShellTests(TempTest):
     def test_managed_kubeconfig_compatibility_directory(self):
         install = self.root.resolve() / 'install'
@@ -463,6 +466,7 @@ python3 -c 'import os; assert "LIVEPEER_ENROLLMENT_TOKEN" not in os.environ; ass
             self.assertNotIn('header.payload.signature', result.stderr)
 
 
+@hosttools.requires_gnu_userland
 class EnrollmentHTTPTests(TempTest):
     shell = ShellTests.shell
 
@@ -613,6 +617,7 @@ check_ports
         self.assertIn('incompatible', result.stderr)
 
 
+@hosttools.requires_gnu_userland
 class RecoveryTests(TempTest):
     shell = ShellTests.shell
 
@@ -806,8 +811,14 @@ class FirewallTests(TempTest):
         nft = self.root / 'nft'
         nft.write_text('#!/bin/sh\nif [ "$1" = list ]; then exit 0; fi\ncat > "$BATCH_OUTPUT"\n')
         nft.chmod(0o755)
+        # Fixed routes keep the batch independent of the test host's network.
+        tools = self.root / 'bin'
+        tools.mkdir()
+        (tools / 'ip').write_text('#!/bin/sh\nprintf \'%s\' \'[{"dst":"default"},{"dst":"10.204.0.0/24","scope":"link"},'
+                                  '{"dst":"127.0.0.1","scope":"host"},{"dst":"192.0.2.0/24","scope":"global"}]\'\n')
+        (tools / 'ip').chmod(0o755)
         batch = self.root / 'batch'
-        env = {**os.environ, 'BATCH_OUTPUT': str(batch)}
+        env = {**os.environ, 'BATCH_OUTPUT': str(batch), 'PATH': f'{tools}{os.pathsep}{os.environ["PATH"]}'}
         result = subprocess.run(['bash', str(PROJECT / 'lib/firewall.sh'),
                                  str(PROJECT / 'config/firewall.nft'), str(nft)],
                                 capture_output=True, text=True, env=env)
@@ -820,6 +831,7 @@ class FirewallTests(TempTest):
         self.assertIn('ct direction reply', rules)
         self.assertLess(rules.index('iifname "lp-gvisor0" drop'),
                         rules.index('ip saddr 10.42.0.0/16 tcp dport { 6443, 10250 } accept'))
+        self.assertTrue(rules.endswith('add element inet livepeer_bootstrap local_ipv4 { 10.204.0.0/24, 127.0.0.1 }\n'))
 
     def test_missing_policy_does_not_change_firewall(self):
         nft = self.root / 'nft'
@@ -832,6 +844,7 @@ class FirewallTests(TempTest):
         self.assertFalse(touched.exists())
 
 
+@hosttools.requires_gnu_userland
 class StagingTests(TempTest):
     shell = ShellTests.shell
 

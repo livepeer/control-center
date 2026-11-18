@@ -48,6 +48,20 @@ Docker images on native Linux amd64 and arm64 runners for pull requests and
 `main` pushes, and can be run manually. Image publication and bootstrap
 activation follow the [deployment process](../deploy/README.md).
 
+## Runtime unit tests
+
+```sh
+python3 -m unittest discover -s runtime/tests
+```
+
+These tests run bootstrap shell code with fakes and also work on macOS. There,
+run `brew install bash coreutils jq` first. Bootstrap targets Debian/Ubuntu, so
+it needs Bash 4.4+ and GNU-only coreutils options; the tests put Homebrew's GNU
+coreutils first on their PATH. Without these tools, tests that run bootstrap
+code are skipped rather than failing. Checks that need Linux host facilities, such as
+`/run/lock` file locks and the firewall container, run only on Linux or through
+`make test-runtime`.
+
 ## Remote Runtime tests
 
 ```sh
