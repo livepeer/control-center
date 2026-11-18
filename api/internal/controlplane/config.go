@@ -60,7 +60,7 @@ type Params struct {
 
 	// Listen serves every route, including internal callbacks. PublicListen
 	// is the tunnel-facing listener; see PublicHandler.
-	PublicListen        string   `env:"PUBLIC_LISTEN_ADDR" optional:"true" descr:"Internet-facing listen address without internal routes or metrics; empty serves only Listen"`
+	PublicListen        string   `env:"PUBLIC_LISTEN_ADDR" optional:"true" descr:"Internet-facing listen address without metrics or private callbacks; empty serves only Listen"`
 	AllowedOrigins      []string `env:"ALLOWED_ORIGINS" optional:"true" descr:"Exact browser origins allowed to call /api/* cross-origin"`
 	RedeemerUpstreamURL string   `env:"REDEEMER_UPSTREAM_URL" optional:"true" descr:"Redeemer base URL receiving POST /redemption/tickets from PublicListen"`
 }

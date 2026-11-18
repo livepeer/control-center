@@ -99,19 +99,32 @@ func TestCORSResponses(t *testing.T) {
 func TestPublicHandlerHidesPrivateRoutes(t *testing.T) {
 	h := edgeServer(t, nil).PublicHandler()
 	for _, tc := range []struct{ method, target string }{
-		{http.MethodGet, "/internal/secrets/nodes/node-1"},
-		{http.MethodPost, "/internal/secrets/nodes/node-1"},
-		{http.MethodGet, "/internal/users/u/orchestrators/0xabc"},
 		{http.MethodPost, "/internal/redemption/authorize"},
 		{http.MethodGet, "/internal"},
 		{http.MethodGet, "/metrics"},
+		{http.MethodPut, "/internal/secrets/nodes/node-1"},
+		{http.MethodHead, "/internal/secrets/nodes/node-1"},
+		{http.MethodPost, "/internal/users/u/orchestrators/0xabc"},
+		{http.MethodGet, "/internal/secrets/nodes/node-1/extra"},
 		{http.MethodGet, "/api/../internal/users/u/orchestrators/0xabc"},
 		{http.MethodGet, "//internal/secrets/nodes/node-1"},
-		{http.MethodGet, "/%69nternal/secrets/nodes/node-1"},
+		{http.MethodGet, "/%69nternal/redemption/authorize"},
+		{http.MethodGet, "/internal/secrets/nodes/../../redemption/authorize"},
 	} {
 		w := edgeRequest(h, tc.method, tc.target, map[string]string{"Authorization": "Bearer " + strings.Repeat("m", 32)}, "")
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("%s %s = %d %s", tc.method, tc.target, w.Code, w.Body.String())
+		}
+	}
+	// As with the former Caddy site, a secrets service on another host can
+	// still reach its metadata callbacks; they require the metadata token.
+	for _, tc := range []struct{ method, target string }{
+		{http.MethodGet, "/internal/secrets/nodes/node-1"},
+		{http.MethodPost, "/internal/secrets/nodes/node-1"},
+		{http.MethodGet, "/internal/users/u/orchestrators/0xabc"},
+	} {
+		if w := edgeRequest(h, tc.method, tc.target, nil, ""); w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
+			t.Fatalf("%s %s = %d, want the handler's credential refusal", tc.method, tc.target, w.Code)
 		}
 	}
 	for _, target := range []string{"/healthz", "/api/config"} {

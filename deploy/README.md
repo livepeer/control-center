@@ -22,7 +22,9 @@ and selected with `TUNNEL_TOKEN_FILE`.
 The API listens twice. `Listen` (`43812`) serves every route, including the
 `/internal/*` callbacks used by the redeemer and the secrets service, and is
 reachable only on the Compose networks. `PublicListen` (`43811`) is the tunnel
-origin: it omits `/internal/*` and `/metrics` and forwards
+origin: it omits `/metrics` and `/internal/*`, except the secrets-service
+metadata and membership callbacks that a secrets service on another host
+reaches over HTTPS with the shared metadata token. It forwards
 `POST /redemption/tickets` to `RedeemerUpstreamURL` as `/tickets`. Keep the
 redeemer URL in Node configurations (`redeemer_url` in `onchain.json`) on the
 API hostname.

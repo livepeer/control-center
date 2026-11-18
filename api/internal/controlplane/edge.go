@@ -58,9 +58,27 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
-// PublicHandler serves the Internet-facing API hostname. Internal callbacks
-// and metrics stay on the private listener. Winning-ticket submissions under
-// the Node-facing redeemer URL (…/redemption) are forwarded to the redeemer.
+// publicCallback reports whether r is one of the internal callbacks that a
+// secrets service on another host may reach through the public hostname over
+// HTTPS. Both require the shared metadata token.
+func publicCallback(r *http.Request, clean string) bool {
+	if r.URL.Path != clean {
+		return false
+	}
+	p := strings.Split(strings.TrimPrefix(clean, "/"), "/")
+	switch {
+	case len(p) == 4 && p[0] == "internal" && p[1] == "secrets" && p[2] == "nodes" && p[3] != "":
+		return r.Method == http.MethodGet || r.Method == http.MethodPost
+	case len(p) == 5 && p[0] == "internal" && p[1] == "users" && p[2] != "" && p[3] == "orchestrators" && p[4] != "":
+		return r.Method == http.MethodGet
+	}
+	return false
+}
+
+// PublicHandler serves the Internet-facing API hostname. Other internal
+// callbacks and metrics stay on the private listener. Winning-ticket
+// submissions under the Node-facing redeemer URL (…/redemption) are forwarded
+// to the redeemer.
 func (s *Server) PublicHandler() http.Handler {
 	api := s.Handler()
 	redeemer := s.redeemerProxy()
@@ -69,6 +87,8 @@ func (s *Server) PublicHandler() http.Handler {
 		// Match on the cleaned path; the mux redirects unclean paths before routing.
 		clean := path.Clean("/" + r.URL.Path)
 		switch {
+		case publicCallback(r, clean):
+			api.ServeHTTP(w, r)
 		case clean == "/internal" || strings.HasPrefix(clean, "/internal/") || clean == "/metrics":
 			fail(w, http.StatusNotFound, "not found")
 		case clean == "/redemption" || strings.HasPrefix(clean, "/redemption/"):
