@@ -1,0 +1,34 @@
+// Cloudflare Workers Static Assets deployment for the Control Center UI.
+// Build first (`npm run build`); wrangler uploads ./dist and worker/index.ts.
+//
+//   npx wrangler deploy                     workers.dev smoke instance
+//   npx wrangler deploy --env production    controlcenter.livepeer.live
+//
+// See deploy/README.md for the release, rollback and bootstrap runbook.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "controlcenter-ui",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./dist",
+    // Unknown paths such as /invite and /auth/callback load the SPA.
+    "not_found_handling": "single-page-application",
+    // These paths must never fall back to index.html.
+    "run_worker_first": ["/bootstrap", "/bootstrap.sh", "/bootstrap/*", "/api", "/api/*"]
+  },
+  "observability": { "enabled": true },
+  "workers_dev": true,
+  "preview_urls": false,
+  "r2_buckets": [{ "binding": "BOOTSTRAP", "bucket_name": "controlcenter-bootstrap" }],
+  "env": {
+    "production": {
+      "workers_dev": false,
+      "preview_urls": false,
+      // A route keeps cutover and rollback to adding or removing it while the
+      // hostname's proxied DNS record stays in place.
+      "routes": [{ "pattern": "controlcenter.livepeer.live/*", "zone_name": "livepeer.live" }],
+      "r2_buckets": [{ "binding": "BOOTSTRAP", "bucket_name": "controlcenter-bootstrap" }]
+    }
+  }
+}
