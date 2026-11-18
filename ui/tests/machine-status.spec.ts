@@ -27,7 +27,7 @@ function evidence(): MachineObservation {
 
 async function setup(page: Page, admin = false, reportState = 'observed', terminal = false) {
   const listedMachine = { ...machine, report_state: reportState, terminal }
-  const state = { view: evidence(), fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], writes: [] as string[], admin }
+  const state = { view: evidence(), readiness: undefined as MachineObservation['readiness'], fail: false, hold: false, held: [] as Route[], reads: 0, statusNodes: [] as string[], writes: [] as string[], admin }
   if (terminal) { state.view.lifecycle = 'cleanup_pending'; state.view.assignments[0].desired = 'absent'; state.view.assignments[0].completed_at = null }
   await page.addInitScript(saved => {
     localStorage.setItem('sb-auth-auth-token', JSON.stringify(saved))
@@ -42,9 +42,10 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
     if (path === '/api/config') return route.fulfill({ json: { supabase_url: 'http://auth.test', supabase_publishable_key: 'fixture' } })
     if (path === '/api/operator/config') return route.fulfill({ json: { public_api_url: 'https://api.example', secrets_url: secretsURL } })
     if (path === '/api/bootstrap-token') return route.fulfill({ json: { token: 'fixture', expires_at: new Date(Date.now() + 3600000).toISOString() } })
-    if (path === '/api/admin/overview') return route.fulfill({ json: { user_id: user, is_admin: state.admin, administrators: [], machines: [listedMachine] } })
+    const summary = { ...listedMachine, readiness: state.readiness }
+    if (path === '/api/admin/overview') return route.fulfill({ json: { user_id: user, is_admin: state.admin, administrators: [], machines: [summary] } })
     if (path === '/api/admin/apps') return route.fulfill({ json: { apps: [], onchain_mode: 'offchain', next_after_name: null } })
-    if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [listedMachine, { ...machine, node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker', }] } })
+    if (path === '/api/machines') return route.fulfill({ json: { machines: admin ? [] : [summary, { ...machine, node_id: 'xo53xo53xo53waaaaaaaaaaaaa', hostname: 'second-worker', }] } })
     if (path.startsWith('/api/admin/machines/') && path.endsWith('/apps')) return route.fulfill({ json: { assignments: [], apps_generation: 2, published_generation: 1, next_after_revision_id: null, last_config_fetch_at: null } })
     if (path.endsWith('/status')) {
       state.reads++
@@ -63,6 +64,35 @@ async function setup(page: Page, admin = false, reportState = 'observed', termin
   await expect(page.getByText('External app reachability: unverified.', { exact: false })).toBeVisible()
   return state
 }
+
+for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees the readiness badge change and expire`, async ({ page }) => {
+  await page.clock.install()
+  const state = await setup(page, admin)
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 50)))
+  const badge = page.getByRole('row').filter({ hasText: 'worker-status' }).locator('.machine-status')
+  const title = page.getByRole('region', { name: 'Work readiness', exact: true }).getByRole('heading')
+  const refresh = async () => {
+    state.view.server_time = new Date(await page.evaluate(() => Date.now())).toISOString()
+    state.view.readiness = state.readiness
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  }
+
+  state.readiness = { state: 'ready', valid_for_ms: 3000 }
+  await refresh()
+  await expect(badge).toHaveClass('machine-status ready')
+  await expect(badge).toHaveText('Ready to receive work')
+  await expect(title).toHaveText('Ready to receive work')
+
+  await page.clock.fastForward(3500)
+  await expect(badge).toHaveText('Readiness unverified')
+  await expect(title).toHaveText('Work readiness unverified')
+
+  state.readiness = { state: 'blocked' }
+  await refresh()
+  await expect(badge).toHaveClass('machine-status blocked')
+  await expect(badge).toHaveText('Not ready to receive work')
+  await expect(title).toHaveText('Not ready to receive work')
+})
 
 for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} sees distinct rollout and configured-health evidence`, async ({ page }, info) => {
   await setup(page, admin)

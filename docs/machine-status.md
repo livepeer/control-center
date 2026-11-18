@@ -8,12 +8,19 @@ enrollment does not inherit access to the previous enrollment's diagnostics.
 
 ## Reading status
 
-The **Work readiness** summary appears before rollout details. It distinguishes
-known blockers from missing or expired evidence for Node deployment, apps,
-tunnel provisioning and discovery. Runtime reporting alone does not establish
-readiness. Apps need current health and Node registration evidence; a verified
-tunnel connector does not establish that tunnel provisioning is complete.
-Disabled tunnel or discovery services are shown separately from blockers.
+The machine list and **Work readiness** section use the same readiness status.
+
+- **Green — Ready to receive work.** The current Node deployment is ready,
+  onchain admission is ready when configured, and all active assignments have
+  current health and Node registration evidence for the requested replicas.
+  Managed tunnels require verified provisioning and a ready connector. With
+  discovery enabled, the inventory must be fresh and include a current, ready
+  app instance.
+- **Amber — Pending, partially ready, or unverified.** Readiness evidence is
+  missing or expired, startup or rollout is in progress, or only some
+  requested app replicas are confirmed ready.
+- **Red — Not ready or not accepting work.** A confirmed blocker prevents work,
+  there are no active assignments, or the enrollment is draining or retired.
 
 Compare the stages and their timestamps for the same enrollment and app:
 
@@ -28,9 +35,8 @@ Compare the stages and their timestamps for the same enrollment and app:
 | Registered | Node confirmed this runner and app while that observation remains valid |
 | Discovery | The published fleet inventory contained the exact public app endpoint and version at the snapshot time |
 
-Public app reachability remains **unverified**. Local checks, a verified tunnel
-and successful discovery collection do not establish that an external client can
-run the app. External probes and their freshness are separate observability work.
+An external client completing a session requires separate verification. The
+readiness badge uses the control plane's operational evidence.
 
 Reports use `TunnelStatusTTL` (two minutes by default); individual probes,
 Node and connector observations, and Collector snapshots have their own expiry.

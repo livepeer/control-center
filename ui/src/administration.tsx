@@ -3,10 +3,10 @@ import type { Session } from '@supabase/supabase-js'
 import { api, APIError } from './api'
 import { Catalog } from './catalog'
 import { MachineApps } from './machine-apps'
-import { MachineStatus, MachineReadinessBadge } from './machine-status'
+import { MachineStatus, MachineReadinessBadge, type MachineReadinessSummary } from './machine-status'
 
 type Grant = { grant_id: string; email: string; user_id: string | null; current_email: string | null; revision: number; state: 'pending' | 'bound' | 'account_missing' }
-type FleetMachine = { terminal?: boolean; report_state?: string; lifecycle?: string; node_id: string; hostname: string; orchestrator_address: string; k3s_version: string; created_at: string; last_config_fetch_at: string | null }
+type FleetMachine = MachineReadinessSummary & { node_id: string; hostname: string; orchestrator_address: string; k3s_version: string; created_at: string }
 type Capability = 'loading' | 'admin' | 'ordinary' | 'unavailable'
 
 // Keyed by account in Dashboard. Request versions reject obsolete successes

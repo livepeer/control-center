@@ -105,6 +105,7 @@ type machineObservation struct {
 	DiscoverySelectionStale     bool                        `json:"discovery_selection_stale"`
 	DiscoverySource             *fleet.SourceStatus         `json:"discovery_source,omitempty"`
 	Membership                  map[string]fleet.Membership `json:"membership"`
+	Readiness                   machineReadiness            `json:"readiness"`
 	ExternalReachability        string                      `json:"external_reachability"`
 	ServerTime                  time.Time                   `json:"server_time"`
 }
@@ -167,92 +168,155 @@ func (s *Server) observedState(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, view)
 }
 
-func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObservation, error) {
-	now := time.Now().UTC()
-	v := machineObservation{NodeID: m.NodeID, Hostname: m.Hostname, Assignments: []observedAssignment{}, Components: []componentObservation{}, Membership: map[string]fleet.Membership{}, ExternalReachability: "unverified", ServerTime: now}
-	ttl := s.params.TunnelStatusTTL
-	if ttl <= 0 {
-		ttl = 2 * time.Minute
-	}
-	var record machineconfig.State
-	var rollout, routing, onchainConfig, bundle []byte
-	var ack *time.Time
-	var delivered contract.StageIdentity
-	var deliveredAt *time.Time
-	// Keep scalar status facts in one statement snapshot; assignments and reports
-	// remain separate, bounded projections.
-	err := s.db.QueryRowContext(ctx, `SELECT s.rollout,s.state,COALESCE(s.apps_generation,0),COALESCE(s.apps_error,''),
- oc.config,CASE WHEN $2 THEN e.retained_bundle ELSE c.bundle END,e.removal_ack_at,
- COALESCE(d.apps_generation,0),COALESCE(d.apps_digest,''),COALESCE('sha256:'||d.bundle_sha256,''),d.published_at
- FROM (SELECT $1::text AS node_id) n
- LEFT JOIN lpcc.enrollments e ON e.node_id=n.node_id
- LEFT JOIN lpcc.machine_states s ON s.node_id=e.node_id
+// The fleet and detail reads share a single statement snapshot of the current
+// configuration, bounded assignments and reports for the current enrollment.
+const observationColumns = `s.rollout,s.state,COALESCE(s.apps_generation,0),COALESCE(s.apps_error,''),
+ oc.config,COALESCE(d.apps_generation,0),COALESCE(d.apps_digest,''),COALESCE('sha256:'||d.bundle_sha256,''),d.published_at,
+ assignments.data,reports.data`
+
+const observationJoins = `
+ LEFT JOIN lpcc.enrollments e ON e.node_id=i.node_id
+ LEFT JOIN lpcc.machine_states s ON s.node_id=i.node_id
  LEFT JOIN lpcc.onchain_state os ON os.fingerprint=e.fingerprint
  LEFT JOIN lpcc.onchain_configs oc ON oc.fingerprint=os.fingerprint AND oc.generation=os.generation
- LEFT JOIN lpcc.machine_configs c ON c.node_id=n.node_id AND NOT $2
  LEFT JOIN LATERAL (
- SELECT apps_generation,apps_digest,bundle_sha256,published_at FROM lpcc.machine_app_deliveries
- WHERE node_id=n.node_id ORDER BY published_at DESC,apps_generation DESC LIMIT 1
+  SELECT apps_generation,apps_digest,bundle_sha256,published_at FROM lpcc.machine_app_deliveries
+  WHERE node_id=i.node_id ORDER BY published_at DESC,apps_generation DESC LIMIT 1
  ) d ON true
- WHERE NOT $2 OR e.node_id IS NOT NULL`, m.NodeID, m.Terminal).Scan(&rollout, &routing, &v.Requested.Generation, &v.DeliveryReason,
-		&onchainConfig, &bundle, &ack, &delivered.Generation, &delivered.AppsDigest, &delivered.ArtifactDigest, &deliveredAt)
+ LEFT JOIN LATERAL (
+  SELECT jsonb_agg(to_jsonb(a) ORDER BY a.revision_id) AS data FROM (
+   SELECT v.revision_id,v.intent-'revision' AS intent,r.app_name AS name,r.app_version AS version,r.revision,
+          c.received_at AS completed_at,CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END AS failure,
+          def.canonical->'health' AS health,def.canonical->'runner'->>'mode' AS mode,
+          jsonb_path_query_array(def.canonical,'$.apps[*].name') AS discovery_apps
+   FROM lpcc.machine_app_heads v
+   JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
+   CROSS JOIN LATERAL (SELECT convert_from(r.canonical,'UTF8')::jsonb AS canonical) def
+   LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation
+   LEFT JOIN lpcc.machine_app_diagnostics d ON d.node_id=v.node_id AND d.revision_id=v.revision_id AND d.generation=v.generation
+   WHERE i.include_assignments AND v.node_id=i.node_id AND (v.intent->>'desired'='present' OR c.received_at IS NULL)
+   ORDER BY v.revision_id LIMIT 101
+  ) a
+ ) assignments ON true
+ LEFT JOIN LATERAL (
+  SELECT jsonb_agg(to_jsonb(r)) AS data FROM (
+   SELECT component,report,received_at FROM lpcc.machine_reports
+   WHERE node_id=i.node_id AND credential_version=i.credential_version
+  ) r
+ ) reports ON true`
+
+type machineObservationFacts struct {
+	rollout, routing, onchain, assignments, reports []byte
+	generation                                      int64
+	deliveryReason                                  string
+	delivered                                       contract.StageIdentity
+	deliveredAt                                     *time.Time
+}
+
+func (f *machineObservationFacts) scanFields() []any {
+	return []any{&f.rollout, &f.routing, &f.generation, &f.deliveryReason, &f.onchain,
+		&f.delivered.Generation, &f.delivered.AppsDigest, &f.delivered.ArtifactDigest, &f.deliveredAt, &f.assignments, &f.reports}
+}
+
+func (s *Server) observationTTL() time.Duration {
+	if s.params.TunnelStatusTTL > 0 {
+		return s.params.TunnelStatusTTL
+	}
+	return 2 * time.Minute
+}
+
+func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObservation, error) {
+	var facts machineObservationFacts
+	var bundle []byte
+	var ack *time.Time
+	err := s.db.QueryRowContext(ctx, `SELECT `+observationColumns+`,
+ CASE WHEN i.terminal THEN e.retained_bundle ELSE c.bundle END,e.removal_ack_at
+ FROM (SELECT $1::text AS node_id,$2::boolean AS terminal,$3::bigint AS credential_version,true AS include_assignments) i`+observationJoins+`
+ LEFT JOIN lpcc.machine_configs c ON c.node_id=i.node_id AND NOT i.terminal
+ WHERE NOT i.terminal OR e.node_id IS NOT NULL`, m.NodeID, m.Terminal, m.CredentialVersion).
+		Scan(append(facts.scanFields(), &bundle, &ack)...)
+	if err != nil {
+		return machineObservation{}, err
+	}
+	v, route, err := s.composeMachineObservation(m, facts, time.Now().UTC())
 	if err != nil {
 		return v, err
 	}
-	if rollout == nil {
-		record = machineconfig.InitialState(m.Terminal)
-	} else if err = json.Unmarshal(rollout, &record); err != nil {
-		return v, err
+	if m.Terminal && ack != nil {
+		v.Lifecycle = "removed"
 	}
-	v.Onchain, err = newOnchainView(onchainConfig, bundle)
+	if meta, _, err := machineconfig.ReadApplied(bundle); err == nil {
+		v.Onchain.DeliveredGeneration = meta.Onchain.Generation
+	}
+	if s.discovery != nil {
+		status := s.discovery.Status()
+		for i := range status.Sources {
+			if status.Sources[i].NodeID == m.NodeID {
+				v.DiscoverySource = &status.Sources[i]
+				break
+			}
+		}
+		s.observeDiscovery(&v, route, status, false)
+	}
+	v.Readiness = workReadiness(v)
+	return v, nil
+}
+
+func (s *Server) composeMachineObservation(m Machine, facts machineObservationFacts, now time.Time) (machineObservation, tunnel.RoutingState, error) {
+	v := machineObservation{NodeID: m.NodeID, Hostname: m.Hostname, Assignments: []observedAssignment{}, Components: []componentObservation{}, Membership: map[string]fleet.Membership{}, ExternalReachability: "unverified", ServerTime: now}
+	ttl := s.observationTTL()
+	record := machineconfig.InitialState(m.Terminal)
+	var route tunnel.RoutingState
+	if facts.rollout != nil {
+		if err := json.Unmarshal(facts.rollout, &record); err != nil {
+			return v, route, err
+		}
+	}
+	if facts.routing != nil {
+		if err := json.Unmarshal(facts.routing, &route); err != nil {
+			return v, route, err
+		}
+	}
+	var err error
+	v.Onchain, err = newOnchainView(facts.onchain)
 	if err != nil {
-		return v, err
+		return v, route, err
 	}
 	v.Lifecycle, v.RolloutGeneration = record.Lifecycle, record.Generation
 	if m.Terminal {
 		v.Lifecycle = "cleanup_pending"
-		if ack != nil {
-			v.Lifecycle = "removed"
-		}
-	}
-	var route tunnel.RoutingState
-	if len(routing) > 0 && json.Unmarshal(routing, &route) != nil {
-		return v, errors.New("invalid routing state")
 	}
 	v.Tunnel = tunnelObservation{Enabled: route.TunnelID != "" || s.params.CloudflareEnabled, Ready: route.Ready && route.ReadyGeneration == record.Generation && !route.VerifiedAt.IsZero() && now.Before(route.VerifiedAt.Add(ttl)), Reason: safeObservationReason(route.Reason), VerifiedAt: timePointer(route.VerifiedAt), SourceGeneration: route.SourceGeneration, CleanupComplete: route.CleanupComplete}
 	if !route.VerifiedAt.IsZero() {
 		v.Tunnel.ExpiresAt = timePointer(route.VerifiedAt.Add(ttl))
 	}
-	v.DeliveryReason = safeObservationReason(v.DeliveryReason)
-	if deliveredAt != nil {
-		v.Delivered, v.DeliveredAt = &delivered, deliveredAt
+	v.Requested.Generation, v.DeliveryReason = facts.generation, safeObservationReason(facts.deliveryReason)
+	if facts.deliveredAt != nil {
+		v.Delivered, v.DeliveredAt = &facts.delivered, facts.deliveredAt
 	}
-	v.Assignments, v.AssignmentsOmitted, err = s.observedAssignments(ctx, m)
+	v.Assignments, v.AssignmentsOmitted, err = observedAssignments(facts.assignments)
 	if err != nil {
-		return v, err
+		return v, route, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT component,report,received_at FROM lpcc.machine_reports WHERE node_id=$1 AND credential_version=$2 ORDER BY component`, m.NodeID, m.CredentialVersion)
-	if err != nil {
-		return v, err
+	var reports []struct {
+		Component  string
+		Report     machineconfig.Report
+		ReceivedAt time.Time `json:"received_at"`
+	}
+	if facts.reports != nil {
+		if err := json.Unmarshal(facts.reports, &reports); err != nil {
+			return v, route, err
+		}
 	}
 	observations := map[string]componentObservation{}
-	for rows.Next() {
-		var name string
-		var raw []byte
-		var received time.Time
-		var report machineconfig.Report
-		if err = rows.Scan(&name, &raw, &received); err != nil {
-			break
-		}
-		if err = json.Unmarshal(raw, &report); err != nil {
-			break
-		}
-		effective := machineconfig.ObservationTime(report, received)
+	for _, row := range reports {
+		name, report := row.Component, row.Report
+		effective := machineconfig.ObservationTime(report, row.ReceivedAt)
 		var expires *time.Time
 		if !effective.IsZero() {
 			expires = timePointer(effective.Add(ttl))
 		}
-		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &received, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
+		c := componentObservation{Component: name, Generation: report.Generation, ObservedAt: report.ObservedAt, ReceivedAt: &row.ReceivedAt, ExpiresAt: expires, Fresh: expires != nil && now.Before(*expires), Current: report.Generation == record.Generation, Ready: report.Ready, Reason: safeObservationReason(report.Reason), ClockUncertain: report.ClockUncertain, BundleSHA256: report.BundleSHA256, ConfigDigest: report.ConfigDigest, DeliveryReason: safeObservationReason(report.DeliveryReason)}
 		c.Software, c.K3sVersion = report.Software, report.K3sVersion
 		c.IngressReady, c.IngressConfigDigest = report.IngressReady, report.IngressConfigDigest
 		c.Onchain = report.Onchain
@@ -282,14 +346,6 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 		}
 		observations[name] = c
 	}
-	readErr := rows.Err()
-	rows.Close()
-	if err != nil {
-		return v, err
-	}
-	if readErr != nil {
-		return v, readErr
-	}
 	for _, name := range []string{"runtime", "app-reconciler", "runner", "connector"} {
 		if c, ok := observations[name]; ok {
 			v.Components = append(v.Components, c)
@@ -297,33 +353,38 @@ func (s *Server) machineObservation(ctx context.Context, m Machine) (machineObse
 			v.Components = append(v.Components, componentObservation{Component: name, Reason: "unreported"})
 		}
 	}
-	if s.discovery != nil {
-		status := s.discovery.Status()
-		v.DiscoveryEnabled, v.DiscoveryInitialized, v.DiscoverySelectionStale = status.Enabled, status.Initialized, status.SelectionStale
-		v.DiscoverySelectionExpiresAt = status.SelectionExpiresAt
-		for _, source := range status.Sources {
-			if source.NodeID == m.NodeID {
-				v.DiscoverySource = &source
-				break
-			}
-		}
-		byRevision := map[string]observedAssignment{}
-		for _, a := range v.Assignments {
-			byRevision[a.RevisionID] = a
-		}
-		if app := observations["runner"].Apps; app != nil {
-			queries := []fleet.MembershipQuery{}
-			for _, i := range app.Instances {
-				a, ok := byRevision[i.RevisionID]
-				if !ok || i.AppID == "" {
-					continue
-				}
-				queries = append(queries, a.membershipQueries(i, route.ServiceURL, route.ProxyURLTemplate)...)
-			}
-			v.Membership = s.discovery.Memberships(m.NodeID, queries)
+	return v, route, nil
+}
+
+func (s *Server) observeDiscovery(v *machineObservation, route tunnel.RoutingState, status fleet.Status, readinessOnly bool) {
+	v.DiscoveryEnabled, v.DiscoveryInitialized, v.DiscoverySelectionStale = status.Enabled, status.Initialized, status.SelectionStale
+	v.DiscoverySelectionExpiresAt = status.SelectionExpiresAt
+	runner := v.component("runner")
+	if runner.Apps == nil {
+		return
+	}
+	if readinessOnly {
+		source := v.DiscoverySource
+		if source == nil || source.Stale || source.State == "excluded" || source.PublicationBlocked ||
+			!status.Initialized || status.SelectionStale {
+			return
 		}
 	}
-	return v, nil
+	byRevision := make(map[string]observedAssignment, len(v.Assignments))
+	for _, a := range v.Assignments {
+		byRevision[a.RevisionID] = a
+	}
+	var queries []fleet.MembershipQuery
+	for _, i := range runner.Apps.Instances {
+		a, ok := byRevision[i.RevisionID]
+		if !ok || i.AppID == "" || (readinessOnly && (!i.Ready || !i.Registered)) {
+			continue
+		}
+		queries = append(queries, a.membershipQueries(i, route.ServiceURL, route.ProxyURLTemplate)...)
+	}
+	if len(queries) > 0 {
+		v.Membership = s.discovery.Memberships(v.NodeID, queries)
+	}
 }
 
 func (a observedAssignment) membershipQueries(i contract.InstanceStatus, serviceURL, proxyTemplate string) []fleet.MembershipQuery {
@@ -346,108 +407,112 @@ func (a observedAssignment) membershipQueries(i contract.InstanceStatus, service
 	return queries
 }
 
-func (s *Server) observedAssignments(ctx context.Context, m Machine) ([]observedAssignment, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT v.intent-'revision',r.app_name,r.app_version,r.revision,r.canonical,c.received_at,CASE WHEN c.received_at IS NULL THEN COALESCE(d.reason,'') ELSE '' END FROM lpcc.machine_app_heads v `+` JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
- LEFT JOIN lpcc.machine_app_completions c ON c.node_id=v.node_id AND c.revision_id=v.revision_id AND c.generation=v.generation
- LEFT JOIN lpcc.machine_app_diagnostics d ON d.node_id=v.node_id AND d.revision_id=v.revision_id AND d.generation=v.generation
- WHERE v.node_id=$1 AND (v.intent->>'desired'='present' OR c.received_at IS NULL) ORDER BY v.revision_id LIMIT 101`, m.NodeID)
-	if err != nil {
-		return nil, false, err
+func observedAssignments(raw []byte) ([]observedAssignment, bool, error) {
+	var rows []struct {
+		observedAssignment
+		Intent        schema.AppAssignment
+		Health        schema.Health
+		Mode          string
+		DiscoveryApps []string `json:"discovery_apps"`
 	}
-	defer rows.Close()
-	result := []observedAssignment{}
-	for rows.Next() {
-		var a observedAssignment
-		var intent, canonical []byte
-		var definition schema.DefinitionV1
-		var assignment schema.AppAssignment
-		if err = rows.Scan(&intent, &a.Name, &a.Version, &a.Revision, &canonical, &a.CompletedAt, &a.Failure); err != nil {
+	if raw != nil {
+		if err := json.Unmarshal(raw, &rows); err != nil {
 			return nil, false, err
 		}
-		if err = json.Unmarshal(intent, &assignment); err != nil {
-			return nil, false, err
-		}
-		if err = json.Unmarshal(canonical, &definition); err != nil {
-			return nil, false, err
-		}
+	}
+	omitted := len(rows) > 100
+	if omitted {
+		rows = rows[:100]
+	}
+	result := make([]observedAssignment, 0, len(rows))
+	for _, row := range rows {
+		a, assignment := row.observedAssignment, row.Intent
 		a.RevisionID, a.Digest, a.Generation, a.ActivationGeneration = assignment.RevisionID, assignment.Digest, assignment.Generation, assignment.ActivationGeneration
 		a.Desired, a.Replicas, a.StartAllowed = assignment.Desired, assignment.Replicas, assignment.StartAllowed
 		a.Failure = safeObservationReason(a.Failure)
-		a.Health.Type, a.Health.Interval, a.Health.Timeout, a.Health.FailureThreshold = definition.Health.Readiness.Type, definition.Health.Readiness.Interval, definition.Health.Readiness.Timeout, definition.Health.Readiness.FailureThreshold
+		health := row.Health.Readiness
+		a.Health.Type, a.Health.Interval, a.Health.Timeout, a.Health.FailureThreshold = health.Type, health.Interval, health.Timeout, health.FailureThreshold
 		if interval, _ := time.ParseDuration(a.Health.Interval); interval < 10*time.Second {
 			a.Health.Interval = "10s"
 		}
-		a.Mode = definition.Runner.Mode
-		for _, app := range definition.Apps {
-			a.DiscoveryApps = append(a.DiscoveryApps, app.Name)
-		}
+		a.Mode, a.DiscoveryApps = row.Mode, row.DiscoveryApps
 		result = append(result, a)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, false, err
-	}
-	omitted := len(result) > 100
-	if omitted {
-		result = result[:100]
 	}
 	return result, omitted, nil
 }
 
 type observedMachineSummary struct {
-	NodeID              string     `json:"node_id"`
-	Hostname            string     `json:"hostname"`
-	OrchestratorAddress *string    `json:"orchestrator_address,omitempty"`
-	InstallDir          string     `json:"install_dir,omitempty"`
-	K3sVersion          string     `json:"k3s_version"`
-	CreatedAt           time.Time  `json:"created_at"`
-	LastConfigFetchAt   *time.Time `json:"last_config_fetch_at"`
-	Lifecycle           string     `json:"lifecycle"`
-	Terminal            bool       `json:"terminal"`
-	LastObservedAt      *time.Time `json:"last_observed_at"`
-	ReportState         string     `json:"report_state"`
+	NodeID              string           `json:"node_id"`
+	Hostname            string           `json:"hostname"`
+	OrchestratorAddress *string          `json:"orchestrator_address,omitempty"`
+	InstallDir          string           `json:"install_dir,omitempty"`
+	K3sVersion          string           `json:"k3s_version"`
+	CreatedAt           time.Time        `json:"created_at"`
+	LastConfigFetchAt   *time.Time       `json:"last_config_fetch_at"`
+	Lifecycle           string           `json:"lifecycle"`
+	Terminal            bool             `json:"terminal"`
+	LastObservedAt      *time.Time       `json:"last_observed_at"`
+	ReportState         string           `json:"report_state"`
+	Readiness           machineReadiness `json:"readiness"`
 }
 
 func (s *Server) observedMachineList(ctx context.Context, owner string, admin bool) ([]observedMachineSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `WITH inventory AS (
- SELECT m.node_id,m.hostname,m.orchestrator_address,m.install_dir,m.k3s_version,m.created_at,m.last_config_fetch_at,m.credential_version,false AS terminal,COALESCE(s.rollout->>'lifecycle','active') AS lifecycle
- FROM lpcc.machines m LEFT JOIN lpcc.machine_states s ON s.node_id=m.node_id
+ SELECT m.node_id,m.hostname,m.orchestrator_address,m.install_dir,m.k3s_version,m.created_at,m.last_config_fetch_at,m.credential_version,false AS terminal,true AS include_assignments
+ FROM lpcc.machines m WHERE ($1='' OR m.orchestrator_address::text=$1)
  UNION ALL
- SELECT e.node_id,e.hostname,e.orchestrator_address,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,'cleanup_pending'
- FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL AND e.removal_ack_at IS NULL
- ) SELECT i.node_id,i.hostname,i.orchestrator_address::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,i.lifecycle,
- CASE WHEN COALESCE((r.report->>'clock_uncertain')::boolean,false) THEN NULL
- ELSE LEAST(r.received_at,(r.report->>'observed_at')::timestamptz) END, COALESCE((r.report->>'clock_uncertain')::boolean,false)
- FROM inventory i LEFT JOIN lpcc.machine_reports r ON r.node_id=i.node_id AND r.credential_version=i.credential_version AND r.component='runtime'
- WHERE ($1='' OR i.orchestrator_address::text=$1) ORDER BY i.created_at DESC,i.node_id`, owner)
+ SELECT e.node_id,e.hostname,e.orchestrator_address,e.install_dir,e.k3s_version,e.retired_at,NULL::timestamptz,e.credential_version,true,false
+ FROM lpcc.enrollments e WHERE e.retired_at IS NOT NULL AND e.removal_ack_at IS NULL AND ($1='' OR e.orchestrator_address::text=$1)
+ ) SELECT i.node_id,i.hostname,i.orchestrator_address::text,i.install_dir,i.k3s_version,i.created_at,i.last_config_fetch_at,i.terminal,`+observationColumns+`
+ FROM inventory i`+observationJoins+`
+ ORDER BY i.created_at DESC,i.node_id`, owner)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := []observedMachineSummary{}
-	ttl := s.params.TunnelStatusTTL
-	if ttl <= 0 {
-		ttl = 2 * time.Minute
+	var discovery fleet.Status
+	sources := map[string]*fleet.SourceStatus{}
+	if s.discovery != nil {
+		discovery = s.discovery.Status()
+		for i := range discovery.Sources {
+			source := &discovery.Sources[i]
+			sources[source.NodeID] = source
+		}
 	}
+	result := []observedMachineSummary{}
 	for rows.Next() {
 		var m observedMachineSummary
-		var id string
-		var clockUncertain bool
-		if err = rows.Scan(&m.NodeID, &m.Hostname, &id, &m.InstallDir, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt, &m.Terminal, &m.Lifecycle, &m.LastObservedAt, &clockUncertain); err != nil {
+		var ownerAddress string
+		var facts machineObservationFacts
+		fields := []any{&m.NodeID, &m.Hostname, &ownerAddress, &m.InstallDir, &m.K3sVersion, &m.CreatedAt, &m.LastConfigFetchAt, &m.Terminal}
+		if err := rows.Scan(append(fields, facts.scanFields()...)...); err != nil {
 			return nil, err
 		}
 		if admin {
-			m.OrchestratorAddress = &id
+			m.OrchestratorAddress = &ownerAddress
 			m.InstallDir = ""
 		}
+		view, route, err := s.composeMachineObservation(Machine{NodeID: m.NodeID, Hostname: m.Hostname, Terminal: m.Terminal}, facts, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		m.Lifecycle = view.Lifecycle
+		runtime := view.component("runtime")
 		m.ReportState = "unreported"
-		if clockUncertain {
+		if runtime.ClockUncertain {
 			m.ReportState = "clock_uncertain"
-		} else if m.LastObservedAt != nil {
+		} else if runtime.ExpiresAt != nil {
+			m.LastObservedAt = timePointer(runtime.ExpiresAt.Add(-s.observationTTL()))
 			m.ReportState = "observed"
-			if time.Since(*m.LastObservedAt) > ttl {
+			if !runtime.Fresh {
 				m.ReportState = "stale"
 			}
 		}
+		if s.discovery != nil && view.Lifecycle == "active" {
+			view.DiscoverySource = sources[m.NodeID]
+			s.observeDiscovery(&view, route, discovery, true)
+		}
+		m.Readiness = workReadiness(view)
 		result = append(result, m)
 	}
 	return result, rows.Err()
@@ -458,7 +523,7 @@ type onchainView struct {
 	DeliveredGeneration int64          `json:"delivered_generation"`
 }
 
-func newOnchainView(config, bundle []byte) (onchainView, error) {
+func newOnchainView(config []byte) (onchainView, error) {
 	v := onchainView{Desired: onchain.Offchain()}
 	if config != nil {
 		if err := json.Unmarshal(config, &v.Desired); err != nil {
@@ -471,8 +536,5 @@ func newOnchainView(config, bundle []byte) (onchainView, error) {
 	v.Desired.RPCSecret = ""
 	v.Desired.RPCGrants = nil
 	v.Desired.RedeemerGrants = nil
-	if meta, _, err := machineconfig.ReadApplied(bundle); err == nil {
-		v.DeliveredGeneration = meta.Onchain.Generation
-	}
 	return v, nil
 }

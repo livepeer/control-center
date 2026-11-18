@@ -10,11 +10,11 @@ import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
 import { OrchestratorWorkspace } from './orchestrators'
 import { clearInvitation, pendingInvitation } from './orchestrator-members'
-import { MachineStatus, MachineReadinessBadge } from './machine-status'
+import { MachineStatus, MachineReadinessBadge, type MachineReadinessSummary } from './machine-status'
 
 type AuthConfig = { supabase_url: string; supabase_publishable_key: string }
 type OperatorConfig = { public_api_url: string; secrets_url: string }
-type Machine = { node_id: string; terminal?: boolean; lifecycle?: string; report_state?: string; hostname: string; created_at: string; last_config_fetch_at: string | null }
+type Machine = MachineReadinessSummary & { node_id: string; hostname: string; created_at: string }
 type Enrollment = { token: string; expires_at: string }
 
 function Brand({ dark = false }: { dark?: boolean }) {

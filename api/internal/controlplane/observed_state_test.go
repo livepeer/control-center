@@ -61,8 +61,8 @@ func TestObservedStateScalarProjection(t *testing.T) {
 		queries.Store(0)
 		w := request(t, s, "GET", "/api/machines/"+node+"/status", "session-a", nil)
 		requireStatus(t, w, 200)
-		if got := queries.Load(); got != 5 {
-			t.Fatalf("status executed %d SQL statements, want 5", got)
+		if got := queries.Load(); got != 3 {
+			t.Fatalf("status executed %d SQL statements, want 3", got)
 		}
 		var v machineObservation
 		if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
@@ -194,6 +194,105 @@ func observationFixture(t *testing.T) (*Server, map[string]string, contract.Meta
 func observationReport(m contract.Metadata, a schema.AppAssignment) machineconfig.Report {
 	now := time.Now().UTC()
 	return machineconfig.Report{ReportVersion: 1, ObservedAt: now, NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runner", Generation: m.Generation, BundleFormat: contract.BundleFormat, Sequence: 1, Ready: true, Reason: "ready", Apps: &contract.AppStatus{DesiredGeneration: m.AppsGeneration, DesiredDigest: m.AppsDigest, Assignments: []contract.AssignmentStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, Instances: 1, Ready: 1, Registered: 1}}, InstancesTotal: 1, Instances: []contract.InstanceStatus{{RevisionID: a.RevisionID, Generation: a.Generation, ActivationGeneration: a.ActivationGeneration, InstanceID: "instance-1", PodUID: "pod-1", RunnerID: "runner-1", AppID: "app-1", Phase: "running", Ready: true, Registered: true, Capacity: 1, Sessions: 0, NodeObservedAt: now, NodeExpiresAt: now.Add(30 * time.Second), AcceptedSequence: new(uint64(1))}}}}
+}
+
+func TestFleetReadinessUsesCurrentHealthAndRegistration(t *testing.T) {
+	s, c, m, a := observationFixture(t)
+	runtime := currentReport(t, s, m.NodeID, machineconfig.Report{
+		NodeID: m.NodeID, CredentialVersion: m.CredentialVersion, Component: "runtime",
+		Generation: m.Generation, BundleFormat: contract.BundleFormat, Ready: true, Reason: "ready",
+	})
+	path := "/v1/nodes/" + m.NodeID + "/status"
+	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
+	runner := observationReport(m, a)
+	runner.Apps.Applied = &contract.StageIdentity{
+		Generation: m.AppsGeneration, AppsDigest: m.AppsDigest, ArtifactDigest: "sha256:" + strings.Repeat("4", 64),
+	}
+	runner.Apps.Assignments[0].NodeExpiresAt = runner.Apps.Instances[0].NodeExpiresAt
+	runner.Apps.Assignments[0].ProbeExpiresAt = time.Now().Add(15 * time.Second).UTC()
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+
+	check := func(want readinessState) {
+		t.Helper()
+		for _, path := range []string{"/api/machines?orchestrator_address=" + orchA, "/api/admin/overview"} {
+			w := request(t, s, "GET", path, "session-a", nil)
+			requireStatus(t, w, 200)
+			var got struct{ Machines []observedMachineSummary }
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Machines) != 1 || got.Machines[0].Readiness.State != want ||
+				(want == readinessReady && (got.Machines[0].Readiness.ValidForMS <= 0 || got.Machines[0].Readiness.ValidForMS > 15000)) {
+				t.Fatalf("%s readiness = %+v, want %s", path, got.Machines, want)
+			}
+		}
+		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
+		requireStatus(t, w, 200)
+		var detail machineObservation
+		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail.Readiness.State != want {
+			t.Fatalf("detail readiness = %+v, want %s (%v)", detail.Readiness, want, err)
+		}
+	}
+
+	check(readinessReady)
+	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,probe_expires_at}',to_jsonb(now()-interval '1 second'))
+ WHERE node_id=$1 AND component='runner'`, m.NodeID)
+	check(readinessUnverified)
+	runtime = currentReport(t, s, m.NodeID, runtime)
+	runtime.Ready, runtime.Reason = false, "applying"
+	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
+	check(readinessPending)
+	runtime = currentReport(t, s, m.NodeID, runtime)
+	runtime.Reason = "reconcile_failed"
+	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
+	check(readinessBlocked)
+}
+
+func TestWorkReadinessRequiresFreshConfiguredIngress(t *testing.T) {
+	now := time.Now()
+	expires := now.Add(time.Minute)
+	instance := contract.InstanceStatus{RevisionID: "app", InstanceID: "instance", Generation: 1, ActivationGeneration: 1,
+		Ready: true, Registered: true, NodeExpiresAt: expires}
+	apps := &contract.AppStatus{DesiredGeneration: 1, Applied: &contract.StageIdentity{Generation: 1},
+		Instances: []contract.InstanceStatus{instance},
+		Assignments: []contract.AssignmentStatus{{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Instances: 1,
+			Ready: 1, Registered: 1, NodeExpiresAt: expires, ProbeExpiresAt: expires}}}
+	report := componentObservation{Fresh: true, Current: true, Ready: true, ReceivedAt: &now, ExpiresAt: &expires}
+	runtime, runner, connector := report, report, report
+	runtime.Component, runner.Component, connector.Component = "runtime", "runner", "connector"
+	runner.Apps, connector.ConnectorExpiresAt = apps, &expires
+	view := machineObservation{
+		ServerTime: now, Lifecycle: "active", Requested: contract.StageIdentity{Generation: 1},
+		Components:       []componentObservation{runtime, runner, connector},
+		Assignments:      []observedAssignment{{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Desired: "present", Replicas: 1, StartAllowed: true}},
+		Tunnel:           tunnelObservation{Enabled: true, Ready: true, ExpiresAt: &expires},
+		DiscoveryEnabled: true, DiscoveryInitialized: true, DiscoverySelectionExpiresAt: &expires,
+		DiscoverySource: &fleet.SourceStatus{State: "fresh", ExpiresAt: &expires},
+		Membership:      map[string]fleet.Membership{"instance": {State: "present", ExpiresAt: &expires}},
+	}
+	check := func(want readinessState) {
+		t.Helper()
+		if got := workReadiness(view); got.State != want {
+			t.Fatalf("readiness = %+v, want %s", got, want)
+		}
+	}
+	check(readinessReady)
+	view.Components[2].ConnectorExpiresAt = &now
+	check(readinessUnverified)
+	view.Components[2].ConnectorExpiresAt = &expires
+	view.Membership["instance"] = fleet.Membership{State: "absent", ExpiresAt: &expires}
+	check(readinessUnverified)
+	view.DiscoverySource.State = "excluded"
+	check(readinessBlocked)
+	view.Tunnel.Enabled, view.DiscoveryEnabled = false, false
+	check(readinessReady)
+	view.Assignments[0].Replicas = 2
+	check(readinessPartial)
+	view.Assignments[0].Replicas = 1
+	view.Assignments = append(view.Assignments, observedAssignment{RevisionID: "blocked", Desired: "present", Replicas: 1})
+	check(readinessPartial)
+	view.Lifecycle = "draining"
+	check(readinessInactive)
 }
 
 func TestObservedStateOwnerAdminBoundariesAndRedaction(t *testing.T) {
