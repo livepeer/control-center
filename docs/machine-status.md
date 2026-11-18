@@ -8,11 +8,13 @@ enrollment does not inherit access to the previous enrollment's diagnostics.
 
 ## Reading status
 
-The machine list and **Work readiness** section use the same browser calculation.
-Both receive readiness evidence in their existing status responses.
+The machine list and **Work readiness** section use the same readiness criteria.
+Each fleet poll makes one HTTP request. The browser fetches detailed status
+only for the selected machine.
 
-Deploy the Control Center API before updating Runtime. If reverting both,
-roll back Runtime before the API so the report format stays compatible.
+No schema migration is required. Deploy the Control Center API first because
+older APIs reject the new Runtime report fields. If reverting both, roll back
+Runtime before the API.
 
 - **Green — Ready to receive work.** The current Node deployment is ready,
   onchain admission is ready when configured, and all active assignments have
@@ -42,11 +44,11 @@ Compare the stages and their timestamps for the same enrollment and app:
 An external client completing a session requires separate verification. The
 readiness badge uses the control plane's operational evidence.
 
-Reports use `TunnelStatusTTL` (two minutes by default); individual probes,
-Node and connector observations, and Collector snapshots have their own expiry.
-An exact report retry does not renew older evidence. A successful empty discovery
-snapshot differs from failed or stale collection; retained inventory cannot prove
-membership after source or credential rotation. Reports include at most 128
+Reports expire after `TunnelStatusTTL` (two minutes by default). Individual
+probes, Node and connector observations, and Collector snapshots expire
+independently. Each expired observation becomes unverified. A fresh report or
+retry cannot extend an older observation. Only successful discovery collection
+for the current source and credentials can verify inventory membership. Reports include at most 128
 instance details, with omissions identified, so a healthy subset does not prove
 all instances are ready.
 

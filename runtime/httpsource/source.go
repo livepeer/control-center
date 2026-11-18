@@ -74,7 +74,7 @@ func (s *Source) Report(ctx context.Context) error {
 	if d == nil || !s.installed(d.Metadata) {
 		return nil
 	}
-	return s.report(ctx, d.Metadata, d.Digest, d.AppError)
+	return s.report(ctx, d)
 }
 
 func (s *Source) Sync(ctx context.Context) error {
@@ -252,7 +252,8 @@ func (s *Source) applied(ctx context.Context, name, digest string) (bool, string
 	unchanged := digest != "" && k.Status.LastAppliedRevision != digest && s.componentUnchanged(name, k.Status.LastAppliedRevision, digest)
 	return k.Status.ObservedGeneration == k.Metadata.Generation && (current || unchanged), k.Status.LastAppliedRevision
 }
-func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appError string) error {
+func (s *Source) report(ctx context.Context, d *delivery) error {
+	m, digest := d.Metadata, d.Digest
 	observedAt := time.Now().UTC()
 	applied, revision := s.applied(ctx, "livepeer-node", digest)
 	if m.Terminal {
@@ -391,12 +392,13 @@ func (s *Source) report(ctx context.Context, m contract.Metadata, digest, appErr
 		reporter = s.Control
 	}
 	payload := map[string]any{"node_id": m.NodeID, "credential_version": m.CredentialVersion, "component": "runtime", "generation": m.Generation,
-		"ingress_ready": ingressReady, "ingress_config_digest": ingressDigest, "bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(appError), "observed_at": observedAt, "software": s.software(ctx, s.NodeName)}
+		"ingress_ready": ingressReady, "ingress_config_digest": ingressDigest, "bundle_sha256": strings.TrimPrefix(revision, "sha256:"), "config_digest": actual, "k3s_version": k3sVersion, "ready": ready, "https": strings.HasPrefix(s.Control.ConfigURL, "https://"), "reason": reason, "bundle_format": contract.BundleFormat, "apps_error": appErrorReason(d.AppError), "observed_at": observedAt, "software": s.software(ctx, s.NodeName)}
 	if s.Onchain != nil {
 		payload["onchain"] = s.Onchain(ctx, m, applied && actual == m.ConfigDigest && podUID != "", ready, podUID)
 	}
-	if d := s.reporting.Load(); d != nil {
-		payload["downloaded"], payload["downloaded_at"] = d.Downloaded, d.DownloadedAt
+	payload["downloaded"], payload["downloaded_at"] = d.Downloaded, d.DownloadedAt
+	if d.AppError != "" && digest != "" {
+		payload["apps_error_bundle_digest"] = digest
 	}
 	if s.deliveryFailure.Load() {
 		payload["delivery_reason"] = "fetch_or_publication_failed"

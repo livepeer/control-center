@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { CircleAlert, CircleCheck, CircleHelp, Minus } from 'lucide-react'
 import { api, APIError } from './api'
-import { appEvidenceAt, classifyReadiness, nextReadinessExpiry, observationState, type ReadinessSnapshot } from './readiness'
+import { appEvidenceAt, classifyReadiness, nextReadinessExpiry, observationState, type ReadinessSnapshot, type ReadinessState } from './readiness'
 
 type Stage = { generation: number; apps_digest?: string; artifact_digest?: string }
 type Probe = { observed_at: string; due_at: string; expires_at: string; success: boolean; failures: number; started: boolean }
@@ -63,6 +63,7 @@ const reasons: Record<string, string> = {
   tls_or_route_pending: 'Waiting for tunnel endpoints to pass verification',
   discovery_excluded: 'This node is excluded from fleet discovery',
   secrets_unavailable: 'Secret delivery is unavailable; startup is waiting for secret preflight', secrets_denied: 'Secret delivery was denied; check assignment access', secret_missing: 'A required secret or key is missing', secret_invalid: 'Delivered secret data could not be validated',
+  startup_pending: 'Waiting for app startup', onchain_startup_pending: 'Waiting for the onchain Node to start',
   onchain_not_ready: 'Onchain Node is not ready; inspect credential delivery, retained onchain state, RPC and rate source', sandbox_pending: 'Sandbox or Pod network setup is pending', invalid_app_payload: 'Downloaded app input is invalid',
   onchain_pending: 'Waiting for the target onchain configuration', onchain_incompatible: 'App price is incompatible with the target onchain mode', resource_refused: 'Insufficient resources for this assignment', cleanup_prerequisite: 'Waiting for previous revision cleanup', cleanup_pending: 'Waiting for earlier instance cleanup', generation_failed: 'App configuration could not be rendered', invalid_definition: 'App definition is invalid', unsupported_instance_mode: 'Instance lifetime is not supported', unsupported_stop_signal: 'Configured stop signal is not supported', image_pull_failed: 'Container image could not be pulled', container_start_failed: 'Container could not start', startup_failed: 'Startup deadline expired', readiness_failed: 'Configured readiness check failed', memory_limit: 'Container exceeded its memory limit', scheduling_refused: 'Kubernetes refused scheduling', isolation_failed: 'Sandbox isolation could not start', state_recovery_failed: 'App Reconciler state recovery failed; management repair remains available', registration_reset: 'Node registration was lost or expired', node_registration_recreated: 'Node registration was recreated; previous work is unconfirmed', clock_uncertain: 'Observation clock is uncertain', process_lost: 'App process disappeared', process_failed: 'App process failed', observation_pending: 'App state could not be observed', fetch_or_publication_failed: 'Configuration fetch or artifact publication failed', access_denied: 'Discovery bearer authentication was denied', credential_unavailable: 'Discovery credential is unavailable', unreported: 'No observation received', input_regression: 'Older app input was refused', registration_failed: 'Node registration failed', registration_pending: 'Node registration is pending', node_unavailable: 'Node registration service is unreachable', node_request_failed: 'Node rejected the registration request', heartbeat_response: 'Node registration response is invalid', heartbeat_ttl: 'Node registration expiry is invalid', registration_auth_failed: 'Node rejected registration credentials', tls_pending: 'Waiting for TLS', drain_pending: 'Drain or cleanup is pending', runtime_offline: 'Runtime has no fresh report', reconcile_failed: 'Flux resource reconciliation failed', cleanup_failed: 'Resource cleanup failed', ownership_conflict: 'Tunnel resource ownership conflicts', provisioning_pending: 'Tunnel provisioning is pending', ingress_pending: 'Waiting for ingress authentication configuration', denied_destination: 'Discovery destination was refused', dns: 'Discovery DNS lookup failed', timeout: 'Discovery collection timed out', http_error: 'Discovery source returned an error', redirect: 'Discovery source redirected the request', transport_error: 'Discovery source could not be reached', unsupported_stop_signal_field: 'Host does not support the requested stop signal', stop_signal_unverified: 'The configured stop signal could not be verified; admission is withheld', process_failed_to_start: 'App process failed to start', registration_cleanup_failed: 'Registration cleanup failed', clock_state_unavailable: 'Clock state is unavailable', app_cleanup_pending: 'App cleanup remains pending', drain_timeout: 'Drain deadline expired', input_unavailable: 'App input is unavailable', publication_failed: 'App artifact publication failed', serving_failed: 'App artifact serving failed', failed: 'Component reported failure', offline: 'Component has no ready observation', connector_observation_stale: 'No fresh connector readiness observation', applying: 'Resource reconciliation is pending', ready: 'Ready', removed: 'Removed', rollout_pending: 'Waiting for the new configuration to apply', cleanup_unconfirmed: 'Cleanup is unconfirmed',
 }
@@ -88,7 +89,7 @@ function WorkReadiness({ view }: { view: MachineObservation }) {
   const title = state === 'unverified' ? 'Work readiness unverified' : readinessLabels[state]
   const HeadingIcon = state === 'ready' ? CircleCheck : inactive || state === 'blocked' ? CircleAlert : CircleHelp
 
-  type Check = { label: string; state: 'ready' | 'pending' | 'blocked' | 'unverified' | 'disabled'; detail?: string }
+  type Check = { label: string; state: Exclude<ReadinessState, 'inactive'> | 'disabled'; detail?: string }
   const checks: Check[] = []
   if (evidence) {
     const add = (label: string, observation: typeof evidence.node | undefined) => {
@@ -98,10 +99,10 @@ function WorkReadiness({ view }: { view: MachineObservation }) {
     add('Node deployment', evidence.node)
     if (evidence.onchain) add('Onchain admission', evidence.onchain)
     const { apps } = evidence
-    const { admitted, someCurrent, blocker, pending, ready } = appEvidenceAt(apps, age)
+    const { state, admitted, someCurrent, blocker, pending } = appEvidenceAt(apps, age)
     const appIssue = reason((blocker ? apps.blocker : pending ? apps.pending : undefined)?.reason)
     checks.push({
-      label: 'Apps', state: ready ? 'ready' : blocker || (apps.complete && apps.requested === 0) ? 'blocked' : pending ? 'pending' : 'unverified',
+      label: 'Apps', state,
       detail: apps.complete && apps.requested === 0 ? 'No apps assigned.' :
         `${someCurrent ? 'At least ' : ''}${admitted} of ${apps.requested} requested replicas have current Node admission evidence.${appIssue ? ` ${appIssue}.` : ''}`,
     })
@@ -109,7 +110,7 @@ function WorkReadiness({ view }: { view: MachineObservation }) {
     add('Discovery inventory', evidence.discovery)
   }
 
-  const status = { ready: 'Ready', pending: 'Pending', blocked: 'Blocked', unverified: 'Unverified', disabled: 'Disabled' }
+  const status = { ready: 'Ready', partial: 'Partially ready', pending: 'Pending', blocked: 'Blocked', unverified: 'Unverified', disabled: 'Disabled' }
   return <section className={`work-readiness ${state}`} aria-label="Work readiness">
     <div className="readiness-heading"><HeadingIcon size={23} aria-hidden="true" /><div><h4>{title}</h4>{inactive && <p>{view.lifecycle === 'draining' ? 'This node is draining for removal.' : 'This enrollment is retired. Cleanup evidence is shown below.'}</p>}</div></div>
     {checks.length > 0 && <ul className="readiness-checks">{checks.map(check => {

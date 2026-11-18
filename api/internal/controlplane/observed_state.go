@@ -46,6 +46,7 @@ type componentObservation struct {
 	DownloadedAt        *time.Time              `json:"downloaded_at,omitempty"`
 	DeliveryReason      string                  `json:"delivery_reason,omitempty"`
 	AppsError           string                  `json:"apps_error,omitempty"`
+	AppsErrorDigest     string                  `json:"-"`
 	ConnectorObservedAt *time.Time              `json:"connector_observed_at,omitempty"`
 	ConnectorExpiresAt  *time.Time              `json:"connector_expires_at,omitempty"`
 	Apps                *contract.AppStatus     `json:"apps,omitempty"`
@@ -209,7 +210,7 @@ const observationJoins = `
     'observed_at',report->'observed_at','clock_uncertain',report->'clock_uncertain',
     'onchain',report->'onchain','ingress_ready',report->'ingress_ready','ingress_config_digest',report->'ingress_config_digest',
     'connector_observed_at',report->'connector_observed_at','connector_expires_at',report->'connector_expires_at',
-    'apps_error',report->'apps_error','downloaded',report->'downloaded',
+    'apps_error',report->'apps_error','apps_error_bundle_digest',report->'apps_error_bundle_digest',
     'apps',CASE WHEN jsonb_typeof(report->'apps')='object' THEN jsonb_build_object(
      'desired_generation',report#>'{apps,desired_generation}','desired_digest',report#>'{apps,desired_digest}',
      'applied',report#>'{apps,applied}','reason',report#>'{apps,reason}','assignments',report#>'{apps,assignments}',
@@ -219,7 +220,7 @@ const observationJoins = `
       'reason',inst->'reason','workload_reason',inst->'workload_reason','withdrawal_id',inst->'withdrawal_id','phase',inst->'phase',
       'probe',CASE WHEN inst#>'{probe,expires_at}' IS NOT NULL THEN jsonb_build_object('expires_at',inst#>'{probe,expires_at}') END
      )) FROM jsonb_array_elements(COALESCE(NULLIF(report#>'{apps,instances}','null'),'[]')) inst
-     WHERE (i.discovery AND inst ? 'admission_expires_at') OR inst ? 'workload_reason' OR inst ? 'reason')
+     WHERE (i.discovery AND inst ? 'admission_expires_at') OR inst ? 'workload_reason' OR inst ? 'reason' OR inst->>'phase'='starting')
     ) END
    ) END AS report FROM lpcc.machine_reports
    WHERE node_id=i.node_id AND credential_version=i.credential_version
@@ -351,7 +352,7 @@ func (s *Server) composeMachineObservation(m Machine, facts machineObservationFa
 			}
 			c.Onchain = &copy
 		}
-		c.AppsError = safeObservationReason(report.AppsError)
+		c.AppsError, c.AppsErrorDigest = safeObservationReason(report.AppsError), report.AppsErrorDigest
 		c.Apps, c.Downloaded, c.DownloadedAt = report.Apps, report.Downloaded, timePointer(report.DownloadedAt)
 		c.ObserverID, c.ObserverStartedAt = report.ObserverID, timePointer(report.ObserverStartedAt)
 		c.ConnectorObservedAt, c.ConnectorExpiresAt = timePointer(report.ConnectorObservedAt), timePointer(report.ConnectorExpiresAt)

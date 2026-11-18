@@ -127,6 +127,9 @@ for (const admin of [false, true]) test(`${admin ? 'administrator' : 'owner'} se
   })
   await refresh()
   await expect(badge).toHaveClass('machine-status partial')
+  const appCheck = page.locator('.readiness-check').filter({ hasText: 'Apps' })
+  await expect(appCheck).toContainText('Partially ready')
+  await expect(appCheck).toContainText('Insufficient resources for this assignment')
 
   state.holdFleet = state.fail = true
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))

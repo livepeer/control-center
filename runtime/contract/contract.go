@@ -124,9 +124,25 @@ type AssignmentStatus struct {
 
 // ReplicaAdmission counts replicas with fresh health and matching Node-ready
 // registration evidence. ExpiresAt is the earliest expiry in that set.
+// LastExpiresAt is present when at least one replica expires later.
 type ReplicaAdmission struct {
-	Ready     int       `json:"ready"`
-	ExpiresAt time.Time `json:"expires_at,omitzero"`
+	Ready         int       `json:"ready"`
+	ExpiresAt     time.Time `json:"expires_at,omitzero"`
+	LastExpiresAt time.Time `json:"last_expires_at,omitzero"`
+}
+
+func (a *ReplicaAdmission) Add(expires time.Time) {
+	a.Ready++
+	if a.ExpiresAt.IsZero() {
+		a.ExpiresAt = expires
+		return
+	}
+	if expires.Before(a.ExpiresAt) {
+		a.ExpiresAt, expires = expires, a.ExpiresAt
+	}
+	if expires.After(a.ExpiresAt) && expires.After(a.LastExpiresAt) {
+		a.LastExpiresAt = expires
+	}
 }
 
 type SecretRollout struct {

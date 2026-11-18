@@ -257,10 +257,25 @@ func TestFleetReadinessEvidenceRequiresNodeAdmission(t *testing.T) {
 	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,admission,expires_at}',to_jsonb(now()-interval '1 second'))
  WHERE node_id=$1 AND component='runner'`, m.NodeID)
 	check("ready", 0, false)
+	runner = currentReport(t, s, m.NodeID, runner)
+	first := runner.Apps.Instances[0]
+	first.InstanceID, first.AdmissionExpiresAt = "instance-2", expiry.Add(-time.Second)
+	runner.Apps.Instances = append(runner.Apps.Instances, first)
+	runner.Apps.InstancesTotal = 2
+	assignment := &runner.Apps.Assignments[0]
+	assignment.Instances, assignment.Ready, assignment.Registered = 2, 2, 2
+	assignment.Admission = &contract.ReplicaAdmission{Ready: 2, ExpiresAt: first.AdmissionExpiresAt, LastExpiresAt: expiry.Add(time.Second)}
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 409)
+	assignment.Admission.LastExpiresAt = expiry
+	requireStatus(t, request(t, s, "POST", path, c["token"], runner), 200)
+	execSQL(t, s.db, `UPDATE lpcc.machine_reports SET report=jsonb_set(report,'{apps,assignments,0,admission,expires_at}',to_jsonb(now()-interval '1 second'))
+ WHERE node_id=$1 AND component='runner'`, m.NodeID)
+	check("ready", 1, false)
+
 	runtime = currentReport(t, s, m.NodeID, runtime)
-	runtime.Ready, runtime.Reason = false, "applying"
+	runtime.Ready, runtime.Reason = false, "onchain_not_ready"
 	requireStatus(t, request(t, s, "POST", path, c["token"], runtime), 200)
-	check("pending", 0, false)
+	check("pending", 1, false)
 }
 
 func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
@@ -304,12 +319,33 @@ func TestReadinessEvidenceFencesIngressAndDiscovery(t *testing.T) {
 	view.Tunnel.IngressVerified = false
 	check("pending", "ready", 1)
 	view.Tunnel.IngressVerified = true
+	view.Tunnel.Ready = false
+	for _, code := range []string{"onchain_startup_pending", "drain_pending"} {
+		view.Tunnel.Reason = code
+		check("pending", "ready", 1)
+	}
+	view.Tunnel.Reason = "drain_timeout"
+	check("blocked", "ready", 1)
+	view.Tunnel.Ready, view.Tunnel.Reason = true, ""
 	view.Components[2].ConnectorExpiresAt = &now
 	check("unverified", "ready", 1)
 	view.Components[2].ConnectorExpiresAt = &expires
 	view.DiscoverySource.SelectedGeneration--
 	check("ready", "unverified", 1)
 	view.DiscoverySource.SelectedGeneration++
+	a.Replicas = 2
+	reported.Admission.ExpiresAt, reported.Admission.LastExpiresAt = now.Add(time.Second), expires
+	if e := view.readinessEvidence().Apps; e.Admitted != 2 || e.AdmittedValidForMS != 1000 || e.LastAdmissionForMS != 60000 {
+		t.Fatalf("cached observation lost staggered replica expiry: %+v", e)
+	}
+	view.ServerTime = now.Add(2 * time.Second)
+	check("ready", "ready", 1)
+	if e := view.readinessEvidence().Apps; e.AdmittedValidForMS != 58000 {
+		t.Fatalf("fresh poll lost the surviving replica deadline: %+v", e)
+	}
+	view.ServerTime = now
+	a.Replicas = 1
+	reported.Admission.ExpiresAt, reported.Admission.LastExpiresAt = expires, time.Time{}
 	apps.Instances[0].AdmissionExpiresAt = now
 	check("ready", "unverified", 1)
 	view.DiscoverySource.State, view.DiscoverySource.SelectionReason = "excluded", "blocked"
@@ -337,23 +373,28 @@ func TestReplicaIssuesKeepTheirOwnFreshness(t *testing.T) {
 	a := observedAssignment{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Replicas: 1}
 	i := contract.InstanceStatus{RevisionID: "app", Generation: 1, ActivationGeneration: 1, Probe: &contract.ProbeStatus{ExpiresAt: probeExpiry}}
 	for _, tc := range []struct {
-		reason string
-		clock  time.Time
-		ttl    int64
+		reason, phase, state, want string
+		clock                      time.Time
+		ttl                        int64
 	}{
-		{"readiness_failed", now, 3000}, {"readiness_failed", probeExpiry, 0},
-		{"stop_signal_unverified", now, 30000}, {"secret_invalid", now, 30000},
+		{"readiness_failed", "", "blocked", "readiness_failed", now, 3000},
+		{"readiness_failed", "", "", "", probeExpiry, 0},
+		{"stop_signal_unverified", "", "blocked", "stop_signal_unverified", now, 30000},
+		{"secret_invalid", "", "blocked", "secret_invalid", now, 30000},
+		{"secrets_unavailable", "starting", "blocked", "secrets_unavailable", now, 30000},
+		{"sandbox_pending", "starting", "pending", "sandbox_pending", now, 30000},
+		{"", "starting", "pending", "startup_pending", now, 30000},
 	} {
-		i.Reason = tc.reason
-		_, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i}}, tc.clock, now.Add(30*time.Second))
-		if issue.ValidForMS != tc.ttl || (tc.ttl > 0 && issue.Reason != tc.reason) {
+		i.Reason, i.Phase = tc.reason, tc.phase
+		_, _, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i}}, tc.clock, now.Add(30*time.Second))
+		if issue.ValidForMS != tc.ttl || issue.State != tc.state || issue.Reason != tc.want {
 			t.Fatalf("%s at %s: %+v", tc.reason, tc.clock, issue)
 		}
 	}
 	i.Reason = "readiness_failed"
 	sibling := i
 	sibling.Reason = "image_pull_failed"
-	_, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i, sibling}}, now, now.Add(30*time.Second))
+	_, _, _, issue := replicaEvidence(a, &contract.AppStatus{Instances: []contract.InstanceStatus{i, sibling}}, now, now.Add(30*time.Second))
 	if issue.Reason != sibling.Reason || issue.ValidForMS != 30000 {
 		t.Fatalf("short probe expiry hid a longer blocker: %+v", issue)
 	}
@@ -633,9 +674,48 @@ func TestInvalidAppDownloadKeepsManagementReportsIngestible(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.Components[0].AppsError != last.AppsError || strings.Contains(w.Body.String(), "invalid app input") {
-		t.Fatal("adapter validation classification lost or payload exposed", w.Body.String())
+	if view.Components[0].AppsError != last.AppsError || view.ReadinessEvidence.Apps.Blocker != nil ||
+		strings.Contains(w.Body.String(), "invalid app input") || strings.Contains(w.Body.String(), "apps_error_bundle_digest") {
+		t.Fatal("unexpected evidence for an unrecorded artifact", w.Body.String())
 	}
+	rejected := artifact.Digest(data)
+	if last.AppsErrorDigest != rejected {
+		t.Fatalf("rejection identified the wrong artifact: %s", last.AppsErrorDigest)
+	}
+
+	// Record the rejected artifact as the current delivery, as if it was
+	// delivered with a manifest Runtime understands but app input it rejects.
+	execSQL(t, s.db, `INSERT INTO lpcc.machine_app_deliveries (node_id,apps_digest,bundle_sha256,apps_generation,entries,terminal)
+ SELECT node_id,apps_digest,$2,apps_generation,entries,terminal FROM lpcc.machine_app_deliveries
+ WHERE node_id=$1 AND bundle_sha256=$3`, m.NodeID, strings.TrimPrefix(rejected, "sha256:"), strings.TrimPrefix(first.Downloaded.ArtifactDigest, "sha256:"))
+	checkBlocker := func(want string) {
+		t.Helper()
+		w := request(t, s, "GET", "/api/machines/"+m.NodeID+"/status", "session-a", nil)
+		requireStatus(t, w, 200)
+		var detail machineObservation
+		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		w = request(t, s, "GET", "/api/admin/overview", "session-a", nil)
+		requireStatus(t, w, 200)
+		var overview struct{ Machines []observedMachineSummary }
+		if err := json.Unmarshal(w.Body.Bytes(), &overview); err != nil || len(overview.Machines) != 1 {
+			t.Fatalf("invalid overview: %v %s", err, w.Body.String())
+		}
+		for _, evidence := range []*machineReadinessEvidence{detail.ReadinessEvidence, overview.Machines[0].ReadinessEvidence} {
+			if issue := evidence.Apps.Blocker; (issue == nil) != (want == "") || (issue != nil && issue.Reason != want) {
+				t.Fatalf("want app blocker %q, got %+v", want, issue)
+			}
+		}
+	}
+	checkBlocker(last.AppsError)
+	last = currentReport(t, s, m.NodeID, last)
+	last.Downloaded, last.DownloadedAt = nil, time.Time{}
+	requireStatus(t, request(t, s, "POST", p+"/status", c["token"], last), 200)
+	checkBlocker(last.AppsError)
+	execSQL(t, s.db, `UPDATE lpcc.machine_app_deliveries SET published_at = now()
+ WHERE node_id=$1 AND bundle_sha256=$2`, m.NodeID, strings.TrimPrefix(first.Downloaded.ArtifactDigest, "sha256:"))
+	checkBlocker("")
 }
 
 func TestTerminalDiagnosticsRetainEarlierInstanceLineage(t *testing.T) {

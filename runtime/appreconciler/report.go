@@ -115,7 +115,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		}
 	}
 	clean := true
-	registeredInstances := map[string]bool{}
+	readyRegistered := map[string]bool{}
 	ids := instanceIDs(&s)
 	sort.SliceStable(ids, func(a, b int) bool {
 		x, y := s.Instances[ids[a]], s.Instances[ids[b]]
@@ -139,14 +139,15 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		}
 		registered := s.Identity.Confirmed && i.AppID != "" && !i.RegistrationGone && !nodeAt.IsZero()
 		p := proofs[id]
-		registeredInstances[id] = registered && p.PodUID == i.PodUID && p.App.Status == "ready" && p.Observation.Accepted && p.Observation.RunnerID == s.Identity.RunnerID && p.Observation.Credential == s.Identity.Credential && s.Identity.Sequence != nil && p.Observation.Sequence == *s.Identity.Sequence
+		registeredForWork := registered && p.PodUID == i.PodUID && p.App.Status == "ready" && p.Observation.Accepted && p.Observation.RunnerID == s.Identity.RunnerID && p.Observation.Credential == s.Identity.Credential && s.Identity.Sequence != nil && p.Observation.Sequence == *s.Identity.Sequence
 		healthy := ready[id]
 		var probe *contract.ProbeStatus
 		if c.Probes != nil {
 			probe, healthy = c.Probes.Status(id, i.PodUID)
 		}
+		readyRegistered[id] = ready[id] && healthy && i.WithdrawalID == "" && registeredForWork
 		var admissionExpiry time.Time
-		if ready[id] && healthy && i.WithdrawalID == "" && registeredInstances[id] && probe != nil && now.Before(probe.ExpiresAt) {
+		if readyRegistered[id] && probe != nil && now.Before(probe.ExpiresAt) {
 			admissionExpiry = nodeExpiry
 			if probe.ExpiresAt.Before(admissionExpiry) {
 				admissionExpiry = probe.ExpiresAt
@@ -170,10 +171,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 				a.CleanupPending++
 			}
 			if !admissionExpiry.IsZero() {
-				a.Admission.Ready++
-				if a.Admission.ExpiresAt.IsZero() || admissionExpiry.Before(a.Admission.ExpiresAt) {
-					a.Admission.ExpiresAt = admissionExpiry
-				}
+				a.Admission.Add(admissionExpiry)
 			}
 		}
 		if len(status.Instances) >= 128 {
@@ -219,7 +217,7 @@ func (c *Controller) report(ctx context.Context, ready map[string]bool, view Vie
 		for id, i := range s.Instances {
 			if i.Group.RevisionID == revision && occupied(i) {
 				count++
-				if i.Group.ActivationGeneration != activation || i.SecretVersion != r.Desired || !ready[id] || !registeredInstances[id] || i.WithdrawalID != "" {
+				if i.Group.ActivationGeneration != activation || i.SecretVersion != r.Desired || !readyRegistered[id] {
 					complete = false
 				}
 			}

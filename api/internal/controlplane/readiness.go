@@ -57,7 +57,7 @@ func issueState(reason string) string {
 	switch reason {
 	case "applying", "runtime_pending", "rollout_pending", "provisioning_pending", "tls_pending",
 		"ingress_pending", "registration_pending", "onchain_pending", "sandbox_pending", "cleanup_pending", "cleanup_prerequisite",
-		"certificate_pending", "tls_or_route_pending", "observation_pending":
+		"certificate_pending", "tls_or_route_pending", "observation_pending", "onchain_not_ready", "onchain_startup_pending", "drain_pending":
 		return "pending"
 	case "runtime_offline", "observation_expired", "connector_observation_stale":
 		return "unverified"
@@ -170,7 +170,8 @@ func (v machineObservation) appEvidence(runtime, runner componentObservation, ap
 	if v.DeliveryReason != "" {
 		addIssue(readinessObservation{State: issueState(v.DeliveryReason), Reason: v.DeliveryReason})
 	}
-	if stage := runtime.Downloaded; runtime.currentAt(now) && runtime.AppsError != "" && stage != nil && v.matchesAppInput(stage.Generation, stage.AppsDigest) {
+	if d := v.Delivered; runtime.currentAt(now) && runtime.AppsError != "" && runtime.AppsErrorDigest != "" &&
+		d != nil && d.Generation == v.Requested.Generation && d.ArtifactDigest == runtime.AppsErrorDigest {
 		addIssue(timedObservation(issueState(runtime.AppsError), runtime.AppsError, now, *runtime.ExpiresAt))
 	}
 	if apps != nil {
@@ -202,13 +203,13 @@ func (v machineObservation) appEvidence(runtime, runner componentObservation, ap
 		}
 		var issue readinessObservation
 		if apps != nil {
-			admitted, ttl, observed := replicaEvidence(a, apps, now, *runner.ExpiresAt)
+			admitted, ttl, lastTTL, observed := replicaEvidence(a, apps, now, *runner.ExpiresAt)
 			if admitted > 0 {
 				if e.Admitted == 0 || ttl < e.AdmittedValidForMS {
 					e.AdmittedValidForMS = ttl
 				}
 				e.Admitted += admitted
-				e.LastAdmissionForMS = max(e.LastAdmissionForMS, ttl)
+				e.LastAdmissionForMS = max(e.LastAdmissionForMS, lastTTL)
 			}
 			issue = observed
 		}
@@ -238,24 +239,36 @@ func (a observedAssignment) report(apps *contract.AppStatus) *contract.Assignmen
 	return nil
 }
 
-func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, reportExpiry time.Time) (admitted int, ttl int64, issue readinessObservation) {
+func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, reportExpiry time.Time) (admitted int, ttl, lastTTL int64, issue readinessObservation) {
 	o := a.report(apps)
 	if o != nil && o.Admission != nil {
 		ttl = earlier(o.Admission.ExpiresAt, reportExpiry).Sub(now).Milliseconds()
+		lastTTL = max(ttl, earlier(o.Admission.LastExpiresAt, reportExpiry).Sub(now).Milliseconds())
 		if ttl > 0 {
 			admitted = min(o.Admission.Ready, a.Replicas)
+		} else if lastTTL > 0 {
+			admitted, ttl = 1, lastTTL
 		}
 	}
 	if admitted == a.Replicas {
-		return admitted, ttl, issue
+		return admitted, ttl, lastTTL, issue
 	}
+	var pending string
 	if o != nil && o.Reason != "" {
-		return admitted, ttl, timedObservation(issueState(o.Reason), o.Reason, now, reportExpiry)
+		switch issueState(o.Reason) {
+		case "blocked":
+			return admitted, ttl, lastTTL, timedObservation("blocked", o.Reason, now, reportExpiry)
+		case "pending":
+			pending = o.Reason
+		}
 	}
 	var lastFailedProbe time.Time
 	for _, i := range apps.Instances {
 		if !a.matchesInstance(i) || now.Before(i.AdmissionExpiresAt) {
 			continue
+		}
+		if i.Phase == "starting" && pending == "" {
+			pending = "startup_pending"
 		}
 		for _, reason := range []string{i.WorkloadReason, i.Reason} {
 			switch reason {
@@ -264,19 +277,24 @@ func replicaEvidence(a observedAssignment, apps *contract.AppStatus, now, report
 					lastFailedProbe = i.Probe.ExpiresAt
 				}
 			case "image_pull_failed", "container_start_failed", "startup_failed", "memory_limit", "scheduling_refused",
-				"isolation_failed", "process_failed_to_start", "process_failed", "process_lost", "stop_signal_unverified", "secret_invalid":
-				return admitted, ttl, timedObservation("blocked", reason, now, reportExpiry)
+				"isolation_failed", "process_failed_to_start", "process_failed", "process_lost", "stop_signal_unverified", "secret_invalid", "secrets_unavailable":
+				return admitted, ttl, lastTTL, timedObservation("blocked", reason, now, reportExpiry)
+			case "sandbox_pending":
+				pending = reason
 			}
 		}
 	}
 	if now.Before(lastFailedProbe) {
-		return admitted, ttl, timedObservation("blocked", "readiness_failed", now, earlier(lastFailedProbe, reportExpiry))
+		return admitted, ttl, lastTTL, timedObservation("blocked", "readiness_failed", now, earlier(lastFailedProbe, reportExpiry))
 	}
-	if o != nil && o.Admission != nil && (o.Instances < a.Replicas || o.CleanupPending > 0 ||
+	if pending == "" && o != nil && o.Admission != nil && (o.Instances < a.Replicas || o.CleanupPending > 0 ||
 		(o.Admission.Ready == 0 && now.Before(o.ProbeExpiresAt) && now.Before(o.NodeExpiresAt))) {
-		return admitted, ttl, timedObservation("pending", "registration_pending", now, reportExpiry)
+		pending = "registration_pending"
 	}
-	return admitted, ttl, issue
+	if pending != "" {
+		issue = timedObservation("pending", pending, now, reportExpiry)
+	}
+	return admitted, ttl, lastTTL, issue
 }
 
 func (v machineObservation) discoveryEvidence(apps *contract.AppStatus) readinessObservation {
@@ -306,7 +324,7 @@ func (v machineObservation) discoveryEvidence(apps *contract.AppStatus) readines
 			if a.Desired != "present" || a.Replicas == 0 || !a.StartAllowed || !a.matchesInstance(i) {
 				continue
 			}
-			if report := a.report(apps); report != nil && report.Admission != nil && report.Admission.Ready > 0 && now.Before(report.Admission.ExpiresAt) {
+			if report := a.report(apps); report != nil && report.Admission != nil && report.Admission.Ready > 0 {
 				if expires := earlier(i.AdmissionExpiresAt, *m.ExpiresAt); expires.After(latest) {
 					latest = expires
 				}

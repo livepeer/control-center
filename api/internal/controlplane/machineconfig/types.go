@@ -117,6 +117,7 @@ type Report struct {
 	Reason              string                  `json:"reason,omitempty"`
 	BundleFormat        int                     `json:"bundle_format,omitempty"`
 	AppsError           string                  `json:"apps_error,omitempty"`
+	AppsErrorDigest     string                  `json:"apps_error_bundle_digest,omitempty"`
 	Sequence            uint64                  `json:"sequence,omitempty"`
 	Evidence            *contract.Evidence      `json:"evidence,omitempty"`
 	Apps                *contract.AppStatus     `json:"apps,omitempty"`

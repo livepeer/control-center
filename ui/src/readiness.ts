@@ -42,8 +42,12 @@ export function appEvidenceAt(apps: ReadinessEvidence['apps'], age: number) {
   const admitted = countCurrent ? apps.admitted : someCurrent ? 1 : 0
   const blocker = observationState(apps.blocker, age) === 'blocked'
   const pending = observationState(apps.pending, age) === 'pending'
-  const ready = countCurrent && apps.complete && apps.applied && apps.requested > 0 && admitted === apps.requested && !blocker && !pending
-  return { admitted, someCurrent, blocker, pending, ready }
+  let state: Exclude<ReadinessState, 'inactive'> = 'unverified'
+  if (apps.complete && apps.requested === 0) state = 'blocked'
+  else if (admitted > 0) state = countCurrent && apps.complete && apps.applied && admitted === apps.requested && !blocker && !pending ? 'ready' : 'partial'
+  else if (blocker) state = 'blocked'
+  else if (pending) state = 'pending'
+  return { state, admitted, someCurrent, blocker, pending }
 }
 
 export function classifyReadiness(snapshot: ReadinessSnapshot, now: number): ReadinessState {
@@ -51,17 +55,13 @@ export function classifyReadiness(snapshot: ReadinessSnapshot, now: number): Rea
   const evidence = snapshot.readiness_evidence
   if (!evidence) return 'unverified'
   const age = snapshot.readinessRequestedAt === undefined ? Infinity : now - snapshot.readinessRequestedAt
-  const { apps } = evidence
   const checks = [observationState(evidence.node, age), ...[evidence.onchain, evidence.ingress, evidence.discovery]
     .filter(check => check !== undefined)
     .map(check => observationState(check, age))]
-  const { admitted, blocker, pending, ready } = appEvidenceAt(apps, age)
-  if (checks.includes('blocked') || (apps.complete && apps.requested === 0)) return 'blocked'
-  if (blocker && admitted === 0) return 'blocked'
-  if (checks.every(state => state === 'ready') && admitted > 0) {
-    return ready ? 'ready' : 'partial'
-  }
-  return pending || checks.includes('pending') ? 'pending' : 'unverified'
+  const apps = appEvidenceAt(evidence.apps, age)
+  if (checks.includes('blocked') || apps.state === 'blocked') return 'blocked'
+  if (checks.every(state => state === 'ready')) return apps.state
+  return apps.pending || checks.includes('pending') ? 'pending' : 'unverified'
 }
 
 export function nextReadinessExpiry(evidence: ReadinessEvidence, age: number) {
