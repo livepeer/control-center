@@ -29,7 +29,7 @@ func TestSystemPeersRetainTerminalCleanupAndScopedCredentials(t *testing.T) {
 			t.Fatal("Node omitted private authority", field)
 		}
 	}
-	if !strings.Contains(string(files["system/node/orchestrator.yaml"]), `ExcludedHeaders = ["Livepeer-Session-*", "X-Forwarded-*"]`) {
+	if !strings.Contains(string(files["system/node/orchestrator.yaml"]), `ExcludedHeaders = ["Livepeer-Session-Token", "Livepeer-Session-Control", "X-Forwarded-*"]`) {
 		t.Fatal("Node omitted ingress header exclusion")
 	}
 	var deployment struct {

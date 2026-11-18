@@ -47,7 +47,7 @@ func realNode(t *testing.T, timeout string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config=", "--data-dir="+t.TempDir(), "--network=offchain", "--listen=unsafe@"+addr, "--metrics-listen=unsafe@"+metrics, "--service-url="+base, "--runner-service-url="+base, "--bootstrap-secret-file="+secret, "--runner-grants=127.0.0.0/8", "--excluded-headers=Livepeer-Session-*,X-Forwarded-*", "--heartbeat-interval=10ms", "--heartbeat-ttl=10s", "--drain-timeout="+timeout)
+	cmd := exec.CommandContext(ctx, binary, "--config=", "--data-dir="+t.TempDir(), "--network=offchain", "--listen=unsafe@"+addr, "--metrics-listen=unsafe@"+metrics, "--service-url="+base, "--runner-service-url="+base, "--bootstrap-secret-file="+secret, "--runner-grants=127.0.0.0/8", "--excluded-headers=Livepeer-Session-Token,Livepeer-Session-Control,X-Forwarded-*", "--heartbeat-interval=10ms", "--heartbeat-ttl=10s", "--drain-timeout="+timeout)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
