@@ -279,6 +279,35 @@ func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 type reviewRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f reviewRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRuntimeUsesHeartbeatSessionListsWithoutO2R(t *testing.T) {
+	const base = "http://node.example"
+	guard := originGuard{base: base, client: &http.Client{Transport: reviewRoundTripper(func(*http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		err := json.NewEncoder(w).Encode(runner.HeartbeatResponse{
+			RunnerID: "owner", HeartbeatTTL: "30s", O2R: &runner.Channel{URL: base + "/ai/trickle/events"},
+			Apps: []runner.HeartbeatAppStatus{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}},
+		})
+		return w.Result(), err
+	})}}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, base+"/runners/heartbeat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := guard.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var result runner.HeartbeatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.O2R != nil || len(result.Apps) != 1 || len(result.Apps[0].SessionIDs) != 1 || result.Apps[0].SessionIDs[0] != "work" {
+		t.Fatalf("expected only the authoritative session observation, got %+v", result)
+	}
+}
+
 func TestNativeOriginGuardRejectsBeforeO2R(t *testing.T) {
 	var calls atomic.Int32
 	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))

@@ -153,6 +153,8 @@ func appReconciler(ctx context.Context, args []string) error {
 		})
 	}
 	defer journal.Close()
+	metrics := appreconciler.NewMetrics()
+	journal.Metrics, owner.Metrics = metrics, metrics
 	defer func() {
 		stop, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
@@ -164,7 +166,9 @@ func appReconciler(ctx context.Context, args []string) error {
 	controller := appreconciler.Controller{Journal: journal, Input: appreconciler.Source{Kube: kube, Client: transport.HTTPClient(), ArtifactURL: *sourceURL, IdentityFile: *identity, NodeID: control.NodeID}, Cluster: appreconciler.Kubernetes{Client: kube, NodeID: control.NodeID}, Owner: owner, Store: store, ArtifactURL: *artifactURL, Reporter: appreconciler.ControlReporter{Client: reports}, Probes: probes}
 	controller.Secrets = &appreconciler.SecretDelivery{Client: &secretclient.Client{Directory: filepath.Join(*directory, "secrets")}, Kube: kube}
 	var stateLost atomic.Bool
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.NewServeMux()
+	handler.Handle("GET /metrics", metrics.Handler())
+	handler.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" && stateLost.Load() {
 			http.Error(w, "state_recovery_failed", http.StatusServiceUnavailable)
 			return

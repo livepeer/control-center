@@ -51,10 +51,6 @@ func (c *Controller) hooks() OwnerHooks {
 	return OwnerHooks{Observe: c.observe, Failure: c.failed, Now: c.now,
 		Eligibility: func(r Registration) (bool, bool) {
 			member, ready := c.Journal.Eligibility(r)
-			state := c.Journal.View()
-			if state.Metadata.Onchain.Onchain() && !state.Metadata.OnchainActive {
-				ready = false
-			}
 			return member, ready && c.Probes != nil && c.Probes.Ready(r.InstanceID, r.PodUID)
 		}}
 }

@@ -33,6 +33,7 @@ type Probes struct {
 	mu       sync.Mutex
 	values   map[string]*health
 	results  chan probeResult
+	revision uint64
 	OnChange func()
 	Client   *http.Client
 	// Address is used by local contract tests; production always probes the immutable Service.
@@ -56,6 +57,7 @@ func (p *Probes) Configure(instances map[string]*Instance, view View) {
 func (p *Probes) Run(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var notified uint64
 	for {
 		select {
 		case <-ctx.Done():
@@ -66,9 +68,13 @@ func (p *Probes) Run(ctx context.Context) {
 			p.mu.Unlock()
 			if instances != nil {
 				p.Poll(ctx, instances, view, now)
-				if p.OnChange != nil {
-					p.OnChange()
-				}
+			}
+			p.mu.Lock()
+			revision := p.revision
+			p.mu.Unlock()
+			if revision != notified && p.OnChange != nil {
+				notified = revision
+				p.OnChange()
 			}
 		}
 	}
@@ -98,6 +104,7 @@ func (p *Probes) Poll(ctx context.Context, instances map[string]*Instance, view 
 			}
 			h.pending = false
 			h.observedAt, h.success, h.observedDue = r.at, r.success, h.next
+			wasReady := h.ready
 			if r.success {
 				h.ready = true
 				h.started = true
@@ -108,6 +115,9 @@ func (p *Probes) Poll(ctx context.Context, instances map[string]*Instance, view 
 					h.ready = false
 				}
 			}
+			if h.ready != wasReady {
+				p.revision++
+			}
 		default:
 			goto consumed
 		}
@@ -116,7 +126,7 @@ consumed:
 	ready := map[string]bool{}
 	for id, h := range p.values {
 		if instances[id] == nil {
-			delete(p.values, id)
+			p.removeLocked(id)
 		} else {
 			ready[id] = h.ready
 		}
@@ -124,12 +134,13 @@ consumed:
 	for id, i := range instances {
 		pod, exists := view.Pods[i.Name]
 		if !exists || pod.UID == "" || pod.Deleting || pod.Phase != "Running" || !view.Endpoints[i.Name][pod.UID] || i.Phase == "removed" {
-			delete(p.values, id)
+			p.removeLocked(id)
 			ready[id] = false
 			continue
 		}
 		h := p.values[id]
 		if h == nil || h.uid != pod.UID {
+			p.removeLocked(id)
 			h = &health{uid: pod.UID}
 			p.values[id] = h
 		}
@@ -187,6 +198,13 @@ consumed:
 		}()
 	}
 	return ready
+}
+
+func (p *Probes) removeLocked(id string) {
+	if h := p.values[id]; h != nil && h.ready {
+		p.revision++
+	}
+	delete(p.values, id)
 }
 
 func (p *Probes) Status(id, uid string) *contract.ProbeStatus {
