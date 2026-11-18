@@ -5,6 +5,8 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -66,6 +68,18 @@ class BootstrapPublish(unittest.TestCase):
         self.source = self.root / 'bootstrap'
         for release_id in ('r1', 'r2'):
             release.package(ROOT, self.source, release_id, release.DEFAULT_ORIGIN, IMAGE)
+        # History used to order releases: c1 <- c2 on main, and c3 branching from c1.
+        self.repository = self.root / 'repository'
+        self.repository.mkdir()
+        self.git('init', '-q')
+        self.commits = {}
+        for name, parent in (('c1', None), ('c2', 'c1'), ('c3', 'c1')):
+            if parent:
+                self.git('checkout', '-q', '--detach', self.commits[parent])
+            self.git('commit', '-q', '--allow-empty', '-m', name)
+            self.commits[name] = self.git('rev-parse', 'HEAD')
+        self.set_commit('r1', 'c1')
+        self.set_commit('r2', 'c2')
         self.store, self.meta, self.calls = self.root / 'r2', self.root / 'meta', self.root / 'calls.jsonl'
         self.wrangler = self.root / 'wrangler'
         self.wrangler.write_text(FAKE_WRANGLER)
@@ -75,11 +89,25 @@ class BootstrapPublish(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def git(self, *args):
+        environment = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1',
+                       'GIT_AUTHOR_NAME': 'test', 'GIT_AUTHOR_EMAIL': 'test@example.invalid',
+                       'GIT_COMMITTER_NAME': 'test', 'GIT_COMMITTER_EMAIL': 'test@example.invalid'}
+        return subprocess.check_output(['git', '-C', str(self.repository), *args], env=environment, text=True).strip()
+
+    def set_commit(self, release_id, commit):
+        """Record a source commit; release.json is not covered by the loader's checksums."""
+        path = self.source / 'releases' / release_id / 'release.json'
+        record = json.loads(path.read_text())
+        record['source_commit'] = self.commits.get(commit, commit)
+        path.write_text(json.dumps(record, indent=2) + '\n')
+
     def run_publish(self, *args):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             try:
-                publisher.main(['--source', str(self.source), '--wrangler', str(self.wrangler), *args])
+                publisher.main(['--source', str(self.source), '--wrangler', str(self.wrangler),
+                                '--repository', str(self.repository), *args])
                 code = 0
             except SystemExit as exit:
                 code = exit.code
@@ -135,13 +163,49 @@ class BootstrapPublish(unittest.TestCase):
         self.assertIn('not completely published', output)
         self.assertIsNone(self.remote('bootstrap.sh'))
 
+    def test_activation_moves_forward(self):
+        self.assertEqual(self.run_publish('--all', '--activate', 'r1')[0], 0)
+        code, output = self.run_publish('--activate', 'r2')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.remote('bootstrap.sh'), self.local('r2', 'bootstrap.sh'))
+        # Re-activating the active release is a no-op check.
+        self.assertEqual(self.run_publish('--activate', 'r2')[0], 0)
+
+    def test_refuses_to_activate_an_older_or_diverged_release(self):
+        for commit in ('c1', 'c3'):
+            shutil.rmtree(self.store, ignore_errors=True)
+            self.set_commit('r1', commit)
+            self.assertEqual(self.run_publish('--all', '--activate', 'r2')[0], 0, commit)
+            code, output = self.run_publish('--activate', 'r1')
+            self.assertEqual(code, 1, commit)
+            self.assertIn('is not newer than the active release r2', output)
+            self.assertIn('--rollback', output)
+            self.assertEqual(self.remote('bootstrap.sh'), self.local('r2', 'bootstrap.sh'))
+
     def test_rollback_reactivates_an_older_release(self):
         self.assertEqual(self.run_publish('--all', '--activate', 'r2')[0], 0)
         self.assertEqual(self.remote('bootstrap.sh'), self.local('r2', 'bootstrap.sh'))
-        code, output = self.run_publish('--activate', 'r1')
+        code, output = self.run_publish('--activate', 'r1', '--rollback')
         self.assertEqual(code, 0, output)
+        self.assertIn('(rollback)', output)
         self.assertEqual(self.remote('bootstrap.sh'), self.local('r1', 'bootstrap.sh'))
         self.assertIsNotNone(self.remote('releases/r2/runtime-bootstrap.tar.gz'))
+        # Moving forward again needs no flag.
+        self.assertEqual(self.run_publish('--activate', 'r2')[0], 0)
+
+    def test_refuses_releases_it_cannot_order(self):
+        for commit, message in (('a' * 40, 'fetch its history'), ('--output=x', 'invalid source_commit')):
+            shutil.rmtree(self.store, ignore_errors=True)
+            self.set_commit('r2', commit)
+            self.assertEqual(self.run_publish('--all', '--activate', 'r1')[0], 0, commit)
+            code, output = self.run_publish('--activate', 'r2')
+            self.assertEqual(code, 1, commit)
+            self.assertIn(message, output)
+            self.assertIn('--rollback', output)
+            self.assertEqual(self.remote('bootstrap.sh'), self.local('r1', 'bootstrap.sh'))
+
+    def test_rollback_requires_activate(self):
+        self.assertEqual(self.run_publish('--release-id', 'r1', '--rollback')[0], 2)
 
     def test_read_errors_are_not_mistaken_for_missing_objects(self):
         os.environ['FAKE_R2_FAIL'] = 'get:releases/r1/runtime-bootstrap.tar.gz'

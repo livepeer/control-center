@@ -10,9 +10,15 @@ uploads them with wrangler, using the layout that ui/worker/index.ts serves:
 Published release objects are immutable: an identical object is skipped and a
 different one is refused. --activate switches the loader last, and only after
 the whole release reads back intact, so the active loader always names a
-complete release. Rolling back is activating an older release ID.
+complete release.
+
+Activation only moves forward: the candidate's source commit must descend from
+the active release's, so a slow publish of an older commit cannot replace a
+newer loader. Rolling back is activating an older release ID with --rollback.
+Runs sharing a --source directory are serialized with the packager's lock.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -35,6 +41,8 @@ RELEASE_FILES = {
     'bootstrap.sh': 'text/x-shellscript',
 }
 MISSING = 'The specified key does not exist'
+LOADER_RELEASE = re.compile(r'/bootstrap/releases/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})/runtime-bootstrap\.tar\.gz')
+COMMIT = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
 
 
 class PublishError(Exception):
@@ -125,12 +133,51 @@ def publish(bucket, release_id, files, log):
         log(f'uploaded {key}')
 
 
-def activate(bucket, release_id, files, log):
+def source_commit(raw, release_id):
+    try:
+        commit = json.loads(raw)['source_commit']
+    except (TypeError, ValueError, KeyError) as error:
+        raise PublishError(f'release {release_id} has no readable release.json source_commit') from error
+    if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
+        raise PublishError(f'release {release_id} has an invalid source_commit')
+    return commit
+
+
+def check_forward(bucket, release_id, files, repository):
+    """Refuse to replace the active loader with a release that is not newer."""
+    loader = bucket.get('bootstrap.sh')
+    if loader is None:
+        return
+    named = set(LOADER_RELEASE.findall(loader.decode('utf-8', 'replace')))
+    if len(named) != 1:
+        raise PublishError('the active bootstrap.sh does not name exactly one release; pass --rollback to replace it')
+    active = named.pop()
+    if active == release_id:
+        return
+    hint = '; pass --rollback to activate it anyway'
+    try:
+        active_commit = source_commit(bucket.get(f'releases/{active}/release.json'), active)
+        commit = source_commit(files['release.json'], release_id)
+    except PublishError as error:
+        raise PublishError(f'cannot order against the active release {active}: {error}{hint}') from error
+    result = subprocess.run(['git', '-C', str(repository), 'merge-base', '--is-ancestor', active_commit, commit],
+                            capture_output=True, text=True)
+    if result.returncode == 1:
+        raise PublishError(f'release {release_id} ({commit[:12]}) is not newer than the active release '
+                           f'{active} ({active_commit[:12]}){hint}')
+    if result.returncode != 0:
+        raise PublishError(f'cannot order release {release_id} against the active release {active} in '
+                           f'{repository}: {result.stderr.strip()}; fetch its history{hint}')
+
+
+def activate(bucket, release_id, files, log, repository=ROOT, rollback=False):
     for name in RELEASE_FILES:
         if bucket.get(f'releases/{release_id}/{name}') != files[name]:
             raise PublishError(f'release {release_id} is not completely published; publish it before activating')
+    if not rollback:
+        check_forward(bucket, release_id, files, repository)
     bucket.put('bootstrap.sh', files['bootstrap.sh'], RELEASE_FILES['bootstrap.sh'], 'no-cache')
-    log(f'activated {release_id} as bootstrap.sh')
+    log(f'activated {release_id} as bootstrap.sh' + (' (rollback)' if rollback else ''))
 
 
 def main(argv=None):
@@ -140,6 +187,8 @@ def main(argv=None):
     parser.add_argument('--release-id', action='append', default=[], help='release to publish; repeatable')
     parser.add_argument('--all', action='store_true', help='publish every local release (for migrating an existing host)')
     parser.add_argument('--activate', metavar='RELEASE_ID', help='switch the active loader to this published release, last')
+    parser.add_argument('--rollback', action='store_true', help='let --activate select a release that is not newer than the active one')
+    parser.add_argument('--repository', type=Path, default=ROOT, help='Git checkout used to order releases by source commit')
     parser.add_argument('--wrangler', default=os.environ.get('WRANGLER', str(ROOT / 'ui/node_modules/.bin/wrangler')),
                         help='wrangler executable (default: $WRANGLER or ui/node_modules/.bin/wrangler)')
     args = parser.parse_args(argv)
@@ -151,14 +200,18 @@ def main(argv=None):
         parser.error('nothing to do: pass --release-id, --all or --activate')
     bucket = Bucket(args.bucket, [args.wrangler])
     log = lambda message: print(message, file=sys.stderr)
+    if args.rollback and not args.activate:
+        parser.error('--rollback requires --activate')
     try:
-        loaded = {release_id: load_release(args.source, release_id) for release_id in dict.fromkeys(releases)}
-        if args.activate and args.activate not in loaded:
-            loaded[args.activate] = load_release(args.source, args.activate)
-        for release_id in dict.fromkeys(releases):
-            publish(bucket, release_id, loaded[release_id], log)
-        if args.activate:
-            activate(bucket, args.activate, loaded[args.activate], log)
+        with (args.source / '.publish.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            loaded = {release_id: load_release(args.source, release_id) for release_id in dict.fromkeys(releases)}
+            if args.activate and args.activate not in loaded:
+                loaded[args.activate] = load_release(args.source, args.activate)
+            for release_id in dict.fromkeys(releases):
+                publish(bucket, release_id, loaded[release_id], log)
+            if args.activate:
+                activate(bucket, args.activate, loaded[args.activate], log, args.repository, args.rollback)
     except (PublishError, OSError) as error:
         parser.exit(1, f'error: {error}\n')
 

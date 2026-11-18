@@ -169,10 +169,11 @@ Missing files return a plain-text `404` with `no-store`. Every loader embeds its
 release's bundle URL under `https://controlcenter.livepeer.live/bootstrap/releases/`,
 so published releases must stay in the bucket.
 
-From the repository root, choose a previously unused release ID, package it,
-and publish it:
+From the repository root, package the checked-out commit under a new release
+ID, then publish it. Use one release ID per commit:
 
 ```sh
+NEW_RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)"
 python3 tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" --output deploy/bootstrap
 python3 tools/publish-bootstrap.py --release-id "$NEW_RELEASE_ID"
 python3 tools/publish-bootstrap.py --activate "$NEW_RELEASE_ID"
@@ -197,14 +198,23 @@ the complete local release and refuses reused IDs. The publisher checks that
 the release's files agree, uploads the loader last, and reads every object
 back. It skips identical objects and refuses to replace a published file with
 different content. `--activate` switches `/bootstrap.sh` only after the whole
-release reads back intact. Never put credentials in a release. Keep
+release reads back intact.
+
+Activation only moves forward. The candidate's `source_commit` must be the
+active release's commit or descend from it in the local Git history, so a slow
+publish of an older commit cannot replace a newer loader. Packaging and
+publishing runs that share `deploy/bootstrap` take the same lock, but the lock
+is local: publish from one machine. Automation should activate only releases
+built from the current tip of its deployment branch. Never put credentials in a
+release. Keep
 `deploy/bootstrap` and the activation and validation records with the
 deployment artifacts.
 
-To roll back, activate a retained release:
+To roll back, or to switch to a release from another branch, activate a
+retained release explicitly:
 
 ```sh
-python3 tools/publish-bootstrap.py --activate bootstrap-20261112.1
+python3 tools/publish-bootstrap.py --activate bootstrap-20261112.1 --rollback
 ```
 
 `--all` publishes every release under `deploy/bootstrap/releases`, which
