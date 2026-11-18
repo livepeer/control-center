@@ -123,8 +123,10 @@ func (d diagnosticMetrics) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	total := "memory.current"
+	categories := []string{"anon", "file", "kernel", "sock", "slab_reclaimable"}
 	if d.cgroup.legacy {
 		total = "memory.usage_in_bytes"
+		categories = []string{"total_rss", "total_cache"}
 		d.emitMemoryFile(ch, "kernel", "memory.kmem.usage_in_bytes")
 		d.emitMemoryFile(ch, "sock", "memory.kmem.tcp.usage_in_bytes")
 	}
@@ -135,18 +137,8 @@ func (d diagnosticMetrics) Collect(ch chan<- prometheus.Metric) {
 	}
 	for line := range strings.Lines(string(raw)) {
 		category, value, ok := strings.Cut(strings.TrimSpace(line), " ")
-		if !ok {
-			continue
-		}
-		if d.cgroup.legacy {
-			switch category {
-			case "total_rss":
-				d.emitMemory(ch, "rss", value)
-			case "total_cache":
-				d.emitMemory(ch, "cache", value)
-			}
-		} else if slices.Contains([]string{"anon", "file", "kernel", "sock", "slab_reclaimable"}, category) {
-			d.emitMemory(ch, category, value)
+		if ok && slices.Contains(categories, category) {
+			d.emitMemory(ch, strings.TrimPrefix(category, "total_"), value)
 		}
 	}
 }

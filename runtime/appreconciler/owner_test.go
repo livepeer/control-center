@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,6 +98,9 @@ func (n *nativeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := runner.HeartbeatResponse{RunnerID: "owner", Apps: apps, HeartbeatInterval: "5ms", HeartbeatTTL: "30s"}
+	if n.busy {
+		resp.O2R = &runner.Channel{URL: "http://" + r.Host + "/ai/trickle/events"}
+	}
 	if r.Header.Get("Authorization") == "bootstrap" {
 		resp.HeartbeatSecret = "issued"
 		if n.issued != "" {
@@ -184,6 +188,9 @@ func TestNativeOwnerSequenceZeroMembershipAndRetirement(t *testing.T) {
 		})
 		if len(draining.Entries) != 0 {
 			t.Fatal("retained apps copied into submitted membership")
+		}
+		if !slices.Equal(draining.Apps[0].SessionIDs, []string{"work"}) || current.O2RChannel() != nil {
+			t.Fatal("heartbeat must preserve active sessions without subscribing to O2R")
 		}
 		if err := o.Close(t.Context()); err != nil {
 			t.Fatal(err)
@@ -307,20 +314,23 @@ func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 		result := make(chan error, 1)
 		go func() { result <- o.Sync(context.Background(), r, h) }()
 		<-entered
-		// Simulate an independent health update while Start is in flight.
+		// Replace the SDK app snapshot while Start is in flight.
 		o.mu.Lock()
-		o.request.Entries[0].Options.Status = "not-ready"
-		_ = o.setAppsLocked()
+		o.request.Entries[0].Options.Capacity = 2
+		updateErr := o.setAppsLocked()
 		o.mu.Unlock()
 		close(release)
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
 		if err := <-result; err != nil {
 			t.Fatal(err)
 		}
 		awaitObservation(t, ch, func(o Observation) bool { return o.Accepted })
 		n.mu.Lock()
 		defer n.mu.Unlock()
-		if len(n.requests) < 2 || n.requests[1].Apps[0].ID != "assigned-0" {
-			t.Fatal("assigned ID lost across SetApps", n.requests)
+		if len(n.requests) < 2 || len(n.requests[1].Apps) != 1 || n.requests[1].Apps[0].Capacity != 2 || n.requests[1].Apps[0].ID != "assigned-0" {
+			t.Fatal("second heartbeat must carry updated capacity and assigned ID", n.requests)
 		}
 	})
 }
@@ -328,34 +338,6 @@ func TestNativeOwnerInFlightMembershipKeepsAssignedIDs(t *testing.T) {
 type reviewRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f reviewRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func TestRuntimeUsesHeartbeatSessionListsWithoutO2R(t *testing.T) {
-	const base = "http://node.example"
-	guard := originGuard{base: base, client: &http.Client{Transport: reviewRoundTripper(func(*http.Request) (*http.Response, error) {
-		w := httptest.NewRecorder()
-		err := json.NewEncoder(w).Encode(runner.HeartbeatResponse{
-			RunnerID: "owner", HeartbeatTTL: "30s", O2R: &runner.Channel{URL: base + "/ai/trickle/events"},
-			Apps: []runner.HeartbeatAppStatus{{ID: "app", Status: "draining", SessionIDs: []string{"work"}}},
-		})
-		return w.Result(), err
-	})}}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, base+"/runners/heartbeat", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := guard.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var result runner.HeartbeatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatal(err)
-	}
-	if result.O2R != nil || len(result.Apps) != 1 || len(result.Apps[0].SessionIDs) != 1 || result.Apps[0].SessionIDs[0] != "work" {
-		t.Fatalf("expected only the authoritative session observation, got %+v", result)
-	}
-}
 
 func TestNativeOriginGuardRejectsBeforeO2R(t *testing.T) {
 	var calls atomic.Int32
