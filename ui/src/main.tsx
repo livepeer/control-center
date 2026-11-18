@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js'
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { ArrowDown, ArrowRight, Check, CheckCheck, ChevronRight, Copy, Cpu, LogOut, Plus, RefreshCw, Server, Terminal, X } from 'lucide-react'
 import './style.css'
-import { api } from './api'
+import { api, apiURL } from './api'
 import { OperatorSecrets, enrollSecretsService, enrollmentEnvelope } from './operator-secrets'
 import { bootstrapCommand } from './bootstrap'
 import { Administration } from './administration'
@@ -208,8 +208,9 @@ function App() {
     let dispose: (() => void) | undefined
     async function load() {
       try {
-        const response = await fetch('/api/config')
-        if (!response.ok) throw new Error('The console could not reach the API. Check that the backend is running.')
+        const unreachable = 'The console could not reach the API. Check your connection and try again.'
+        const response = await fetch(apiURL('/api/config'), { cache: 'no-store', credentials: 'omit' }).catch(() => { throw new Error(unreachable) })
+        if (!response.ok) throw new Error(unreachable)
         const settings = await response.json() as AuthConfig
         if (!active) return
         const callbackURL = new URL(window.location.href)

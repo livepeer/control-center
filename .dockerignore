@@ -12,6 +12,7 @@
 !ui/tsconfig.json
 !ui/vite.config.ts
 !ui/index.html
+!ui/.env.production
 !ui/src/**
 !ui/public/**
 !deploy/
