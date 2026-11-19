@@ -8,6 +8,7 @@
 !runtime/**
 !deploy/
 !deploy/Dockerfile
+!deploy/grafana/**
 **/._*
 **/.DS_Store
 

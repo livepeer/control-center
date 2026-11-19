@@ -171,6 +171,11 @@ RedeemerUpstreamURL = "http://redeemer:8941"
 	if p.DefaultAdminEmail != "first@example.invalid" {
 		t.Fatal("default admin config missing")
 	}
+	// Telemetry is on by default and its defaults name the compose services.
+	if want := (TelemetryParams{TelemetryEnabled: true, TelemetryMetricsURL: "http://victoriametrics:8428", TelemetryLogsURL: "http://victorialogs:9428",
+		TelemetryTokenTTL: time.Hour, TelemetryMaxBodyBytes: 8 << 20, TelemetryNodeRateBytes: 1 << 20, TelemetryAppLogsEnabled: true}); p.TelemetryParams != want {
+		t.Fatalf("telemetry defaults = %+v, want %+v", p.TelemetryParams, want)
+	}
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "environment@example.invalid")
 	p = Params{}
 	if err := (boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", filepath.Join(dir, "config.toml")}}).Validate(); err != nil || p.DefaultAdminEmail != "environment@example.invalid" {
@@ -181,7 +186,8 @@ RedeemerUpstreamURL = "http://redeemer:8941"
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
-	for _, name := range []string{"CONTROL_CENTER_CONFIG", "CONTROL_CENTER_MODE", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_PRIVATE_KEY_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL"} {
+	for _, name := range []string{"CONTROL_CENTER_CONFIG", "CONTROL_CENTER_MODE", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_PRIVATE_KEY_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL",
+		"TELEMETRY_ENABLED", "TELEMETRY_METRICS_URL", "TELEMETRY_LOGS_URL", "TELEMETRY_TOKEN_TTL", "TELEMETRY_MAX_BODY_BYTES", "TELEMETRY_NODE_RATE_BYTES", "TELEMETRY_APP_LOGS_ENABLED"} {
 		t.Setenv(name, "")
 	}
 }

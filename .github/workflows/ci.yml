@@ -50,6 +50,9 @@ jobs:
             echo "NODE_BINARY=$RUNNER_TEMP/bin/livepeer-orchestrator"
             echo "TRAEFIK_BINARY=$RUNNER_TEMP/bin/traefik"
             echo "CLOUDFLARED_BINARY=$RUNNER_TEMP/bin/cloudflared"
+            echo "VICTORIAMETRICS_BINARY=$RUNNER_TEMP/bin/victoria-metrics-prod"
+            echo "VICTORIALOGS_BINARY=$RUNNER_TEMP/bin/victoria-logs-prod"
+            echo "VMAGENT_BINARY=$RUNNER_TEMP/bin/vmagent-prod"
           } >> "$GITHUB_ENV"
       - name: Install pinned Livepeer Node fixture
         run: |
@@ -69,6 +72,23 @@ jobs:
             --output "$RUNNER_TEMP/traefik.tar.gz"
           echo "5b9f51199fcb7a3b5f7ae0f9dae8dcf01efadafd92c5fca96ea2822eca81f8e6  $RUNNER_TEMP/traefik.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/traefik.tar.gz" -C "$RUNNER_TEMP/bin" traefik
+      - name: Pin telemetry storage fixtures
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v1.155.0/victoria-metrics-linux-amd64-v1.155.0.tar.gz \
+            --output "$RUNNER_TEMP/victoria-metrics.tar.gz"
+          echo "7180e65913d55ab99c0be8f4a3ad17a0fafe5598a21ff6327fecba3190d7b176  $RUNNER_TEMP/victoria-metrics.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/victoria-metrics.tar.gz" -C "$RUNNER_TEMP/bin" victoria-metrics-prod
+          curl --fail --location --retry 3 \
+            https://github.com/VictoriaMetrics/VictoriaLogs/releases/download/v1.53.0/victoria-logs-linux-amd64-v1.53.0.tar.gz \
+            --output "$RUNNER_TEMP/victoria-logs.tar.gz"
+          echo "55feba89713cafa952673f91b8b38e7701bb0290989263da671b47a0de16edd3  $RUNNER_TEMP/victoria-logs.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/victoria-logs.tar.gz" -C "$RUNNER_TEMP/bin" victoria-logs-prod
+          curl --fail --location --retry 3 \
+            https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v1.155.0/vmutils-linux-amd64-v1.155.0.tar.gz \
+            --output "$RUNNER_TEMP/vmutils.tar.gz"
+          echo "b6181fc16cf19835706ea5d67215eea56c1fe87350fdfd82a5ff803ea2c1a907  $RUNNER_TEMP/vmutils.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/vmutils.tar.gz" -C "$RUNNER_TEMP/bin" vmagent-prod
       - name: Race and real-process tests
         run: |
           mkdir -p "${{ runner.temp }}/livepeer-test-artifacts"

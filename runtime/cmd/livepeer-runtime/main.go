@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/livepeer/control-center/runtime/ingressauth"
 	"github.com/livepeer/control-center/runtime/management"
 	"github.com/livepeer/control-center/runtime/secretclient"
+	"github.com/livepeer/control-center/runtime/telemetry"
 	"github.com/livepeer/control-center/runtime/transport"
 )
 
@@ -36,7 +38,7 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("choose http-source, app-reconciler, ingress-auth, connector-start, or connector-probe")
+		return errors.New("choose http-source, app-reconciler, ingress-auth, telemetry-relay, connector-start, or connector-probe")
 	}
 	switch args[0] {
 	case "ingress-auth":
@@ -52,6 +54,8 @@ func run(ctx context.Context, args []string) error {
 		return httpSource(ctx, args[1:])
 	case "app-reconciler":
 		return appReconciler(ctx, args[1:])
+	case "telemetry-relay":
+		return telemetryRelay(ctx, args[1:])
 	case "connector-start", "connector-probe":
 		return connectorCommand(ctx, args[0], args[1:])
 	default:
@@ -238,7 +242,7 @@ func httpSource(ctx context.Context, args []string) error {
 	}
 	store := artifact.Store{Directory: *directory}
 	ordered := &transport.Reports{Client: control, Directory: filepath.Join(*directory, "reports")}
-	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, InstalledSoftwareFile: "/installed-software/software.json", NodeName: os.Getenv("NODE_NAME")}
+	source := httpsource.Source{Reporter: ordered, Control: control, Kube: kube, Store: store, ArtifactURL: *artifactURL, IdentityFile: *identity, InstalledSoftwareFile: "/installed-software/software.json", HostFeaturesFile: "/installed-software/host-features.json", NodeName: os.Getenv("NODE_NAME")}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	socketErrors := make(chan error, 1)
@@ -247,7 +251,8 @@ func httpSource(ctx context.Context, args []string) error {
 	onchain := &consumer.Integration{Profile: consumer.Orchestrator, Control: control, Kube: kube, Desired: source.Desired, StateFile: filepath.Join(*directory, "onchain-grant.json"), SigningKeyFile: *signingKey}
 	onchain.Restore()
 	source.Onchain = onchain.Observe
-	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, onchain)
+	telemetry := management.TelemetryTokens{Control: control, Base: control.Base, Desired: source.Desired}
+	sockets, err := management.Listen(*socketRoot, integration, management.AppReports{Control: control, Desired: source.Desired}, onchain, telemetry)
 	if err != nil {
 		return err
 	}
@@ -325,6 +330,24 @@ func serve(ctx context.Context, address string, handler http.Handler, loop func(
 	err := server.Shutdown(stop)
 	<-loopDone
 	return err
+}
+
+var telemetryNodeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// telemetryRelay holds the telemetry token for agents in its Pod. It receives
+// the token and destinations only through the scoped management socket.
+func telemetryRelay(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("telemetry-relay", flag.ContinueOnError)
+	listen := flags.String("listen", "127.0.0.1:20244", "Loopback listener shared with the Pod's agents")
+	socket := flags.String("socket", "/management/control.sock", "Scoped telemetry management socket")
+	mode := flags.String("transport", "https", "https or development-http")
+	maxBody := flags.Int64("max-body-bytes", 8<<20, "Largest agent write")
+	node := flags.String("node-id", "", "Enrollment this relay may send as")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *socket == "" || !telemetryNodeID.MatchString(*node) || *maxBody < 1<<20 || *maxBody > 64<<20 || (*mode != "https" && *mode != "development-http") {
+		return errors.New("invalid telemetry-relay configuration")
+	}
+	relay := telemetry.NewRelay(transport.NewLocal(*socket), *node, *mode == "development-http", *maxBody)
+	return relay.Serve(ctx, *listen)
 }
 
 func ingressAuth(ctx context.Context, args []string) error {

@@ -1,0 +1,4 @@
+# Applied to every series before remote write. Session and credential
+# identities must never become metric labels.
+- action: labeldrop
+  regex: '(?i).*(session|token|ticket|secret|password|credential).*'

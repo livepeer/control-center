@@ -14,6 +14,7 @@ INSTALL_DIR='/opt/livepeer'
 CHECK_ONLY=0
 STATUS_ONLY=0
 CREDENTIAL_TRANSITION=''
+UPGRADE_RUNTIME=0
 UNIT='livepeer-k3s.service'
 case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR=${BASH_SOURCE[0]%/*} ;; *) SCRIPT_DIR=. ;; esac
 SCRIPT_DIR=$(cd -- "$SCRIPT_DIR" && pwd -P)
@@ -45,6 +46,7 @@ The API must be reachable from this host and its pods.
   --status            Show local installation progress without changing anything.
   --refresh-credentials  Refresh via a fresh enrollment token and HTTPS, preserving identity.
   --reenroll           Enroll a removed installation as a new lifetime; retain data.
+  --upgrade-runtime    Switch to this release's Runtime image instead of the saved one.
   -h, --help          Show this help without requiring root.
 
 Requires Debian/Ubuntu amd64, systemd, 2 CPUs, 4 GiB RAM,
@@ -62,6 +64,7 @@ parse_args() {
       --status) STATUS_ONLY=1; shift ;;
       --refresh-credentials) CREDENTIAL_TRANSITION=refresh; shift ;;
       --reenroll) CREDENTIAL_TRANSITION=reenroll; shift ;;
+      --upgrade-runtime) UPGRADE_RUNTIME=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -73,10 +76,14 @@ parse_args() {
     die 'installation directory cannot contain repeated or trailing slashes, . or .. directory names, or symlinks'
 }
 
+read_machine_id() {
+  [[ -s /etc/machine-id ]] && cat /etc/machine-id
+}
+
 # Enrollment credentials are separate from the short-lived bootstrap JWT.
 # Reruns reuse the saved machine credential and never require another JWT.
 authenticate_node() {
-  local credentials="$INSTALL_DIR/credentials" key request response api status
+  local credentials="$INSTALL_DIR/credentials" key request response api status machine_id
   NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; IDENTITY_NODE_ID=''; INSTALLATION_FINGERPRINT=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
     ENROLLMENT_TOKEN=''
@@ -98,8 +105,8 @@ authenticate_node() {
     [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
     api=$(api_url)
     [[ "$api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS; development HTTP must be explicit'
-    [[ -s /etc/machine-id ]] || die '/etc/machine-id must be initialized'
-    INSTALLATION_FINGERPRINT=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
+    machine_id=$(read_machine_id) || die '/etc/machine-id must be initialized'
+    INSTALLATION_FINGERPRINT=$(printf '%s' "$machine_id" | sha256sum)
     INSTALLATION_FINGERPRINT=${INSTALLATION_FINGERPRINT:0:64}
     request=$(jq -nc --arg fingerprint "$INSTALLATION_FINGERPRINT" --arg hostname "$(hostname)" \
       --arg install_dir "$INSTALL_DIR" --arg k3s_version "$K3S_VERSION" --argjson development_http "${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0}" \
@@ -133,8 +140,9 @@ authenticate_node() {
   [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
   [[ "$CONFIG_URL" =~ ^https?://[a-zA-Z0-9/_.:-]+$ ]] || die 'invalid configuration URL'
   [[ "$CONFIG_URL" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'saved HTTP credential requires --refresh-credentials over HTTPS'
-  [[ ! "${CONFIG_URL,,}" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]] ||
+  if (shopt -s nocasematch; [[ "$CONFIG_URL" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]]); then
     die 'configuration URL uses loopback; Kubernetes pods need a reachable API address'
+  fi
   ENROLLMENT_TOKEN=''
 }
 
@@ -176,9 +184,15 @@ prepare_installation() {
     "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   chown 65532:65532 "$INSTALL_DIR/volumes/http-source" "$INSTALL_DIR/volumes/orchestrator" "$INSTALL_DIR/volumes/app-reconciler"
   install -d -m 0700 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator" \
+    "$INSTALL_DIR/volumes/management-sockets/telemetry"
   chown 65532:65532 "$INSTALL_DIR/volumes/management-sockets" \
-    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator"
+    "$INSTALL_DIR/volumes/management-sockets/connector" "$INSTALL_DIR/volumes/management-sockets/apps" "$INSTALL_DIR/volumes/management-sockets/orchestrator" \
+    "$INSTALL_DIR/volumes/management-sockets/telemetry"
+  # Telemetry agents buffer here while Control Center is unreachable. The log
+  # reader runs as UID 0 without capabilities, so its buffer is root-owned.
+  install -d -m 0700 "$INSTALL_DIR/volumes/telemetry" "$INSTALL_DIR/volumes/telemetry-logs"
+  chown 65532:65532 "$INSTALL_DIR/volumes/telemetry"
   printf '%s\n' "$RUNTIME_IMAGE" | atomic_write "$INSTALL_DIR/state/runtime-image"
   chmod 0700 "$INSTALL_DIR/k3s" "$INSTALL_DIR/kubelet"
   write_once "$INSTALL_DIR/credentials/fingerprint" "$INSTALLATION_FINGERPRINT"
@@ -247,6 +261,16 @@ write_host_configuration() {
   "$INSTALL_DIR/bin/livepeer-record-version" "$INSTALL_DIR/bin/k3s" "$INSTALL_DIR/state/k3s-version" "$INSTALL_DIR/lib/recovery.sh" "$INSTALL_DIR"
   mv "$INSTALL_DIR/state/host-config.new" "$INSTALL_DIR/state/host-config.sha256"
   rm -f -- "$INSTALL_DIR/state/k3s-restart-required"
+}
+
+# Host features name host-owned prerequisites that Control Center gates
+# workloads on: telemetry needs its management socket and http-source RBAC.
+# Record them only after the bootstrap that applied them has succeeded.
+HOST_FEATURES='{"telemetry":1}'
+record_host_features() {
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson features "$HOST_FEATURES" \
+    '{recorded_at:$at,features:$features}' |
+    atomic_write "$INSTALL_DIR/volumes/installed-software/host-features.json" 0644
 }
 
 kube() { "$INSTALL_DIR/bin/k3s" kubectl --kubeconfig "$INSTALL_DIR/config/kubeconfig.yaml" --request-timeout=30s "$@"; }
@@ -356,6 +380,7 @@ main() {
   run_phase cluster bootstrap_cluster
   run_phase secrets enroll_secrets
   run_phase smoke smoke_test
+  run_phase features record_host_features
   run_phase complete true
   log "Ready. Kubeconfig: $INSTALL_DIR/config/kubeconfig.yaml"
   log "Configuration is managed by the Livepeer API; Flux polls every minute."

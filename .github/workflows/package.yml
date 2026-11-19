@@ -32,6 +32,9 @@ jobs:
           - name: secrets
             file: deploy/Dockerfile.secrets
             target: ''
+          - name: grafana
+            file: deploy/Dockerfile.grafana
+            target: ''
         include:
           - arch: amd64
             runner: ubuntu-26.04

@@ -54,6 +54,13 @@ RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
 # TunnelDrainTimeout = "<DRAIN_DEADLINE>"
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
 
+# Machine telemetry is on by default. Without local VictoriaMetrics and
+# VictoriaLogs, ingest answers 503 and machines keep buffering; see
+# docs/telemetry.md. Point these at local stores to receive data.
+# TelemetryEnabled = true
+# TelemetryMetricsURL = "http://127.0.0.1:8428"
+# TelemetryLogsURL = "http://127.0.0.1:9428"
+
 # Local development opts out of the default onchain deployment.
 Mode = "offchain"
 

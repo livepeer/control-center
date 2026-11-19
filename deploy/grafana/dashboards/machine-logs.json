@@ -1,0 +1,150 @@
+{
+  "uid": "lp-logs",
+  "title": "Machine logs",
+  "description": "Logs from machines. App output is included only while TelemetryAppLogsEnabled is true.",
+  "tags": [
+    "telemetry"
+  ],
+  "editable": false,
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "orchestrator",
+        "label": "Orchestrator",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "query": {
+          "query": "label_values(up{job=\"node-exporter\"}, orchestrator)",
+          "refId": "orchestrator"
+        },
+        "definition": "label_values(up{job=\"node-exporter\"}, orchestrator)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": true,
+        "allValue": ".*"
+      },
+      {
+        "name": "node_id",
+        "label": "Machine",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "query": {
+          "query": "label_values(up{job=\"node-exporter\", orchestrator=~\"$orchestrator\"}, node_id)",
+          "refId": "node_id"
+        },
+        "definition": "label_values(up{job=\"node-exporter\", orchestrator=~\"$orchestrator\"}, node_id)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*"
+      },
+      {
+        "name": "source",
+        "label": "Source",
+        "type": "custom",
+        "query": "system,app,host,event",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": []
+      },
+      {
+        "name": "search",
+        "label": "Matches (regexp)",
+        "type": "textbox",
+        "query": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Volume by source",
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "refId": "A",
+          "expr": "{node_id=~\"$node_id\", source=~\"$source\"} orchestrator:~\"$orchestrator\" ~\"$search\" | stats by (source) count()",
+          "queryType": "statsRange"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 6
+      },
+      "id": 1
+    },
+    {
+      "type": "logs",
+      "title": "Logs",
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "refId": "A",
+          "expr": "{node_id=~\"$node_id\", source=~\"$source\"} orchestrator:~\"$orchestrator\" ~\"$search\"",
+          "queryType": "instant",
+          "maxLines": 1000
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 22
+      },
+      "id": 2
+    }
+  ]
+}

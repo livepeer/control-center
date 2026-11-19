@@ -43,7 +43,10 @@ type Source struct {
 	deliveryFailure atomic.Bool
 
 	InstalledSoftwareFile string
-	NodeName              string
+	// HostFeaturesFile lists host-owned capabilities that bootstrap applied,
+	// such as the telemetry socket and RBAC. Control Center gates workloads on them.
+	HostFeaturesFile string
+	NodeName         string
 }
 
 type delivery struct {
@@ -419,6 +422,10 @@ func (s *Source) gc(ctx context.Context, current string) {
 	names := []string{"livepeer", "livepeer-upgrade-plan"}
 	for _, c := range []string{"node", "connector", "ingress", "app-reconciler", "upgrade-controller"} {
 		names = append(names, "livepeer-"+c)
+	}
+	// Only hosts that applied the telemetry RBAC may read its Kustomization.
+	if s.hostFeatures()["telemetry"] >= 1 {
+		names = append(names, "livepeer-telemetry")
 	}
 	for _, name := range names {
 		var k fluxState

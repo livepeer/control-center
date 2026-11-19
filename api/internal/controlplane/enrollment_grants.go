@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/livepeer/control-center/runtime/ingressauth"
 	protocol "github.com/livepeer/control-center/secrets"
+	"io"
 	"net/http"
 	"time"
 	"uuid"
@@ -178,4 +179,5 @@ func (s *Server) revokeEnrollmentGrant(w http.ResponseWriter, r *http.Request) {
 func (s *Server) enrollmentMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "control_enrollment_grants_issued_total %d\ncontrol_enrollment_grants_rejected_total %d\n", s.grantsIssued.Load(), s.grantsRejected.Load())
+	io.WriteString(w, s.telemetryMetricsText())
 }

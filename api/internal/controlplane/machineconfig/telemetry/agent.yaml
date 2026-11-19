@@ -1,0 +1,133 @@
+# One Pod collects workload telemetry and host logs on the Pod network. Every
+# agent listens on the Pod loopback only; the relay alone holds the write token.
+# node_exporter runs in its own Pod; see node-exporter.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: livepeer-telemetry-agent, namespace: livepeer-telemetry}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: livepeer-telemetry-agent}}
+  template:
+    metadata:
+      labels: {app: livepeer-telemetry-agent}
+    spec:
+      serviceAccountName: livepeer-telemetry-agent
+      automountServiceAccountToken: true
+      nodeSelector: {livepeer.io/node-id: '@NODE_ID@'}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: relay
+        image: '@RUNTIME_IMAGE@'
+        command: [/usr/local/bin/livepeer-runtime, telemetry-relay]
+        # The relay accepts grants only for this enrollment's node.
+        args: [--listen, '127.0.0.1:20244', --socket, /management/control.sock, --transport, '@CONTROL_TRANSPORT@', --node-id, '@NODE_ID@', --max-body-bytes, '@TELEMETRY_MAX_BODY@']
+        resources:
+          requests: {cpu: 5m, memory: 16Mi}
+          limits: {memory: 64Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: management, mountPath: /management, readOnly: true}
+      - name: vmagent
+        # vmagent v1.155.0
+        image: victoriametrics/vmagent:v1.155.0@sha256:8e3c03905be15bba8312d4868e8ae6f9fc2fefee0a41d544472034249ca42bb4
+        args:
+        - -httpListenAddr=127.0.0.1:20243
+        - -promscrape.config=/etc/telemetry/vmagent.yaml
+        - -remoteWrite.url=http://127.0.0.1:20244/metrics/write
+        - -remoteWrite.relabelConfig=/etc/telemetry/relabel.yaml
+        - -remoteWrite.forceVMProto=true
+        # Uncompressed blocks stay below Control Center's body limit.
+        - -remoteWrite.maxBlockSize=@TELEMETRY_BLOCK_BYTES@
+        - -remoteWrite.queues=1
+        # Each enrollment buffers separately, so a backlog is never sent as
+        # another identity.
+        - -remoteWrite.tmpDataPath=/buffer/@NODE_ID@
+        # vmagent's minimum queue size (16 chunk files of 32 MiB + 8 bytes);
+        # smaller values are rounded up to this.
+        - -remoteWrite.maxDiskUsagePerURL=536871040
+        - -loggerLevel=WARN
+        env:
+        - name: HOST_IP
+          valueFrom: {fieldRef: {fieldPath: status.hostIP}}
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        resources:
+          requests: {cpu: 25m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: config, mountPath: /etc/telemetry, readOnly: true}
+        - {name: buffer, mountPath: /buffer}
+        - {name: tmp, mountPath: /tmp}
+      - name: kube-state-metrics
+        # kube-state-metrics v2.20.0
+        image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0@sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b
+        args:
+        - --host=127.0.0.1
+        - --port=20246
+        - --telemetry-host=127.0.0.1
+        - --telemetry-port=20247
+        - --resources=daemonsets,deployments,nodes,pods,replicasets
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {memory: 128Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+      - name: fluent-bit
+        # Fluent Bit 5.1.5. Kubelet and journald write root-owned 0640 files, so
+        # this reader runs as UID 0 with every capability dropped: it reads
+        # through owner permissions only and cannot bypass file modes.
+        image: cr.fluentbit.io/fluent/fluent-bit:5.1.5@sha256:2740f387f6e68fab66d28e4fa6a853387b9cab6ffb4cb78958f69bba4eb0e7b4
+        args: [-c, /etc/telemetry/fluent-bit.conf]
+        resources:
+          requests: {cpu: 25m, memory: 32Mi}
+          limits: {memory: 128Mi}
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: config, mountPath: /etc/telemetry, readOnly: true}
+        - {name: log-buffer, mountPath: /buffer}
+        - {name: logs, mountPath: '@INSTALL_DIR@/logs', readOnly: true}
+        - {name: journal, mountPath: /var/log, readOnly: true}
+        - {name: runtime-journal, mountPath: /run/log, readOnly: true}
+        - {name: machine-id, mountPath: /etc/machine-id, readOnly: true}
+      volumes:
+      - name: config
+        configMap: {name: livepeer-telemetry-config}
+      - name: management
+        hostPath: {path: '@INSTALL_DIR@/volumes/management-sockets/telemetry', type: Directory}
+      - name: buffer
+        hostPath: {path: '@INSTALL_DIR@/volumes/telemetry', type: Directory}
+      - name: tmp
+        emptyDir: {medium: Memory, sizeLimit: 16Mi}
+      - name: log-buffer
+        hostPath: {path: '@INSTALL_DIR@/volumes/telemetry-logs', type: Directory}
+      - name: logs
+        hostPath: {path: '@INSTALL_DIR@/logs', type: Directory}
+      - name: journal
+        hostPath: {path: /var/log, type: Directory}
+      - name: runtime-journal
+        hostPath: {path: /run/log, type: Directory}
+      - name: machine-id
+        hostPath: {path: /etc/machine-id, type: File}

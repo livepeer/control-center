@@ -61,7 +61,11 @@ class TempTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
+        self.env = os.environ.copy()
+        if sys.platform == 'darwin':
+            self.env.update(BASH_ENV=str(Path(__file__).with_name('macos-bootstrap.sh').resolve()),
+                            BOOTSTRAP_TEST_PYTHON=sys.executable)
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
 
@@ -195,19 +199,18 @@ python3() { echo 'host Python is forbidden' >&2; exit 199; }
 ENROLLMENT_TOKEN='header.payload.signature'
 SECRET_PUBLIC=public-key-fixture
 registration_key_proof() { cat >/dev/null; printf registration-proof-fixture; }
+read_machine_id() { printf '%s\\n' machine-id-fixture; }
 LIVEPEER_API_URL='http://127.0.0.1:41932'
 LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
 RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 LIVEPEER_RUNTIME_IMAGE=$RUNTIME_IMAGE
 curl() {
-  local digest
-  digest=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum)
   printf '{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","token":"%s","config_url":"%s","credential_version":1}' "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/config}"
   printf '\\n200'
 }
 '''
         return subprocess.run(['bash', '-c', setup + commands, 'test', str(SCRIPT), *args],
-                              text=True, capture_output=True)
+                              env=self.env, text=True, capture_output=True)
 
     def test_help_and_invalid_arguments(self):
         result = self.shell('usage')
@@ -277,12 +280,24 @@ stage_manifests() { echo manifests; }
 write_host_configuration() { echo host; }
 bootstrap_cluster() { echo cluster; }
 smoke_test() { echo smoke; }
+record_host_features() { echo features; }
 main --install-dir "$1"
 ''', str(self.root / 'installation'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines()[:10],
+        self.assertEqual(result.stdout.splitlines()[:11],
                          ['eligibility', 'lock', 'recheck', 'authentication', 'prepare', 'install',
-                          'manifests', 'host', 'cluster', 'smoke'])
+                          'manifests', 'host', 'cluster', 'smoke', 'features'])
+
+    def test_host_features_are_recorded_for_control_center_gating(self):
+        target = self.root / 'volumes/installed-software'
+        target.mkdir(parents=True)
+        result = self.shell('INSTALL_DIR="$1"; record_host_features', str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = target / 'host-features.json'
+        record = json.loads(path.read_text())
+        self.assertEqual(record['features'], {'telemetry': 1})
+        self.assertRegex(record['recorded_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 
     def test_checksums_and_supported_versions(self):
         (self.root / 'binary').write_bytes(b'corrupt')
@@ -368,7 +383,8 @@ authenticate_node
 
     def test_fresh_enrollment_requires_token_and_valid_api(self):
         for setup, message in [("ENROLLMENT_TOKEN=''", 'LIVEPEER_ENROLLMENT_TOKEN'),
-                               ("LIVEPEER_API_URL='file:///invalid'", 'LIVEPEER_API_URL')]:
+                               ("LIVEPEER_API_URL='file:///invalid'", 'LIVEPEER_API_URL'),
+                               ('read_machine_id() { return 1; }', '/etc/machine-id must be initialized')]:
             result = self.shell('INSTALL_DIR="$1"; ' + setup + '; authenticate_node', str(self.root / 'new'))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(message, result.stderr)
@@ -392,13 +408,34 @@ authenticate_node
             return self.shell(setup + extra + '; runtime_image; printf "%s" "$RUNTIME_IMAGE"', str(install), str(release))
         result = selected(':')
         self.assertEqual(result.stdout, default, result.stderr)
+        self.assertNotIn('Keeping the saved Runtime image', result.stderr)
         (install / 'state/runtime-image').write_text(saved + '\n')
-        self.assertEqual(selected(':').stdout, saved)
+        result = selected(':')
+        self.assertEqual(result.stdout, saved)
+        # Reruns keep the saved image but say how to adopt the release's.
+        self.assertIn('Keeping the saved Runtime image ' + saved, result.stderr)
+        self.assertIn('ships ' + default, result.stderr)
+        self.assertIn('--upgrade-runtime', result.stderr)
+        self.assertEqual(selected('UPGRADE_RUNTIME=1').stdout, default)
         self.assertEqual(selected('LIVEPEER_RUNTIME_IMAGE=' + override).stdout, override)
+        self.assertEqual(selected('UPGRADE_RUNTIME=1 LIVEPEER_RUNTIME_IMAGE=' + override).stdout, override)
         for value in ('', 'registry.example/runtime:latest'):
             self.assertNotEqual(selected('LIVEPEER_RUNTIME_IMAGE=' + value).returncode, 0)
+        (release / 'release-runtime-image').unlink()
+        result = selected('UPGRADE_RUNTIME=1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--upgrade-runtime requires', result.stderr)
+        self.assertNotIn('Keeping the saved', selected(':').stderr)
         (install / 'state/runtime-image').write_text('invalid-saved-image\n')
         self.assertNotEqual(selected(':').returncode, 0)
+
+    def test_upgrade_runtime_flag_is_parsed_and_documented(self):
+        result = self.shell('parse_args --upgrade-runtime; printf "%s" "$UPGRADE_RUNTIME"')
+        self.assertEqual(result.stdout, '1', result.stderr)
+        result = self.shell('parse_args; printf "%s" "$UPGRADE_RUNTIME"')
+        self.assertEqual(result.stdout, '0', result.stderr)
+        help_text = subprocess.run(['bash', str(SCRIPT), '--help'], text=True, capture_output=True).stdout
+        self.assertIn('--upgrade-runtime', help_text)
 
     def test_direct_entry_consumes_environment_before_helpers_even_with_export_and_trace(self):
         for options in ([], ['-a'], ['-x'], ['-ax']):
@@ -442,7 +479,6 @@ class EnrollmentHTTPTests(TempTest):
                 received['path'] = self.path
                 received['authorization'] = self.headers.get('Authorization')
                 received['body'] = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                fingerprint = received['body']['fingerprint']
                 response = {'node_id': 'a' * 26, 'token': 'c' * 64,
                             'config_url': 'https://api.example/v1/nodes/' + 'a' * 26 + '/config',
                             'credential_version': 1}
@@ -461,7 +497,7 @@ prepare_installation
         self.assertEqual(received['path'], '/v1/nodes/register')
         self.assertEqual(received['authorization'], 'Bearer header.payload.signature')
         self.assertEqual(received['body']['install_dir'], str(self.root / 'install'))
-        self.assertRegex(received['body']['fingerprint'], r'^[a-f0-9]{64}$')
+        self.assertEqual(received['body']['fingerprint'], hashlib.sha256(b'machine-id-fixture').hexdigest())
         self.assertEqual((self.root / 'install/credentials/service-token').read_text(), 'c' * 64)
         self.assertNotIn('c' * 64, result.stdout + result.stderr)
         self.assertNotIn('header.payload.signature', result.stdout + result.stderr)
@@ -589,7 +625,10 @@ class RecoveryTests(TempTest):
             if existing:
                 target.mkdir()
             failed = self.shell('''INSTALL_DIR="$1"
-mv() { if [[ "${*: -1}" == "$INSTALL_DIR" ]]; then exit 71; fi; command mv "$@"; }
+mv() {
+  if [[ "${*: -1}" == "$INSTALL_DIR" ]]; then exit 71; fi
+  if declare -F macos_mv >/dev/null; then macos_mv "$@"; else command mv "$@"; fi
+}
 initialize_installation
 ''', str(target))
             self.assertEqual(failed.returncode, 71, failed.stderr)
@@ -705,6 +744,7 @@ install_k3s
         for name in ('runsc', 'containerd-shim-runsc-v1', 'gvisor-bin/helper'):
             (tree / name).write_text('#!/bin/sh\nexit 0\n')
             (tree / name).chmod(0o755)
+        (tree / 'gvisor-bin/helper').chmod(0o700)
         archive = upstream / 'gvisor-x86_64.tar.bz2'
         with tarfile.open(archive, 'w:bz2') as tar:
             for path in tree.iterdir():
@@ -763,7 +803,7 @@ install_k3s
         record = self.root / 'version'
         record.write_text('v1.37.2+k3s1\n')
         result = subprocess.run(['bash', str(PROJECT / 'lib/record-version.sh'), str(binary),
-                                 str(record), str(PROJECT / 'lib/recovery.sh')], capture_output=True, text=True)
+                                 str(record), str(PROJECT / 'lib/recovery.sh')], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(record.read_text().strip(), 'v1.38.0+k3s1')
 
@@ -773,8 +813,14 @@ class FirewallTests(TempTest):
         nft = self.root / 'nft'
         nft.write_text('#!/bin/sh\nif [ "$1" = list ]; then exit 0; fi\ncat > "$BATCH_OUTPUT"\n')
         nft.chmod(0o755)
+        # Fixed routes keep the batch independent of the test host's network.
+        tools = self.root / 'bin'
+        tools.mkdir()
+        (tools / 'ip').write_text('#!/bin/sh\nprintf \'%s\' \'[{"dst":"default"},{"dst":"10.204.0.0/24","scope":"link"},'
+                                  '{"dst":"127.0.0.1","scope":"host"},{"dst":"192.0.2.0/24","scope":"global"}]\'\n')
+        (tools / 'ip').chmod(0o755)
         batch = self.root / 'batch'
-        env = {**os.environ, 'BATCH_OUTPUT': str(batch)}
+        env = {**os.environ, 'BATCH_OUTPUT': str(batch), 'PATH': f'{tools}{os.pathsep}{os.environ["PATH"]}'}
         result = subprocess.run(['bash', str(PROJECT / 'lib/firewall.sh'),
                                  str(PROJECT / 'config/firewall.nft'), str(nft)],
                                 capture_output=True, text=True, env=env)
@@ -787,6 +833,7 @@ class FirewallTests(TempTest):
         self.assertIn('ct direction reply', rules)
         self.assertLess(rules.index('iifname "lp-gvisor0" drop'),
                         rules.index('ip saddr 10.42.0.0/16 tcp dport { 6443, 10250 } accept'))
+        self.assertTrue(rules.endswith('add element inet livepeer_bootstrap local_ipv4 { 10.204.0.0/24, 127.0.0.1 }\n'))
 
     def test_missing_policy_does_not_change_firewall(self):
         nft = self.root / 'nft'

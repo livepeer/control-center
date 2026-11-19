@@ -51,6 +51,7 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
 | Machine Tunnel token | Provider API → authenticated Control Center endpoint → management agent's scoped Unix socket → private tmpfs file mode 0600 | cloudflared process only |
 | Discovery signing private key | Local private read-only `JWTSigningPrivateKeyFile` mount | Control Center only |
 | Discovery verification public keys | Generated ConfigMap, independently rolled out | Runtime ingress-auth |
+| Telemetry write token | Minted locally by Control Center for the machine credential → management agent's scoped Unix socket → telemetry relay memory; one-hour lifetime | Telemetry relay only |
 
 Bootstrap stores the machine enrollment credential in owner-only host files and
 the `flux-system/livepeer-service-auth` Secret. Only the management agent mounts

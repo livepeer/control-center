@@ -73,6 +73,9 @@ func Build(m Desired) ([]byte, string, error) {
 	if err := addManagedApps(files, m); err != nil {
 		return nil, "", err
 	}
+	if err = addTelemetry(files, m); err != nil {
+		return nil, "", err
+	}
 	if err = addSystemWorkloads(files, m); err != nil {
 		return nil, "", err
 	}

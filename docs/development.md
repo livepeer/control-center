@@ -60,6 +60,17 @@ activation follow the [deployment process](../deploy/README.md). The UI is
 released separately with the [Deploy UI](../.github/workflows/ui-deploy.yml)
 workflow; see [UI hosting](../deploy/README.md#ui-hosting).
 
+## Runtime unit tests
+
+```sh
+python3 -m unittest discover -s runtime/tests
+```
+
+On macOS, the host-safe tests use the system Bash and test fixtures for GNU
+commands. They use Python 3 and jq, and the Secrets signature test requires
+an `openssl` that supports Ed25519. Run the Linux host checks and firewall
+container with `make test-runtime`.
+
 ## Remote Runtime tests
 
 ```sh

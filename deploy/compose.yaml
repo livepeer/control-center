@@ -53,6 +53,7 @@ services:
       default:
       secrets-control:
         aliases: [control-metadata]
+      telemetry:
 
   redeemer:
     <<: *service
@@ -148,6 +149,76 @@ services:
       retries: 6
       start_period: 10s
 
+  # Machine telemetry storage. Only the API writes, through its authenticated
+  # ingest endpoints; only Grafana and the API reach these stores.
+  victoriametrics:
+    <<: *service
+    # VictoriaMetrics v1.155.0 single-node.
+    image: victoriametrics/victoria-metrics:v1.155.0@sha256:f60dc268b54ecf87f6e09d740c2b732838aa9193090cc741417c9f6386a130df
+    user: "65532:65532"
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=${TELEMETRY_METRICS_RETENTION:-30d}
+      - -httpListenAddr=:8428
+      - -selfScrapeInterval=30s
+      - -promscrape.config=/etc/victoriametrics/scrape.yaml
+    volumes:
+      - /opt/controlcenter-telemetry/victoriametrics:/storage
+      - ./victoriametrics-scrape.yaml:/etc/victoriametrics/scrape.yaml:ro
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=0700
+    networks: [telemetry]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8428/health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 30s
+
+  victorialogs:
+    <<: *service
+    # VictoriaLogs v1.53.0 single-node.
+    image: victoriametrics/victoria-logs:v1.53.0@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d
+    user: "65532:65532"
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=${TELEMETRY_LOGS_RETENTION:-14d}
+      - -retention.maxDiskSpaceUsageBytes=${TELEMETRY_LOGS_MAX_DISK:-50GiB}
+      - -httpListenAddr=:9428
+    volumes:
+      - /opt/controlcenter-telemetry/victorialogs:/storage
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=0700
+    networks: [telemetry]
+    stop_grace_period: 30s
+
+  grafana:
+    <<: *service
+    image: controlcenter-grafana:staging
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.grafana
+    user: "65532:65532"
+    # Fails closed until the Cloudflare Access application exists; see README.
+    environment:
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      GRAFANA_ROOT_URL: ${GRAFANA_ROOT_URL:-https://controlcenter-grafana.livepeer.live}
+    volumes:
+      - /opt/controlcenter-telemetry/grafana:/var/lib/grafana
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=0700
+    # The default network supplies egress for Cloudflare Access signing keys.
+    networks: [default, telemetry]
+    ports:
+      - 127.0.0.1:13812:3000
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:3000/api/health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   cloudflared:
     <<: *service
     image: cloudflare/cloudflared:2026.10.7
@@ -191,6 +262,8 @@ volumes:
 
 networks:
   secrets-control:
+    internal: true
+  telemetry:
     internal: true
   default:
     enable_ipv6: true
