@@ -110,6 +110,12 @@ jobs:
       - run: npm ci
       - name: Build UI
         run: npm run build
+      - name: Edge Worker tests
+        run: npm run test:worker
+      - name: Validate edge deployment
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx wrangler deploy --dry-run --env production --outdir "$RUNNER_TEMP/wrangler-dry-run"
       - name: Install Chrome
         run: npx playwright install --with-deps chrome
       - name: Browser tests
