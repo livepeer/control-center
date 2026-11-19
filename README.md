@@ -49,7 +49,7 @@ Deployments are onchain by default and Control Center configures each orchestrat
 ```mermaid
 flowchart TB
     subgraph control["Control Center"]
-        ui["Web UI"]
+        ui["Web UI and bootstrap files<br/>Cloudflare Workers"]
         api["Go API<br/>App catalog, assignments and configuration"]
         db[(PostgreSQL)]
         discovery["Fleet discovery collector"]

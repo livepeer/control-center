@@ -173,7 +173,7 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			if err := os.WriteFile(runners, []byte(fmt.Sprintf("[[Runners]]\nID = \"app-fixture\"\nApp = \"fixture\"\nRunnerURL = %q\nMode = \"persistent\"\nProxy = true\nCapacity = 2\n\n[[Runners]]\nID = \"app-echo\"\nApp = \"echo\"\nRunnerURL = %q\nMode = \"single-shot\"\nProxy = true\nCapacity = 2\n", app.URL, app.URL)), 0600); err != nil {
 				t.Fatal(err)
 			}
-			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"Livepeer-Session-*\", \"X-Forwarded-*\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
+			config := fmt.Sprintf("Listen = %q\nMetricsListen = %q\nServiceURL = %q\nAPIOriginURL = %q\nRunnerServiceURL = %q\nProxyURLTemplate = %q\nExcludedHeaders = [\"Livepeer-Session-Token\", \"Livepeer-Session-Control\", \"X-Forwarded-*\"]\nRunnerConfig = %q\nRunnerGrants = [%q]\n", address, metrics, backend.service, PrivateOrchestrator, PrivateOrchestrator, backend.template, runners, strings.TrimPrefix(app.URL, "http://"))
 			configPath := filepath.Join(directory, "config.toml")
 			if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 				t.Fatal(err)
@@ -243,6 +243,7 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			}
 			defer response.Body.Close()
 			var reserved struct {
+				SessionID  string `json:"session_id"`
 				AppURL     string `json:"app_url"`
 				ControlURL string `json:"control_url"`
 			}
@@ -253,14 +254,19 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			if err != nil || appURL.Host == endpointHost(state.ServiceURL) {
 				t.Fatal("reservation did not generate separate proxy origin", reserved.AppURL, err)
 			}
-			response, err = client.Get(reserved.AppURL + "/test")
+			req, _ := http.NewRequest("GET", reserved.AppURL+"/echo", nil)
+			req.Header.Set("Livepeer-Session-Id", "caller-supplied")
+			response, err = client.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer response.Body.Close()
-			body, _ := io.ReadAll(response.Body)
-			if response.StatusCode != 200 || string(body) != "application response" {
-				t.Fatal("Host-preserving public proxy failed", response.StatusCode, string(body))
+			var sessionHeaders http.Header
+			if response.StatusCode != 200 || json.NewDecoder(response.Body).Decode(&sessionHeaders) != nil {
+				t.Fatal("Host-preserving public proxy failed", response.StatusCode)
+			}
+			if reserved.SessionID == "" || sessionHeaders.Get("Livepeer-Session-Id") != reserved.SessionID {
+				t.Fatal("application did not receive the reserved session ID")
 			}
 			response, err = client.Post(reserved.ControlURL+"/stop", "application/json", nil)
 			if err != nil {
@@ -270,8 +276,9 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 			if response.StatusCode != 200 {
 				t.Fatal("public stop failed", response.StatusCode)
 			}
-			req, _ := http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
-			req.Header.Set("Livepeer-Session-Extra", "caller-supplied")
+			req, _ = http.NewRequest("GET", strings.Replace(state.ProxyURLTemplate, "{proxy}", "app-echo", 1)+"/echo", nil)
+			req.Header.Set("Livepeer-Session-Token", "caller-supplied")
+			req.Header.Set("Livepeer-Session-Control", "caller-supplied")
 			req.Header.Set("X-Forwarded-Extra", "caller-supplied")
 			req.Header.Add("Cookie", "session=app-cookie")
 			req.Header.Set("Authorization", "Bearer app-authorization")
@@ -285,7 +292,7 @@ func TestNodePublicAPIProtectedDiscoveryIntegration(t *testing.T) {
 				t.Fatal("public application echo failed", response.StatusCode)
 			}
 			for name := range headers {
-				if strings.HasPrefix(strings.ToLower(name), "livepeer-session-") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+				if name == "Livepeer-Session-Token" || name == "Livepeer-Session-Control" || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
 					t.Fatal("excluded header reached application", name)
 				}
 			}

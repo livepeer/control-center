@@ -69,12 +69,41 @@ func serve(ctx context.Context, p controlplane.Params) error {
 	workers.Go(func() { app.RunTunnels(workCtx) })
 	workers.Go(func() { app.RunDiscovery(workCtx) })
 	workers.Go(func() { app.Reconcile(workCtx) })
-	server := &http.Server{Addr: p.Listen, Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
-	done := make(chan error, 1)
-	go func() { logger.Info("API listening", "address", p.Listen); done <- server.ListenAndServe() }()
+	newServer := func(addr string, handler http.Handler) *http.Server {
+		return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
+	}
+	// Listen serves every route for private networks. PublicListen, when set,
+	// is the tunnel-facing listener without internal callbacks or metrics.
+	servers := []*http.Server{newServer(p.Listen, app.Handler())}
+	if p.PublicListen != "" {
+		servers = append(servers, newServer(p.PublicListen, app.PublicHandler()))
+	}
+	done := make(chan error, len(servers))
+	for i, server := range servers {
+		scope := "private"
+		if i > 0 {
+			scope = "public"
+		} else if len(servers) == 1 {
+			scope = "all"
+		}
+		go func() {
+			logger.Info("API listening", "address", server.Addr, "scope", scope)
+			done <- server.ListenAndServe()
+		}()
+	}
+	shutdown := func() error {
+		shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		var errs []error
+		for _, server := range servers {
+			errs = append(errs, server.Shutdown(shutdownCtx))
+		}
+		return errors.Join(errs...)
+	}
 	select {
 	case err := <-done:
 		cancel()
+		_ = shutdown()
 		app.CloseDiscovery()
 		workers.Wait()
 		if errors.Is(err, http.ErrServerClosed) {
@@ -83,9 +112,7 @@ func serve(ctx context.Context, p controlplane.Params) error {
 		return err
 	case <-ctx.Done():
 		cancel()
-		shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		err := server.Shutdown(shutdownCtx)
+		err := shutdown()
 		app.CloseDiscovery()
 		workers.Wait()
 		return err

@@ -189,6 +189,74 @@ func TestAssignmentRefusalIsSpecificBeforeInstanceCreation(t *testing.T) {
 	}
 }
 
+func TestReportAdmissionRequiresCurrentNodeReadyAndProbe(t *testing.T) {
+	c, _, k, _, reports, now := fixtureController(t)
+	registerApps(t, c, k)
+	c.Probes = NewProbes()
+	revision := c.Journal.View().Payload.Intent.Entries[0].RevisionID
+	if err := c.Journal.Update(func(s *State) error {
+		s.SecretRollouts = map[string]contract.SecretRollout{revision: {Desired: "updated"}}
+		for _, i := range s.Instances {
+			i.SecretVersion = "updated"
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ready := map[string]bool{}
+	for id, i := range c.Journal.View().Instances {
+		ready[id] = true
+		c.Probes.values[id] = &health{uid: i.PodUID, ready: true, observedAt: *now, success: true, started: true}
+		p, ok := c.proofs[id]
+		if !ok {
+			t.Fatalf("fixture did not register instance %s", id)
+		}
+		p.App.Status = "not-ready"
+		c.proofs[id] = p
+	}
+	check := func(want, healthy int, secretsApplied bool) {
+		t.Helper()
+		if err := c.report(t.Context(), ready, k.view, *now); err != nil {
+			t.Fatal(err)
+		}
+		apps := reports.reports[len(reports.reports)-1].Apps
+		a := apps.Assignments[0]
+		if a.Ready != healthy || a.Registered != len(ready) || a.Admission == nil || a.Admission.Ready != want {
+			t.Fatalf("report admission evidence: %+v", a)
+		}
+		if applied := apps.SecretRollouts[revision].Applied; (applied == "updated") != secretsApplied {
+			t.Fatalf("secret rollout applied version = %q, want applied = %t", applied, secretsApplied)
+		}
+		for _, i := range apps.Instances {
+			if i.AdmissionExpiresAt.IsZero() != (want == 0) {
+				t.Fatalf("instance %s admission expiry = %v, count = %d", i.InstanceID, i.AdmissionExpiresAt, want)
+			}
+		}
+	}
+	check(0, len(ready), false)
+	for id, p := range c.proofs {
+		p.App.Status = "ready"
+		c.proofs[id] = p
+	}
+	check(len(ready), len(ready), true)
+	for _, h := range c.Probes.values {
+		h.observedAt = now.Add(-time.Minute)
+	}
+	check(0, len(ready), true)
+	for _, h := range c.Probes.values {
+		h.observedAt, h.success, h.failures = *now, false, 1 // The configured threshold has not been crossed.
+	}
+	check(len(ready), len(ready), true)
+	for _, h := range c.Probes.values {
+		h.ready, h.failures = false, 3 // The copied ready map still says true.
+	}
+	check(0, 0, false)
+	for id, h := range c.Probes.values {
+		ready[id], h.ready, h.success, h.failures = false, true, true, 0
+	}
+	check(0, len(ready), false)
+}
+
 func TestFailingProbeSummaryPreservesItsOwnExpiry(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()

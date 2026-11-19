@@ -6,17 +6,8 @@
 !api/internal/**
 !schema/**
 !runtime/**
-!ui/
-!ui/package.json
-!ui/package-lock.json
-!ui/tsconfig.json
-!ui/vite.config.ts
-!ui/index.html
-!ui/src/**
-!ui/public/**
 !deploy/
 !deploy/Dockerfile
-!deploy/Caddyfile
 !deploy/grafana/**
 **/._*
 **/.DS_Store

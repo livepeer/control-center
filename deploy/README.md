@@ -1,16 +1,17 @@
 # Staging deployment
 
-Docker Compose runs the Go API, built web UI with Caddy, persistent image
-registry, payment redeemer, operator secrets service, Vault, machine telemetry
+Docker Compose runs the Go API, persistent image registry and its read-only
+proxy, payment redeemer, operator secrets service, Vault, machine telemetry
 storage (VictoriaMetrics, VictoriaLogs and Grafana), and Cloudflare Tunnel
-connector.
+connector. The web UI and bootstrap files are served separately by Cloudflare
+Workers; see [UI hosting](#ui-hosting).
 PostgreSQL and authentication use the Supabase project selected in the private
 `config.toml`.
 
 | Hostname | Origin | Routes |
 | --- | --- | --- |
-| `controlcenter.livepeer.live` | `http://localhost:33812` | UI, `/auth/callback`, `/bootstrap.sh`, versioned `/bootstrap/releases/*`, same-origin `/api/*` proxy |
-| `controlcenter-api.livepeer.live` | `http://localhost:43812` | API, `/v1/*`, `/discovery` |
+| `controlcenter.livepeer.live` | Cloudflare Worker `controlcenter-ui-production` (route `controlcenter.livepeer.live/*`) | UI with SPA routes such as `/auth/callback` and `/invite`, `/bootstrap.sh`, versioned `/bootstrap/releases/*` from R2 |
+| `controlcenter-api.livepeer.live` | `http://localhost:43811` | API public listener: `/api/*` (CORS for `AllowedOrigins`), `/v1/*`, `/discovery`, `POST /redemption/tickets` |
 | `controlcenter-registry.livepeer.live` | `http://localhost:53812` | Read-only OCI registry `/v2/*` |
 | `controlcenter-secrets.livepeer.live` | `http://localhost:23812` | Operator secrets API |
 | `controlcenter-grafana.livepeer.live` | `http://localhost:13812` | Telemetry dashboards; Cloudflare Access required |
@@ -19,6 +20,16 @@ The application ports and the registry upload port `63812` bind only to
 `127.0.0.1`. The cloudflared container uses host networking so the configured
 `localhost` origins resolve to the host. Its token is mounted as a private file
 and selected with `TUNNEL_TOKEN_FILE`.
+
+The API listens twice. `Listen` (`43812`) serves every route, including the
+`/internal/*` callbacks used by the redeemer and the secrets service, and is
+reachable only on the Compose networks. `PublicListen` (`43811`) is the tunnel
+origin: it omits `/metrics` and `/internal/*`, except the secrets-service
+metadata and membership callbacks that a secrets service on another host
+reaches over HTTPS with the shared metadata token. It forwards
+`POST /redemption/tickets` to `RedeemerUpstreamURL` as `/tickets`. Keep the
+redeemer URL in Node configurations (`redeemer_url` in `onchain.json`) on the
+API hostname.
 
 ## Install
 
@@ -36,8 +47,11 @@ and machine credential secrets across upgrades. The registry uses the persistent
 `controlcenter_registry-data` Docker volume.
 
 Allow `https://controlcenter.livepeer.live/auth/callback` in the Supabase
-authentication redirect URLs. Keep email confirmation enabled. The initial
-administrator signs in using the verified address in `DefaultAdminEmail`.
+authentication redirect URLs and keep the Site URL on the same origin. Keep
+email confirmation enabled. The initial administrator signs in using the
+verified address in `DefaultAdminEmail`. The UI origin must also appear in
+`AllowedOrigins` in `config.toml` and in `SECRETS_ALLOWED_ORIGIN` in
+`secrets-service.env`; browsers are refused any other origin.
 
 The Compose network enables IPv6 because direct Supabase database endpoints can
 be IPv6-only. The host needs working IPv6 egress for such an endpoint.
@@ -77,11 +91,10 @@ docker push 127.0.0.1:63812/controlcenter/node:staging
 Use the public registry hostname and returned digests for `RuntimeImage`,
 `RuntimeConnectorImage`, and `RuntimeNodeImage` in `config.toml`. Set
 `LIVEPEER_REDEEMER_IMAGE` in `.env` to the same managed Node digest as
-`RuntimeNodeImage`. Package a bootstrap release, then start the complete deployment:
+`RuntimeNodeImage`. Start the complete deployment, then
+[publish a bootstrap release](#bootstrap-releases):
 
 ```sh
-python3 ../tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" --output bootstrap --activate
-chmod 0755 bootstrap bootstrap/releases
 docker compose up -d --build --wait
 ```
 
@@ -138,56 +151,116 @@ Signed-in administrators get the Editor role. Dashboards come from
 Deployment mode and chain identity are fixed at first startup. Local development
 opts out with `Mode = "offchain"`; see [API configuration](../api/config.example.toml).
 
-## Bootstrap releases
+## UI hosting
 
-The web service mounts `deploy/bootstrap` read-only at `/srv/bootstrap`. The
-current `/bootstrap.sh` resolves to `bootstrap/bootstrap.sh`; a versioned URL
-`/bootstrap/releases/<id>/runtime-bootstrap.tar.gz` resolves to
-`bootstrap/releases/<id>/runtime-bootstrap.tar.gz`. These routes return 404 for
-missing files and never fall back to the UI. The current loader is not cached;
-versioned files are immutable. Keep this directory across web builds/deployments.
+The UI is a Workers Static Assets project configured in
+[`ui/wrangler.jsonc`](../ui/wrangler.jsonc). Static files come from the Vite
+build, with SPA fallback for unknown paths. `/bootstrap*` and `/api*` always run
+[`ui/worker`](../ui/worker/index.ts) instead, so they never return the UI's
+HTML. Response headers and caching for static files are in
+[`ui/public/_headers`](../ui/public/_headers): fingerprinted `/assets/*` are
+immutable and HTML revalidates on every load, so clients pick up a release on
+their next navigation. Deploying or rolling back the UI never touches this host.
 
-From the repository root, choose a previously unused release ID:
+Cloudflare account prerequisites:
+
+- An R2 bucket named `controlcenter-bootstrap` (no public access; the Worker
+  reads it through its binding).
+- A proxied DNS record for `controlcenter.livepeer.live` in the `livepeer.live`
+  zone. With no other origin, use `AAAA 100::`; the Worker route serves every
+  request.
+- A GitHub `production` environment for the [deploy workflow](../.github/workflows/ui-deploy.yml),
+  limited to `main` with required reviewers. It holds the secret
+  `CLOUDFLARE_API_TOKEN`, scoped to account *Workers Scripts: Edit* and, on the
+  `livepeer.live` zone only, *Workers Routes: Edit* and *Zone: Read* (wrangler
+  looks up the route's `zone_name`). It also holds the variable
+  `CLOUDFLARE_ACCOUNT_ID`. This token can publish the JavaScript that seals
+  operator secrets; keep it there.
+
+Run **Deploy UI** from `main` with `deploy` to build and release that commit.
+The run summary lists recent Worker versions. To roll back, run it with
+`rollback` and the version ID to restore; static assets roll back with the
+Worker version. The build bakes in `VITE_CONTROLCENTER_API_URL`
+(`ui/.env.production`, overridden by the environment variable
+`CONTROLCENTER_API_URL`); publish only browser-safe values there.
+
+The same commands work from a workstation authenticated with `wrangler login`:
 
 ```sh
-python3 tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" \
-  --output deploy/bootstrap --activate
-chmod 0755 deploy/bootstrap deploy/bootstrap/releases
+npm --prefix ui ci
+npm --prefix ui run build
+(cd ui && npx wrangler deploy --env production)
+(cd ui && npx wrangler deployments list --env production)
+(cd ui && npx wrangler rollback <version-id> --env production)
 ```
 
-The build machine needs Python 3.10+ and Git; target hosts need neither. By
-default the packager uses `RuntimeImage` in `staging-images.json` and
-the public `https://controlcenter.livepeer.live` origin. Supply `--runtime-image`
-with another compatible published digest and `--public-origin https://your-host`
-for a custom deployment. Confirm anonymous Linux amd64 pulls and compatibility
-with the deployed API, Node and connector before activation.
+`npx wrangler deploy` without `--env` publishes a smoke-test copy on
+`workers.dev`. It reads the same bootstrap bucket but its origin is not in
+`AllowedOrigins`, so sign-in there is expected to fail.
+
+The CSP in `_headers` is report-only. Promote it to `Content-Security-Policy`
+once a production session (sign-in, machines, administration and secrets)
+shows no violations in the browser console.
+
+## Bootstrap releases
+
+The UI Worker serves bootstrap files from the `controlcenter-bootstrap` R2
+bucket. `/bootstrap.sh` is the object `bootstrap.sh` and is never cached;
+`/bootstrap/releases/<id>/<file>` is `releases/<id>/<file>` and is immutable.
+Missing files return a plain-text `404` with `no-store`. Every loader embeds its
+release's bundle URL under `https://controlcenter.livepeer.live/bootstrap/releases/`,
+so published releases must stay in the bucket.
+
+From the repository root, package the checked-out commit under a new release
+ID, then publish it. Use one release ID per commit:
+
+```sh
+NEW_RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)"
+python3 tools/package-bootstrap.py --release-id "$NEW_RELEASE_ID" --output deploy/bootstrap
+python3 tools/publish-bootstrap.py --release-id "$NEW_RELEASE_ID"
+python3 tools/publish-bootstrap.py --activate "$NEW_RELEASE_ID"
+```
+
+The build machine needs Python 3.10+, Git, Node.js 22.12+ with
+`npm --prefix ui ci` (for wrangler), and Cloudflare credentials with R2 write
+access (`wrangler login`, or `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID`). Target hosts need none of these. By default the
+packager uses `RuntimeImage` in `staging-images.json` and the public
+`https://controlcenter.livepeer.live` origin. Supply `--runtime-image` with
+another compatible published digest and `--public-origin https://your-host` for
+a custom deployment. Confirm anonymous Linux amd64 pulls and compatibility with
+the deployed API, Node and connector before activation.
 
 Each release retains the complete bundle, `SHA256SUMS`, its exact `bootstrap.sh`,
 and `release.json` containing checksums, source revision/dirty-state evidence,
 asset hashes and recorded image build provenance when available. Only tracked
 installer assets are packaged; add any newly required helpers/templates to Git
-before packaging. The loader includes the bundle checksum. Publication stages
-the complete release directory, refuses reused IDs, then `--activate` atomically
-switches the current loader last. Omit `--activate` to stage a release for checks.
-All published assets must be readable by web UID 65532; files are mode 0644 and
-release directories mode 0755. Never put credentials in this directory.
-Retain activation and validation records with the deployment artifacts.
+before packaging. The loader includes the bundle checksum. The packager stages
+the complete local release and refuses reused IDs. The publisher checks that
+the release's files agree, uploads the loader last, and reads every object
+back. It skips identical objects and refuses to replace a published file with
+different content. `--activate` switches `/bootstrap.sh` only after the whole
+release reads back intact.
 
-For a remote deployment, transfer into a staging directory outside the served
-bootstrap tree, on the same filesystem. After the transfer and checksum checks,
-rename the complete directory into `bootstrap/releases/<id>`, then switch the
-current loader. Do not upload directly into the final release directory or replace
-or delete prior releases. Missing artifacts return `404` with `no-store`; existing
-release files use immutable caching.
+Activation only moves forward. The candidate's `source_commit` must be the
+active release's commit or descend from it in the local Git history, so a slow
+publish of an older commit cannot replace a newer loader. Packaging and
+publishing runs that share `deploy/bootstrap` take the same lock, but the lock
+is local: publish from one machine. Automation should activate only releases
+built from the current tip of its deployment branch. Never put credentials in a
+release. Keep
+`deploy/bootstrap` and the activation and validation records with the
+deployment artifacts.
 
-To activate a staged release or roll back, run on the deployment host from
-`deploy/`, substituting the retained release ID:
+To roll back, or to switch to a release from another branch, activate a
+retained release explicitly:
 
 ```sh
-cp bootstrap/releases/bootstrap-20261112.1/bootstrap.sh bootstrap/.loader-next
-chmod 0644 bootstrap/.loader-next
-mv -f bootstrap/.loader-next bootstrap/bootstrap.sh
+python3 tools/publish-bootstrap.py --activate bootstrap-20261112.1 --rollback
 ```
+
+`--all` publishes every release under `deploy/bootstrap/releases`, which
+restores a bucket from the retained directory.
 
 Check the public script content type/body, its referenced bundle/checksum,
 anonymous image pulls, and a prepared disposable Debian/Ubuntu host. Check both
@@ -201,12 +274,13 @@ release; broader host lifecycle and application acceptance remain separate gates
 ```sh
 cd /opt/controlcenter/deploy
 docker compose ps
-docker compose logs --tail=100 api web cloudflared
-curl --fail http://127.0.0.1:43812/readyz
+docker compose logs --tail=100 api registry-proxy cloudflared
+curl --fail http://127.0.0.1:43811/readyz
+curl --fail http://127.0.0.1:43811/api/config
 curl --fail http://127.0.0.1:13812/api/health
-curl --fail http://127.0.0.1:33812/api/config
 curl --fail http://127.0.0.1:23813/ready
 docker compose up -d --build --wait
+curl --fail --head https://controlcenter.livepeer.live/bootstrap.sh
 ```
 
 Docker restarts the services after host reboot. Public registry requests allow

@@ -3,10 +3,10 @@ import type { Session } from '@supabase/supabase-js'
 import { api, APIError } from './api'
 import { Catalog } from './catalog'
 import { MachineApps } from './machine-apps'
-import { MachineStatus, MachineReadinessBadge } from './machine-status'
+import { MachineStatus, MachineReadinessBadge, type MachineReadinessSummary } from './machine-status'
 
 type Grant = { grant_id: string; email: string; user_id: string | null; current_email: string | null; revision: number; state: 'pending' | 'bound' | 'account_missing' }
-type FleetMachine = { terminal?: boolean; report_state?: string; lifecycle?: string; node_id: string; hostname: string; orchestrator_address: string; k3s_version: string; created_at: string; last_config_fetch_at: string | null }
+type FleetMachine = MachineReadinessSummary & { node_id: string; hostname: string; orchestrator_address: string; k3s_version: string; created_at: string }
 type Capability = 'loading' | 'admin' | 'ordinary' | 'unavailable'
 
 // Keyed by account in Dashboard. Request versions reject obsolete successes
@@ -47,12 +47,13 @@ export function Administration({ session }: { session: Session }) {
       const controller = new AbortController()
       requests.current.add(controller)
       const current = () => alive && ticket === version.current && !controller.signal.aborted
+      const readinessRequestedAt = performance.now()
       try {
         const overview = await api<{ user_id: string; is_admin: boolean; administrators: Grant[]; machines: FleetMachine[] }>(session, '/api/admin/overview', { signal: controller.signal })
         if (!current()) return
         if (overview.user_id !== session.user.id) throw new APIError(401, 'Sign in again to verify your account.')
         if (!overview.is_admin) { invalidate('ordinary'); return }
-        setCapability('admin'); setGrants(overview.administrators); setMachines(overview.machines); setAccessProblem('')
+        setCapability('admin'); setGrants(overview.administrators); setMachines(overview.machines.map(machine => ({ ...machine, readinessRequestedAt }))); setAccessProblem('')
       } catch (error) {
         if (!current()) return
         invalidate(error instanceof APIError && [401, 403].includes(error.status) ? 'ordinary' : 'unavailable')

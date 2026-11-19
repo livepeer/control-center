@@ -124,6 +124,23 @@ func TestMachineAssignmentsDeliveryAndSequentialReplacement(t *testing.T) {
 	if !target.StartAllowed || target.Generation != 1 || target.ActivationGeneration != 1 {
 		t.Fatal("cleanup did not release target")
 	}
+	status := request(t, s, "GET", "/api/machines/"+c["node_id"]+"/status", "session-a", nil)
+	requireStatus(t, status, 200)
+	var observed machineObservation
+	if err := json.Unmarshal(status.Body.Bytes(), &observed); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	for _, a := range observed.Assignments {
+		if a.RevisionID == target.RevisionID {
+			health := target.Revision.Definition.Health.Readiness
+			released = a.StartAllowed && a.Health.Type == health.Type && a.Health.Timeout == health.Timeout &&
+				a.Health.FailureThreshold == health.FailureThreshold
+		}
+	}
+	if !released {
+		t.Fatalf("status missed released replacement: %+v", observed.Assignments)
+	}
 	if files["system/node/orchestrator.yaml"] != afterFiles["system/node/orchestrator.yaml"] {
 		t.Fatal("assignment edit replaced Node")
 	}

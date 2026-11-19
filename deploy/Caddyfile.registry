@@ -1,0 +1,23 @@
+# Read-only public endpoint for the bundled image registry
+# (controlcenter-registry.livepeer.live -> localhost:53812). Uploads use the
+# loopback registry port 63812 over SSH. Retire with naap-ops#124.
+{
+	admin off
+	auto_https off
+}
+
+:8082 {
+	header X-Content-Type-Options nosniff
+
+	@registry_read {
+		path /v2 /v2/*
+		method GET HEAD
+	}
+	handle @registry_read {
+		reverse_proxy registry:5000
+	}
+
+	handle {
+		respond "Image uploads require SSH access." 405
+	}
+}

@@ -58,6 +58,12 @@ type Params struct {
 	RuntimeNodeImage              string        `env:"RUNTIME_NODE_IMAGE" optional:"true" descr:"Digest-pinned compatible Node image; empty keeps the bundled image"`
 	RuntimeNodeDrainTimeout       time.Duration `env:"RUNTIME_NODE_DRAIN_TIMEOUT" default:"12h" descr:"Node app drain timeout, from zero to 12h"`
 	AppStopSignals                bool          `env:"APP_STOP_SIGNALS" default:"false" descr:"Render explicit stop signals only after enabling ContainerStopSignals on the host"`
+
+	// Listen serves every route, including internal callbacks. PublicListen
+	// is the tunnel-facing listener; see PublicHandler.
+	PublicListen        string   `env:"PUBLIC_LISTEN_ADDR" optional:"true" descr:"Internet-facing listen address without metrics or private callbacks; empty serves only Listen"`
+	AllowedOrigins      []string `env:"ALLOWED_ORIGINS" optional:"true" descr:"Exact browser origins allowed to call /api/* cross-origin"`
+	RedeemerUpstreamURL string   `env:"REDEEMER_UPSTREAM_URL" optional:"true" descr:"Redeemer base URL receiving POST /redemption/tickets from PublicListen"`
 }
 
 var passwordPlaceholder = regexp.MustCompile(`(?i)\[(?:your[-_])?password\]|\[PG_PASSWORD\]`)
@@ -161,6 +167,31 @@ func (p *Params) PreValidate() error {
 		u, err := url.Parse(raw)
 		if raw != "" && (err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "") {
 			return errors.New("PublicAPIURL and SupabaseURL must be HTTP(S) base URLs without credentials, query strings, or fragments")
+		}
+	}
+	return p.validateEdge()
+}
+
+// validateEdge checks the browser and public-listener settings that replace
+// the former reverse proxy in front of the API.
+func (p *Params) validateEdge() error {
+	for _, origin := range p.AllowedOrigins {
+		u, err := url.Parse(origin)
+		local := u != nil && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1")
+		if err != nil || u.Host == "" || u.Scheme+"://"+u.Host != origin || strings.ToLower(origin) != origin || (u.Scheme != "https" && !(u.Scheme == "http" && local)) {
+			return errors.New("AllowedOrigins must be exact lowercase HTTPS origins (HTTP only for localhost)")
+		}
+	}
+	if p.PublicListen != "" && p.PublicListen == p.Listen {
+		return errors.New("PublicListen must differ from Listen")
+	}
+	if p.RedeemerUpstreamURL != "" {
+		u, err := url.Parse(p.RedeemerUpstreamURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("RedeemerUpstreamURL must be an HTTP(S) origin")
+		}
+		if p.PublicListen == "" {
+			return errors.New("RedeemerUpstreamURL requires PublicListen")
 		}
 	}
 	return nil

@@ -26,9 +26,6 @@ jobs:
           - name: api
             file: deploy/Dockerfile
             target: api
-          - name: web
-            file: deploy/Dockerfile
-            target: web
           - name: runtime
             file: runtime/Dockerfile
             target: ''

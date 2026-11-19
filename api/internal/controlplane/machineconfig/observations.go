@@ -28,6 +28,9 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 	if !validCode(r.AppsError) || !validCode(r.DeliveryReason) {
 		return ErrStaleStatus
 	}
+	if digest := r.AppsErrorDigest; digest != "" && (r.Component != "runtime" || r.AppsError == "" || !artifact.HashPattern.MatchString(digest)) {
+		return ErrStaleStatus
+	}
 	stages := []*contract.StageIdentity{r.Downloaded}
 	members := []contract.AssignmentStatus{}
 	var downloadedDigest, downloadedArtifact, desiredDigest string
@@ -57,6 +60,10 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 			if i.Probe != nil && (i.Probe.Failures < 0 || i.Probe.Failures > 1000000 || i.Probe.ExpiresAt.Before(i.Probe.ObservedAt)) {
 				return ErrStaleStatus
 			}
+			if !i.AdmissionExpiresAt.IsZero() && (!i.Ready || !i.Registered || i.WithdrawalID != "" || i.Probe == nil ||
+				i.AdmissionExpiresAt.After(i.NodeExpiresAt) || i.AdmissionExpiresAt.After(i.Probe.ExpiresAt)) {
+				return ErrStaleStatus
+			}
 		}
 		seen = map[string]bool{}
 		for _, a := range a.Assignments {
@@ -64,6 +71,17 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 				return ErrStaleStatus
 			}
 			seen[a.RevisionID] = true
+			if proof := a.Admission; proof != nil {
+				if proof.Ready < 0 || proof.Ready > min(a.Ready, a.Registered) || (proof.Ready > 0) == proof.ExpiresAt.IsZero() {
+					return ErrStaleStatus
+				}
+				if !proof.LastExpiresAt.IsZero() && (proof.Ready < 2 || !proof.LastExpiresAt.After(proof.ExpiresAt)) {
+					return ErrStaleStatus
+				}
+				if r.Apps.InstancesOmitted == 0 && !matchesAdmission(a, r.Apps.Instances) {
+					return ErrStaleStatus
+				}
+			}
 		}
 		// Both current summaries and retained incarnation identities must have
 		// actually been delivered to this enrollment, not merely exist in the catalog.
@@ -113,6 +131,17 @@ func (s *Manager) validateObservations(ctx context.Context, m Machine, r Report)
 		return ErrStaleStatus
 	}
 	return nil
+}
+
+func matchesAdmission(a contract.AssignmentStatus, instances []contract.InstanceStatus) bool {
+	var proof contract.ReplicaAdmission
+	for _, i := range instances {
+		if i.RevisionID == a.RevisionID && i.ActivationGeneration == a.ActivationGeneration && i.Generation <= a.Generation && !i.AdmissionExpiresAt.IsZero() {
+			proof.Add(i.AdmissionExpiresAt)
+		}
+	}
+	return proof.Ready == a.Admission.Ready && proof.ExpiresAt.Equal(a.Admission.ExpiresAt) &&
+		(a.Admission.LastExpiresAt.IsZero() || proof.LastExpiresAt.Equal(a.Admission.LastExpiresAt))
 }
 
 // ObservationTime is shared by status projections and safety gates. Receipt

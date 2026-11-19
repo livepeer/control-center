@@ -20,6 +20,14 @@ make ui
 ```
 
 Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
+The Vite dev server proxies `/api` to the local API on the same origin. Deployed
+builds call the API origin from `VITE_CONTROLCENTER_API_URL` instead
+([`ui/.env.production`](../ui/.env.production)), which needs the UI origin in
+the API's `AllowedOrigins`.
+
+To try the deployed edge behaviour locally (SPA fallback, `_headers`, and
+bootstrap routes against a local R2 bucket), build the UI and run
+`npx wrangler dev` in `ui/`.
 
 ## Development checks
 
@@ -27,6 +35,7 @@ Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
 make test
 make build
 npm --prefix ui run test:browser
+npm --prefix ui run test:worker
 ```
 
 Database tests skip without `TEST_DATABASE_URL` for a disposable PostgreSQL
@@ -35,18 +44,21 @@ Chrome and mocks.
 
 [GitHub Actions CI](../.github/workflows/ci.yml) runs on pull requests and can
 be run manually. It checks Go formatting, race tests, Vet, Staticcheck and
-Govulncheck; builds and browser-tests the UI; and runs bootstrap, remote runner
-and Runtime tests. CI supplies PostgreSQL, Livepeer Node and cloudflared for
+Govulncheck; builds and browser-tests the UI, tests its edge Worker and
+dry-runs its production deployment; and runs bootstrap, remote runner and
+Runtime tests. CI supplies PostgreSQL, Livepeer Node and cloudflared for
 integration tests. Pushes to `main` also run these checks.
 
 For local real-process tests, set `NODE_BINARY` and `LIVEPEER_NODE_TEST_BINARY`
 to the compatible Node binary. CI sets both. Isolated Flux/gVisor cluster tests
 remain opt-in.
 
-[Build](../.github/workflows/build.yml) validates the API, web and Runtime
+[Build](../.github/workflows/build.yml) validates the API, secrets and Runtime
 Docker images on native Linux amd64 and arm64 runners for pull requests and
 `main` pushes, and can be run manually. Image publication and bootstrap
-activation follow the [deployment process](../deploy/README.md).
+activation follow the [deployment process](../deploy/README.md). The UI is
+released separately with the [Deploy UI](../.github/workflows/ui-deploy.yml)
+workflow; see [UI hosting](../deploy/README.md#ui-hosting).
 
 ## Runtime unit tests
 

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,7 @@ type SDKOwner struct {
 	base, bootstrap string
 	client          *http.Client
 	current         *runner.Runner
+	publishedApps   []runner.AppOptions
 	request         OwnerRequest
 	accepted        Identity
 	hooks           OwnerHooks
@@ -83,6 +85,7 @@ type SDKOwner struct {
 	lineage         string
 	rejectedUntil   time.Time
 	rejectedReason  string
+	Metrics         *Metrics
 	// Fatal must terminate the process. Production exits without joining the SDK.
 	Fatal func(error)
 }
@@ -112,7 +115,7 @@ func (o *SDKOwner) Close(ctx context.Context) error {
 	defer o.lifecycle.Unlock()
 	o.mu.Lock()
 	value := o.current
-	o.current = nil
+	o.current, o.publishedApps = nil, nil
 	o.mu.Unlock()
 	if value != nil {
 		return value.Close(ctx)
@@ -157,20 +160,20 @@ func (o *SDKOwner) Sync(ctx context.Context, r OwnerRequest, h OwnerHooks) error
 		o.mu.Unlock()
 		return errors.New("sdk_configuration")
 	}
-	o.current = value
+	o.current, o.publishedApps = value, apps
 	o.mu.Unlock()
 	// Start invokes OnHeartbeat synchronously; no callback-needed mutex is held.
 	if err = value.Start(ctx); err != nil {
 		_ = value.Close(context.WithoutCancel(ctx))
 		o.mu.Lock()
-		o.current = nil
+		o.current, o.publishedApps = nil, nil
 		o.mu.Unlock()
 		return err
 	}
 	return nil
 }
 func (o *SDKOwner) appsLocked() []runner.AppOptions {
-	apps := []runner.AppOptions{}
+	apps := make([]runner.AppOptions, 0, len(o.request.Entries))
 	backoff := time.Now().Before(o.rejectedUntil)
 	credential := o.request.Identity.Credential
 	if o.current != nil {
@@ -206,12 +209,25 @@ func (o *SDKOwner) setAppsLocked() error {
 	if o.current == nil {
 		return nil
 	}
-	return o.current.SetApps(o.appsLocked())
+	apps := o.appsLocked()
+	if slices.Equal(o.publishedApps, apps) {
+		return nil
+	}
+	if err := o.current.SetApps(apps); err != nil {
+		return err
+	}
+	o.publishedApps = apps
+	return nil
 }
 
 // Refresh applies independent probe/lifecycle downgrades without reconciling workloads.
 func (o *SDKOwner) Refresh() { o.mu.Lock(); defer o.mu.Unlock(); _ = o.setAppsLocked() }
 func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
+	if o.Metrics != nil {
+		started := time.Now()
+		defer func() { o.Metrics.heartbeatCallback.Observe(time.Since(started).Seconds()) }()
+		o.Metrics.observeHeartbeatRequest(event, started)
+	}
 	o.mu.Lock()
 	h, r, lineage := o.hooks, copyRequest(o.request), o.lineage
 	fail := func(reason string, reset bool) {
@@ -282,7 +298,8 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		}
 	}
 	o.mu.Unlock()
-	if err := h.Observe(obs); err != nil && !errors.Is(err, ErrSuperseded) {
+	observeErr := h.Observe(obs)
+	if observeErr != nil && !errors.Is(observeErr, ErrSuperseded) {
 		o.Fatal(errors.New("identity_persistence_failed"))
 		panic("fatal handler returned")
 	}
@@ -298,6 +315,9 @@ func (o *SDKOwner) heartbeat(event runner.HeartbeatEvent) {
 		}
 	}
 	o.accepted = Identity{RunnerID: resp.RunnerID, Credential: obs.Credential, Confirmed: obs.Accepted && !obs.Bootstrap, Sequence: event.AcceptedSeq}
+	if o.Metrics != nil && observeErr == nil && o.accepted.Confirmed {
+		o.Metrics.observeAcceptedHeartbeat(event.At)
+	}
 	if time.Now().Before(o.rejectedUntil) && len(obs.Entries) < len(o.request.Entries) && h.Failure != nil {
 		h.Failure(OwnerFailure{RunnerID: r.Identity.RunnerID, Reason: o.rejectedReason, Partial: true})
 	}
@@ -326,8 +346,8 @@ func (o *SDKOwner) Unregister(ctx context.Context, id Identity) error {
 	return nil
 }
 
-// originGuard only validates origins before the SDK applies a response and starts
-// O2R. It returns unchanged bytes; all protocol mutation belongs to the SDK.
+// originGuard validates the origins in Node heartbeat responses. Runtime uses
+// the authoritative session lists in those responses and skips the O2R stream.
 type originGuard struct {
 	base   string
 	client *http.Client
@@ -359,6 +379,13 @@ func (g originGuard) Do(req *http.Request) (*http.Response, error) {
 		if err != nil || u.Scheme != base.Scheme || u.Host != base.Host || u.User != nil || u.Fragment != "" {
 			return nil, errors.New("o2r_origin")
 		}
+		value.O2R = nil
+		data, err = json.Marshal(value)
+		if err != nil {
+			return nil, errors.New("heartbeat_response")
+		}
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = int64(len(data))
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(data))
 	return resp, nil

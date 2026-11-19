@@ -158,13 +158,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/{node_id}/telemetry/token", s.telemetryToken)
 	mux.HandleFunc("POST /v1/nodes/{node_id}/telemetry/metrics", s.telemetryIngest(telemetryMetrics))
 	mux.HandleFunc("POST /v1/nodes/{node_id}/telemetry/logs", s.telemetryIngest(telemetryLogs))
+	routes := s.cors(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Livepeer-Tunnels-Enabled", strconv.FormatBool(s.params.CloudflareEnabled))
-		mux.ServeHTTP(w, r.WithContext(ctx))
+		routes.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
