@@ -575,8 +575,11 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 		t.Fatal("original workload was not ready")
 	}
 	adminA(t, s)
-	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
-	s.configs = s.newConfigurationManager()
+	setImage := func(image string) {
+		s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat(image, 64)
+		s.configs = s.newConfigurationManager()
+	}
+	setImage("d")
 	pending := pendingWorkloadDrain(t, s, node)
 	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+node+"/drain/force", "session-a", map[string]int64{"generation": pending.Generation}), 202)
 	reconcile()
@@ -588,14 +591,29 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 
 	generation := forced.Generation
 	for _, image := range []string{"c", "d", "c"} {
-		s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat(image, 64)
-		s.configs = s.newConfigurationManager()
+		setImage(image)
 		reconcile()
 		m := onchainMetadata(t, s, node)
 		if m.ConfigDigest != forced.ConfigDigest || m.Generation <= generation || !m.DrainRequested {
 			t.Fatal("image change bypassed the drain", image)
 		}
 		generation = m.Generation
+	}
+
+	reportRuntime(t, s, c, "runner", true)
+	reconcile()
+	drained := onchainMetadata(t, s, node)
+	if drained.ConfigDigest == forced.ConfigDigest || drained.Generation != generation {
+		t.Fatal("a fresh drain should release the superseding workload")
+	}
+	// The previously forced digest can now be published as a normal startup repair.
+	for _, image := range []string{"d", "e"} {
+		setImage(image)
+		reconcile()
+		m, manifest := publishedMachineConfiguration(t, s, node)
+		if !strings.Contains(manifest, s.params.RuntimeNodeImage) || m.Generation != generation || !m.DrainRequested {
+			t.Fatal("a past force blocked startup repair after the fresh drain", image)
+		}
 	}
 }
 

@@ -197,6 +197,8 @@ func (state *State) observeForcedPublication(digest string) {
 		state.ForcedDrainTarget = ""
 		state.UnconfirmedForcedDigest = digest
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+	} else if state.UnconfirmedForcedDigest != digest {
+		state.UnconfirmedForcedDigest = ""
 	}
 }
 
