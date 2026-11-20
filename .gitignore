@@ -15,4 +15,3 @@ ui/.wrangler/
 /tools/__pycache__/
 /tools/tests/__pycache__/
 /deploy/
-/apps/
