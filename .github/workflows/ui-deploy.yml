@@ -3,6 +3,13 @@ name: Deploy UI
 # Publishes ui/ to Cloudflare Workers Static Assets on
 # controlcenter.livepeer.live, independently of backend deployments.
 #
+# A successful Build images run for a main push whose commit changes ui/
+# proposes a deploy of that commit; a production reviewer approves it. The
+# change check compares the commit with its first parent, so it assumes
+# squash or rebase merges. A run is skipped when a newer main commit has
+# already changed ui/ again: that commit's run deploys it, so a late build
+# never replaces a newer UI. Manual deploys and rollbacks use the dispatch form.
+#
 # Repository configuration (Settings → Environments → production):
 #   - Required reviewers, and deployment branches limited to main.
 #   - Secret CLOUDFLARE_API_TOKEN: account "Workers Scripts: Edit", and
@@ -24,6 +31,10 @@ on:
         description: Worker version ID to restore (rollback only; see the previous run summaries)
         type: string
         default: ''
+  workflow_run:
+    workflows: [Build images]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -38,8 +49,45 @@ defaults:
     working-directory: ui
 
 jobs:
+  changes:
+    if: >-
+      github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      deploy: ${{ steps.diff.outputs.deploy }}
+    env:
+      COMMIT: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check for UI changes
+        id: diff
+        run: |
+          if git diff --quiet "$COMMIT^1" "$COMMIT" -- ui; then
+            deploy=false
+          elif ! git diff --quiet "$COMMIT" origin/main -- ui; then
+            echo "::notice::A newer main commit changes ui/ again; its run deploys the UI."
+            deploy=false
+          else
+            deploy=true
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
   production:
-    if: github.ref == 'refs/heads/main'
+    needs: changes
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main'
+      && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.deploy == 'true')
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     environment:
@@ -48,10 +96,13 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+      ACTION: ${{ inputs.action || 'deploy' }}
       WRANGLER_SEND_METRICS: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.COMMIT }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -60,7 +111,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
       - name: Build and test
-        if: inputs.action == 'deploy'
+        if: env.ACTION == 'deploy'
         env:
           API_URL: ${{ vars.CONTROLCENTER_API_URL }}
         run: |
@@ -68,10 +119,10 @@ jobs:
           npm run build
           npm run test:worker
       - name: Deploy
-        if: inputs.action == 'deploy'
-        run: npx wrangler deploy --env production --tag "${GITHUB_SHA::12}" --message "Deploy ${GITHUB_SHA} by ${GITHUB_ACTOR}"
+        if: env.ACTION == 'deploy'
+        run: npx wrangler deploy --env production --tag "${COMMIT::12}" --message "Deploy ${COMMIT} by ${GITHUB_ACTOR}"
       - name: Roll back
-        if: inputs.action == 'rollback'
+        if: env.ACTION == 'rollback'
         env:
           VERSION: ${{ inputs.version }}
         run: |

@@ -182,8 +182,11 @@ Cloudflare account prerequisites:
   `CLOUDFLARE_ACCOUNT_ID`. This token can publish the JavaScript that seals
   operator secrets; keep it there.
 
-Run **Deploy UI** from `main` with `deploy` to build and release that commit.
-The run summary lists recent Worker versions. To roll back, run it with
+When a `main` commit changes `ui/` and its **Build images** run succeeds,
+**Deploy UI** starts for that commit and waits for a `production` reviewer.
+A run is skipped when a newer `main` commit has changed `ui/` again, because
+that commit's run deploys it. To release a commit by hand, run **Deploy UI**
+from `main` with `deploy`. The run summary lists recent Worker versions. To roll back, run it with
 `rollback` and the version ID to restore; static assets roll back with the
 Worker version. The build bakes in `VITE_CONTROLCENTER_API_URL`
 (`ui/.env.production`, overridden by the environment variable
