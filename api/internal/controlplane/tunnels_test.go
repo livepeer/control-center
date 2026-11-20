@@ -141,7 +141,8 @@ func tunnelTestServer(t *testing.T) (*Server, *simulatedCloudflare) {
 	t.Helper()
 	s := newTestServer(t)
 	t.Cleanup(func() { testTunnelDependencies.Delete(s) })
-	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareAPIToken: "backend-provisioning-only", TunnelStatusTTL: 5 * time.Minute, TunnelDrainTimeout: time.Minute}
+	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareAPIToken: "backend-provisioning-only", TunnelStatusTTL: 5 * time.Minute}
+	s.params.DrainTimeout = new(time.Minute)
 	s.params.TunnelNodeAddresses = []string{"198.51.100.10/32"}
 	s.params.RuntimeImage = "registry.example.invalid/runtime@sha256:" + strings.Repeat("d", 64)
 	s.params.RuntimeConnectorImage = "registry.example.invalid/connector@sha256:" + strings.Repeat("c", 64)

@@ -145,7 +145,7 @@ the machine with `force:true`.
 
 If waiting for sessions to drain during an orchestrator update, an administrator
 can use `drain/force` at any time. Control Center forces the update on its next
-update check after `TunnelDrainTimeout` expires (12 hours by default). Replacing
+update check after `DrainTimeout` expires (`12h10m` by default). Replacing
 the orchestrator ends remaining sessions. The new orchestrator accepts sessions
 when Runtime reports it ready.
 

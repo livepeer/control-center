@@ -17,8 +17,11 @@ deadline expires. Normal removal and endpoint migration require an authorized
 retry if their drain expires. Normal removal retires the enrollment and publishes
 a terminal bundle that retains storage, with or without a tunnel.
 
-`TunnelDrainTimeout` sets the drain deadline; an unset or nonpositive value uses
-12 hours. `TunnelStatusTTL` sets report freshness and defaults to two minutes.
+`DrainTimeout` sets the machine drain deadline. It must be at least
+`RuntimeAppDrainTimeout`, the grace period Node gives existing sessions after
+app withdrawal. An omitted `DrainTimeout` uses the app timeout plus `10m`
+(`12h10m` by default). Setting both to `0s` makes the machine deadline immediate.
+`TunnelStatusTTL` sets report freshness and defaults to two minutes.
 
 The [tunnel manager](../tunnel/README.md) orders endpoint replacement. A completed
 drain alone does not establish external readiness.

@@ -191,15 +191,24 @@ modes. Single-session lifetimes are unsupported. Each instance runs in a gVisor
 Pod with a private Service. Node advertises ready instances and checks capacity
 before accepting work; Control Center collects Node's discovery responses.
 
-Removal withdraws an instance from discovery and drains existing work. Set
-`RuntimeNodeDrainTimeout` from 0 to 12 hours (default 12 hours); zero ends work
-immediately. Normally Runtime waits for Node to confirm registration removal,
-then removes the Pod and Service and reports cleanup. `TunnelDrainTimeout` is a
-separate machine-maintenance deadline that defaults to 12 hours. After it expires
-during an orchestrator update, Control Center forces replacement on its next
-update check, possibly without Node confirmation. Ordinary machine removal and
-endpoint migration require a retry after expiry. Node restart or owner expiry can
-lose sessions.
+Removal withdraws an instance from discovery. `RuntimeAppDrainTimeout` is how
+long Node lets existing sessions finish after an app is withdrawn. It defaults
+to `12h`. Set it to `0s` to end those sessions immediately. Normally Runtime waits
+for Node to confirm registration removal, then removes the Pod and Service and
+reports cleanup.
+
+`DrainTimeout` is how long Control Center waits for the runner to confirm a
+machine drain. The clock starts when Control Center requests the drain, and the
+operation can proceed as soon as the runner confirms it. `DrainTimeout` must be
+at least `RuntimeAppDrainTimeout`. Omit it to use the app timeout plus `10m`,
+which gives `12h10m` by default. The extra time allows for delivery of the drain
+request, cleanup, and reporting. Setting both values to `0s` makes machine
+drains expire immediately.
+
+If the deadline expires during an orchestrator update, Control Center forces
+replacement on its next update check, possibly without Node confirmation.
+Ordinary machine removal and endpoint migration require a retry after expiry.
+Node restart or owner expiry can lose sessions.
 
 Normal machine removal withdraws assignments and waits for app cleanup and
 machine drain. Forced removal stops Node early without a graceful drain. It

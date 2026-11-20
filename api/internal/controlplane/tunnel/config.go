@@ -19,7 +19,6 @@ type Config struct {
 	CloudflareAPIToken        string        `env:"CLOUDFLARE_API_TOKEN" secret:"true" optional:"true" descr:"Backend-only Cloudflare provisioning token"`
 	CloudflareAPITokenFile    string        `env:"CLOUDFLARE_API_TOKEN_FILE" secretfor:"CloudflareAPIToken" basepath:"source" descr:"Private provisioning credential file"`
 	TunnelStatusTTL           time.Duration `env:"TUNNEL_STATUS_TTL" optional:"true" descr:"Maximum age of Runtime readiness observations"`
-	TunnelDrainTimeout        time.Duration `env:"TUNNEL_DRAIN_TIMEOUT" optional:"true" descr:"Drain deadline; expiry blocks ordinary activation"`
 	TunnelNodeAddresses       []string      `env:"TUNNEL_NODE_ADDRESSES" optional:"true" descr:"Node/management addresses excluded from connector public egress"`
 }
 
@@ -37,8 +36,8 @@ func (p Config) Validate(api string) error {
 	if e != nil || u.Scheme != "https" || u.Host == "" {
 		return errors.New("tunnel-enabled PublicAPIURL requires verified HTTPS")
 	}
-	if p.TunnelStatusTTL < 2*time.Minute || p.TunnelDrainTimeout <= 0 {
-		return errors.New("configure tunnel status TTL of at least two minutes, positive drain limit")
+	if p.TunnelStatusTTL < 2*time.Minute {
+		return errors.New("configure tunnel status TTL of at least two minutes")
 	}
 	for _, raw := range p.TunnelNodeAddresses {
 		if _, e := netip.ParsePrefix(raw); e != nil {
