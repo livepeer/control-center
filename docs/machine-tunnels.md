@@ -138,15 +138,17 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-`DrainTimeout` sets the machine drain deadline. When it expires, Control Center
-forces eligible orchestrator updates on its next check. Normal removal and endpoint
-changes require a positive timeout and confirmation before the deadline. If either
-drain times out, use `drain/retry` or remove the machine with `force:true`.
-For defaults, see [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
+`DrainTimeout` sets the deadline for a machine drain. After the deadline,
+Control Center automatically forces a pending orchestrator update if the
+service and session proxy URLs stay the same. Normal removal and endpoint
+changes require a positive timeout and confirmation before the deadline. If
+either times out, use `drain/retry` to start a new drain or `force:true` to
+remove the machine. For defaults, see
+[drain settings](app-registry.md#runtime-delivery-and-completion-contract).
 
-An administrator can use `drain/force` at any time while an orchestrator update
-is waiting for sessions to drain. A forced update ends remaining sessions.
-The new orchestrator accepts sessions when Runtime reports it ready.
+For an update that keeps both URLs, an administrator can use `drain/force` at
+any time while sessions are draining. A forced update ends sessions still
+running, and the replacement accepts sessions when Runtime reports it ready.
 
 Stop all older Control Center API replicas before an upgraded replica starts
 writing rollout state. Let ongoing forced updates finish before rolling back to an
