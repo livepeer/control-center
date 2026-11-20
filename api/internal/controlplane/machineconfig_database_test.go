@@ -207,24 +207,18 @@ func TestForcePendingWorkloadRollout(t *testing.T) {
 				}
 				return record.State
 			}
-			reconcile := func() {
-				t.Helper()
-				if err := s.reconcile(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			}
 			force := func(token string, generation int64, status int) {
 				t.Helper()
 				path := "/api/admin/machines/" + m.NodeID + "/drain/force"
 				requireStatus(t, request(t, s, "POST", path, token, map[string]int64{"generation": generation}), status)
 			}
 			force("session-a", 1, 409)
-			reconcile()
+			requireNoError(t, s.reconcile(t.Context()))
 			pending := loadRollout()
 			if pending.PendingConfigDigest == "" || pending.HeldOrchestrator != previous {
 				t.Fatal("expected a pending, held rollout", pending.RolloutReason)
 			}
-			reconcile()
+			requireNoError(t, s.reconcile(t.Context()))
 			if _, manifest := publishedMachineConfiguration(t, s, m.NodeID); manifest != previous {
 				t.Fatal("published the replacement before the drain deadline")
 			}
@@ -240,7 +234,7 @@ func TestForcePendingWorkloadRollout(t *testing.T) {
 				s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
 				s.configs = s.newConfigurationManager()
 			}
-			reconcile()
+			requireNoError(t, s.reconcile(t.Context()))
 			state := loadRollout()
 			runtime, manifest := publishedMachineConfiguration(t, s, m.NodeID)
 			if !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
@@ -264,10 +258,10 @@ func TestForcePendingWorkloadRollout(t *testing.T) {
 			path := "/api/admin/machines/" + m.NodeID + "/drain/retry"
 			for range 2 {
 				requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": state.Generation}), 409)
-				reconcile()
+				requireNoError(t, s.reconcile(t.Context()))
 			}
 			reportRuntime(t, s, c, "runtime", true)
-			reconcile()
+			requireNoError(t, s.reconcile(t.Context()))
 			if state = loadRollout(); state.DrainRequested || state.ApprovedConfigDigest != pending.PendingConfigDigest || state.ForcedDrainTarget != "" {
 				t.Fatal("ready replacement did not finish the rollout", state.RolloutReason)
 			}
@@ -279,17 +273,11 @@ func TestRollbackAfterForcedPublication(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
 	m, _ := priorMachineConfiguration(t, s, c, nil)
-	reconcile := func() {
-		t.Helper()
-		if err := s.reconcile(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	reportRuntime(t, s, c, "runner", true)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	reportRuntime(t, s, c, "runtime", true)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	original, _ := publishedMachineConfiguration(t, s, m.NodeID)
 	if original.DrainRequested {
 		t.Fatal("original workload was not ready")
@@ -299,7 +287,7 @@ func TestRollbackAfterForcedPublication(t *testing.T) {
 	s.configs = s.newConfigurationManager()
 	pending := pendingWorkloadDrain(t, s, m.NodeID)
 	backdateWorkloadDrain(t, s, m.NodeID)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	replacement, _ := publishedMachineConfiguration(t, s, m.NodeID)
 	if replacement.ConfigDigest != pending.PendingConfigDigest || !replacement.DrainRequested {
 		t.Fatal("expected forced replacement to be published with admission closed")
@@ -307,15 +295,15 @@ func TestRollbackAfterForcedPublication(t *testing.T) {
 
 	s.params.RuntimeNodeImage = image
 	s.configs = s.newConfigurationManager()
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	reportRuntime(t, s, c, "runner", true)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	rollback, _ := publishedMachineConfiguration(t, s, m.NodeID)
 	if rollback.ConfigDigest != original.ConfigDigest || rollback.Generation <= replacement.Generation || !rollback.DrainRequested {
 		t.Fatal("expected rollback to wait for readiness in a new generation")
 	}
 	reportRuntime(t, s, c, "runtime", true)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	if restored, _ := publishedMachineConfiguration(t, s, m.NodeID); restored.DrainRequested || restored.ConfigDigest != original.ConfigDigest {
 		t.Fatal("ready rollback did not restore admission")
 	}
@@ -335,9 +323,7 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 			rotate := func() {
 				rotated = true
 				requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", map[string]string{"kind": "connector"}), 202)
-				if err := s.tunnels.Reconcile(t.Context()); err != nil {
-					t.Fatal(err)
-				}
+				requireNoError(t, s.tunnels.Reconcile(t.Context()))
 			}
 			if timing == "during rendering" {
 				build := s.build
@@ -351,9 +337,7 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 				rotate()
 			}
 			for i := 0; i < 2; i++ {
-				if err := s.reconcile(t.Context()); err != nil {
-					t.Fatal(err)
-				}
+				requireNoError(t, s.reconcile(t.Context()))
 				runtime, _ := publishedMachineConfiguration(t, s, node)
 				if runtime.ConfigDigest == pending.PendingConfigDigest {
 					t.Fatal("published the replacement after its force generation was superseded")
@@ -383,14 +367,10 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 			node := c["node_id"]
 			pending := forcePendingImageRollout(t, s, node)
 			path := "/api/admin/machines/" + node + "/drain/"
-			if err := s.tunnels.Reconcile(t.Context()); err != nil {
-				t.Fatal(err)
-			}
+			requireNoError(t, s.tunnels.Reconcile(t.Context()))
 			if action == "timeout after publication" {
 				for range 2 {
-					if err := s.configs.Reconcile(t.Context()); err != nil {
-						t.Fatal(err)
-					}
+					requireNoError(t, s.configs.Reconcile(t.Context()))
 				}
 			}
 			state, _, err := s.loadTunnel(t.Context(), node)
@@ -413,9 +393,7 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 				if _, err = tx.Exec(`LOCK TABLE lpcc.onchain_state IN ACCESS EXCLUSIVE MODE`); err != nil {
 					t.Fatal(err)
 				}
-				if err = s.configs.Reconcile(t.Context()); err != nil {
-					t.Fatal(err)
-				}
+				requireNoError(t, s.configs.Reconcile(t.Context()))
 				if err = tx.Rollback(); err != nil {
 					t.Fatal(err)
 				}
@@ -429,9 +407,7 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 				reportRuntime(t, s, c, "runtime", true)
 			}
 			for range 2 {
-				if err := s.reconcile(t.Context()); err != nil {
-					t.Fatal(err)
-				}
+				requireNoError(t, s.reconcile(t.Context()))
 			}
 			runtime, _ := publishedMachineConfiguration(t, s, node)
 			want := pending.PendingConfigDigest
@@ -478,17 +454,13 @@ func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
 	_, previousManifest := publishedMachineConfiguration(t, s, node)
 	pending := forcePendingImageRollout(t, s, node)
 	path := "/api/admin/machines/" + node
-	if err := s.tunnels.Reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.tunnels.Reconcile(t.Context()))
 	state, _, err := s.loadTunnel(t.Context(), node)
 	if err != nil || state.ApplyingConfigDigest != pending.PendingConfigDigest || readPlan() != previousPlan {
 		t.Fatal("expected an unpublished force", err)
 	}
 	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.reconcile(t.Context()))
 	_, manifest := publishedMachineConfiguration(t, s, node)
 	if manifest != previousManifest || readPlan() != previousPlan {
 		t.Fatal("ordinary removal changed the published orchestrator or upgrade plan")
@@ -510,9 +482,7 @@ func TestForceRolloutRejectsInitialPublicExposure(t *testing.T) {
 	path := "/api/admin/machines/" + node + "/drain/force"
 	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 409)
 	backdateWorkloadDrain(t, s, node)
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.reconcile(t.Context()))
 	state, _, err := s.loadTunnel(t.Context(), node)
 	_, manifest := publishedMachineConfiguration(t, s, node)
 	if err != nil || state.RolloutReason != "drain_timeout" || manifest != previous {
@@ -571,17 +541,8 @@ func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
 	path := "/api/admin/machines/" + node + "/drain/force"
 	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 202)
 
-	var database string
-	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Database, cfg.DefaultQueryExecMode = database, pgx.QueryExecModeExec
 	changed := false
-	cfg.Tracer = onchainQueryTrace(func(query string) {
+	s.db = traceTestQueries(t, s.db, func(query string) {
 		if changed || !strings.HasPrefix(query, "UPDATE lpcc.machine_states SET apps_generation=1,revision=") {
 			return
 		}
@@ -592,13 +553,8 @@ func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
 			t.Fatal("onchain settings change created a new enrollment")
 		}
 	})
-	db := stdlib.OpenDB(*cfg)
-	t.Cleanup(func() { db.Close() })
-	s.db = db
 	s.configs = s.newConfigurationManager()
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.reconcile(t.Context()))
 	runtime, _ := publishedMachineConfiguration(t, s, node)
 	if !changed || runtime.ConfigDigest != previous.ConfigDigest {
 		t.Fatal("published a different configuration after force authorization", changed, runtime.ConfigDigest)
@@ -617,9 +573,7 @@ func forcePendingImageRollout(t *testing.T, s *Server, node string) machineconfi
 
 func pendingWorkloadDrain(t *testing.T, s *Server, node string) machineconfig.State {
 	t.Helper()
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.reconcile(t.Context()))
 	state, _, err := s.loadTunnel(t.Context(), node)
 	if err != nil || !state.DrainRequested || state.HeldOrchestrator == "" || state.PendingConfigDigest == "" {
 		t.Fatal("expected a pending workload drain", state.RolloutReason, err)
@@ -979,14 +933,26 @@ func TestCompletedEndpointDrainDoesNotMaskProviderFailure(t *testing.T) {
 	}
 }
 
-// Count client commands without logging SQL arguments or bundle contents.
-type configurationQueryCounter struct{ queries int }
+type queryTrace func(string)
 
-func (c *configurationQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
-	c.queries++
+func (f queryTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, q pgx.TraceQueryStartData) context.Context {
+	f(q.SQL)
 	return ctx
 }
-func (*configurationQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (queryTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// Trace SQL commands without reading their arguments or results.
+func traceTestQueries(t *testing.T, db *sql.DB, trace func(string)) *sql.DB {
+	t.Helper()
+	var database string
+	requireNoError(t, db.QueryRow(`SELECT current_database()`).Scan(&database))
+	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	requireNoError(t, err)
+	cfg.Database, cfg.DefaultQueryExecMode, cfg.Tracer = database, pgx.QueryExecModeExec, queryTrace(trace)
+	traced := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { traced.Close() })
+	return traced
+}
 
 func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
 	s := newTestServer(t)
@@ -994,20 +960,10 @@ func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
 	other := enroll(t, s, ownerB, strings.Repeat("b", 64))
 	node := c["node_id"]
 	var bundle []byte
-	var digest, database string
-	if err := s.db.QueryRow(`SELECT bundle,sha256,current_database() FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle, &digest, &database); err != nil {
-		t.Fatal(err)
-	}
-	config, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.Database = database
-	config.DefaultQueryExecMode = pgx.QueryExecModeExec
-	counter := &configurationQueryCounter{}
-	config.Tracer = counter
-	db := sql.OpenDB(stdlib.GetConnector(*config))
-	t.Cleanup(func() { db.Close() })
+	var digest string
+	requireNoError(t, s.db.QueryRow(`SELECT bundle,sha256 FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle, &digest))
+	var commands int
+	db := traceTestQueries(t, s.db, func(string) { commands++ })
 	s.db = db
 	path := "/v1/nodes/" + node + "/config"
 	for _, token := range []string{c["token"], c["token"], other["token"]} {
@@ -1015,9 +971,9 @@ func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
 		if _, err := db.Exec(`UPDATE lpcc.machines SET last_config_fetch_at=$2 WHERE node_id=$1`, node, before); err != nil {
 			t.Fatal(err)
 		}
-		counter.queries = 0
+		commands = 0
 		w := request(t, s, "GET", path, token, nil)
-		queries := counter.queries
+		queries := commands
 		var fetched time.Time
 		if err := db.QueryRow(`SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&fetched); err != nil {
 			t.Fatal(err)

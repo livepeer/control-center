@@ -14,9 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -126,36 +123,15 @@ func TestAutomaticOnchainConfigurationAndUpdates(t *testing.T) {
 	}
 }
 
-type onchainQueryTrace func(string)
-
-func (f onchainQueryTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, q pgx.TraceQueryStartData) context.Context {
-	f(q.SQL)
-	return ctx
-}
-func (onchainQueryTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
 func TestOnchainReconcileSkipsUnchangedMachines(t *testing.T) {
 	s, _, a := onchainMachine(t)
 	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	var database string
-	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Database, cfg.DefaultQueryExecMode = database, pgx.QueryExecModeExec
 	var queries []string
-	cfg.Tracer = onchainQueryTrace(func(q string) { queries = append(queries, q) })
-	s.db = stdlib.OpenDB(*cfg)
-	t.Cleanup(func() { s.db.Close() })
-	if err = s.reconcileOnchain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	s.db = traceTestQueries(t, s.db, func(query string) { queries = append(queries, query) })
+	requireNoError(t, s.reconcileOnchain(t.Context()))
 	if len(queries) != 1 || !strings.HasPrefix(queries[0], "SELECT m.fingerprint") {
 		t.Fatalf("unchanged pass issued %d commands: %v", len(queries), queries)
 	}
@@ -563,14 +539,8 @@ func TestOnchainActivationAndNormalDrain(t *testing.T) {
 func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 	s, _, c := onchainMachine(t)
 	node := c["node_id"]
-	reconcile := func() {
-		t.Helper()
-		if err := s.reconcile(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-	}
 	reportOnchainReady(t, s, c)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	if !onchainMetadata(t, s, node).OnchainActive {
 		t.Fatal("original workload was not ready")
 	}
@@ -582,8 +552,8 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 	setImage("d")
 	pending := pendingWorkloadDrain(t, s, node)
 	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+node+"/drain/force", "session-a", map[string]int64{"generation": pending.Generation}), 202)
-	reconcile()
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
+	requireNoError(t, s.reconcile(t.Context()))
 	forced := onchainMetadata(t, s, node)
 	if forced.ConfigDigest != pending.PendingConfigDigest || !forced.DrainRequested {
 		t.Fatal("expected forced replacement to be published with admission closed")
@@ -592,7 +562,7 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 	generation := forced.Generation
 	for _, image := range []string{"c", "d", "c"} {
 		setImage(image)
-		reconcile()
+		requireNoError(t, s.reconcile(t.Context()))
 		m := onchainMetadata(t, s, node)
 		if m.ConfigDigest != forced.ConfigDigest || m.Generation <= generation || !m.DrainRequested {
 			t.Fatal("image change bypassed the drain", image)
@@ -601,7 +571,7 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 	}
 
 	reportRuntime(t, s, c, "runner", true)
-	reconcile()
+	requireNoError(t, s.reconcile(t.Context()))
 	drained := onchainMetadata(t, s, node)
 	if drained.ConfigDigest == forced.ConfigDigest || drained.Generation != generation {
 		t.Fatal("a fresh drain should release the superseding workload")
@@ -609,7 +579,7 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 	// The previously forced digest can now be published as a normal startup repair.
 	for _, image := range []string{"d", "e"} {
 		setImage(image)
-		reconcile()
+		requireNoError(t, s.reconcile(t.Context()))
 		m, manifest := publishedMachineConfiguration(t, s, node)
 		if !strings.Contains(manifest, s.params.RuntimeNodeImage) || m.Generation != generation || !m.DrainRequested {
 			t.Fatal("a past force blocked startup repair after the fresh drain", image)
@@ -632,9 +602,7 @@ func TestOnchainStartupRepairSupersedesDrain(t *testing.T) {
 	writeOnchainTemplate(t, s, settings)
 	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
 	s.configs = s.newConfigurationManager()
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.reconcile(t.Context()))
 	meta, manifest := publishedMachineConfiguration(t, s, node)
 	if !strings.Contains(manifest, s.params.RuntimeNodeImage) || meta.OnchainActive {
 		t.Fatal("a never-ready workload should allow repair while keeping admission closed")
@@ -658,9 +626,7 @@ func TestOnchainStartupRepairDoesNotBlockEndpointChange(t *testing.T) {
 	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
 	configureTestTunnels(t, s)
 	execSQL(t, s.db, "UPDATE lpcc.machine_states SET next_attempt_at=now()")
-	if err := s.tunnels.Reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.tunnels.Reconcile(t.Context()))
 	state, _, err := s.loadTunnel(t.Context(), node)
 	if err != nil || state.ApplyingConfigDigest == "" || state.ApplyingConfigDigest == original.ConfigDigest {
 		t.Fatal("expected an unpublished startup repair", err)
