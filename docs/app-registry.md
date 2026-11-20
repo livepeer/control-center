@@ -207,7 +207,8 @@ drains expire immediately.
 
 If the deadline expires during an orchestrator update, Control Center forces
 replacement on its next update check, possibly without Node confirmation.
-Ordinary machine removal and endpoint migration require a retry after expiry.
+Ordinary machine removal and endpoint migration require a positive timeout to
+receive confirmation. If a drain expires, retry starts a new drain.
 Node restart or owner expiry can lose sessions.
 
 Normal machine removal withdraws assignments and waits for app cleanup and

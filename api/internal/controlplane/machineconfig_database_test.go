@@ -142,7 +142,15 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	if s.tunnels.Enabled() || state.TunnelID != "" {
 		t.Fatal("private rollout acquired provider resources")
 	}
-	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
+	s.params.RuntimeAppDrainTimeout = 3 * time.Minute
+	s.configs = s.newConfigurationManager()
+	requireNoError(t, s.reconcile(t.Context()))
+	updated, held := publishedMachineConfiguration(t, s, m.NodeID)
+	if held != previous || updated.Generation != runtime.Generation+1 ||
+		!updated.DrainStartedAt.Equal(runtime.DrainStartedAt) || !updated.DrainDeadline.Equal(runtime.DrainStartedAt.Add(13*time.Minute)) {
+		t.Fatal("changing the app timeout did not preserve the in-flight drain start and fence the old target")
+	}
+	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: runtime.Generation, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
 	for len(s.reconcileWake) > 0 {
 		<-s.reconcileWake
 	}
