@@ -138,17 +138,22 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-`DrainTimeout` sets the deadline for a machine drain. After the deadline,
-Control Center automatically forces a pending orchestrator update if the
-service and session proxy URLs stay the same. Normal removal and endpoint
-changes require a positive timeout and confirmation before the deadline. If
-either times out, use `drain/retry` to start a new drain or `force:true` to
-remove the machine. For defaults, see
-[drain settings](app-registry.md#runtime-delivery-and-completion-contract).
-
-For an update that keeps both URLs, an administrator can use `drain/force` at
-any time while sessions are draining. A forced update ends sessions still
-running, and the replacement accepts sessions when Runtime reports it ready.
+- **Orchestrator replacement.** For an update that keeps the existing
+  endpoints, an administrator can use `drain/force` at any time while the
+  update waits for sessions to finish. Control Center forces these updates
+  automatically after `DrainTimeout`. Forced updates end remaining sessions,
+  and the replacement accepts sessions when Runtime reports it ready.
+- **Endpoint changes and normal removal.** Control Center returns HTTP 409 if
+  you use `drain/force` on a change that moves an endpoint, even if it also
+  replaces the orchestrator. Control Center can switch addresses or continue
+  normal removal once the runner confirms the drain. The runner has up to
+  `DrainTimeout` from the drain request (`12h10m` by default). `0s` makes the
+  attempt expire immediately. After expiry, the operation stays blocked. An
+  endpoint change keeps the old addresses. Use `drain/retry` to start a fresh
+  attempt. See
+  [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
+- **Forced removal.** Send `force:true` with the machine DELETE request to
+  start removal without waiting for a graceful drain.
 
 Stop all older Control Center API replicas before an upgraded replica starts
 writing rollout state. Let ongoing forced updates finish before rolling back to an
