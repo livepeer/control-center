@@ -43,8 +43,9 @@ instance with database and test-role creation privileges. Browser tests use
 Chrome and mocks.
 
 [GitHub Actions CI](../.github/workflows/ci.yml) runs on pull requests and can
-be run manually. The hidden file check requires an exact allowlist entry for
-each tracked path with a dot-prefixed file or directory name. CI checks Go
+be run manually. The hidden file check allows the root `.github/` directory,
+`.gitignore` and `.dockerignore`. It rejects other tracked dot-prefixed names,
+including inside `.github/`. CI checks Go
 formatting and runs race tests, Vet, Staticcheck and Govulncheck. It builds and
 browser-tests the UI, tests its edge Worker, dry-runs the production UI
 deployment and runs the bootstrap, remote runner and Runtime tests. CI

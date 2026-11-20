@@ -10,6 +10,8 @@ ui/test-results/
 ui/playwright-report/
 ui/.wrangler/
 /.remote-test-results/
+/runtime/**/__pycache__/
+/runtime/**/*.pyc
 /tools/__pycache__/
 /tools/tests/__pycache__/
 /deploy/config.toml
