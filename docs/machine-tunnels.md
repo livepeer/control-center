@@ -138,10 +138,11 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-Ordinary removal withdraws readiness and waits for draining. For removal and
-endpoint migration, an expired drain remains blocked even if a late completion
-arrives. An administrator can start a fresh drain with `drain/retry` or remove
-the machine with `force:true`.
+Ordinary removal withdraws readiness and waits for draining. Removal and
+endpoint changes can proceed on timely confirmation and need a positive
+`DrainTimeout` to receive it. An expired drain remains blocked even if a late
+completion arrives. An administrator can start a fresh drain with `drain/retry`
+or remove the machine with `force:true`.
 
 If waiting for sessions to drain during an orchestrator update, an administrator
 can use `drain/force` at any time. Control Center forces the update on its next

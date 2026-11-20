@@ -192,10 +192,10 @@ Pod with a private Service. Node advertises ready instances and checks capacity
 before accepting work; Control Center collects Node's discovery responses.
 
 Removal withdraws an instance from discovery. `RuntimeAppDrainTimeout` is how
-long Node lets existing sessions finish after an app is withdrawn. It defaults
-to `12h`. Set it to `0s` to end those sessions immediately. Normally Runtime waits
-for Node to confirm registration removal, then removes the Pod and Service and
-reports cleanup.
+long Node lets an app's existing sessions finish after withdrawal. It accepts
+`0s` through `12h` and defaults to `12h`. Set it to `0s` to end sessions
+immediately. Normally Runtime waits for Node to confirm registration removal,
+then removes the Pod and Service and reports cleanup.
 
 `DrainTimeout` is how long Control Center waits for the runner to confirm a
 machine drain. The clock starts when Control Center requests the drain, and the

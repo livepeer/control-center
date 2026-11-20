@@ -48,8 +48,11 @@ DiscoveryGrants = []
 # CloudflareBaseDomain = "<BASE_DOMAIN>"
 # CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
 RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required; build instructions in runtime/README.md
-RuntimeAppDrainTimeout = "12h" # 0-12h; 0s ends work immediately
-# DrainTimeout = "12h10m" # Must be at least RuntimeAppDrainTimeout; defaults to that value plus 10m
+# Node session grace per app after withdrawal (0s through 12h, default 12h).
+RuntimeAppDrainTimeout = "12h"
+# Machine drain deadline from the request. Must be at least RuntimeAppDrainTimeout.
+# Defaults to the app timeout plus 10m. Setting both to 0s makes expiry immediate.
+# DrainTimeout = "12h10m"
 # RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # Runtime helper and cloudflared
 # TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory

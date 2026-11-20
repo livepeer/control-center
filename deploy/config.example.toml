@@ -26,8 +26,11 @@ ConfigReconcileInterval = "1m"
 RuntimeImage = "controlcenter-registry.livepeer.live/controlcenter/runtime@sha256:<RUNTIME_DIGEST>"
 RuntimeConnectorImage = "controlcenter-registry.livepeer.live/controlcenter/connector@sha256:<CONNECTOR_DIGEST>"
 RuntimeNodeImage = "controlcenter-registry.livepeer.live/controlcenter/node@sha256:<NODE_DIGEST>"
+# Node session grace per app after withdrawal (0s through 12h, default 12h).
 RuntimeAppDrainTimeout = "12h"
-# DrainTimeout = "12h10m" # Must be at least RuntimeAppDrainTimeout; defaults to that value plus 10m
+# Machine drain deadline from the request. Must be at least RuntimeAppDrainTimeout.
+# Defaults to the app timeout plus 10m. Setting both to 0s makes expiry immediate.
+# DrainTimeout = "12h10m"
 
 # Enable after supplying account settings, the private keyring, and fleet IPs.
 CloudflareEnabled = false
