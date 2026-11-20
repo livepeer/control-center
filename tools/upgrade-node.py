@@ -10,6 +10,8 @@ An onchain redeemer must separately use the verified upstream image. The config
 timestamp gate may require a separate reload of pending or recovered edits before retry.
 Private backups under --state-dir contain config secrets; retain them for recovery.
 Requires Python 3.11+, Go, Git, gh, Docker Engine, Compose and Buildx.
+--resolve-upstream only verifies the go.mod release's upstream image against
+its committed pin and release tag, for CI image builds; it needs Go, gh and Buildx.
 """
 import argparse
 from contextlib import contextmanager
@@ -81,6 +83,45 @@ def source_version(root, runner=run):
     require(len(fallback) == 1 and fallback[0][0] == versions[0],
             'fallback Node image release must match go.mod')
     return versions[0], fallback[0][1]
+
+
+def remote_image(reference, runner=run):
+    """Resolve a registry reference to its index digest, linux/amd64 child and image config."""
+    descriptor = json.loads(runner('docker', 'buildx', 'imagetools', 'inspect',
+                                   reference, '--format', '{{json .Manifest}}'))
+    digest = descriptor.get('digest', '')
+    require(re.fullmatch(DIGEST, digest), 'missing registry manifest digest')
+    repository = reference.split('@')[0]
+    if '@' not in reference:
+        repository = reference.rsplit(':', 1)[0]
+    child = digest
+    if 'manifests' in descriptor:
+        candidates = [entry['digest'] for entry in descriptor['manifests']
+                      if entry.get('platform', {}).get('os') == 'linux'
+                      and entry['platform'].get('architecture') == 'amd64']
+        require(len(candidates) == 1, 'image must contain exactly one linux/amd64 manifest')
+        child = candidates[0]
+    config = json.loads(runner('docker', 'buildx', 'imagetools', 'inspect',
+                               repository + '@' + child, '--format', '{{json .Image}}'))
+    require(config.get('os') == 'linux' and config.get('architecture') == 'amd64',
+            'image does not support linux/amd64')
+    return repository + '@' + digest, repository + '@' + child, config
+
+
+def resolve_upstream(root, runner=run):
+    """Verify the go.mod Node release's upstream image against its committed pin and release tag."""
+    version, fallback_digest = source_version(root, runner)
+    image, child, config = remote_image(UPSTREAM + ':' + version, runner)
+    require(image == UPSTREAM + '@' + fallback_digest,
+            'published release digest differs from the committed fallback pin')
+    commit = runner('gh', 'api', f'repos/livepeer/node/commits/refs/tags/{version}', '--jq', '.sha')
+    require(re.fullmatch(r'[0-9a-f]{40}', commit), 'invalid upstream release commit')
+    labels = config['config'].get('Labels') or {}
+    require(labels.get('org.opencontainers.image.source') == 'https://github.com/livepeer/node'
+            and labels.get('org.opencontainers.image.version') == version
+            and labels.get('org.opencontainers.image.revision') == commit,
+            'upstream image version/source/revision does not match the release')
+    return {'version': version, 'commit': commit, 'image': image, 'platform_image': child}
 
 
 def patch_config(data, image):
@@ -201,25 +242,7 @@ class Upgrade:
         return self.inspect('container', ids[0])
 
     def remote_image(self, reference):
-        descriptor = json.loads(self.run('docker', 'buildx', 'imagetools', 'inspect',
-                                         reference, '--format', '{{json .Manifest}}'))
-        digest = descriptor.get('digest', '')
-        require(re.fullmatch(DIGEST, digest), 'missing registry manifest digest')
-        repository = reference.split('@')[0]
-        if '@' not in reference:
-            repository = reference.rsplit(':', 1)[0]
-        child = digest
-        if 'manifests' in descriptor:
-            candidates = [entry['digest'] for entry in descriptor['manifests']
-                          if entry.get('platform', {}).get('os') == 'linux'
-                          and entry['platform'].get('architecture') == 'amd64']
-            require(len(candidates) == 1, 'image must contain exactly one linux/amd64 manifest')
-            child = candidates[0]
-        config = json.loads(self.run('docker', 'buildx', 'imagetools', 'inspect',
-                                     repository + '@' + child, '--format', '{{json .Image}}'))
-        require(config.get('os') == 'linux' and config.get('architecture') == 'amd64',
-                'image does not support linux/amd64')
-        return repository + '@' + digest, repository + '@' + child, config
+        return remote_image(reference, self.run)
 
     def deployment(self):
         request = Request(API + '/api/admin/deployment',
@@ -243,7 +266,7 @@ class Upgrade:
         return self.run('docker', 'exec', container['Id'], 'sha256sum', '--', path).split()[0]
 
     def preflight(self):
-        self.version, fallback_digest = source_version(self.root, self.run)
+        self.version, _ = source_version(self.root, self.run)
         require(self.token_file is not None, 'provide an existing administrator bearer token with --admin-token-file')
         token = Snapshot.read(self.token_file, limit=8192)
         require(token.mode & 0o077 == 0, 'administrator token file must be private (mode 0600)')
@@ -274,16 +297,8 @@ class Upgrade:
         self.check_loaded_config(self.api)
         runtime_ref, _, _ = self.remote_image(self.runtime)
         require(runtime_ref == self.runtime, 'Runtime manifest does not match the configured digest')
-        self.upstream, self.upstream_child, upstream_config = self.remote_image(UPSTREAM + ':' + self.version)
-        require(self.upstream == UPSTREAM + '@' + fallback_digest,
-                'published release digest differs from the committed fallback pin')
-        self.node_commit = self.run('gh', 'api', f'repos/livepeer/node/commits/refs/tags/{self.version}', '--jq', '.sha')
-        require(re.fullmatch(r'[0-9a-f]{40}', self.node_commit), 'invalid upstream release commit')
-        labels = upstream_config['config'].get('Labels') or {}
-        require(labels.get('org.opencontainers.image.source') == 'https://github.com/livepeer/node'
-                and labels.get('org.opencontainers.image.version') == self.version
-                and labels.get('org.opencontainers.image.revision') == self.node_commit,
-                'upstream image version/source/revision does not match the release')
+        node = resolve_upstream(self.root, self.run)
+        self.upstream, self.upstream_child, self.node_commit = node['image'], node['platform_image'], node['commit']
         self.check_redeemer()
         self.container('registry')
         with urlopen('http://127.0.0.1:63812/v2/', timeout=10) as response:
@@ -530,6 +545,8 @@ def main():
     mode.add_argument('--apply', action='store_true', help='publish, activate and recreate only the API')
     mode.add_argument('--dry-run', action='store_true', help='inspect and resolve metadata only (default)')
     mode.add_argument('--check-source', action='store_true', help='check go.mod and the fallback release, then exit')
+    mode.add_argument('--resolve-upstream', action='store_true',
+                      help='verify the go.mod release image upstream, print it as JSON, then exit')
     parser.add_argument('--deploy-dir', type=Path, default=ROOT / 'deploy')
     parser.add_argument('--compose-file', type=Path, action='append', help='existing Compose file, in original order; repeat for overlays')
     parser.add_argument('--env-file', type=Path, help='existing Compose interpolation environment file')
@@ -546,6 +563,9 @@ def main():
         require(not args.expected_version or version == args.expected_version, 'unexpected Node version in go.mod')
         if args.check_source:
             print(version)
+            return
+        if args.resolve_upstream:
+            print(json.dumps(resolve_upstream(ROOT), sort_keys=True))
             return
         upgrade = Upgrade(ROOT, args.deploy_dir, args.compose_file, args.env_file, token_file=args.admin_token_file)
         if not args.apply:

@@ -22,3 +22,43 @@ jobs:
     uses: ./.github/workflows/package.yml
     with:
       commit: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [checks, package]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      commit: ${{ github.sha }}
+
+  # Asks livepeer/deploy-control-center to preflight this commit for staging.
+  # Needs the repository variable DEPLOYER_APP_CLIENT_ID and, in the
+  # deploy-dispatch environment (main only), the secret DEPLOYER_APP_PRIVATE_KEY
+  # of a GitHub App with Contents write on that repository. Without the
+  # variable, main builds only publish images.
+  dispatch:
+    name: Request staging deployment
+    if: vars.DEPLOYER_APP_CLIENT_ID != ''
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    environment: deploy-dispatch
+    steps:
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: app
+        with:
+          client-id: ${{ vars.DEPLOYER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEPLOYER_APP_PRIVATE_KEY }}
+          owner: livepeer
+          repositories: deploy-control-center
+          permission-contents: write
+      - name: Dispatch
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          gh api --method POST repos/livepeer/deploy-control-center/dispatches \
+            -f event_type=controlcenter-published \
+            -f "client_payload[commit]=$GITHUB_SHA" \
+            -f "client_payload[run_id]=$GITHUB_RUN_ID"

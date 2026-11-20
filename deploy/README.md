@@ -70,8 +70,13 @@ Copy `redeemer.example.toml` to `redeemer.toml` and `onchain.example.json` to
 - `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.
 - `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
 
-Build and publish images from this directory. Set `NODE_IMAGE` to the compatible
-upstream Node release digest; the first command starts only the registry:
+Every `main` commit also has published linux/amd64 images in GHCR, listed in the
+[Publish images](../docs/development.md#development-checks) run summary.
+The runtime, connector and node digests there can be used for `RuntimeImage`,
+`RuntimeConnectorImage` and `RuntimeNodeImage` instead of local builds; machines
+pull them anonymously. To build and publish images from this directory instead,
+set `NODE_IMAGE` to the compatible upstream Node release digest. The first
+command starts only the registry:
 
 ```sh
 LIVEPEER_REDEEMER_IMAGE="$NODE_IMAGE" docker compose up -d registry

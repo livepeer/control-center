@@ -210,6 +210,16 @@ class UpgradeTests(unittest.TestCase):
             with self.subTest(version=version, replacement=replacement), self.assertRaises(ValueError):
                 upgrade.source_version(self.root, lambda *a, **kw: json.dumps(value))
 
+    def test_upstream_resolution_requires_the_committed_pin_and_release_labels(self):
+        self.assertEqual(upgrade.resolve_upstream(self.root, self.docker),
+                         {'version': VERSION, 'commit': COMMIT, 'image': NODE, 'platform_image': NODE})
+        other_tag = lambda *a, **kw: 'f' * 40 if list(a[:2]) == ['gh', 'api'] else self.docker(*a, **kw)
+        with self.assertRaisesRegex(ValueError, 'version/source/revision'):
+            upgrade.resolve_upstream(self.root, other_tag)
+        (self.root / upgrade.FALLBACK).write_text(f'image: ghcr.io/livepeer/node:{VERSION}@sha256:{"f" * 64}\n')
+        with self.assertRaisesRegex(ValueError, 'committed fallback pin'):
+            upgrade.resolve_upstream(self.root, self.docker)
+
     def test_atomic_write_preserves_mode_owner_and_rejects_changed_or_symlink_input(self):
         path = self.deploy / 'config.toml'
         snapshot = upgrade.Snapshot.read(path)

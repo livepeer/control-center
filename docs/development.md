@@ -53,12 +53,25 @@ For local real-process tests, set `NODE_BINARY` and `LIVEPEER_NODE_TEST_BINARY`
 to the compatible Node binary. CI sets both. Isolated Flux/gVisor cluster tests
 remain opt-in.
 
-[Build](../.github/workflows/build.yml) validates the API, secrets and Runtime
-Docker images on native Linux amd64 and arm64 runners for pull requests and
-`main` pushes, and can be run manually. Image publication and bootstrap
-activation follow the [deployment process](../deploy/README.md). The UI is
-released separately with the [Deploy UI](../.github/workflows/ui-deploy.yml)
-workflow; see [UI hosting](../deploy/README.md#ui-hosting).
+[Build](../.github/workflows/build.yml) validates the API, secrets, Runtime and
+Grafana Docker images on native Linux amd64 and arm64 runners for pull requests
+and `main` pushes, and can be run manually. After the checks pass on a `main`
+push, [Publish images](../.github/workflows/publish.yml) builds each deployable
+linux/amd64 image once and pushes it to GHCR as
+`ghcr.io/livepeer/controlcenter-<name>:sha-<commit>`, where `<name>` is `api`,
+`secrets`, `grafana`, `runtime`, `connector` or `node`. The managed Node image
+uses the Node release selected in `go.mod`. Before that image is pushed, CI
+checks that its binary reports that release and that it carries the same Runtime
+wrapper as the runtime image. The run summary and its `release` artifact list
+the published digests. Machines pull the runtime, connector and node images
+anonymously; the other packages are private. Published tags are never replaced,
+so a rerun reuses images that already exist.
+
+When the deployer GitHub App is configured, the build then asks the staging
+deployer to preflight the commit. Bootstrap activation follows the
+[deployment process](../deploy/README.md). The UI is released separately with
+the [Deploy UI](../.github/workflows/ui-deploy.yml) workflow; see
+[UI hosting](../deploy/README.md#ui-hosting).
 
 ## Runtime unit tests
 
