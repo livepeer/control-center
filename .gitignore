@@ -14,11 +14,4 @@ ui/.wrangler/
 /runtime/**/*.pyc
 /tools/__pycache__/
 /tools/tests/__pycache__/
-/deploy/config.toml
-/deploy/compose.env
-/deploy/secrets/
-/deploy/bootstrap/
-
-/deploy/secrets-service-private/
-/deploy/secrets-service.env
-/deploy/vault-private/
+/deploy/

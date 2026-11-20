@@ -31,13 +31,13 @@ flowchart LR
 
 Control Center delivers the `livepeer-telemetry` Flux Kustomization only when
 `TelemetryEnabled` is true and the machine's latest runtime report lists the
-installed `host-telemetry` software entry. Bootstrap records that entry after
-applying the telemetry management socket and the management agent's RBAC, and
-the management agent reports it only from this release's Runtime image. Older
-installations keep running unchanged until they rerun an updated bootstrap with
-`--upgrade-runtime`; a plain rerun keeps the saved Runtime image. The
-Kustomization uses `deletionPolicy: Delete`: disabling telemetry removes the
-agents. Telemetry never changes Node's drain digest.
+installed `host-telemetry` software entry. Bootstrap configures the telemetry
+management socket and the management agent's RBAC, then records the host
+feature for the agent to report. To enable telemetry on a machine with a
+Runtime image that cannot report the feature, rerun a bootstrap bundle that
+supports telemetry with `--upgrade-runtime`. A plain rerun keeps the saved
+Runtime image. The Kustomization uses `deletionPolicy: Delete`, so disabling
+telemetry removes the agents. Telemetry never changes Node's drain digest.
 
 Two Deployments in the `livepeer-telemetry` namespace run on the Pod network
 with no host ports:

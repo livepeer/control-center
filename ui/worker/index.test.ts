@@ -6,11 +6,11 @@ import type { Env } from './index.ts'
 const loader = '#!/bin/sh\necho loader\n'
 const objects = new Map<string, string>([
   ['bootstrap.sh', loader],
-  ['releases/20261118-a/bootstrap.sh', '#!/bin/sh\necho release\n'],
-  ['releases/20261118-a/runtime-bootstrap.tar.gz', 'bundle-bytes'],
-  ['releases/20261118-a/SHA256SUMS', 'abc  runtime-bootstrap.tar.gz\n'],
-  ['releases/20261118-a/release.json', '{"release_id":"20261118-a"}\n'],
-  ['releases/20261118-a/notes.txt', 'unpublished'],
+  ['releases/release-a/bootstrap.sh', '#!/bin/sh\necho release\n'],
+  ['releases/release-a/runtime-bootstrap.tar.gz', 'bundle-bytes'],
+  ['releases/release-a/SHA256SUMS', 'abc  runtime-bootstrap.tar.gz\n'],
+  ['releases/release-a/release.json', '{"release_id":"release-a"}\n'],
+  ['releases/release-a/notes.txt', 'unpublished'],
 ])
 
 function bucket(failing = false): Env['BOOTSTRAP'] {
@@ -40,23 +40,23 @@ test('serves the active loader as a shell script that is always revalidated', as
 
 test('serves immutable release files with explicit content types', async () => {
   for (const [file, type] of [['runtime-bootstrap.tar.gz', 'application/gzip'], ['bootstrap.sh', 'text/x-shellscript'], ['SHA256SUMS', 'text/plain; charset=utf-8'], ['release.json', 'application/json']]) {
-    const response = await call(`/bootstrap/releases/20261118-a/${file}`)
+    const response = await call(`/bootstrap/releases/release-a/${file}`)
     assert.equal(response.status, 200, file)
     assert.equal(response.headers.get('Content-Type'), type, file)
     assert.equal(response.headers.get('Cache-Control'), 'public, max-age=31536000, immutable', file)
-    assert.equal(await response.text(), objects.get(`releases/20261118-a/${file}`), file)
+    assert.equal(await response.text(), objects.get(`releases/release-a/${file}`), file)
   }
 })
 
 test('HEAD returns headers without a body', async () => {
-  const response = await call('/bootstrap/releases/20261118-a/runtime-bootstrap.tar.gz', { method: 'HEAD' })
+  const response = await call('/bootstrap/releases/release-a/runtime-bootstrap.tar.gz', { method: 'HEAD' })
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('Content-Length'), String('bundle-bytes'.length))
   assert.equal(await response.text(), '')
 })
 
 test('missing or unsupported bootstrap paths are plain-text 404s, never HTML', async () => {
-  for (const path of ['/bootstrap', '/bootstrap/', '/bootstrap/releases/', '/bootstrap/releases/missing/bootstrap.sh', '/bootstrap/releases/20261118-a/notes.txt', '/bootstrap/releases/20261118-a/', '/bootstrap/releases/../bootstrap.sh', '/bootstrap/releases/.hidden/bootstrap.sh', '/bootstrap/releases/a..b/bootstrap.sh', '/bootstrap/releases/20261118-a/nested/bootstrap.sh', '/bootstrap.sh/']) {
+  for (const path of ['/bootstrap', '/bootstrap/', '/bootstrap/releases/', '/bootstrap/releases/missing/bootstrap.sh', '/bootstrap/releases/release-a/notes.txt', '/bootstrap/releases/release-a/', '/bootstrap/releases/../bootstrap.sh', '/bootstrap/releases/.hidden/bootstrap.sh', '/bootstrap/releases/a..b/bootstrap.sh', '/bootstrap/releases/release-a/nested/bootstrap.sh', '/bootstrap.sh/']) {
     const response = await call(path)
     assert.equal(response.status, 404, path)
     assert.equal(response.headers.get('Content-Type'), 'text/plain; charset=utf-8', path)

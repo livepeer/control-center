@@ -78,9 +78,7 @@ encryption.
 ## Deployment
 
 The secrets service and Vault are required services in the default
-[Compose deployment](../deploy/compose.yaml). Existing installations using the
-`livepeer-secrets` project should use the local deployment helper to retain the
-running Vault and its network. For a fresh setup, work from `deploy/`. Set
+[Compose deployment](../deploy/compose.yaml). Work from `deploy/`. Set
 `LIVEPEER_REDEEMER_IMAGE` in `compose.env` to a compatible digest-pinned Node
 image before running Compose. This value is required even when starting only
 Vault.

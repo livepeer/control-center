@@ -204,9 +204,9 @@ npm --prefix ui run build
 `workers.dev`. It reads the same bootstrap bucket but its origin is not in
 `AllowedOrigins`, so sign-in there is expected to fail.
 
-The CSP in `_headers` is report-only. Promote it to `Content-Security-Policy`
-once a production session (sign-in, machines, administration and secrets)
-shows no violations in the browser console.
+Before enforcing a CSP change in `_headers`, test it in report-only mode
+through sign-in, machines, administration and secrets. Resolve any violations
+reported in the browser console.
 
 ## Bootstrap releases
 
@@ -239,7 +239,7 @@ the deployed API, Node and connector before activation.
 
 Each release retains the complete bundle, `SHA256SUMS`, its exact `bootstrap.sh`,
 and `release.json` containing checksums, source revision/dirty-state evidence,
-asset hashes and recorded image build provenance when available. Only tracked
+asset hashes and recorded image metadata when available. Only tracked
 installer assets are packaged; add any newly required helpers/templates to Git
 before packaging. The loader includes the bundle checksum. The packager stages
 the complete local release and refuses reused IDs. The publisher checks that
@@ -258,11 +258,11 @@ release. Keep
 `deploy/bootstrap` and the activation and validation records with the
 deployment artifacts.
 
-To roll back, or to switch to a release from another branch, activate a
-retained release explicitly:
+To roll back or switch branches, set `RETAINED_RELEASE_ID` to the ID of the
+retained release to restore.
 
 ```sh
-python3 tools/publish-bootstrap.py --activate bootstrap-20261112.1 --rollback
+python3 tools/publish-bootstrap.py --activate "$RETAINED_RELEASE_ID" --rollback
 ```
 
 `--all` publishes every release under `deploy/bootstrap/releases`, which
