@@ -20,10 +20,9 @@ a terminal bundle that retains storage, with or without a tunnel.
 `RuntimeAppDrainTimeout` sets Node's per-app session grace after withdrawal. It
 accepts `0s` through `12h` and defaults to `12h`. `DrainTimeout` starts when
 Control Center requests a machine drain and must be at least the app timeout.
-It defaults to the app timeout plus `10m` (`12h10m` by default). Confirmation
-can allow the operation to proceed sooner. Setting both to `0s` makes the
-machine deadline immediate, so normal removal and endpoint migration need a
-positive `DrainTimeout` to receive confirmation.
+It defaults to the app timeout plus `10m` (`12h10m` by default). Setting both to
+`0s` makes the machine deadline immediate. Normal removal and endpoint migration
+need a positive `DrainTimeout` to receive confirmation.
 `TunnelStatusTTL` sets report freshness and defaults to two minutes.
 
 The [tunnel manager](../tunnel/README.md) orders endpoint replacement. A completed
