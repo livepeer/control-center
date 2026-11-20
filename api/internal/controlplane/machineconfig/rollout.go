@@ -6,30 +6,29 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
-	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/onchain"
 	"time"
 )
 
-func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, error) {
+func (s *Manager) applied(ctx context.Context, m Machine) (appliedWorkload, error) {
 	var data []byte
 	err := s.store.DB.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Runtime{}, "", ErrFenced
+		return appliedWorkload{}, ErrFenced
 	}
 	if err != nil {
-		return Runtime{}, "", err
+		return appliedWorkload{}, err
 	}
-	return ReadApplied(data)
+	return readAppliedWorkload(data)
 }
 
-// Gate holds the applied workload until a fresh report completes its drain.
+// Gate holds the applied workload until its drain completes, is forced, or reaches its deadline.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
 	if desired.OnchainError != nil {
 		return false, desired.OnchainError
 	}
-	old, manifest, err := s.applied(ctx, m)
+	old, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
 	}
@@ -37,13 +36,26 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
+	state.observeForcedPublication(old.ConfigDigest)
+	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
+		state.PendingConfigDigest == digest && sameWorkloadEndpoints(old.manifest, desired)
+	if state.ForcedDrainTarget != "" && !forced {
+		state.ForcedDrainTarget = ""
+		if state.ApplyingConfigDigest != "" {
+			state.ApplyingConfigDigest = ""
+			state.ApplyingUpgradeVersion = ""
+			old.hold(state)
+		}
+	}
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining storage identity, redemption destination and the admission freeze.
 	frozen := state.ApplyingConfigDigest == old.ConfigDigest
 	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
-	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient && old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller && old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL
-	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient &&
+		old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller &&
+		old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL && sameWorkloadEndpoints(old.manifest, desired)
+	if old.ConfigDigest != digest && old.ConfigDigest != state.UnconfirmedForcedDigest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 		state.ApplyingConfigDigest = digest
 		state.ApplyingUpgradeVersion = upgradeVersion(desired)
@@ -53,6 +65,11 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	}
 	if state.ApplyingConfigDigest != "" {
 		if state.ApplyingConfigDigest == digest {
+			if forced {
+				state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+				state.RolloutReason = "rollout_pending"
+				return false, nil
+			}
 			report, at, e := s.store.Report(ctx, m, "runtime")
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return false, e
@@ -64,6 +81,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 			state.ApplyingConfigDigest = ""
 			state.ApplyingUpgradeVersion = ""
 			state.PendingConfigDigest = ""
+			state.UnconfirmedForcedDigest = ""
+			state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 			state.DrainRequested = false
 			state.ApprovedConfigDigest = digest
 			state.RolloutReason = ""
@@ -73,7 +92,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.ApplyingConfigDigest = ""
 		state.ApplyingUpgradeVersion = ""
 	}
-	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
+	if !state.DrainRequested && state.HeldOrchestrator == "" && old.ConfigDigest == digest && digest != state.UnconfirmedForcedDigest {
 		if desired.Onchain.Onchain() && state.ApprovedConfigDigest != digest {
 			if !desired.OnchainReady {
 				state.RolloutReason = "onchain_startup_pending"
@@ -91,13 +110,14 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.PendingConfigDigest = digest
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
-		state.HeldOrchestrator = manifest
-		state.HeldOnchain = onchainJSON(old.Onchain)
-		s.holdUpgrade(ctx, m, state)
+		old.hold(state)
 	}
-	if old.ConfigDigest != digest {
-		done, err := s.drainComplete(ctx, m, state)
-		if err != nil || !done {
+	if old.ConfigDigest != digest && !forced {
+		now := time.Now()
+		if s.drainExpired(state.DrainStartedAt, now) && state.canForceDrain() &&
+			sameWorkloadEndpoints(old.manifest, desired) {
+			state.forceDrain(m.NodeID)
+		} else if done, err := s.drainComplete(ctx, m, state, now); err != nil || !done {
 			return true, err
 		}
 	}
@@ -116,7 +136,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	if desired.OnchainError != nil {
 		return false, desired.OnchainError
 	}
-	old, manifest, err := s.applied(ctx, m)
+	old, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
 	}
@@ -125,50 +145,71 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
 	if !state.DrainRequested || state.Target != target {
-		state.PendingConfigDigest = ""
-		state.HeldOrchestrator = ""
 		if old.ConfigDigest == digest {
 			return false, nil
+		}
+		state.observeForcedPublication(old.ConfigDigest)
+		state.ForcedDrainTarget = ""
+		// If the route change is canceled, resume waiting for the published workload.
+		if state.UnconfirmedForcedDigest == old.ConfigDigest {
+			state.ApplyingConfigDigest, state.ApplyingUpgradeVersion = old.ConfigDigest, old.UpgradeVersion
+		} else if state.ApplyingConfigDigest != old.ConfigDigest {
+			state.ApplyingConfigDigest, state.ApplyingUpgradeVersion = "", ""
 		}
 		state.Generation++
 		state.DrainRequested = true
 		state.Target = target
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
-		state.HeldOrchestrator = manifest
-		state.HeldOnchain = onchainJSON(old.Onchain)
-		s.holdUpgrade(ctx, m, state)
+		old.hold(state)
 	}
-	done, err := s.drainComplete(ctx, m, state)
+	done, err := s.drainComplete(ctx, m, state, time.Now())
 	return !done, err
 }
 
 func (s *State) CancelTarget() {
 	s.Generation++
+	s.Target = ""
+	s.ForcedDrainTarget = ""
+	s.HeldOrchestrator, s.HeldUpgradePlan = "", ""
+	s.PendingConfigDigest = s.ApplyingConfigDigest
+	if s.ApplyingConfigDigest != "" {
+		s.RolloutReason = "rollout_pending"
+		return
+	}
 	s.DrainRequested = false
 	s.DrainStartedAt = time.Time{}
-	s.Target = ""
-	s.PendingConfigDigest = ""
-	s.HeldOrchestrator = ""
-	s.HeldUpgradePlan = ""
-	s.ApplyingConfigDigest = ""
 	s.ApplyingUpgradeVersion = ""
 	s.RolloutReason = ""
 }
-func (s *Manager) holdUpgrade(ctx context.Context, m Machine, state *State) {
-	if state.HeldUpgradePlan != "" {
-		return
-	}
-	var data []byte
-	if s.store.DB.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&data) == nil {
-		if files, err := artifact.Read(data); err == nil {
-			state.HeldUpgradePlan = string(files["upgrade-plan/plan.yaml"])
-		}
+func (state State) canForceDrain() bool {
+	return state.Lifecycle == "active" && state.Target == "" && state.DrainRequested &&
+		!state.DrainStartedAt.IsZero() && state.HeldOrchestrator != "" && state.PendingConfigDigest != "" &&
+		state.ApplyingConfigDigest == "" && state.ForcedDrainTarget == ""
+}
+
+func (state *State) forceDrain(node string) {
+	state.Generation++
+	state.ForcedDrainTarget = DrainTarget(node, *state)
+}
+
+// Publication can be observed even if Runtime has never fetched the bundle.
+func (state *State) observeForcedPublication(digest string) {
+	if state.ForcedDrainTarget != "" && state.ApplyingConfigDigest == digest {
+		state.ForcedDrainTarget = ""
+		state.UnconfirmedForcedDigest = digest
+		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+	} else if state.UnconfirmedForcedDigest != digest {
+		state.UnconfirmedForcedDigest = ""
 	}
 }
 
-func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (bool, error) {
-	if state.DrainStartedAt.IsZero() || time.Since(state.DrainStartedAt) > s.drainTimeout() {
+func (s *Manager) drainExpired(startedAt, now time.Time) bool {
+	return !startedAt.IsZero() && !now.Before(startedAt.Add(s.drainTimeout()))
+}
+
+func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State, now time.Time) (bool, error) {
+	if state.DrainStartedAt.IsZero() || s.drainExpired(state.DrainStartedAt, now) {
 		state.RolloutReason = "drain_timeout"
 		return false, nil
 	}
@@ -186,7 +227,7 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 
 func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) (bool, error) {
 	if state.DrainedGeneration != state.Generation {
-		done, err := s.drainComplete(ctx, m, state)
+		done, err := s.drainComplete(ctx, m, state, time.Now())
 		if err != nil || !done {
 			return false, err
 		}

@@ -133,7 +133,8 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("DELETE /api/admin/machines/{node_id}", s.adminMutation("machine.remove", s.prepareMachineRemoval))
 	mux.HandleFunc("POST /api/admin/machines/{node_id}/tunnel/rotate", s.adminMutation("tunnel.rotate", s.prepareTunnelRotation))
-	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/retry", s.adminMutation("machine.drain.retry", s.prepareDrainRetry))
+	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/retry", s.adminMutation("machine.drain.retry", s.prepareDrain(false)))
+	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/force", s.adminMutation("machine.drain.force", s.prepareDrain(true)))
 	mux.HandleFunc("GET /api/admin/apps", s.adminRead(s.listApps))
 	mux.HandleFunc("POST /api/admin/apps/validate", s.adminRead(s.validateApp))
 	mux.HandleFunc("POST /api/admin/apps", s.adminMutation("app.create", s.prepareCreateApp))
@@ -358,7 +359,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	config, _, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	config, changed, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	if err == nil && changed && m.NodeID != newNodeID {
+		err = s.configs.FenceConfigUpdate(r.Context(), tx, m.NodeID)
+	}
 	if err != nil {
 		s.databaseError(w, err)
 		return

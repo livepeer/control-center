@@ -140,7 +140,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 			s.databaseError(w, e)
 			return
 		}
-		if e = s.configs.FenceCredentialRefresh(r.Context(), tx, m.NodeID); e != nil {
+		if e = s.configs.FenceConfigUpdate(r.Context(), tx, m.NodeID); e != nil {
 			s.databaseError(w, e)
 			return
 		}

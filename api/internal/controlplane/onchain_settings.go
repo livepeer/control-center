@@ -298,7 +298,7 @@ func (s *Server) reconcileOnchain(ctx context.Context) error {
 				}
 			}
 			if err == nil {
-				_, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, m.node)
+				err = s.configs.FenceConfigUpdate(ctx, tx, m.node)
 			}
 		}
 		if err == nil {
