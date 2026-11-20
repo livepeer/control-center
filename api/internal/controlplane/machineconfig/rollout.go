@@ -69,6 +69,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	if state.ApplyingConfigDigest != "" {
 		if state.ApplyingConfigDigest == digest {
 			if forced {
+				state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+				state.RolloutReason = "rollout_pending"
 				return false, nil
 			}
 			report, at, e := s.store.Report(ctx, m, "runtime")

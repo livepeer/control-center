@@ -126,7 +126,8 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 		state.ForcedDrainTarget = DrainTarget(node, state)
 		state.RolloutReason = "rollout_pending"
 	} else {
-		state.ForcedDrainTarget = ""
+		// The new generation revokes force. Keep the marker so Gate can
+		// restore the held workload if the replacement was not published.
 		state.DrainStartedAt = time.Now().UTC()
 		state.RolloutReason = "drain_pending"
 	}
@@ -138,9 +139,9 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	return result, err
 }
 
-// FenceCredentialRefresh runs in the credential transaction, after updating the
-// enrollment. A waiting state writer must recheck the changed shared revision.
-func (s *Manager) FenceCredentialRefresh(ctx context.Context, tx *sql.Tx, node string) error {
+// FenceConfigUpdate makes workers recheck the revision after a configuration
+// input changes in the enrollment's transaction.
+func (s *Manager) FenceConfigUpdate(ctx context.Context, tx *sql.Tx, node string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, node)
 	return err
 }

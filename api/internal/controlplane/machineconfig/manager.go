@@ -208,12 +208,6 @@ func (s *Manager) reconcile(ctx context.Context, m Machine) error {
 		return err
 	}
 	desired := s.Desired(m, record.State, exposure)
-	// Onchain settings can change after the rollout decision without changing
-	// the lease revision. Leave the existing bundle until the new digest is gated.
-	if !m.Terminal && record.ApplyingConfigDigest != "" && record.HeldOrchestrator == "" &&
-		Digest(desired) != record.ApplyingConfigDigest {
-		return nil
-	}
 	if desired.ReportError != nil && desired.TelemetryEnabled && !m.Terminal {
 		// Without the report, telemetry capability is unknown; publishing
 		// would remove a running agent.

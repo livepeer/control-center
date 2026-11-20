@@ -359,7 +359,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	config, _, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	config, changed, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	if err == nil && changed && m.NodeID != newNodeID {
+		err = s.configs.FenceConfigUpdate(r.Context(), tx, m.NodeID)
+	}
 	if err != nil {
 		s.databaseError(w, err)
 		return

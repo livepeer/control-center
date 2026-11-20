@@ -318,6 +318,66 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 	}
 }
 
+func TestUnpublishedForceAfterRetryOrObservationFailure(t *testing.T) {
+	for _, action := range []string{"ordinary retry", "settings read timeout"} {
+		t.Run(action, func(t *testing.T) {
+			s, _ := tunnelTestServer(t)
+			c := enroll(t, s, ownerA, strings.Repeat("9", 64))
+			readyTunnel(t, s, c)
+			adminA(t, s)
+			node := c["node_id"]
+			s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+			configureTestTunnels(t, s)
+			expired := expireWorkloadDrain(t, s, node)
+			path := "/api/admin/machines/" + node + "/drain/"
+			requireStatus(t, request(t, s, "POST", path+"force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
+			if err := s.tunnels.Reconcile(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			state, _, err := s.loadTunnel(t.Context(), node)
+			previous, _ := publishedMachineConfiguration(t, s, node)
+			if err != nil || state.ApplyingConfigDigest != expired.PendingConfigDigest || previous.ConfigDigest == expired.PendingConfigDigest {
+				t.Fatal("expected a planned but unpublished force", err)
+			}
+
+			switch action {
+			case "ordinary retry":
+				requireStatus(t, request(t, s, "POST", path+"retry", "session-a", map[string]int64{"generation": state.Generation}), 202)
+			case "settings read timeout":
+				tx, err := s.db.Begin()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				if _, err = tx.Exec(`LOCK TABLE lpcc.onchain_state IN ACCESS EXCLUSIVE MODE`); err != nil {
+					t.Fatal(err)
+				}
+				if err = s.configs.Reconcile(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				if err = tx.Rollback(); err != nil {
+					t.Fatal(err)
+				}
+				state, _, err = s.loadTunnel(t.Context(), node)
+				if err != nil || state.RolloutReason != "lifecycle_observation_failed" || state.HeldOrchestrator == "" {
+					t.Fatal("expected management reconcile to retain the previous workload", err)
+				}
+			}
+			if err := s.reconcile(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			runtime, _ := publishedMachineConfiguration(t, s, node)
+			want := previous.ConfigDigest
+			if action == "settings read timeout" {
+				want = expired.PendingConfigDigest
+			}
+			if runtime.ConfigDigest != want || !runtime.DrainRequested {
+				t.Fatal("unexpected workload after reconciliation", runtime.ConfigDigest, runtime.DrainRequested)
+			}
+		})
+	}
+}
+
 func TestForceRolloutRejectsInitialPublicExposure(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("c", 64))
