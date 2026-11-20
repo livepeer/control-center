@@ -107,7 +107,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		if !state.DrainRequested || state.PendingConfigDigest != "" {
 			state.Generation++
 		}
-		if !state.DrainRequested || state.DrainStartedAt.IsZero() ||
+		if frozen || !state.DrainRequested || state.DrainStartedAt.IsZero() ||
 			state.HeldOrchestrator != old.manifest || state.HeldUpgradePlan != old.upgradePlan {
 			state.DrainStartedAt = time.Now().UTC()
 		}

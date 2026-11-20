@@ -269,9 +269,28 @@ func TestAutomaticForceAndRollback(t *testing.T) {
 		t.Fatal("expected forced replacement to be published with admission closed")
 	}
 
+	// A failed observation can hold the already-published replacement.
+	requireNoError(t, s.reconcile(t.Context()))
+	tx, err := s.db.Begin()
+	requireNoError(t, err)
+	defer tx.Rollback()
+	_, err = tx.Exec("LOCK TABLE lpcc.onchain_state IN ACCESS EXCLUSIVE MODE")
+	requireNoError(t, err)
+	requireNoError(t, s.configs.Reconcile(t.Context()))
+	requireNoError(t, tx.Rollback())
+	state, _, err := s.loadTunnel(t.Context(), m.NodeID)
+	requireNoError(t, err)
+	if state.HeldOrchestrator == "" || state.ApplyingConfigDigest != replacement.ConfigDigest || state.RolloutReason != "lifecycle_observation_failed" {
+		t.Fatal("expected the observation failure to hold the published replacement")
+	}
+
 	s.params.RuntimeNodeImage = image
 	s.configs = s.newConfigurationManager()
 	requireNoError(t, s.reconcile(t.Context()))
+	draining, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if draining.ConfigDigest != replacement.ConfigDigest || !draining.DrainStartedAt.After(replacement.DrainStartedAt) {
+		t.Fatal("rollback must drain the published replacement with a fresh deadline")
+	}
 	reportRuntime(t, s, c, "runner", true)
 	requireNoError(t, s.reconcile(t.Context()))
 	rollback, _ := publishedMachineConfiguration(t, s, m.NodeID)
