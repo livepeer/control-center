@@ -641,6 +641,42 @@ func TestOnchainStartupRepairSupersedesDrain(t *testing.T) {
 	}
 }
 
+func TestOnchainStartupRepairDoesNotBlockEndpointChange(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	onchainSettings(t, s)
+	configureTestTunnels(t, s)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	node := c["node_id"]
+	reportRuntime(t, s, c, "runtime", false)
+	driveTunnels(t, s)
+	reportRuntime(t, s, c, "runner", true)
+	driveTunnels(t, s)
+	original, manifest := publishedMachineConfiguration(t, s, node)
+	if original.OnchainActive || !strings.Contains(manifest, s.params.CloudflareBaseDomain) {
+		t.Fatal("expected a starting workload on the original route")
+	}
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	configureTestTunnels(t, s)
+	execSQL(t, s.db, "UPDATE lpcc.machine_states SET next_attempt_at=now()")
+	if err := s.tunnels.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.ApplyingConfigDigest == "" || state.ApplyingConfigDigest == original.ConfigDigest {
+		t.Fatal("expected an unpublished startup repair", err)
+	}
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	reportRuntime(t, s, c, "runner", true)
+	driveTunnels(t, s)
+	state, _, err = s.loadTunnel(t.Context(), node)
+	m, manifest := publishedMachineConfiguration(t, s, node)
+	if err != nil || state.Target != "" || !strings.Contains(manifest, s.params.CloudflareBaseDomain) || !m.DrainRequested {
+		t.Fatal("the drained endpoint change did not publish while waiting for readiness", err)
+	}
+}
+
 func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {
 	s, _, c := onchainMachine(t)
 	node := c["node_id"]

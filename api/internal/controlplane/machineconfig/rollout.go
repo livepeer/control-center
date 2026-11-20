@@ -52,7 +52,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	// retaining storage identity, redemption destination and the admission freeze.
 	frozen := state.ApplyingConfigDigest == old.ConfigDigest
 	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
-	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient && old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller && old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL
+	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient &&
+		old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller &&
+		old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL && sameWorkloadEndpoints(old.manifest, desired)
 	if old.ConfigDigest != digest && old.ConfigDigest != state.UnconfirmedForcedDigest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 		state.ApplyingConfigDigest = digest
