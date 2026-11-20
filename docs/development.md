@@ -43,11 +43,13 @@ instance with database and test-role creation privileges. Browser tests use
 Chrome and mocks.
 
 [GitHub Actions CI](../.github/workflows/ci.yml) runs on pull requests and can
-be run manually. It checks Go formatting, race tests, Vet, Staticcheck and
-Govulncheck; builds and browser-tests the UI, tests its edge Worker and
-dry-runs its production deployment; and runs bootstrap, remote runner and
-Runtime tests. CI supplies PostgreSQL, Livepeer Node and cloudflared for
-integration tests. Pushes to `main` also run these checks.
+be run manually. The hidden file check requires an exact allowlist entry for
+each tracked path with a dot-prefixed file or directory name. CI checks Go
+formatting and runs race tests, Vet, Staticcheck and Govulncheck. It builds and
+browser-tests the UI, tests its edge Worker, dry-runs the production UI
+deployment and runs the bootstrap, remote runner and Runtime tests. CI
+supplies PostgreSQL, Livepeer Node and cloudflared for integration tests.
+Pushes to `main` also run these checks.
 
 For local real-process tests, set `NODE_BINARY` and `LIVEPEER_NODE_TEST_BINARY`
 to the compatible Node binary. CI sets both. Isolated Flux/gVisor cluster tests

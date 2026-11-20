@@ -9,6 +9,40 @@ permissions:
   contents: read
 
 jobs:
+  hidden-files:
+    name: Check hidden files
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reject hidden paths outside the allowlist
+        shell: bash
+        run: |
+          git ls-files -z | {
+            status=0
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                .dockerignore|\
+                .github/dependabot.yml|\
+                .github/workflows/build.yml|\
+                .github/workflows/ci.yml|\
+                .github/workflows/clean-dependabot.yml|\
+                .github/workflows/package.yml|\
+                .github/workflows/ui-deploy.yml|\
+                .gitignore|\
+                runtime/.gitignore)
+                  ;;
+                .*|*/.*)
+                  printf 'Unexpected hidden path: %q\n' "$path" >&2
+                  status=1
+                  ;;
+              esac
+            done
+            exit "$status"
+          }
+
   test:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
