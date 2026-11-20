@@ -138,17 +138,14 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-Ordinary removal withdraws readiness and waits for draining. Removal and
-endpoint changes can proceed on timely confirmation and need a positive
-`DrainTimeout` to receive it. An expired drain remains blocked even if a late
-completion arrives. An administrator can start a fresh drain with `drain/retry`
-or remove the machine with `force:true`.
+Normal removal and endpoint changes require a positive `DrainTimeout` and
+confirmation before the deadline. After expiry, use `drain/retry` or remove the
+machine with `force:true`. For defaults, see [drain settings](app-registry.md#runtime-delivery-and-completion-contract)
 
-If waiting for sessions to drain during an orchestrator update, an administrator
-can use `drain/force` at any time. Control Center forces the update on its next
-update check after `DrainTimeout` expires (`12h10m` by default). Replacing
-the orchestrator ends remaining sessions. The new orchestrator accepts sessions
-when Runtime reports it ready.
+Use `drain/force` to stop waiting during an orchestrator update. After the
+deadline, Control Center forces eligible updates on its next check. A forced
+update ends remaining sessions. The new orchestrator accepts sessions when
+Runtime reports it ready.
 
 Stop all older Control Center API replicas before an upgraded replica starts
 writing rollout state. Let ongoing forced updates finish before rolling back to an

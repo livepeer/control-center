@@ -191,25 +191,16 @@ modes. Single-session lifetimes are unsupported. Each instance runs in a gVisor
 Pod with a private Service. Node advertises ready instances and checks capacity
 before accepting work; Control Center collects Node's discovery responses.
 
-Removal withdraws an instance from discovery. `RuntimeAppDrainTimeout` is how
-long Node lets an app's existing sessions finish after withdrawal. It accepts
-`0s` through `12h` and defaults to `12h`. Set it to `0s` to end sessions
-immediately. Normally Runtime waits for Node to confirm registration removal,
-then removes the Pod and Service and reports cleanup.
+- `RuntimeAppDrainTimeout` gives existing sessions time to finish after an app
+  is withdrawn. It defaults to `12h` and accepts `0s` through `12h`. `0s` ends
+  sessions immediately.
+- `DrainTimeout` is the maximum wait for confirmation after Control Center
+  requests a machine drain. It must be at least `RuntimeAppDrainTimeout` and
+  defaults to the app timeout plus `10m` (`12h10m` by default). Setting both to
+  `0s` makes the machine drain expire immediately.
 
-`DrainTimeout` is how long Control Center waits for the runner to confirm a
-machine drain. The clock starts when Control Center requests the drain, and the
-operation can proceed as soon as the runner confirms it. `DrainTimeout` must be
-at least `RuntimeAppDrainTimeout`. Omit it to use the app timeout plus `10m`,
-which gives `12h10m` by default. The extra time allows for delivery of the drain
-request, cleanup, and reporting. Setting both values to `0s` makes machine
-drains expire immediately.
-
-If the deadline expires during an orchestrator update, Control Center forces
-replacement on its next update check, possibly without Node confirmation.
-Ordinary machine removal and endpoint migration require a positive timeout to
-receive confirmation. If a drain expires, retry starts a new drain.
-Node restart or owner expiry can lose sessions.
+After Node confirms registration removal, Runtime removes the Pod and Service
+and reports cleanup. A Node restart or an expired runner registration can end sessions early.
 
 Normal machine removal withdraws assignments and waits for app cleanup and
 machine drain. Forced removal stops Node early without a graceful drain. It
