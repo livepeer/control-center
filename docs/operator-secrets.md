@@ -81,8 +81,9 @@ The secrets service and Vault are required services in the default
 [Compose deployment](../deploy/compose.yaml). Existing installations using the
 `livepeer-secrets` project should use the local deployment helper to retain the
 running Vault and its network. For a fresh setup, work from `deploy/`. Set
-`LIVEPEER_REDEEMER_IMAGE` in `.env` to a compatible digest-pinned Node image
-before running Compose. This value is required even when starting only Vault.
+`LIVEPEER_REDEEMER_IMAGE` in `compose.env` to a compatible digest-pinned Node
+image before running Compose. This value is required even when starting only
+Vault.
 
 1. Copy `secrets-service.env.example` to `secrets-service.env`. Use the same
    Supabase settings as `config.toml`, and keep `SECRETS_PUBLIC_URL` equal to
@@ -122,7 +123,7 @@ before running Compose. This value is required even when starting only Vault.
    Preserve existing Vault data when adopting these paths. Start Vault:
 
    ```sh
-   docker compose up -d vault
+   docker compose --env-file compose.env up -d vault
    ```
 
    Initialize and unseal it, then enable Transit at `transit/`. Using an
@@ -137,13 +138,13 @@ before running Compose. This value is required even when starting only Vault.
 4. Start the complete deployment:
 
    ```sh
-   docker compose up -d --build --wait
+   docker compose --env-file compose.env up -d --build --wait
    ```
 
 The service applies PostgreSQL migrations on startup. See
 [orchestrator provisioning](operations.md#orchestrators). To inspect migrations,
-run `docker compose run --rm --no-deps secrets migrate status`; use `migrate up`
-to apply them separately. `migrate down` can delete data.
+run `docker compose --env-file compose.env run --rm --no-deps secrets migrate status`.
+Use `migrate up` to apply them separately. `migrate down` can delete data.
 
 ## Application behavior
 

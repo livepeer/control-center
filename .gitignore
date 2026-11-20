@@ -13,6 +13,7 @@ ui/.wrangler/
 /tools/__pycache__/
 /tools/tests/__pycache__/
 /deploy/config.toml
+/deploy/compose.env
 /deploy/secrets/
 /deploy/bootstrap/
 

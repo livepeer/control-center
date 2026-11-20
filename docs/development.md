@@ -21,13 +21,13 @@ make ui
 
 Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
 The Vite dev server proxies `/api` to the local API on the same origin. Deployed
-builds call the API origin from `VITE_CONTROLCENTER_API_URL` instead
-([`ui/.env.production`](../ui/.env.production)), which needs the UI origin in
-the API's `AllowedOrigins`.
+builds call the API origin from `VITE_CONTROLCENTER_API_URL`, which defaults to
+the value in [`ui/production.env`](../ui/production.env). Add the UI origin to
+the deployed API's `AllowedOrigins`.
 
 To try the deployed edge behaviour locally (SPA fallback, `_headers`, and
 bootstrap routes against a local R2 bucket), build the UI and run
-`npx wrangler dev` in `ui/`.
+`npx wrangler dev --env-file /dev/null` in `ui/`.
 
 ## Development checks
 

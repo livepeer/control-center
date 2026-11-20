@@ -135,7 +135,7 @@ jobs:
       - name: Validate edge deployment
         env:
           WRANGLER_SEND_METRICS: 'false'
-        run: npx wrangler deploy --dry-run --env production --outdir "$RUNNER_TEMP/wrangler-dry-run"
+        run: npx wrangler deploy --env-file /dev/null --dry-run --env production --outdir "$RUNNER_TEMP/wrangler-dry-run"
       - name: Install Chrome
         run: npx playwright install --with-deps chrome
       - name: Browser tests
