@@ -121,6 +121,9 @@ POST /api/admin/machines/<NODE_ID>/tunnel/rotate
 POST /api/admin/machines/<NODE_ID>/drain/retry
 {"generation":<EXPIRED_GENERATION>}
 
+POST /api/admin/machines/<NODE_ID>/drain/force
+{"generation":<EXPIRED_GENERATION>}
+
 DELETE /api/admin/machines/<NODE_ID>
 {"force":false}
 ```
@@ -134,7 +137,14 @@ without the secrets service.
 
 Ordinary removal withdraws readiness and waits for draining. An expired drain
 deadline remains blocked even if a late completion arrives. An administrator can
-start a fresh drain with `drain/retry`, or deliberately remove with `force:true`.
+start a fresh drain with `drain/retry` or deliberately remove with `force:true`.
+
+For an expired in-place workload replacement, `drain/force` authorizes Control
+Center to publish the pending configuration without waiting for a drained
+report. Replacing the orchestrator ends its remaining sessions. Admission stays
+paused until Runtime confirms the replacement is ready. The authorization
+applies to the specified generation and its pending configuration.
+
 Deletion denies token delivery, installs deny-only ingress, revokes connector
 authentication before disconnecting, deletes owned DNS and tunnel resources.
 Cleanup proceeds even with the machine offline. Retired-node cleanup cannot

@@ -23,7 +23,7 @@ func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, erro
 	return ReadApplied(data)
 }
 
-// Gate holds the applied workload until a fresh report completes its drain.
+// Gate holds the applied workload until its drain completes or an administrator forces the pending replacement.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
 	if desired.OnchainError != nil {
@@ -37,6 +37,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
+	forced := state.ForcedConfigDigest == digest && state.PendingConfigDigest == digest
+	state.ForcedConfigDigest = ""
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining storage identity, redemption destination and the admission freeze.
@@ -95,7 +97,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.HeldOnchain = onchainJSON(old.Onchain)
 		s.holdUpgrade(ctx, m, state)
 	}
-	if old.ConfigDigest != digest {
+	if old.ConfigDigest != digest && !forced {
 		done, err := s.drainComplete(ctx, m, state)
 		if err != nil || !done {
 			return true, err
@@ -126,6 +128,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	digest := Digest(desired)
 	if !state.DrainRequested || state.Target != target {
 		state.PendingConfigDigest = ""
+		state.ForcedConfigDigest = ""
 		state.HeldOrchestrator = ""
 		if old.ConfigDigest == digest {
 			return false, nil
@@ -149,6 +152,7 @@ func (s *State) CancelTarget() {
 	s.DrainStartedAt = time.Time{}
 	s.Target = ""
 	s.PendingConfigDigest = ""
+	s.ForcedConfigDigest = ""
 	s.HeldOrchestrator = ""
 	s.HeldUpgradePlan = ""
 	s.ApplyingConfigDigest = ""

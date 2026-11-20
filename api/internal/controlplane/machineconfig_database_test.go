@@ -181,6 +181,87 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	}
 }
 
+func TestForceExpiredWorkloadRollout(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		superseded bool
+	}{
+		{name: "pending target"},
+		{name: "superseded target", superseded: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := newTestServer(t)
+			s.params.TunnelDrainTimeout = time.Minute
+			s.configs = s.newConfigurationManager()
+			adminA(t, s)
+			c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+			m, previous := priorMachineConfiguration(t, s, c, nil)
+			store := machineconfig.Store{DB: s.db}
+			loadRollout := func() machineconfig.State {
+				t.Helper()
+				record, err := store.Load(t.Context(), m.NodeID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return record.State
+			}
+			reconcile := func() {
+				t.Helper()
+				if err := s.reconcile(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			force := func(token string, generation int64, status int) {
+				t.Helper()
+				path := "/api/admin/machines/" + m.NodeID + "/drain/force"
+				requireStatus(t, request(t, s, "POST", path, token, map[string]int64{"generation": generation}), status)
+			}
+			reconcile()
+			pending := loadRollout()
+			if pending.PendingConfigDigest == "" || pending.HeldOrchestrator != previous {
+				t.Fatal("expected a pending, held rollout", pending.RolloutReason)
+			}
+			force("session-b", pending.Generation, 403)
+			force("session-a", pending.Generation, 409)
+			execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($2::text)) WHERE node_id=$1`, m.NodeID, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
+			reconcile()
+			if reason := loadRollout().RolloutReason; reason != "drain_timeout" {
+				t.Fatal("expected expired drain", reason)
+			}
+			force("session-a", pending.Generation-1, 409)
+			force("session-a", pending.Generation, 202)
+			force("session-a", pending.Generation, 409)
+			if test.superseded {
+				s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+				s.configs = s.newConfigurationManager()
+			}
+			reconcile()
+			state := loadRollout()
+			runtime, manifest := publishedMachineConfiguration(t, s, m.NodeID)
+			if state.ForcedConfigDigest != "" || !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
+				t.Fatal("force authorization was retained or admission resumed early", state.RolloutReason)
+			}
+			if test.superseded {
+				if manifest != previous || state.PendingConfigDigest == pending.PendingConfigDigest || state.ApplyingConfigDigest != "" {
+					t.Fatal("force authorized a different workload", state.RolloutReason)
+				}
+				return
+			}
+			if state.ApplyingConfigDigest != pending.PendingConfigDigest || manifest == previous || runtime.ConfigDigest != state.ApplyingConfigDigest {
+				t.Fatal("force did not publish the authorized workload", state.RolloutReason)
+			}
+			if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
+				t.Fatal("expected one audited force operation")
+			}
+			reportRuntime(t, s, c, "runtime", true)
+			reconcile()
+			if state = loadRollout(); state.DrainRequested || state.ApprovedConfigDigest != pending.PendingConfigDigest {
+				t.Fatal("ready replacement did not finish the rollout", state.RolloutReason)
+			}
+		})
+	}
+}
+
 func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("9", 64))
