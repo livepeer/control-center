@@ -65,7 +65,7 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node string, force boo
 		state.DrainStartedAt = time.Now().UTC()
 		state.Target = ""
 		state.PendingConfigDigest = ""
-		state.ForcedConfigDigest = ""
+		state.ForcedDrainTarget = ""
 		state.RolloutReason = "drain_pending"
 		raw, _ = json.Marshal(state)
 		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,state,rollout) VALUES($1,'{}',$2) ON CONFLICT(node_id) DO UPDATE SET rollout=EXCLUDED.rollout,revision=lpcc.machine_states.revision+1,next_attempt_at=now()`, node, string(raw))
@@ -89,8 +89,12 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	if err != nil {
 		return result, err
 	}
-	var raw []byte
-	if err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw); err != nil {
+	var raw, routing []byte
+	err = tx.QueryRowContext(ctx, `SELECT rollout,state FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw, &routing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return result, ErrDrainChanged
+	}
+	if err != nil {
 		return result, err
 	}
 	var state State
@@ -106,13 +110,23 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	state.Generation++
 	if force {
 		if state.Lifecycle != "active" || state.Target != "" || state.DrainStartedAt.IsZero() ||
-			state.HeldOrchestrator == "" || state.PendingConfigDigest == "" || state.ApplyingConfigDigest != "" || state.ForcedConfigDigest != "" {
+			state.HeldOrchestrator == "" || state.PendingConfigDigest == "" || state.ApplyingConfigDigest != "" || state.ForcedDrainTarget != "" {
 			return result, ErrForceDrainUnavailable
 		}
-		state.ForcedConfigDigest = state.PendingConfigDigest
+		var exposure *Exposure
+		if s.deps.Exposure != nil {
+			exposure, err = s.deps.Exposure(routing)
+			if err != nil {
+				return result, err
+			}
+		}
+		if !sameWorkloadEndpoints(state.HeldOrchestrator, Desired{State: state, Exposure: exposure}) {
+			return result, ErrForceDrainUnavailable
+		}
+		state.ForcedDrainTarget = DrainTarget(node, state)
 		state.RolloutReason = "rollout_pending"
 	} else {
-		state.ForcedConfigDigest = ""
+		state.ForcedDrainTarget = ""
 		state.DrainStartedAt = time.Now().UTC()
 		state.RolloutReason = "drain_pending"
 	}

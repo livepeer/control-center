@@ -13,12 +13,23 @@ import (
 func routeEnabled(m Desired) bool {
 	return !m.Terminal && m.Exposure != nil && m.Exposure.IngressDigest != "" && (m.State.Lifecycle == "active" || m.State.Lifecycle == "draining")
 }
-func templateValues(m Desired) *strings.Replacer {
-	service, proxy := PrivateOrchestrator, ""
+func workloadEndpoints(m Desired) (service, proxy string) {
 	if routeEnabled(m) {
-		service = m.Exposure.ServiceURL
-		proxy = m.Exposure.ProxyURLTemplate
+		return m.Exposure.ServiceURL, m.Exposure.ProxyURLTemplate
 	}
+	return PrivateOrchestrator, ""
+}
+
+func sameWorkloadEndpoints(heldManifest string, desired Desired) bool {
+	service, proxy := workloadEndpoints(desired)
+	// Read the endpoints from the held orchestrator ConfigMap. The bundle's
+	// Runtime metadata can already describe routes the held workload has not applied.
+	return strings.Contains(heldManifest, fmt.Sprintf("\n    ServiceURL = %q\n", service)) &&
+		strings.Contains(heldManifest, fmt.Sprintf("\n    ProxyURLTemplate = %q\n", proxy))
+}
+
+func templateValues(m Desired) *strings.Replacer {
+	service, proxy := workloadEndpoints(m)
 	mode := "https"
 	if strings.HasPrefix(m.ControlAPIURL, "http://") {
 		mode = "development-http"

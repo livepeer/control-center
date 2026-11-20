@@ -33,7 +33,7 @@ type State struct {
 	HeldOnchain            string    `json:"held_onchain,omitempty"`
 	HeldOrchestrator       string    `json:"held_orchestrator,omitempty"`
 	PendingConfigDigest    string    `json:"pending_config_digest,omitempty"`
-	ForcedConfigDigest     string    `json:"forced_config_digest,omitempty"`
+	ForcedDrainTarget      string    `json:"forced_drain_target,omitempty"`
 	ApprovedConfigDigest   string    `json:"approved_config_digest,omitempty"`
 	RolloutReason          string    `json:"rollout_reason,omitempty"`
 }

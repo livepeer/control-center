@@ -216,6 +216,7 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 				path := "/api/admin/machines/" + m.NodeID + "/drain/force"
 				requireStatus(t, request(t, s, "POST", path, token, map[string]int64{"generation": generation}), status)
 			}
+			force("session-a", 1, 409)
 			reconcile()
 			pending := loadRollout()
 			if pending.PendingConfigDigest == "" || pending.HeldOrchestrator != previous {
@@ -238,7 +239,7 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 			reconcile()
 			state := loadRollout()
 			runtime, manifest := publishedMachineConfiguration(t, s, m.NodeID)
-			if state.ForcedConfigDigest != "" || !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
+			if state.ForcedDrainTarget != "" || !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
 				t.Fatal("force authorization was retained or admission resumed early", state.RolloutReason)
 			}
 			if test.superseded {
@@ -260,6 +261,118 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	initial := readyTunnel(t, s, c)
+	adminA(t, s)
+	node := c["node_id"]
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	configureTestTunnels(t, s)
+	expired := expireWorkloadDrain(t, s, node)
+	path := "/api/admin/machines/" + node
+	requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
+	requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", map[string]string{"kind": "connector"}), 202)
+	if err := s.tunnels.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, _ := publishedMachineConfiguration(t, s, node)
+	if state.Generation <= expired.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
+		t.Fatal("expected connector rotation to advance the generation")
+	}
+	if state.ForcedDrainTarget != "" || runtime.ConfigDigest == expired.PendingConfigDigest {
+		t.Fatal("published the replacement after its force generation was superseded")
+	}
+}
+
+func TestForceRolloutRejectsInitialPublicExposure(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("c", 64))
+	adminA(t, s)
+	node := c["node_id"]
+	_, previous := publishedMachineConfiguration(t, s, node)
+	reportRuntime(t, s, c, "runtime", false)
+	driveTunnels(t, s)
+	expired := expireWorkloadDrain(t, s, node)
+	if expired.Target != "" || expired.HeldOrchestrator != previous {
+		t.Fatal("expected initial public exposure to use a workload drain")
+	}
+	path := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": expired.Generation}), 409)
+}
+
+func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
+	s, _, c := onchainMachine(t)
+	node := c["node_id"]
+	adminA(t, s)
+	next, err := s.loadOnchainTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.RedeemerURL = "https://api.example/pending"
+	writeOnchainTemplate(t, s, next)
+	expired := expireWorkloadDrain(t, s, node)
+	previous, _ := publishedMachineConfiguration(t, s, node)
+	path := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": expired.Generation}), 202)
+
+	var database string
+	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Database, cfg.DefaultQueryExecMode = database, pgx.QueryExecModeExec
+	changed := false
+	cfg.Tracer = onchainQueryTrace(func(query string) {
+		if changed || !strings.HasPrefix(query, "UPDATE lpcc.machine_states SET apps_generation=1,revision=") {
+			return
+		}
+		changed = true
+		next.TicketFaceValue = "4321"
+		writeOnchainTemplate(t, s, next)
+		if enrolled := enroll(t, s, ownerA, strings.Repeat("a", 64)); enrolled["node_id"] != node {
+			t.Fatal("onchain settings change created a new enrollment")
+		}
+	})
+	db := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { db.Close() })
+	s.db = db
+	s.configs = s.newConfigurationManager()
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	runtime, _ := publishedMachineConfiguration(t, s, node)
+	if !changed || runtime.ConfigDigest != previous.ConfigDigest {
+		t.Fatal("published a different configuration after force authorization", changed, runtime.ConfigDigest)
+	}
+}
+
+func expireWorkloadDrain(t *testing.T, s *Server, node string) machineconfig.State {
+	t.Helper()
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($2::text)) WHERE node_id=$1`, node, time.Now().Add(-24*time.Hour).Format(time.RFC3339Nano))
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.RolloutReason != "drain_timeout" || state.PendingConfigDigest == "" {
+		t.Fatal("expected an expired workload drain", state.RolloutReason, err)
+	}
+	return state.State
 }
 
 func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {

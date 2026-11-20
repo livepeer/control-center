@@ -37,8 +37,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
-	forced := state.ForcedConfigDigest == digest && state.PendingConfigDigest == digest
-	state.ForcedConfigDigest = ""
+	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
+		state.PendingConfigDigest == digest && sameWorkloadEndpoints(state.HeldOrchestrator, desired)
+	state.ForcedDrainTarget = ""
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining storage identity, redemption destination and the admission freeze.
@@ -128,7 +129,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	digest := Digest(desired)
 	if !state.DrainRequested || state.Target != target {
 		state.PendingConfigDigest = ""
-		state.ForcedConfigDigest = ""
+		state.ForcedDrainTarget = ""
 		state.HeldOrchestrator = ""
 		if old.ConfigDigest == digest {
 			return false, nil
@@ -152,7 +153,7 @@ func (s *State) CancelTarget() {
 	s.DrainStartedAt = time.Time{}
 	s.Target = ""
 	s.PendingConfigDigest = ""
-	s.ForcedConfigDigest = ""
+	s.ForcedDrainTarget = ""
 	s.HeldOrchestrator = ""
 	s.HeldUpgradePlan = ""
 	s.ApplyingConfigDigest = ""
