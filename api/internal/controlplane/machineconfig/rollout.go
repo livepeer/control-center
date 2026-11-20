@@ -39,8 +39,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	digest := Digest(desired)
 	// Keep the authorization until the approved digest is published. A
 	// generation change can fence publication after the plan was saved.
-	if old.ConfigDigest == state.ApplyingConfigDigest {
+	if state.ForcedDrainTarget != "" && old.ConfigDigest == state.ApplyingConfigDigest {
 		state.ForcedDrainTarget = ""
+		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 	}
 	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
 		state.PendingConfigDigest == digest && sameWorkloadEndpoints(manifest, desired)
