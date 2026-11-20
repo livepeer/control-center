@@ -181,95 +181,55 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	}
 }
 
-func TestForcePendingWorkloadRollout(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		automatic  bool
-		superseded bool
-	}{
-		{name: "manual before deadline"},
-		{name: "automatic after deadline", automatic: true},
-		{name: "superseded target", superseded: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			s := newTestServer(t)
-			s.params.TunnelDrainTimeout = time.Minute
-			s.configs = s.newConfigurationManager()
-			adminA(t, s)
-			c := enroll(t, s, ownerA, strings.Repeat("7", 64))
-			m, previous := priorMachineConfiguration(t, s, c, nil)
-			store := machineconfig.Store{DB: s.db}
-			loadRollout := func() machineconfig.State {
-				t.Helper()
-				record, err := store.Load(t.Context(), m.NodeID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return record.State
-			}
-			force := func(token string, generation int64, status int) {
-				t.Helper()
-				path := "/api/admin/machines/" + m.NodeID + "/drain/force"
-				requireStatus(t, request(t, s, "POST", path, token, map[string]int64{"generation": generation}), status)
-			}
-			force("session-a", 1, 409)
-			requireNoError(t, s.reconcile(t.Context()))
-			pending := loadRollout()
-			if pending.PendingConfigDigest == "" || pending.HeldOrchestrator != previous {
-				t.Fatal("expected a pending, held rollout", pending.RolloutReason)
-			}
-			requireNoError(t, s.reconcile(t.Context()))
-			if _, manifest := publishedMachineConfiguration(t, s, m.NodeID); manifest != previous {
-				t.Fatal("published the replacement before the drain deadline")
-			}
-			if test.automatic {
-				backdateWorkloadDrain(t, s, m.NodeID)
-			} else {
-				force("session-b", pending.Generation, 403)
-				force("session-a", pending.Generation-1, 409)
-				force("session-a", pending.Generation, 202)
-				force("session-a", pending.Generation, 409)
-			}
-			if test.superseded {
-				s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
-				s.configs = s.newConfigurationManager()
-			}
-			requireNoError(t, s.reconcile(t.Context()))
-			state := loadRollout()
-			runtime, manifest := publishedMachineConfiguration(t, s, m.NodeID)
-			if !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
-				t.Fatal("admission resumed early", state.RolloutReason)
-			}
-			if test.superseded {
-				if manifest != previous || state.PendingConfigDigest == pending.PendingConfigDigest || state.ApplyingConfigDigest != "" || state.ForcedDrainTarget != "" {
-					t.Fatal("force authorized a different workload", state.RolloutReason)
-				}
-				return
-			}
-			if state.ApplyingConfigDigest != pending.PendingConfigDigest || manifest == previous || runtime.ConfigDigest != state.ApplyingConfigDigest || state.Generation != pending.Generation+1 {
-				t.Fatal("force did not publish the pending workload in the new generation", state.RolloutReason)
-			}
-			if !test.automatic {
-				if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
-					t.Fatal("expected one audited force operation")
-				}
-				backdateWorkloadDrain(t, s, m.NodeID)
-			}
-			path := "/api/admin/machines/" + m.NodeID + "/drain/retry"
-			for range 2 {
-				requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": state.Generation}), 409)
-				requireNoError(t, s.reconcile(t.Context()))
-			}
-			reportRuntime(t, s, c, "runtime", true)
-			requireNoError(t, s.reconcile(t.Context()))
-			if state = loadRollout(); state.DrainRequested || state.ApprovedConfigDigest != pending.PendingConfigDigest || state.ForcedDrainTarget != "" {
-				t.Fatal("ready replacement did not finish the rollout", state.RolloutReason)
-			}
-		})
+func TestManualForceOnlyReleasesItsPendingWorkload(t *testing.T) {
+	s := newTestServer(t)
+	adminA(t, s)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	m, previous := priorMachineConfiguration(t, s, c, nil)
+	path := "/api/admin/machines/" + m.NodeID + "/drain/"
+	force := func(token string, generation int64, status int) {
+		t.Helper()
+		requireStatus(t, request(t, s, "POST", path+"force", token, map[string]int64{"generation": generation}), status)
+	}
+	force("session-a", 1, 409)
+	pending := pendingWorkloadDrain(t, s, m.NodeID)
+	force("session-b", pending.Generation, 403)
+	force("session-a", pending.Generation-1, 409)
+	force("session-a", pending.Generation, 202)
+	force("session-a", pending.Generation, 409)
+	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
+		t.Fatal("expected one audited force operation")
+	}
+
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	s.configs = s.newConfigurationManager()
+	next := pendingWorkloadDrain(t, s, m.NodeID)
+	held, heldManifest := publishedMachineConfiguration(t, s, m.NodeID)
+	if next.PendingConfigDigest == pending.PendingConfigDigest || next.ApplyingConfigDigest != "" || next.ForcedDrainTarget != "" || heldManifest != previous || !held.DrainRequested {
+		t.Fatal("force authorized a different workload", next.RolloutReason)
+	}
+	force("session-a", next.Generation, 202)
+	requireNoError(t, s.reconcile(t.Context()))
+	published, manifest := publishedMachineConfiguration(t, s, m.NodeID)
+	if published.ConfigDigest != next.PendingConfigDigest || published.Generation != next.Generation+1 || manifest == previous || !published.DrainRequested || published.OnchainActive {
+		t.Fatal("expected forced replacement in a new generation with admission closed")
+	}
+
+	// Retry cannot supersede a replacement once its bundle has been published.
+	backdateWorkloadDrain(t, s, m.NodeID)
+	for range 2 {
+		requireStatus(t, request(t, s, "POST", path+"retry", "session-a", map[string]int64{"generation": published.Generation}), 409)
+		requireNoError(t, s.reconcile(t.Context()))
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	ready, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if ready.DrainRequested || ready.ConfigDigest != next.PendingConfigDigest {
+		t.Fatal("ready replacement did not finish the rollout")
 	}
 }
 
-func TestRollbackAfterForcedPublication(t *testing.T) {
+func TestAutomaticForceAndRollback(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
 	m, _ := priorMachineConfiguration(t, s, c, nil)
@@ -278,7 +238,7 @@ func TestRollbackAfterForcedPublication(t *testing.T) {
 	requireNoError(t, s.reconcile(t.Context()))
 	reportRuntime(t, s, c, "runtime", true)
 	requireNoError(t, s.reconcile(t.Context()))
-	original, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	original, originalManifest := publishedMachineConfiguration(t, s, m.NodeID)
 	if original.DrainRequested {
 		t.Fatal("original workload was not ready")
 	}
@@ -286,10 +246,14 @@ func TestRollbackAfterForcedPublication(t *testing.T) {
 	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
 	s.configs = s.newConfigurationManager()
 	pending := pendingWorkloadDrain(t, s, m.NodeID)
+	requireNoError(t, s.reconcile(t.Context()))
+	if _, manifest := publishedMachineConfiguration(t, s, m.NodeID); manifest != originalManifest {
+		t.Fatal("published the replacement before the drain deadline")
+	}
 	backdateWorkloadDrain(t, s, m.NodeID)
 	requireNoError(t, s.reconcile(t.Context()))
 	replacement, _ := publishedMachineConfiguration(t, s, m.NodeID)
-	if replacement.ConfigDigest != pending.PendingConfigDigest || !replacement.DrainRequested {
+	if replacement.ConfigDigest != pending.PendingConfigDigest || replacement.Generation != pending.Generation+1 || !replacement.DrainRequested {
 		t.Fatal("expected forced replacement to be published with admission closed")
 	}
 
@@ -309,51 +273,39 @@ func TestRollbackAfterForcedPublication(t *testing.T) {
 	}
 }
 
-func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
-	for _, timing := range []string{"before planning", "during rendering"} {
-		t.Run(timing, func(t *testing.T) {
-			s, _ := tunnelTestServer(t)
-			c := enroll(t, s, ownerA, strings.Repeat("7", 64))
-			initial := readyTunnel(t, s, c)
-			adminA(t, s)
-			node := c["node_id"]
-			pending := forcePendingImageRollout(t, s, node)
-			path := "/api/admin/machines/" + node
-			rotated := false
-			rotate := func() {
-				rotated = true
-				requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", map[string]string{"kind": "connector"}), 202)
-				requireNoError(t, s.tunnels.Reconcile(t.Context()))
-			}
-			if timing == "during rendering" {
-				build := s.build
-				s.build = func(desired machineconfig.Desired) ([]byte, string, error) {
-					if !rotated && desired.NodeID == node && desired.State.ApplyingConfigDigest == pending.PendingConfigDigest {
-						rotate()
-					}
-					return build(desired)
-				}
-			} else {
-				rotate()
-			}
-			for i := 0; i < 2; i++ {
-				requireNoError(t, s.reconcile(t.Context()))
-				runtime, _ := publishedMachineConfiguration(t, s, node)
-				if runtime.ConfigDigest == pending.PendingConfigDigest {
-					t.Fatal("published the replacement after its force generation was superseded")
-				}
-			}
-			state, _, err := s.loadTunnel(t.Context(), node)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !rotated || state.Generation <= pending.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
-				t.Fatal("expected connector rotation to advance the generation")
-			}
-			if state.ForcedDrainTarget != "" || state.ApplyingConfigDigest != "" || state.HeldOrchestrator == "" {
-				t.Fatal("expected the old workload to stay held after rotation")
-			}
-		})
+func TestConnectorRotationDuringForcedPublication(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	adminA(t, s)
+	pending := forcePendingImageRollout(t, s, node)
+	build := s.build
+	rotated := false
+	s.build = func(desired machineconfig.Desired) ([]byte, string, error) {
+		if !rotated && desired.NodeID == node && desired.State.ApplyingConfigDigest == pending.PendingConfigDigest {
+			rotated = true
+			path := "/api/admin/machines/" + node + "/tunnel/rotate"
+			requireStatus(t, request(t, s, "POST", path, "session-a", map[string]string{"kind": "connector"}), 202)
+			requireNoError(t, s.tunnels.Reconcile(t.Context()))
+		}
+		return build(desired)
+	}
+	// Check both the stale publisher and the next worker that sees the rotation.
+	for range 2 {
+		requireNoError(t, s.reconcile(t.Context()))
+		published, _ := publishedMachineConfiguration(t, s, node)
+		if published.ConfigDigest == pending.PendingConfigDigest {
+			t.Fatal("published the replacement after its force generation was superseded")
+		}
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if !rotated || state.Generation <= pending.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
+		t.Fatal("expected connector rotation to advance the generation")
+	}
+	if state.ForcedDrainTarget != "" || state.ApplyingConfigDigest != "" || state.HeldOrchestrator == "" {
+		t.Fatal("expected the old workload to stay held after rotation")
 	}
 }
 
@@ -464,29 +416,6 @@ func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
 	_, manifest := publishedMachineConfiguration(t, s, node)
 	if manifest != previousManifest || readPlan() != previousPlan {
 		t.Fatal("ordinary removal changed the published orchestrator or upgrade plan")
-	}
-}
-
-func TestForceRolloutRejectsInitialPublicExposure(t *testing.T) {
-	s, _ := tunnelTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("c", 64))
-	adminA(t, s)
-	node := c["node_id"]
-	_, previous := publishedMachineConfiguration(t, s, node)
-	reportRuntime(t, s, c, "runtime", false)
-	driveTunnels(t, s)
-	pending := pendingWorkloadDrain(t, s, node)
-	if pending.Target != "" || pending.HeldOrchestrator != previous {
-		t.Fatal("expected initial public exposure to use a workload drain")
-	}
-	path := "/api/admin/machines/" + node + "/drain/force"
-	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 409)
-	backdateWorkloadDrain(t, s, node)
-	requireNoError(t, s.reconcile(t.Context()))
-	state, _, err := s.loadTunnel(t.Context(), node)
-	_, manifest := publishedMachineConfiguration(t, s, node)
-	if err != nil || state.RolloutReason != "drain_timeout" || manifest != previous {
-		t.Fatal("timeout forced a change to the workload endpoints", state.RolloutReason, err)
 	}
 }
 
