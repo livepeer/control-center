@@ -586,14 +586,40 @@ func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
 		t.Fatal("expected forced replacement to be published with admission closed")
 	}
 
-	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
-	s.configs = s.newConfigurationManager()
-	for range 2 {
+	generation := forced.Generation
+	for _, image := range []string{"c", "d", "c"} {
+		s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat(image, 64)
+		s.configs = s.newConfigurationManager()
 		reconcile()
 		m := onchainMetadata(t, s, node)
-		if m.ConfigDigest != forced.ConfigDigest || m.Generation <= forced.Generation || !m.DrainRequested {
-			t.Fatal("superseding workload bypassed the drain")
+		if m.ConfigDigest != forced.ConfigDigest || m.Generation <= generation || !m.DrainRequested {
+			t.Fatal("image change bypassed the drain", image)
 		}
+		generation = m.Generation
+	}
+}
+
+func TestOnchainStartupRepairSupersedesDrain(t *testing.T) {
+	s, _, c := onchainMachine(t)
+	node := c["node_id"]
+	settings, err := s.loadOnchainTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemer := settings.RedeemerURL
+	settings.RedeemerURL = "https://api.example/other"
+	writeOnchainTemplate(t, s, settings)
+	pendingWorkloadDrain(t, s, node)
+	settings.RedeemerURL = redeemer
+	writeOnchainTemplate(t, s, settings)
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	s.configs = s.newConfigurationManager()
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	meta, manifest := publishedMachineConfiguration(t, s, node)
+	if !strings.Contains(manifest, s.params.RuntimeNodeImage) || meta.OnchainActive {
+		t.Fatal("a never-ready workload should allow repair while keeping admission closed")
 	}
 }
 

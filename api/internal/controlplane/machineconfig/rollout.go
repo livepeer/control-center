@@ -36,15 +36,10 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
-	// Publication does not prove Runtime applied the authorized workload.
-	// Keep the marker until readiness or until a new target starts draining.
-	forcePublished := state.ForcedDrainTarget != "" && old.ConfigDigest == state.ApplyingConfigDigest
-	if forcePublished {
-		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
-	}
-	forced := !forcePublished && state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
+	state.observeForcedPublication(old.ConfigDigest)
+	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
 		state.PendingConfigDigest == digest && sameWorkloadEndpoints(old.manifest, desired)
-	if !forcePublished && state.ForcedDrainTarget != "" && !forced {
+	if state.ForcedDrainTarget != "" && !forced {
 		state.ForcedDrainTarget = ""
 		if state.ApplyingConfigDigest != "" {
 			state.ApplyingConfigDigest = ""
@@ -55,10 +50,10 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining storage identity, redemption destination and the admission freeze.
-	frozen := !forcePublished && state.ApplyingConfigDigest == old.ConfigDigest
-	initial := !state.DrainRequested && state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
+	frozen := state.ApplyingConfigDigest == old.ConfigDigest
+	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
 	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient && old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller && old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL
-	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
+	if old.ConfigDigest != digest && old.ConfigDigest != state.UnconfirmedForcedDigest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 		state.ApplyingConfigDigest = digest
 		state.ApplyingUpgradeVersion = upgradeVersion(desired)
@@ -84,7 +79,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 			state.ApplyingConfigDigest = ""
 			state.ApplyingUpgradeVersion = ""
 			state.PendingConfigDigest = ""
-			state.ForcedDrainTarget = ""
+			state.UnconfirmedForcedDigest = ""
 			state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 			state.DrainRequested = false
 			state.ApprovedConfigDigest = digest
@@ -94,9 +89,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		// Superseding an already released target retains the admission freeze.
 		state.ApplyingConfigDigest = ""
 		state.ApplyingUpgradeVersion = ""
-		state.ForcedDrainTarget = ""
 	}
-	if !state.DrainRequested && state.HeldOrchestrator == "" && old.ConfigDigest == digest {
+	if !state.DrainRequested && state.HeldOrchestrator == "" && old.ConfigDigest == digest && digest != state.UnconfirmedForcedDigest {
 		if desired.Onchain.Onchain() && state.ApprovedConfigDigest != digest {
 			if !desired.OnchainReady {
 				state.RolloutReason = "onchain_startup_pending"
@@ -149,11 +143,16 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
 	if !state.DrainRequested || state.Target != target {
-		state.PendingConfigDigest = ""
-		state.ForcedDrainTarget = ""
-		state.HeldOrchestrator = ""
 		if old.ConfigDigest == digest {
 			return false, nil
+		}
+		state.observeForcedPublication(old.ConfigDigest)
+		state.ForcedDrainTarget = ""
+		// If the route change is canceled, resume waiting for the published workload.
+		if state.UnconfirmedForcedDigest == old.ConfigDigest {
+			state.ApplyingConfigDigest, state.ApplyingUpgradeVersion = old.ConfigDigest, old.UpgradeVersion
+		} else if state.ApplyingConfigDigest != old.ConfigDigest {
+			state.ApplyingConfigDigest, state.ApplyingUpgradeVersion = "", ""
 		}
 		state.Generation++
 		state.DrainRequested = true
@@ -168,14 +167,16 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 
 func (s *State) CancelTarget() {
 	s.Generation++
+	s.Target = ""
+	s.ForcedDrainTarget = ""
+	s.HeldOrchestrator, s.HeldUpgradePlan = "", ""
+	s.PendingConfigDigest = s.ApplyingConfigDigest
+	if s.ApplyingConfigDigest != "" {
+		s.RolloutReason = "rollout_pending"
+		return
+	}
 	s.DrainRequested = false
 	s.DrainStartedAt = time.Time{}
-	s.Target = ""
-	s.PendingConfigDigest = ""
-	s.ForcedDrainTarget = ""
-	s.HeldOrchestrator = ""
-	s.HeldUpgradePlan = ""
-	s.ApplyingConfigDigest = ""
 	s.ApplyingUpgradeVersion = ""
 	s.RolloutReason = ""
 }
@@ -188,6 +189,15 @@ func (state State) canForceDrain() bool {
 func (state *State) forceDrain(node string) {
 	state.Generation++
 	state.ForcedDrainTarget = DrainTarget(node, *state)
+}
+
+// Publication can be observed even if Runtime has never fetched the bundle.
+func (state *State) observeForcedPublication(digest string) {
+	if state.ForcedDrainTarget != "" && state.ApplyingConfigDigest == digest {
+		state.ForcedDrainTarget = ""
+		state.UnconfirmedForcedDigest = digest
+		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
+	}
 }
 
 func (s *Manager) drainExpired(startedAt, now time.Time) bool {

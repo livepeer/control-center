@@ -520,6 +520,42 @@ func TestForceRolloutRejectsInitialPublicExposure(t *testing.T) {
 	}
 }
 
+func TestCancelEndpointChangeWhileForcedWorkloadStarts(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	node := c["node_id"]
+	readyTunnel(t, s, c)
+	adminA(t, s)
+	pending := forcePendingImageRollout(t, s, node)
+	driveTunnels(t, s)
+	forced, _ := publishedMachineConfiguration(t, s, node)
+	if forced.ConfigDigest != pending.PendingConfigDigest || !forced.DrainRequested {
+		t.Fatal("expected published replacement to wait for readiness")
+	}
+
+	domain := s.params.CloudflareBaseDomain
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.Target == "" {
+		t.Fatal("expected pending endpoint change", err)
+	}
+	s.params.CloudflareBaseDomain = domain
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	state, _, err = s.loadTunnel(t.Context(), node)
+	current, _ := publishedMachineConfiguration(t, s, node)
+	if err != nil || state.Target != "" || !current.DrainRequested || current.ConfigDigest != forced.ConfigDigest {
+		t.Fatal("canceling endpoint change interrupted the readiness check", err)
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	driveTunnels(t, s)
+	if current, _ = publishedMachineConfiguration(t, s, node); current.DrainRequested || current.ConfigDigest != forced.ConfigDigest {
+		t.Fatal("matching readiness did not complete the forced update")
+	}
+}
+
 func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
 	s, _, c := onchainMachine(t)
 	node := c["node_id"]
