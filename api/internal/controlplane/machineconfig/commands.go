@@ -12,7 +12,7 @@ var (
 	ErrNotFound              = errors.New("machine not found")
 	ErrDrainChanged          = errors.New("drain intent changed")
 	ErrDrainNotExpired       = errors.New("drain deadline has not expired")
-	ErrForceDrainUnavailable = errors.New("no expired workload replacement to force")
+	ErrForceDrainUnavailable = errors.New("no pending workload replacement to force")
 )
 
 type Change struct {
@@ -104,7 +104,7 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	if !state.DrainRequested || state.Generation != generation || state.Lifecycle == "removed" {
 		return result, ErrDrainChanged
 	}
-	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.drainTimeout() {
+	if !force && !state.DrainStartedAt.IsZero() && !s.drainExpired(state.DrainStartedAt, time.Now()) {
 		return result, ErrDrainNotExpired
 	}
 	if !force && state.Lifecycle == "active" && state.Target == "" && state.ApplyingConfigDigest != "" {
@@ -120,10 +120,8 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 			return result, ErrDrainChanged
 		}
 	}
-	state.Generation++
 	if force {
-		if state.Lifecycle != "active" || state.Target != "" || state.DrainStartedAt.IsZero() ||
-			state.HeldOrchestrator == "" || state.PendingConfigDigest == "" || state.ApplyingConfigDigest != "" || state.ForcedDrainTarget != "" {
+		if !state.canForceDrain() {
 			return result, ErrForceDrainUnavailable
 		}
 		var exposure *Exposure
@@ -136,9 +134,10 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 		if !sameWorkloadEndpoints(state.HeldOrchestrator, Desired{State: state, Exposure: exposure}) {
 			return result, ErrForceDrainUnavailable
 		}
-		state.ForcedDrainTarget = DrainTarget(node, state)
+		state.forceDrain(node)
 		state.RolloutReason = "rollout_pending"
 	} else {
+		state.Generation++
 		// The new generation revokes force. Keep the marker so Gate can
 		// restore the held workload if the replacement was not published.
 		state.DrainStartedAt = time.Now().UTC()

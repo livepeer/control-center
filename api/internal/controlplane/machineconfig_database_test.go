@@ -181,12 +181,14 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	}
 }
 
-func TestForceExpiredWorkloadRollout(t *testing.T) {
+func TestForcePendingWorkloadRollout(t *testing.T) {
 	for _, test := range []struct {
 		name       string
+		automatic  bool
 		superseded bool
 	}{
-		{name: "pending target"},
+		{name: "manual before deadline"},
+		{name: "automatic after deadline", automatic: true},
 		{name: "superseded target", superseded: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -222,16 +224,18 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 			if pending.PendingConfigDigest == "" || pending.HeldOrchestrator != previous {
 				t.Fatal("expected a pending, held rollout", pending.RolloutReason)
 			}
-			force("session-b", pending.Generation, 403)
-			force("session-a", pending.Generation, 409)
-			execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($2::text)) WHERE node_id=$1`, m.NodeID, time.Now().Add(-time.Hour).Format(time.RFC3339Nano))
 			reconcile()
-			if reason := loadRollout().RolloutReason; reason != "drain_timeout" {
-				t.Fatal("expected expired drain", reason)
+			if _, manifest := publishedMachineConfiguration(t, s, m.NodeID); manifest != previous {
+				t.Fatal("published the replacement before the drain deadline")
 			}
-			force("session-a", pending.Generation-1, 409)
-			force("session-a", pending.Generation, 202)
-			force("session-a", pending.Generation, 409)
+			if test.automatic {
+				backdateWorkloadDrain(t, s, m.NodeID)
+			} else {
+				force("session-b", pending.Generation, 403)
+				force("session-a", pending.Generation-1, 409)
+				force("session-a", pending.Generation, 202)
+				force("session-a", pending.Generation, 409)
+			}
 			if test.superseded {
 				s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
 				s.configs = s.newConfigurationManager()
@@ -248,11 +252,14 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 				}
 				return
 			}
-			if state.ApplyingConfigDigest != pending.PendingConfigDigest || manifest == previous || runtime.ConfigDigest != state.ApplyingConfigDigest {
-				t.Fatal("force did not publish the authorized workload", state.RolloutReason)
+			if state.ApplyingConfigDigest != pending.PendingConfigDigest || manifest == previous || runtime.ConfigDigest != state.ApplyingConfigDigest || state.Generation != pending.Generation+1 {
+				t.Fatal("force did not publish the pending workload in the new generation", state.RolloutReason)
 			}
-			if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
-				t.Fatal("expected one audited force operation")
+			if !test.automatic {
+				if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
+					t.Fatal("expected one audited force operation")
+				}
+				backdateWorkloadDrain(t, s, m.NodeID)
 			}
 			path := "/api/admin/machines/" + m.NodeID + "/drain/retry"
 			for range 2 {
@@ -276,7 +283,7 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 			initial := readyTunnel(t, s, c)
 			adminA(t, s)
 			node := c["node_id"]
-			expired := forceExpiredImageRollout(t, s, node)
+			pending := forcePendingImageRollout(t, s, node)
 			path := "/api/admin/machines/" + node
 			rotated := false
 			rotate := func() {
@@ -289,7 +296,7 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 			if timing == "during rendering" {
 				build := s.build
 				s.build = func(desired machineconfig.Desired) ([]byte, string, error) {
-					if !rotated && desired.NodeID == node && desired.State.ApplyingConfigDigest == expired.PendingConfigDigest {
+					if !rotated && desired.NodeID == node && desired.State.ApplyingConfigDigest == pending.PendingConfigDigest {
 						rotate()
 					}
 					return build(desired)
@@ -302,7 +309,7 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 					t.Fatal(err)
 				}
 				runtime, _ := publishedMachineConfiguration(t, s, node)
-				if runtime.ConfigDigest == expired.PendingConfigDigest {
+				if runtime.ConfigDigest == pending.PendingConfigDigest {
 					t.Fatal("published the replacement after its force generation was superseded")
 				}
 			}
@@ -310,7 +317,7 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !rotated || state.Generation <= expired.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
+			if !rotated || state.Generation <= pending.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
 				t.Fatal("expected connector rotation to advance the generation")
 			}
 			if state.ForcedDrainTarget != "" || state.ApplyingConfigDigest != "" || state.HeldOrchestrator == "" {
@@ -328,7 +335,7 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 			readyTunnel(t, s, c)
 			adminA(t, s)
 			node := c["node_id"]
-			expired := forceExpiredImageRollout(t, s, node)
+			pending := forcePendingImageRollout(t, s, node)
 			path := "/api/admin/machines/" + node + "/drain/"
 			if err := s.tunnels.Reconcile(t.Context()); err != nil {
 				t.Fatal(err)
@@ -340,13 +347,14 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 			}
 			state, _, err := s.loadTunnel(t.Context(), node)
 			previous, _ := publishedMachineConfiguration(t, s, node)
-			published := previous.ConfigDigest == expired.PendingConfigDigest
-			if err != nil || state.ApplyingConfigDigest != expired.PendingConfigDigest || published != (action == "timeout after publication") {
+			published := previous.ConfigDigest == pending.PendingConfigDigest
+			if err != nil || state.ApplyingConfigDigest != pending.PendingConfigDigest || published != (action == "timeout after publication") {
 				t.Fatal("unexpected publication state for planned force", err)
 			}
 
 			switch action {
 			case "ordinary retry":
+				backdateWorkloadDrain(t, s, node)
 				requireStatus(t, request(t, s, "POST", path+"retry", "session-a", map[string]int64{"generation": state.Generation}), 202)
 			case "timeout before publication", "timeout after publication":
 				tx, err := s.db.Begin()
@@ -378,7 +386,7 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 				}
 			}
 			runtime, _ := publishedMachineConfiguration(t, s, node)
-			want := expired.PendingConfigDigest
+			want := pending.PendingConfigDigest
 			if action == "ordinary retry" {
 				want = previous.ConfigDigest
 			}
@@ -420,13 +428,13 @@ func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
 	}
 	execSQL(t, s.db, `UPDATE lpcc.machine_configs SET bundle=$2,sha256=$3 WHERE node_id=$1`, node, data, digest)
 	_, previousManifest := publishedMachineConfiguration(t, s, node)
-	expired := forceExpiredImageRollout(t, s, node)
+	pending := forcePendingImageRollout(t, s, node)
 	path := "/api/admin/machines/" + node
 	if err := s.tunnels.Reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	state, _, err := s.loadTunnel(t.Context(), node)
-	if err != nil || state.ApplyingConfigDigest != expired.PendingConfigDigest || readPlan() != previousPlan {
+	if err != nil || state.ApplyingConfigDigest != pending.PendingConfigDigest || readPlan() != previousPlan {
 		t.Fatal("expected an unpublished force", err)
 	}
 	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
@@ -447,12 +455,21 @@ func TestForceRolloutRejectsInitialPublicExposure(t *testing.T) {
 	_, previous := publishedMachineConfiguration(t, s, node)
 	reportRuntime(t, s, c, "runtime", false)
 	driveTunnels(t, s)
-	expired := expireWorkloadDrain(t, s, node)
-	if expired.Target != "" || expired.HeldOrchestrator != previous {
+	pending := pendingWorkloadDrain(t, s, node)
+	if pending.Target != "" || pending.HeldOrchestrator != previous {
 		t.Fatal("expected initial public exposure to use a workload drain")
 	}
 	path := "/api/admin/machines/" + node + "/drain/force"
-	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": expired.Generation}), 409)
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 409)
+	backdateWorkloadDrain(t, s, node)
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	_, manifest := publishedMachineConfiguration(t, s, node)
+	if err != nil || state.RolloutReason != "drain_timeout" || manifest != previous {
+		t.Fatal("timeout forced a change to the workload endpoints", state.RolloutReason, err)
+	}
 }
 
 func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
@@ -465,10 +482,10 @@ func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
 	}
 	next.RedeemerURL = "https://api.example/pending"
 	writeOnchainTemplate(t, s, next)
-	expired := expireWorkloadDrain(t, s, node)
+	pending := pendingWorkloadDrain(t, s, node)
 	previous, _ := publishedMachineConfiguration(t, s, node)
 	path := "/api/admin/machines/" + node + "/drain/force"
-	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": expired.Generation}), 202)
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 202)
 
 	var database string
 	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
@@ -504,30 +521,31 @@ func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
 	}
 }
 
-func forceExpiredImageRollout(t *testing.T, s *Server, node string) machineconfig.State {
+func forcePendingImageRollout(t *testing.T, s *Server, node string) machineconfig.State {
 	t.Helper()
 	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
 	configureTestTunnels(t, s)
-	expired := expireWorkloadDrain(t, s, node)
+	pending := pendingWorkloadDrain(t, s, node)
 	path := "/api/admin/machines/" + node + "/drain/force"
-	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": expired.Generation}), 202)
-	return expired
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+	return pending
 }
 
-func expireWorkloadDrain(t *testing.T, s *Server, node string) machineconfig.State {
+func pendingWorkloadDrain(t *testing.T, s *Server, node string) machineconfig.State {
 	t.Helper()
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($2::text)) WHERE node_id=$1`, node, time.Now().Add(-24*time.Hour).Format(time.RFC3339Nano))
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	state, _, err := s.loadTunnel(t.Context(), node)
-	if err != nil || state.RolloutReason != "drain_timeout" || state.PendingConfigDigest == "" {
-		t.Fatal("expected an expired workload drain", state.RolloutReason, err)
+	if err != nil || !state.DrainRequested || state.HeldOrchestrator == "" || state.PendingConfigDigest == "" {
+		t.Fatal("expected a pending workload drain", state.RolloutReason, err)
 	}
 	return state.State
+}
+
+func backdateWorkloadDrain(t *testing.T, s *Server, node string) {
+	t.Helper()
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($2::text)) WHERE node_id=$1`, node, time.Now().Add(-24*time.Hour).Format(time.RFC3339Nano))
 }
 
 func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {

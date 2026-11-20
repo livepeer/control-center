@@ -195,9 +195,11 @@ Removal withdraws an instance from discovery and drains existing work. Set
 `RuntimeNodeDrainTimeout` from 0 to 12 hours (default 12 hours); zero ends work
 immediately. Normally Runtime waits for Node to confirm registration removal,
 then removes the Pod and Service and reports cleanup. `TunnelDrainTimeout` is a
-separate machine-maintenance fallback: expiry may force workload removal without
-Node confirmation, but replacement remains blocked until an audited retry.
-Node restart or owner expiry can lose sessions.
+separate machine-maintenance deadline that defaults to 12 hours. During an
+orchestrator update, expiry forces replacement on Control Center's next
+reconciliation and may remove workloads without Node confirmation. Expired drains
+for ordinary machine removal and endpoint migration still require a retry. Node
+restart or owner expiry can lose sessions.
 
 Normal machine removal withdraws assignments and waits for app cleanup and
 machine drain. Forced removal stops Node early without a graceful drain. It

@@ -22,7 +22,7 @@ func (s *Manager) applied(ctx context.Context, m Machine) (appliedWorkload, erro
 	return readAppliedWorkload(data)
 }
 
-// Gate holds the applied workload until its drain completes or an administrator forces the pending replacement.
+// Gate holds the applied workload until its drain completes, is forced, or reaches its deadline.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
 	if desired.OnchainError != nil {
@@ -114,8 +114,11 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		old.hold(state)
 	}
 	if old.ConfigDigest != digest && !forced {
-		done, err := s.drainComplete(ctx, m, state)
-		if err != nil || !done {
+		now := time.Now()
+		if s.drainExpired(state.DrainStartedAt, now) && state.canForceDrain() &&
+			sameWorkloadEndpoints(old.manifest, desired) {
+			state.forceDrain(m.NodeID)
+		} else if done, err := s.drainComplete(ctx, m, state, now); err != nil || !done {
 			return true, err
 		}
 	}
@@ -156,7 +159,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.PendingConfigDigest = digest
 		old.hold(state)
 	}
-	done, err := s.drainComplete(ctx, m, state)
+	done, err := s.drainComplete(ctx, m, state, time.Now())
 	return !done, err
 }
 
@@ -173,8 +176,23 @@ func (s *State) CancelTarget() {
 	s.ApplyingUpgradeVersion = ""
 	s.RolloutReason = ""
 }
-func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (bool, error) {
-	if state.DrainStartedAt.IsZero() || time.Since(state.DrainStartedAt) > s.drainTimeout() {
+func (state State) canForceDrain() bool {
+	return state.Lifecycle == "active" && state.Target == "" && state.DrainRequested &&
+		!state.DrainStartedAt.IsZero() && state.HeldOrchestrator != "" && state.PendingConfigDigest != "" &&
+		state.ApplyingConfigDigest == "" && state.ForcedDrainTarget == ""
+}
+
+func (state *State) forceDrain(node string) {
+	state.Generation++
+	state.ForcedDrainTarget = DrainTarget(node, *state)
+}
+
+func (s *Manager) drainExpired(startedAt, now time.Time) bool {
+	return !startedAt.IsZero() && !now.Before(startedAt.Add(s.drainTimeout()))
+}
+
+func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State, now time.Time) (bool, error) {
+	if state.DrainStartedAt.IsZero() || s.drainExpired(state.DrainStartedAt, now) {
 		state.RolloutReason = "drain_timeout"
 		return false, nil
 	}
@@ -192,7 +210,7 @@ func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (b
 
 func (s *Manager) removalComplete(ctx context.Context, m Machine, state *State) (bool, error) {
 	if state.DrainedGeneration != state.Generation {
-		done, err := s.drainComplete(ctx, m, state)
+		done, err := s.drainComplete(ctx, m, state, time.Now())
 		if err != nil || !done {
 			return false, err
 		}

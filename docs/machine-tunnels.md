@@ -87,8 +87,9 @@ diagnosis and recovery.
 
 The worker provisions the tunnel and private ingress routing. It waits for the
 current ingress configuration digest, Runtime readiness and connector readiness
-before publishing routes. Node configuration changes drain before replacement; an expired deadline requires
-intervention. Connector token changes replace its Deployment.
+before publishing routes. Orchestrator updates wait for sessions to drain. Endpoint
+changes also wait for a drain and require intervention if their drain deadline
+expires. Connector token changes replace its Deployment.
 
 After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
 `api.<node>.<domain>`, `discovery.<node>.<domain>` and `*.<node>.<domain>`.
@@ -122,7 +123,7 @@ POST /api/admin/machines/<NODE_ID>/drain/retry
 {"generation":<EXPIRED_GENERATION>}
 
 POST /api/admin/machines/<NODE_ID>/drain/force
-{"generation":<EXPIRED_GENERATION>}
+{"generation":<ROLLOUT_GENERATION>}
 
 DELETE /api/admin/machines/<NODE_ID>
 {"force":false}
@@ -137,16 +138,20 @@ connections active. Follow the [signing-key rotation procedure](discovery-auth.m
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-Ordinary removal withdraws readiness and waits for draining. An expired drain
-deadline remains blocked even if a late completion arrives. An administrator can
-start a fresh drain with `drain/retry` or deliberately remove with `force:true`.
+Ordinary removal withdraws readiness and waits for draining. For removal and
+endpoint migration, an expired drain remains blocked even if a late completion
+arrives. An administrator can start a fresh drain with `drain/retry` or remove
+the machine with `force:true`.
 
-If waiting for sessions to drain times out during an orchestrator update, use
-`drain/force` to continue the update. Replacing the orchestrator ends remaining
-sessions. The new orchestrator accepts sessions when Runtime reports it ready.
+An administrator can use `drain/force` at any point while an orchestrator update
+waits for sessions to drain. Control Center itself forces the update when
+`TunnelDrainTimeout` expires (12 hours by default). Replacing the orchestrator
+ends remaining sessions. The new orchestrator accepts sessions when Runtime
+reports it ready.
 
-Upgrade every Control Center API replica before using `drain/force`. Let forced
-replacements finish before rolling back the API to an older version.
+Stop all older Control Center API replicas before an upgraded replica starts
+writing rollout state. Let ongoing forced updates finish before rolling back to an
+older API version.
 
 Deletion denies token delivery, installs deny-only ingress, revokes connector
 authentication before disconnecting, deletes owned DNS and tunnel resources.
