@@ -11,11 +11,11 @@ auditing, and wiring.
 
 A workload replacement holds the applied workload while it drains. A fresh runner
 report matching the requested generation and current enrollment credential allows
-replacement. An administrator can force a pending in-place orchestrator update.
-Reconciliation forces it when the drain deadline expires. Normal removal and
-endpoint migration require an authorized retry if their drain expires. Normal
-removal retires the enrollment and publishes a terminal bundle that retains
-storage, with or without a tunnel.
+replacement. An administrator can force an orchestrator update while it waits for
+sessions to drain. Control Center forces it on its next update check after the
+deadline expires. Normal removal and endpoint migration require an authorized
+retry if their drain expires. Normal removal retires the enrollment and publishes
+a terminal bundle that retains storage, with or without a tunnel.
 
 `TunnelDrainTimeout` sets the drain deadline; an unset or nonpositive value uses
 12 hours. `TunnelStatusTTL` sets report freshness and defaults to two minutes.
