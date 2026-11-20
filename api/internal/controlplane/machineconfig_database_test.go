@@ -276,11 +276,8 @@ func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 			initial := readyTunnel(t, s, c)
 			adminA(t, s)
 			node := c["node_id"]
-			s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
-			configureTestTunnels(t, s)
-			expired := expireWorkloadDrain(t, s, node)
+			expired := forceExpiredImageRollout(t, s, node)
 			path := "/api/admin/machines/" + node
-			requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
 			rotated := false
 			rotate := func() {
 				rotated = true
@@ -331,11 +328,8 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 			readyTunnel(t, s, c)
 			adminA(t, s)
 			node := c["node_id"]
-			s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
-			configureTestTunnels(t, s)
-			expired := expireWorkloadDrain(t, s, node)
+			expired := forceExpiredImageRollout(t, s, node)
 			path := "/api/admin/machines/" + node + "/drain/"
-			requireStatus(t, request(t, s, "POST", path+"force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
 			if err := s.tunnels.Reconcile(t.Context()); err != nil {
 				t.Fatal(err)
 			}
@@ -425,11 +419,9 @@ func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	execSQL(t, s.db, `UPDATE lpcc.machine_configs SET bundle=$2,sha256=$3 WHERE node_id=$1`, node, data, digest)
-	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
-	configureTestTunnels(t, s)
-	expired := expireWorkloadDrain(t, s, node)
+	_, previousManifest := publishedMachineConfiguration(t, s, node)
+	expired := forceExpiredImageRollout(t, s, node)
 	path := "/api/admin/machines/" + node
-	requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
 	if err := s.tunnels.Reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -441,8 +433,9 @@ func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if readPlan() != previousPlan {
-		t.Fatal("ordinary removal published the pending upgrade plan")
+	_, manifest := publishedMachineConfiguration(t, s, node)
+	if manifest != previousManifest || readPlan() != previousPlan {
+		t.Fatal("ordinary removal changed the published orchestrator or upgrade plan")
 	}
 }
 
@@ -509,6 +502,16 @@ func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
 	if !changed || runtime.ConfigDigest != previous.ConfigDigest {
 		t.Fatal("published a different configuration after force authorization", changed, runtime.ConfigDigest)
 	}
+}
+
+func forceExpiredImageRollout(t *testing.T, s *Server, node string) machineconfig.State {
+	t.Helper()
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	configureTestTunnels(t, s)
+	expired := expireWorkloadDrain(t, s, node)
+	path := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": expired.Generation}), 202)
+	return expired
 }
 
 func expireWorkloadDrain(t *testing.T, s *Server, node string) machineconfig.State {

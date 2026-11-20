@@ -6,21 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
-	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/onchain"
 	"time"
 )
 
-func (s *Manager) applied(ctx context.Context, m Machine) (Runtime, string, error) {
+func (s *Manager) applied(ctx context.Context, m Machine) (appliedWorkload, error) {
 	var data []byte
 	err := s.store.DB.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Runtime{}, "", ErrFenced
+		return appliedWorkload{}, ErrFenced
 	}
 	if err != nil {
-		return Runtime{}, "", err
+		return appliedWorkload{}, err
 	}
-	return ReadApplied(data)
+	return readAppliedWorkload(data)
 }
 
 // Gate holds the applied workload until its drain completes or an administrator forces the pending replacement.
@@ -29,7 +28,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	if desired.OnchainError != nil {
 		return false, desired.OnchainError
 	}
-	old, manifest, err := s.applied(ctx, m)
+	old, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
 	}
@@ -44,13 +43,13 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 	}
 	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
-		state.PendingConfigDigest == digest && sameWorkloadEndpoints(manifest, desired)
+		state.PendingConfigDigest == digest && sameWorkloadEndpoints(old.manifest, desired)
 	if state.ForcedDrainTarget != "" && !forced {
 		state.ForcedDrainTarget = ""
 		if state.ApplyingConfigDigest != "" {
 			state.ApplyingConfigDigest = ""
 			state.ApplyingUpgradeVersion = ""
-			s.holdWorkload(ctx, m, state, old, manifest)
+			old.hold(state)
 		}
 	}
 	// Admission has never opened for this onchain target. Its image or rendering
@@ -112,7 +111,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.PendingConfigDigest = digest
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
-		s.holdWorkload(ctx, m, state, old, manifest)
+		old.hold(state)
 	}
 	if old.ConfigDigest != digest && !forced {
 		done, err := s.drainComplete(ctx, m, state)
@@ -135,7 +134,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	if desired.OnchainError != nil {
 		return false, desired.OnchainError
 	}
-	old, manifest, err := s.applied(ctx, m)
+	old, err := s.applied(ctx, m)
 	if err != nil {
 		return false, err
 	}
@@ -155,7 +154,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.Target = target
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
-		s.holdWorkload(ctx, m, state, old, manifest)
+		old.hold(state)
 	}
 	done, err := s.drainComplete(ctx, m, state)
 	return !done, err
@@ -174,24 +173,6 @@ func (s *State) CancelTarget() {
 	s.ApplyingUpgradeVersion = ""
 	s.RolloutReason = ""
 }
-func (s *Manager) holdWorkload(ctx context.Context, m Machine, state *State, runtime Runtime, manifest string) {
-	state.HeldOrchestrator = manifest
-	state.HeldOnchain = onchainJSON(runtime.Onchain)
-	s.holdUpgrade(ctx, m, state)
-}
-
-func (s *Manager) holdUpgrade(ctx context.Context, m Machine, state *State) {
-	if state.HeldUpgradePlan != "" {
-		return
-	}
-	var data []byte
-	if s.store.DB.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, m.NodeID).Scan(&data) == nil {
-		if files, err := artifact.Read(data); err == nil {
-			state.HeldUpgradePlan = string(files["upgrade-plan/plan.yaml"])
-		}
-	}
-}
-
 func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State) (bool, error) {
 	if state.DrainStartedAt.IsZero() || time.Since(state.DrainStartedAt) > s.drainTimeout() {
 		state.RolloutReason = "drain_timeout"

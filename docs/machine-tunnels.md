@@ -128,7 +128,8 @@ DELETE /api/admin/machines/<NODE_ID>
 {"force":false}
 ```
 
-The administrator fleet response supplies the node ID. Connector rotation keeps
+The administrator fleet response supplies the node ID. Get `rollout_generation`
+from `GET /api/machines/<NODE_ID>/status` for drain commands. Connector rotation keeps
 the tunnel UUID, advances token generation and replaces the process. Compromise
 rotation also disconnects existing connectors: rotation alone leaves established
 connections active. Follow the [signing-key rotation procedure](discovery-auth.md#key-rotation)
@@ -139,10 +140,10 @@ Ordinary removal withdraws readiness and waits for draining. An expired drain
 deadline remains blocked even if a late completion arrives. An administrator can
 start a fresh drain with `drain/retry` or deliberately remove with `force:true`.
 
-For an expired in-place drain, `drain/force` publishes the specified generation's
-pending configuration without waiting for drain completion. The replacement uses
-the existing enrollment and endpoints and ends any remaining sessions. Admission
-resumes when Runtime confirms readiness.
+For an expired in-place drain, `drain/force` authorizes publication of the
+specified generation's pending configuration without waiting for drain
+completion. The replacement uses the existing enrollment and endpoints and ends
+any remaining sessions. Admission resumes when Runtime confirms readiness.
 
 Upgrade every Control Center API replica before using `drain/force`. Let forced
 replacements finish before rolling back the API to an older version.
