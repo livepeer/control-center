@@ -522,26 +522,27 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 
 }
 
+func reportOnchainReady(t *testing.T, s *Server, c map[string]string) {
+	t.Helper()
+	node := c["node_id"]
+	m := onchainMetadata(t, s, node)
+	launch := consumer.Launch{PodName: "orchestrator-test", PodUID: "node-pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
+	grant := onchainGrant(t, s, c, launch)
+	r := currentReport(t, s, node, machineconfig.Report{NodeID: node, CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
+}
+
 func TestOnchainActivationAndNormalDrain(t *testing.T) {
 	s, _, c := onchainMachine(t)
 	node := c["node_id"]
-	metadata := func() contract.Metadata { return onchainMetadata(t, s, node) }
-	if metadata().OnchainActive {
+	if onchainMetadata(t, s, node).OnchainActive {
 		t.Fatal("saved setting treated as active onchain operation")
 	}
-	launch := consumer.Launch{PodName: "orchestrator-test", PodUID: "node-pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
-	grant := onchainGrant(t, s, c, launch)
-	report := func() {
-		t.Helper()
-		m := metadata()
-		r := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
-		requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
-	}
-	report()
+	reportOnchainReady(t, s, c)
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	if !metadata().OnchainActive {
+	if !onchainMetadata(t, s, node).OnchainActive {
 		t.Fatal("fresh applied Node did not activate")
 	}
 	adminA(t, s)
@@ -557,6 +558,43 @@ func TestOnchainActivationAndNormalDrain(t *testing.T) {
 		t.Fatal("ordinary removal did not complete")
 	}
 
+}
+
+func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
+	s, _, c := onchainMachine(t)
+	node := c["node_id"]
+	reconcile := func() {
+		t.Helper()
+		if err := s.reconcile(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reportOnchainReady(t, s, c)
+	reconcile()
+	if !onchainMetadata(t, s, node).OnchainActive {
+		t.Fatal("original workload was not ready")
+	}
+	adminA(t, s)
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	s.configs = s.newConfigurationManager()
+	pending := pendingWorkloadDrain(t, s, node)
+	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+node+"/drain/force", "session-a", map[string]int64{"generation": pending.Generation}), 202)
+	reconcile()
+	reconcile()
+	forced := onchainMetadata(t, s, node)
+	if forced.ConfigDigest != pending.PendingConfigDigest || !forced.DrainRequested {
+		t.Fatal("expected forced replacement to be published with admission closed")
+	}
+
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	s.configs = s.newConfigurationManager()
+	for range 2 {
+		reconcile()
+		m := onchainMetadata(t, s, node)
+		if m.ConfigDigest != forced.ConfigDigest || m.Generation <= forced.Generation || !m.DrainRequested {
+			t.Fatal("superseding workload bypassed the drain")
+		}
+	}
 }
 
 func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {

@@ -275,6 +275,52 @@ func TestForcePendingWorkloadRollout(t *testing.T) {
 	}
 }
 
+func TestRollbackAfterForcedPublication(t *testing.T) {
+	s := newTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	m, _ := priorMachineConfiguration(t, s, c, nil)
+	reconcile := func() {
+		t.Helper()
+		if err := s.reconcile(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile()
+	reportRuntime(t, s, c, "runner", true)
+	reconcile()
+	reportRuntime(t, s, c, "runtime", true)
+	reconcile()
+	original, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if original.DrainRequested {
+		t.Fatal("original workload was not ready")
+	}
+	image := s.params.RuntimeNodeImage
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	s.configs = s.newConfigurationManager()
+	pending := pendingWorkloadDrain(t, s, m.NodeID)
+	backdateWorkloadDrain(t, s, m.NodeID)
+	reconcile()
+	replacement, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if replacement.ConfigDigest != pending.PendingConfigDigest || !replacement.DrainRequested {
+		t.Fatal("expected forced replacement to be published with admission closed")
+	}
+
+	s.params.RuntimeNodeImage = image
+	s.configs = s.newConfigurationManager()
+	reconcile()
+	reportRuntime(t, s, c, "runner", true)
+	reconcile()
+	rollback, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if rollback.ConfigDigest != original.ConfigDigest || rollback.Generation <= replacement.Generation || !rollback.DrainRequested {
+		t.Fatal("expected rollback to wait for readiness in a new generation")
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	reconcile()
+	if restored, _ := publishedMachineConfiguration(t, s, m.NodeID); restored.DrainRequested || restored.ConfigDigest != original.ConfigDigest {
+		t.Fatal("ready rollback did not restore admission")
+	}
+}
+
 func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
 	for _, timing := range []string{"before planning", "during rendering"} {
 		t.Run(timing, func(t *testing.T) {
@@ -341,8 +387,10 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			if action == "timeout after publication" {
-				if err := s.configs.Reconcile(t.Context()); err != nil {
-					t.Fatal(err)
+				for range 2 {
+					if err := s.configs.Reconcile(t.Context()); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			state, _, err := s.loadTunnel(t.Context(), node)

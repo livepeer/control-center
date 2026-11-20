@@ -36,15 +36,15 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
-	// Keep the authorization until the approved digest is published. A
-	// generation change can fence publication after the plan was saved.
-	if state.ForcedDrainTarget != "" && old.ConfigDigest == state.ApplyingConfigDigest {
-		state.ForcedDrainTarget = ""
+	// Publication does not prove Runtime applied the authorized workload.
+	// Keep the marker until readiness or until a new target starts draining.
+	forcePublished := state.ForcedDrainTarget != "" && old.ConfigDigest == state.ApplyingConfigDigest
+	if forcePublished {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 	}
-	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
+	forced := !forcePublished && state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
 		state.PendingConfigDigest == digest && sameWorkloadEndpoints(old.manifest, desired)
-	if state.ForcedDrainTarget != "" && !forced {
+	if !forcePublished && state.ForcedDrainTarget != "" && !forced {
 		state.ForcedDrainTarget = ""
 		if state.ApplyingConfigDigest != "" {
 			state.ApplyingConfigDigest = ""
@@ -55,8 +55,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining storage identity, redemption destination and the admission freeze.
-	frozen := state.ApplyingConfigDigest == old.ConfigDigest
-	initial := state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
+	frozen := !forcePublished && state.ApplyingConfigDigest == old.ConfigDigest
+	initial := !state.DrainRequested && state.ApplyingConfigDigest == "" && state.ApprovedConfigDigest == ""
 	repair := desired.Onchain.Onchain() && old.Onchain.Recipient == desired.Onchain.Recipient && old.Onchain.ChainID == desired.Onchain.ChainID && old.Onchain.Controller == desired.Onchain.Controller && old.Onchain.RedeemerURL == desired.Onchain.RedeemerURL
 	if old.ConfigDigest != digest && old.Onchain.Onchain() && !old.OnchainActive && state.ApprovedConfigDigest != old.ConfigDigest && repair && old.UpgradeVersion == upgradeVersion(desired) && (frozen || initial) {
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
@@ -84,6 +84,8 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 			state.ApplyingConfigDigest = ""
 			state.ApplyingUpgradeVersion = ""
 			state.PendingConfigDigest = ""
+			state.ForcedDrainTarget = ""
+			state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 			state.DrainRequested = false
 			state.ApprovedConfigDigest = digest
 			state.RolloutReason = ""
@@ -92,8 +94,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		// Superseding an already released target retains the admission freeze.
 		state.ApplyingConfigDigest = ""
 		state.ApplyingUpgradeVersion = ""
+		state.ForcedDrainTarget = ""
 	}
-	if state.HeldOrchestrator == "" && (state.ApprovedConfigDigest == digest || old.ConfigDigest == digest) {
+	if !state.DrainRequested && state.HeldOrchestrator == "" && old.ConfigDigest == digest {
 		if desired.Onchain.Onchain() && state.ApprovedConfigDigest != digest {
 			if !desired.OnchainReady {
 				state.RolloutReason = "onchain_startup_pending"
