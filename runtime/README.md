@@ -213,25 +213,23 @@ K3s's bundled metrics-server supplies CPU and memory usage through the Kubernete
 Metrics API, subject to Kubernetes authentication and RBAC. Its Service stays
 cluster-internal, with no public tunnel route. The host firewall permits system
 Pods to reach the kubelet on TCP 10250 while blocking public and gVisor app
-traffic. Existing installations pick this up when rerunning an updated bootstrap
-bundle, which reloads the firewall and restarts K3s for the changed configuration.
+traffic. Rerun bootstrap to apply firewall or K3s configuration changes.
 
 ### Telemetry
 
 Control Center collects metrics and logs from each machine; see
 [machine telemetry](../docs/telemetry.md). It delivers the
-`livepeer-telemetry` workload only after this bootstrap release records the
-`telemetry` host feature in `volumes/installed-software/host-features.json`.
-The management agent reports that feature only from this release's Runtime
-image, so existing installations receive telemetry after rerunning an updated
-bootstrap with `--upgrade-runtime`:
+`livepeer-telemetry` workload when telemetry is enabled and the management
+agent reports the `telemetry` host feature recorded by bootstrap in
+`volumes/installed-software/host-features.json`. To upgrade a machine to a
+Runtime image that supports telemetry, rerun bootstrap with `--upgrade-runtime`.
 
 ```sh
 curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh | sudo sh -s -- --upgrade-runtime
 ```
 
-The bundle adds the telemetry management socket, the RBAC the management agent
-needs, root-owned and 65532-owned buffer directories under `volumes/`, and a
+Bootstrap configures the telemetry management socket, the management agent's
+RBAC, root-owned and 65532-owned buffer directories under `volumes/`, and a
 private Traefik metrics port.
 
 The agent Pod and the node_exporter Pod run on the Pod network and open no host

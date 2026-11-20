@@ -90,9 +90,9 @@ values or sensitive app output into issue evidence.
 
 ## Recovery and rollout
 
-Deploy the Control Center API first because older APIs reject the new Runtime
-report fields. Roll back Runtime first when reverting both. No schema migration
-is required.
+Before upgrading Runtime, deploy a Control Center API version that accepts its
+status report fields. When reverting to an API version that rejects those fields,
+roll back Runtime first.
 
 A status report HTTP 412 indicates lost or regressed ordering state. Restore
 trustworthy state; do not delete counters or repeatedly increment them until the
