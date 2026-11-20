@@ -239,11 +239,11 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 			reconcile()
 			state := loadRollout()
 			runtime, manifest := publishedMachineConfiguration(t, s, m.NodeID)
-			if state.ForcedDrainTarget != "" || !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
-				t.Fatal("force authorization was retained or admission resumed early", state.RolloutReason)
+			if !state.DrainRequested || !runtime.DrainRequested || runtime.OnchainActive {
+				t.Fatal("admission resumed early", state.RolloutReason)
 			}
 			if test.superseded {
-				if manifest != previous || state.PendingConfigDigest == pending.PendingConfigDigest || state.ApplyingConfigDigest != "" {
+				if manifest != previous || state.PendingConfigDigest == pending.PendingConfigDigest || state.ApplyingConfigDigest != "" || state.ForcedDrainTarget != "" {
 					t.Fatal("force authorized a different workload", state.RolloutReason)
 				}
 				return
@@ -256,7 +256,7 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 			}
 			reportRuntime(t, s, c, "runtime", true)
 			reconcile()
-			if state = loadRollout(); state.DrainRequested || state.ApprovedConfigDigest != pending.PendingConfigDigest {
+			if state = loadRollout(); state.DrainRequested || state.ApprovedConfigDigest != pending.PendingConfigDigest || state.ForcedDrainTarget != "" {
 				t.Fatal("ready replacement did not finish the rollout", state.RolloutReason)
 			}
 		})
@@ -264,33 +264,57 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 }
 
 func TestForceRolloutIsFencedByConnectorRotation(t *testing.T) {
-	s, _ := tunnelTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
-	initial := readyTunnel(t, s, c)
-	adminA(t, s)
-	node := c["node_id"]
-	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
-	configureTestTunnels(t, s)
-	expired := expireWorkloadDrain(t, s, node)
-	path := "/api/admin/machines/" + node
-	requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
-	requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", map[string]string{"kind": "connector"}), 202)
-	if err := s.tunnels.Reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.reconcile(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	state, _, err := s.loadTunnel(t.Context(), node)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, _ := publishedMachineConfiguration(t, s, node)
-	if state.Generation <= expired.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
-		t.Fatal("expected connector rotation to advance the generation")
-	}
-	if state.ForcedDrainTarget != "" || runtime.ConfigDigest == expired.PendingConfigDigest {
-		t.Fatal("published the replacement after its force generation was superseded")
+	for _, timing := range []string{"before planning", "during rendering"} {
+		t.Run(timing, func(t *testing.T) {
+			s, _ := tunnelTestServer(t)
+			c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+			initial := readyTunnel(t, s, c)
+			adminA(t, s)
+			node := c["node_id"]
+			s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+			configureTestTunnels(t, s)
+			expired := expireWorkloadDrain(t, s, node)
+			path := "/api/admin/machines/" + node
+			requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
+			rotated := false
+			rotate := func() {
+				rotated = true
+				requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", map[string]string{"kind": "connector"}), 202)
+				if err := s.tunnels.Reconcile(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if timing == "during rendering" {
+				build := s.build
+				s.build = func(desired machineconfig.Desired) ([]byte, string, error) {
+					if !rotated && desired.NodeID == node && desired.State.ApplyingConfigDigest == expired.PendingConfigDigest {
+						rotate()
+					}
+					return build(desired)
+				}
+			} else {
+				rotate()
+			}
+			for i := 0; i < 2; i++ {
+				if err := s.reconcile(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				runtime, _ := publishedMachineConfiguration(t, s, node)
+				if runtime.ConfigDigest == expired.PendingConfigDigest {
+					t.Fatal("published the replacement after its force generation was superseded")
+				}
+			}
+			state, _, err := s.loadTunnel(t.Context(), node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !rotated || state.Generation <= expired.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
+				t.Fatal("expected connector rotation to advance the generation")
+			}
+			if state.ForcedDrainTarget != "" || state.ApplyingConfigDigest != "" || state.HeldOrchestrator == "" {
+				t.Fatal("expected the old workload to stay held after rotation")
+			}
+		})
 	}
 }
 

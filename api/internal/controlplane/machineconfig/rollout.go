@@ -37,9 +37,21 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldOrchestrator = ""
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
+	// Keep the authorization until the approved digest is published. A
+	// generation change can fence publication after the plan was saved.
+	if old.ConfigDigest == state.ApplyingConfigDigest {
+		state.ForcedDrainTarget = ""
+	}
 	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
-		state.PendingConfigDigest == digest && sameWorkloadEndpoints(state.HeldOrchestrator, desired)
-	state.ForcedDrainTarget = ""
+		state.PendingConfigDigest == digest && sameWorkloadEndpoints(manifest, desired)
+	if state.ForcedDrainTarget != "" && !forced {
+		state.ForcedDrainTarget = ""
+		if state.ApplyingConfigDigest != "" {
+			state.ApplyingConfigDigest = ""
+			state.ApplyingUpgradeVersion = ""
+			s.holdWorkload(ctx, m, state, old, manifest)
+		}
+	}
 	// Admission has never opened for this onchain target. Its image or rendering
 	// can be repaired without asking the failed process to drain again, while
 	// retaining storage identity, redemption destination and the admission freeze.
@@ -56,6 +68,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	}
 	if state.ApplyingConfigDigest != "" {
 		if state.ApplyingConfigDigest == digest {
+			if forced {
+				return false, nil
+			}
 			report, at, e := s.store.Report(ctx, m, "runtime")
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return false, e
@@ -94,9 +109,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		state.PendingConfigDigest = digest
 		state.DrainRequested = true
 		state.DrainStartedAt = time.Now().UTC()
-		state.HeldOrchestrator = manifest
-		state.HeldOnchain = onchainJSON(old.Onchain)
-		s.holdUpgrade(ctx, m, state)
+		s.holdWorkload(ctx, m, state, old, manifest)
 	}
 	if old.ConfigDigest != digest && !forced {
 		done, err := s.drainComplete(ctx, m, state)
@@ -139,9 +152,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.Target = target
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
-		state.HeldOrchestrator = manifest
-		state.HeldOnchain = onchainJSON(old.Onchain)
-		s.holdUpgrade(ctx, m, state)
+		s.holdWorkload(ctx, m, state, old, manifest)
 	}
 	done, err := s.drainComplete(ctx, m, state)
 	return !done, err
@@ -160,6 +171,12 @@ func (s *State) CancelTarget() {
 	s.ApplyingUpgradeVersion = ""
 	s.RolloutReason = ""
 }
+func (s *Manager) holdWorkload(ctx context.Context, m Machine, state *State, runtime Runtime, manifest string) {
+	state.HeldOrchestrator = manifest
+	state.HeldOnchain = onchainJSON(runtime.Onchain)
+	s.holdUpgrade(ctx, m, state)
+}
+
 func (s *Manager) holdUpgrade(ctx context.Context, m Machine, state *State) {
 	if state.HeldUpgradePlan != "" {
 		return
