@@ -250,31 +250,37 @@ func TestLateDrainReportNeedsAuditedRetry(t *testing.T) {
 	}
 }
 
-func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
-	s, _ := tunnelTestServer(t)
+func TestDevelopmentEnrollmentStaysPrivate(t *testing.T) {
+	s := newTestServer(t)
 	jwt, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	fp := strings.Repeat("1", 64)
-	body := registrationBody(ownerA, fp, jwt)
-	body["development_http"] = true
+	secure := registrationBody(ownerA, fp, jwt)
+	dev := registrationBody(ownerA, fp, jwt)
+	dev["development_http"] = true
 	seed := sha256.Sum256([]byte(ownerA + fp))
-	body["signature"] = ed25519.Sign(ed25519.NewKeyFromSeed(seed[:]), protocol.RegistrationProof(jwt, fp, "worker-01", "/opt/livepeer", "v1.37.2+k3s1", body["public_key"].(string), true))
-	w := request(t, s, "POST", "/v1/nodes/register", jwt, body)
+	dev["signature"] = ed25519.Sign(ed25519.NewKeyFromSeed(seed[:]), protocol.RegistrationProof(jwt, fp, "worker-01", "/opt/livepeer", "v1.37.2+k3s1", dev["public_key"].(string), true))
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, dev), 403)
+
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = true, "http://api.example"
+	s.configs = s.newConfigurationManager()
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, secure), 403)
+	w := request(t, s, "POST", "/v1/nodes/register", jwt, dev)
 	requireStatus(t, w, 200)
 	c := credentials(t, w.Body.Bytes())
-	reportRuntime(t, s, c, "runtime", false)
-	driveTunnels(t, s)
-	// An ordinary enrollment retry over the production URL must not upgrade a
-	// credential previously released to development HTTP consumers.
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, registrationBody(ownerA, fp, jwt)), 200)
-	driveTunnels(t, s)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE state->>'tunnel_id' IS NOT NULL AND state->>'tunnel_id'<>''`) != 0 {
-		t.Fatal("development enrollment became live")
+	path := "/v1/nodes/" + c["node_id"]
+	if c["config_url"] != s.params.PublicAPIURL+path+"/config" {
+		t.Fatal("development config URL is not bound to the HTTP origin")
 	}
-	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", jwt, map[string]any{"management_proof": c["token"], "fingerprint": fp, "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
-	requireStatus(t, w, 200)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible AND credential_version=2`) != 1 {
-		t.Fatal("explicit refresh did not enable secure enrollment")
-	}
+	requireStatus(t, request(t, s, "GET", path+"/config", c["token"], nil), 200)
+	requireStatus(t, request(t, s, "POST", path+"/tunnel/connector-token", c["token"], nil), 403)
+
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = false, "https://api.example"
+	requireStatus(t, request(t, s, "GET", path+"/config", c["token"], nil), 401)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, secure), 409)
+	requireStatus(t, request(t, s, "POST", path+"/credentials/refresh", jwt, map[string]any{
+		"management_proof": c["token"], "fingerprint": fp, "install_dir": "/opt/livepeer",
+		"operation_id": uuid.New().String(), "expected_credential_version": 1,
+	}), 404)
 }
 
 type dnsDeleteFailure struct{ *simulatedCloudflare }
@@ -327,21 +333,6 @@ func TestLateRetiredResultCannotAffectReplacementReadiness(t *testing.T) {
 	driveTunnels(t, s)
 	driveTunnels(t, s)
 	readyTunnel(t, s, newC)
-}
-
-func TestSecureEnrollmentBeforeEnablementCanProvision(t *testing.T) {
-	s, f := tunnelTestServer(t)
-	s.params.CloudflareEnabled = false
-	testTunnelDeps(s).Provider = nil
-	configureTestTunnels(t, s)
-	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.machine_states`) != 0 {
-		t.Fatal("secure issuance coupled to enablement")
-	}
-	s.params.CloudflareEnabled = true
-	testTunnelDeps(s).Provider = f
-	configureTestTunnels(t, s)
-	readyTunnel(t, s, c)
 }
 
 func TestEndpointDrainCancellationAndFailedStageRollback(t *testing.T) {
@@ -446,19 +437,6 @@ func TestRemovalRevokesReconnectingConnectorAndResumesLostResponse(t *testing.T)
 				t.Fatal("rotation required an already deleted tunnel")
 			}
 		})
-	}
-}
-func TestModernIneligibleMachineCanCompleteRemoval(t *testing.T) {
-	s, f := tunnelTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("e", 64))
-	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false`)
-	adminA(t, s)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{}), 202)
-	reportRuntime(t, s, c, "runner", true)
-	driveTunnels(t, s)
-	driveTunnels(t, s)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 0 || f.creates["tunnel"] != 0 {
-		t.Fatal("removal depended on provisioning eligibility")
 	}
 }
 

@@ -1,8 +1,7 @@
 # Fleet discovery
 
 The Control Center API runs Node's public Collector and serves its cached fleet
-inventory. The existing API proxy provides TLS; discovery needs no separate
-service or Node release.
+inventory through the existing Cloudflare Tunnel.
 
 ## Enable and secure
 
@@ -10,9 +9,7 @@ service or Node release.
    is disabled by default.
 2. Mount Control Center's Ed25519 signing key using `JWTSigningPrivateKeyFile`.
    All API replicas share signing configuration and the source database. Ingress
-   receives only public verification keys through its independent configuration
-   inventory. A reader needs no Cloudflare provisioning token when provisioning
-   is disabled.
+   receives only public verification keys through its configuration inventory.
 3. Set `CloudflareIngressApproved = true` and `DiscoveryEnabled = true` in
    the existing API deployment. Expose the public, read-only `GET /discovery`
    through its HTTPS proxy and restrict the API origin.

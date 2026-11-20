@@ -1,47 +1,51 @@
 # Machine tunnels and protected discovery
 
-Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's
-connector starts cloudflared, which forwards to private Traefik ingress, then Node;
-Node routes application traffic to private workloads. Client API and app hostnames
-are public through the tunnel; discovery requires a machine-bound ingress bearer
-token.
+Control Center provisions one Cloudflare Tunnel per machine enrollment. The Runtime
+connector forwards client API and app traffic through private Traefik ingress and
+Node to workloads. Discovery requires a machine-bound ingress bearer token. Public
+Trickle is unsupported: `/ai/trickle/*` is denied, so dependent apps can appear in
+discovery but fail for clients. See [discovery authentication](discovery-auth.md).
 
-Public Trickle is unsupported and `/ai/trickle/*` is denied. Apps register
-normally. A Trickle-dependent app can appear in discovery and fail for clients.
+## Production infrastructure
 
-See [discovery authentication](discovery-auth.md) for signing configuration
-and key rotation.
+Production requires Cloudflare. Set the account, zone, base domain, provisioning
+credential, status TTL, drain deadline, and node and management address exclusions
+in the deployed `deploy/config.toml`. See the [API token permissions](../api/internal/controlplane/tunnel/README.md#cloudflare-api-token-permissions).
 
-## Infrastructure and enablement
+Enable Advanced Certificate Manager on the authoritative zone and allow
+certificate and hostname quota headroom. Control Center orders certificates for the zone apex and each machine's
+wildcard. Cloudflare validates and renews them. The generated network policy assumes
+Runtime's fixed Pod/Service ranges. Verify CNI/DNAT behavior and update exclusions
+before adding network ranges or node addresses. The bootstrap origin firewall is required.
 
-Supply account and zone IDs, a dedicated base domain, a scoped backend API
-credential, observation TTL, drain deadline, hostname and certificate quota
-headroom, and all fleet node and management address exclusions. Use the [required API token permissions](../api/internal/controlplane/tunnel/README.md#cloudflare-api-token-permissions)
-when creating the backend credential. The generated network policy assumes
-Runtime's fixed Pod/Service ranges. Verify actual
-CNI/DNAT behavior; update exclusions before introducing any new network ranges
-or node addresses.
+Set `CloudflareIngressApproved = true` after verifying public routes and direct-origin
+isolation. This permits verified sources to report ready. Provisioned routes can
+serve traffic before readiness is advertised. Use removal or compromise actions to
+revoke public access. The private API stays up during provider outages.
 
-Control Center orders an Advanced certificate for the zone apex and each machine's
-wildcard; Cloudflare handles validation and renewal. Enable Advanced Certificate
-Manager on an authoritative Cloudflare zone, allow certificate quota headroom, and
-grant the provisioning token zone-scoped SSL and Certificates Write permission.
-
-Configure `api/config.example.toml` using operator-selected values. Both feature
-flags default false. `CloudflareEnabled` permits provisioning and external
-probes; `CloudflareIngressApproved` permits a source to report ready after the
-release evidence below is accepted. It is a readiness gate, not an edge kill
-switch: provisioned client routes can be reachable before source advertisement.
-Disabling the worker does not revoke resources. Use removal/compromise actions
-when external access must stop.
-
-From the repository root, build the supported amd64 connector image:
+Build the supported amd64 connector image from the repository root:
 
 ```sh
 docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
   --build-arg RUNTIME_IMAGE=<REGISTRY>/livepeer-runtime@sha256:<RUNTIME_DIGEST> \
   -t <REGISTRY>/livepeer-tunnel:<RELEASE> runtime/services
 ```
+
+## Retire legacy HTTP enrollment
+
+1. Close HTTP registration and revoke outstanding grants, or wait one hour for them
+   to expire. Keep the old release's private configuration and reporting endpoints
+   reachable while retiring HTTP machines.
+2. Before shutting those endpoints down, confirm that an authenticated GET to
+   each retired machine’s saved configuration URL returns
+   `X-Livepeer-Terminal: true` and `X-Livepeer-App-Cleanup-Ready: true`.
+3. Remove `CloudflareEnabled` and `CLOUDFLARE_ENABLED`, verify the Cloudflare route
+   to the private API origin, and deploy matching API, Runtime and bootstrap releases.
+4. Export `LIVEPEER_API_URL` with the verified HTTPS API URL and run
+   `--reenroll` with a fresh owner enrollment command to obtain a new node ID.
+   Force retirement of any missed active HTTP enrollment. Keep a private path
+   for the machine to fetch terminal instructions and report app cleanup before
+   re-enrolling. See [rotation and removal](#rotation-and-removal).
 
 ## Credential boundaries
 
@@ -53,30 +57,24 @@ docker build --platform linux/amd64 -f runtime/services/Dockerfile.tunnel \
 | Discovery verification public keys | Generated ConfigMap, independently rolled out | Runtime ingress-auth |
 | Telemetry write token | Minted locally by Control Center for the machine credential → management agent's scoped Unix socket → telemetry relay memory; one-hour lifetime | Telemetry relay only |
 
-Bootstrap stores the machine enrollment credential in owner-only host files and
-the `flux-system/livepeer-service-auth` Secret. Only the management agent mounts
-its token. The connector uses its own socket and has no Kubernetes API credential.
-App Reconciler reports through a separate socket. Protect Kubernetes Secrets and
-backups at deployment.
+Bootstrap stores enrollment credentials in owner-only host files and the
+`flux-system/livepeer-service-auth` Secret. Only the management agent mounts its
+token. The connector uses its own socket and has no Kubernetes API credential.
+App Reconciler uses a separate socket. Protect Kubernetes Secrets and backups.
+Keep private keys and provisioning credentials out of bundles, ConfigMaps, command
+arguments, URLs, logs and metrics. The public key map is safe to distribute.
 
-Keep private signing material and provisioning credentials out of bundles,
-ConfigMaps, command arguments, URLs, logs and metric labels. The public key map
-is safe to distribute; private material stays with Control Center.
-
-The connector fetches a fresh token before each start. Kubernetes restarts it
-when needed; token rotation replaces it. Starting it requires Control Center and
-Cloudflare. See
-[Tunnel token behavior](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
+The connector fetches a fresh token at startup, which requires Control Center and
+Cloudflare. Kubernetes restarts it as needed and token rotation replaces it. See
+[Cloudflare tunnel tokens](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
 
 ## Enrollment, refresh and status
 
-Active registration retries and credential refresh retain the node ID.
-Re-enrollment creates a fresh node ID and tunnel UUID.
-Cloudflare Tunnel must be the HTTPS front door, with the API origin reachable
-only through the trusted connector. The API does not infer transport security
-from arbitrary forwarded headers. HTTPS enrollment is eligible even when
-provisioning is disabled; development credentials cannot enable live tunnels.
-Use the Runtime commands in [its README](../runtime/README.md#protected-machine-ingress).
+Active registration retries and credential refresh retain the node ID. Re-enrollment
+creates a fresh node ID and tunnel UUID. Production enrollment uses HTTPS through
+Cloudflare Tunnel to the private API origin. Private development HTTP uses a fresh
+separate database. See [development setup](development.md) and
+[Runtime enrollment commands](../runtime/README.md#protected-machine-ingress).
 
 Machine endpoints are origin-bound and reject redirects. Retired credentials can
 fetch terminal cleanup instructions and send scoped diagnostics. Reports expire
@@ -95,21 +93,15 @@ After certificate and Runtime readiness, three proxied CNAMEs point at the tunne
 `api.<node>.<domain>`, `discovery.<node>.<domain>` and `*.<node>.<domain>`.
 TLS, public API routing, authenticated discovery, unauthenticated discovery
 rejection and public route isolation probes must succeed for each endpoint
-generation. API and discovery forwarding set Host to the private orchestrator;
-app forwarding preserves the original Host and application Authorization header.
-Traefik preserves the forwarded Host. The API host allows reservation,
-stop/payment and payment refresh; discovery allows `/discovery`. Other paths on
-those hosts return 404. App hosts deny discovery, runner, metrics, health and
-Trickle paths and forward the rest; Node checks HTTP methods.
+generation. See the [tunnel routing rules](../api/internal/controlplane/tunnel/README.md#machine-tunnels).
 Services remain ClusterIP. Never add public Ingress, NodePort, LoadBalancer,
 hostPort or hostNetwork to generated workloads.
 
-If provisioning has an uncertain outcome or an ownership conflict, inventory
-provider resources before retrying. Delete only proven-owned duplicates; do not
-adopt resources by name or discard retirement records. Restore authenticated
-ingress before publishing routes. The last valid artifact and verified ingress
-survive transient provider failures. Account or zone changes
-require retiring the previous scope first.
+After an uncertain provisioning outcome or ownership conflict, inventory provider
+resources before retrying. Delete only proven-owned duplicates. Preserve retirement
+records and restore authenticated ingress before publishing routes. The last valid
+artifact and verified ingress survive transient provider failures. Retire the previous
+scope before changing accounts or zones.
 
 ## Rotation and removal
 
@@ -129,14 +121,12 @@ DELETE /api/admin/machines/<NODE_ID>
 {"force":false}
 ```
 
-The administrator fleet response supplies the node ID. Set `generation` to
-`rollout_generation` from `GET /api/machines/<NODE_ID>/status` for drain commands.
-Connector rotation keeps the tunnel UUID, advances token generation and replaces
-the process. Compromise rotation also disconnects existing connectors. Rotation
-alone leaves established connections active. Follow the
-[signing-key rotation procedure](discovery-auth.md#key-rotation)
-for public-key distribution and retention. Signing and ingress verification work
-without the secrets service.
+Get the node ID from the administrator fleet response and set drain command
+`generation` to `rollout_generation` from `GET /api/machines/<NODE_ID>/status`.
+Connector rotation retains the tunnel UUID, advances the token generation and
+replaces the process. Compromise rotation also disconnects existing connections.
+Signing and ingress verification work without the secrets service. Follow the
+[signing-key rotation procedure](discovery-auth.md#key-rotation).
 
 Client endpoints are the API base URL (`ServiceURL`) and session proxy URL
 pattern (`ProxyURLTemplate`).

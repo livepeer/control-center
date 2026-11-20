@@ -106,9 +106,6 @@ func (c *Control) Request(ctx context.Context, endpoint string, payload any, lim
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, nil, &HTTPError{resp.StatusCode}
 	}
-	if c.AllowHTTP && resp.Header.Get("X-Livepeer-Tunnels-Enabled") == "true" {
-		return nil, nil, errors.New("development_tunnel_refused")
-	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil || int64(len(b)) > limit {
 		return nil, nil, errors.New("control_response_size")

@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"uuid"
 
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
@@ -32,14 +31,17 @@ func (s *Server) authenticateMachine(ctx context.Context, node, token string, re
 	if e != nil {
 		return m, e
 	}
-	if !hmac.Equal([]byte(token), []byte(s.enrollmentToken(m))) || m.Terminal && !retired {
+	wrongMode := !m.Terminal && m.tunnelEligible == s.params.DevelopmentHTTP
+	if wrongMode || !hmac.Equal([]byte(token), []byte(s.enrollmentToken(m))) || m.Terminal && !retired {
 		return m, problem(401, "invalid_machine_credential", "Invalid machine credential.")
 	}
 	return m, nil
 }
 func (s *Server) machineEnrollment(ctx context.Context, node string) (Machine, error) {
 	var m Machine
-	e := s.db.QueryRowContext(ctx, `SELECT node_id,orchestrator_address::text,fingerprint,hostname,install_dir,k3s_version,credential_version,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal)
+	e := s.db.QueryRowContext(ctx, `SELECT e.node_id,e.orchestrator_address::text,e.fingerprint,e.hostname,e.install_dir,e.k3s_version,e.credential_version,
+ e.retired_at IS NOT NULL,COALESCE(m.tunnel_eligible,false)
+ FROM lpcc.enrollments e LEFT JOIN lpcc.machines m USING(node_id) WHERE e.node_id=$1`, node).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion, &m.Terminal, &m.tunnelEligible)
 	if errors.Is(e, sql.ErrNoRows) {
 		return m, problem(404, "machine_not_found", "Machine not found.")
 	}
@@ -61,7 +63,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "fresh owner enrollment token required")
 		return
 	}
-	if !strings.HasPrefix(s.params.PublicAPIURL, "https://") {
+	if s.params.DevelopmentHTTP {
 		fail(w, 409, "credential refresh requires an HTTPS API")
 		return
 	}
@@ -92,7 +94,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var m Machine
-	e = tx.QueryRowContext(r.Context(), `SELECT node_id,orchestrator_address::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
+	e = tx.QueryRowContext(r.Context(), `SELECT node_id,orchestrator_address::text,fingerprint,hostname,install_dir,k3s_version,credential_version FROM lpcc.machines WHERE node_id=$1 AND tunnel_eligible FOR UPDATE`, r.PathValue("node_id")).Scan(&m.NodeID, &m.OrchestratorAddress, &m.Fingerprint, &m.Hostname, &m.InstallDir, &m.K3sVersion, &m.CredentialVersion)
 	if errors.Is(e, sql.ErrNoRows) {
 		fail(w, 404, "machine not found")
 		return
@@ -132,7 +134,7 @@ func (s *Server) refreshCredentials(w http.ResponseWriter, r *http.Request) {
 			s.databaseError(w, e)
 			return
 		}
-		if _, e = tx.ExecContext(r.Context(), `UPDATE lpcc.machines SET credential_version=$2,tunnel_eligible=true WHERE node_id=$1`, m.NodeID, m.CredentialVersion); e != nil {
+		if _, e = tx.ExecContext(r.Context(), `UPDATE lpcc.machines SET credential_version=$2 WHERE node_id=$1`, m.NodeID, m.CredentialVersion); e != nil {
 			s.databaseError(w, e)
 			return
 		}
@@ -166,7 +168,7 @@ func (s *Server) connectorToken(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, e)
 		return
 	}
-	if !s.params.CloudflareEnabled || !s.tunnels.Enabled() {
+	if !s.tunnels.Enabled() {
 		fail(w, 403, "connector delivery is not enabled for this enrollment")
 		return
 	}

@@ -23,7 +23,7 @@ func TestSecretMetadataDefaultsAndAuthorization(t *testing.T) {
 	execSQL(t, s.db, `DELETE FROM lpcc.secret_machines WHERE node_id=$1`, node)
 	for _, n := range []string{node, "missing-node"} {
 		q := &testdb.Observer{DB: s.db}
-		m, err := secretMachineMetadata(t.Context(), q, n)
+		m, err := s.secretMachineMetadata(t.Context(), q, n)
 		if err != nil || q.Reads != 1 || m.NodeID != n || m.PublicKey != "" || m.Managed || m.EncryptionReady || m.PolicyGeneration != 0 {
 			t.Fatal(m, q.Reads, err)
 		}
@@ -36,7 +36,7 @@ func TestSecretMetadataDefaultsAndAuthorization(t *testing.T) {
 		}
 	}
 	execSQL(t, s.db, `UPDATE lpcc.enrollments SET retired_at=now() WHERE node_id=$1`, node)
-	m, err := secretMachineMetadata(t.Context(), s.db, node)
+	m, err := s.secretMachineMetadata(t.Context(), s.db, node)
 	if err != nil || !reflect.DeepEqual(m, protocol.Machine{NodeID: node, Owner: orchA}) {
 		t.Fatal(m, err)
 	}
@@ -63,7 +63,7 @@ func TestSecretMetadataProjectionCleanupAndSnapshot(t *testing.T) {
 		t.Fatal("runtime snapshot lost full definitions", err)
 	}
 	q.Reads = 0
-	m, err := secretMachineMetadata(t.Context(), q, node)
+	m, err := s.secretMachineMetadata(t.Context(), q, node)
 	if err != nil || q.Reads != 1 || len(m.Assignments) != 2 || len(m.Consumers) != 1 || m.Consumers[0].RevisionID != first.RevisionID || m.Consumers[0].References[0].Secret != "lp-app-pinned" {
 		t.Fatal(m, q.Reads, err)
 	}
@@ -99,12 +99,12 @@ func TestSecretMetadataProjectionCleanupAndSnapshot(t *testing.T) {
 	}
 	// Applied evidence and a removal at an older generation cannot release it.
 	execSQL(t, s.db, `INSERT INTO lpcc.machine_app_completions(node_id,revision_id,generation,activation_generation,phase,apps_digest) VALUES($1,$2,1,1,'removed',$3),($1,$2,2,1,'applied',$3)`, node, first.RevisionID, "sha256:"+strings.Repeat("a", 64))
-	m, err = secretMachineMetadata(t.Context(), s.db, node)
+	m, err = s.secretMachineMetadata(t.Context(), s.db, node)
 	if err != nil || target(m).StartAllowed || len(m.Consumers) != 0 {
 		t.Fatal(m, err)
 	}
 	execSQL(t, s.db, `INSERT INTO lpcc.machine_app_completions(node_id,revision_id,generation,activation_generation,phase,apps_digest) VALUES($1,$2,2,1,'removed',$3)`, node, first.RevisionID, "sha256:"+strings.Repeat("a", 64))
-	m, err = secretMachineMetadata(t.Context(), s.db, node)
+	m, err = s.secretMachineMetadata(t.Context(), s.db, node)
 	if err != nil || !target(m).StartAllowed || len(m.Assignments) != 1 {
 		t.Fatal(m, err)
 	}
@@ -112,19 +112,24 @@ func TestSecretMetadataProjectionCleanupAndSnapshot(t *testing.T) {
 	q = &testdb.Observer{DB: s.db, AfterQuery: func() {
 		requireStatus(t, request(t, s, "PUT", "/api/operator/apps/"+first.Name+"/policy?orchestrator_address="+orchA, "session-a", map[string]any{"denied": true, "expected_generation": 0}), 200)
 	}}
-	before, err := secretMachineMetadata(t.Context(), q, node)
+	before, err := s.secretMachineMetadata(t.Context(), q, node)
 	if err != nil || q.Reads != 1 || before.PolicyGeneration != 0 || len(before.DeniedRevisions) != 0 || target(before).Desired != "present" {
 		t.Fatal(before, q.Reads, err)
 	}
-	after, err := secretMachineMetadata(t.Context(), s.db, node)
+	after, err := s.secretMachineMetadata(t.Context(), s.db, node)
 	if err != nil || after.PolicyGeneration != 1 || len(after.DeniedRevisions) != 2 || target(after).Desired != "absent" || len(after.Consumers) != 1 {
 		t.Fatal(after, err)
 	}
 
 	// Denial evidence survives completed-removal filtering and a zero app generation.
 	execSQL(t, s.db, `UPDATE lpcc.machine_states SET apps_generation=0 WHERE node_id=$1`, node)
-	after, err = secretMachineMetadata(t.Context(), s.db, node)
+	after, err = s.secretMachineMetadata(t.Context(), s.db, node)
 	if err != nil || len(after.Assignments) != 0 || len(after.DeniedRevisions) != 2 || len(after.Consumers) != 0 {
+		t.Fatal(after, err)
+	}
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false WHERE node_id=$1`, node)
+	after, err = s.secretMachineMetadata(t.Context(), s.db, node)
+	if err != nil || !reflect.DeepEqual(after, protocol.Machine{NodeID: node, Owner: orchA}) {
 		t.Fatal(after, err)
 	}
 }

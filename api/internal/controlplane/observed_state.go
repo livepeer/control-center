@@ -308,7 +308,7 @@ func (s *Server) composeMachineObservation(m Machine, facts machineObservationFa
 	if m.Terminal {
 		v.Lifecycle = "cleanup_pending"
 	}
-	v.Tunnel = tunnelObservation{Enabled: route.TunnelID != "" || s.params.CloudflareEnabled, Ready: route.Ready && route.ReadyGeneration == record.Generation && !route.VerifiedAt.IsZero() && now.Before(route.VerifiedAt.Add(ttl)), Reason: safeObservationReason(route.Reason), VerifiedAt: timePointer(route.VerifiedAt), SourceGeneration: route.SourceGeneration, CleanupComplete: route.CleanupComplete}
+	v.Tunnel = tunnelObservation{Enabled: !s.params.DevelopmentHTTP, Ready: route.Ready && route.ReadyGeneration == record.Generation && !route.VerifiedAt.IsZero() && now.Before(route.VerifiedAt.Add(ttl)), Reason: safeObservationReason(route.Reason), VerifiedAt: timePointer(route.VerifiedAt), SourceGeneration: route.SourceGeneration, CleanupComplete: route.CleanupComplete}
 	if !route.VerifiedAt.IsZero() {
 		v.Tunnel.ExpiresAt = timePointer(route.VerifiedAt.Add(ttl))
 	}

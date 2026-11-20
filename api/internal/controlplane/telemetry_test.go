@@ -375,31 +375,25 @@ func TestTelemetryTokenAndRevocation(t *testing.T) {
 	if w := push.send(t, s); w.Code != 503 {
 		t.Fatal("ingest before enrollment state loaded", w.Code)
 	}
-	if err := s.refreshTelemetry(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.refreshTelemetry(t.Context()))
 	if w := push.send(t, s); w.Code != 204 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	// A credential refresh revokes tokens bound to the previous version.
-	if _, err := s.db.Exec(`UPDATE lpcc.enrollments SET credential_version=2 WHERE node_id=$1`, node); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.refreshTelemetry(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, s.db, `UPDATE lpcc.enrollments SET credential_version=2 WHERE node_id=$1`, node)
+	requireNoError(t, s.refreshTelemetry(t.Context()))
 	if w := push.send(t, s); w.Code != 401 {
 		t.Fatal("refreshed credential kept telemetry access", w.Code)
 	}
-	if _, err := s.db.Exec(`UPDATE lpcc.enrollments SET credential_version=1 WHERE node_id=$1`, node); err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, s.db, `UPDATE lpcc.enrollments SET credential_version=1 WHERE node_id=$1`, node)
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false WHERE node_id=$1`, node)
+	requireNoError(t, s.refreshTelemetry(t.Context()))
+	requireStatus(t, push.send(t, s), 401)
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=true WHERE node_id=$1`, node)
 	if err := s.RetireMachine(t.Context(), node); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.refreshTelemetry(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, s.refreshTelemetry(t.Context()))
 	if w := push.send(t, s); w.Code != 401 {
 		t.Fatal("retired machine kept telemetry access", w.Code)
 	}

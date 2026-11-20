@@ -198,14 +198,15 @@ python() { echo 'host Python is forbidden' >&2; exit 199; }
 python3() { echo 'host Python is forbidden' >&2; exit 199; }
 ENROLLMENT_TOKEN='header.payload.signature'
 SECRET_PUBLIC=public-key-fixture
+prepare_secrets_enrollment() { :; }
 registration_key_proof() { cat >/dev/null; printf registration-proof-fixture; }
 read_machine_id() { printf '%s\\n' machine-id-fixture; }
-LIVEPEER_API_URL='http://127.0.0.1:41932'
+LIVEPEER_API_URL='http://api.example'
 LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
 RUNTIME_IMAGE=registry.invalid/runtime@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 LIVEPEER_RUNTIME_IMAGE=$RUNTIME_IMAGE
 curl() {
-  printf '{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","token":"%s","config_url":"%s","credential_version":1}' "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-http://api.example/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/config}"
+  printf '{"node_id":"aaaaaaaaaaaaaaaaaaaaaaaaaa","token":"%s","config_url":"%s","credential_version":1}' "${MOCK_SERVICE_TOKEN:-$(printf 'b%.0s' {1..64})}" "${MOCK_CONFIG_URL:-$LIVEPEER_API_URL/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/config}"
   printf '\\n200'
 }
 '''
@@ -270,7 +271,6 @@ main "$2" --install-dir "$1"
     def test_main_stage_order_without_host_mutation(self):
         result = self.shell('''
 preflight() { echo eligibility; }
-prepare_secrets_enrollment() { :; }
 authenticate_node() { echo authentication; }
 lock_installation() { echo lock; }
 check_existing_installation() { echo recheck; }
@@ -371,12 +371,33 @@ prepare_installation
             if keep_runner:
                 self.assertEqual((credentials / 'runner-bootstrap.secret').read_bytes(), runner)
 
+    def test_transport_mismatch_fails_before_preparing_secrets(self):
+        for state in ('new', 'saved'):
+            result = self.shell('''INSTALL_DIR="$1"
+chown() { :; }
+LIVEPEER_API_URL=https://api.example
+if [[ "$2" == saved ]]; then
+  LIVEPEER_ALLOW_DEVELOPMENT_HTTP=0
+  authenticate_node
+  prepare_installation
+  LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1
+  LIVEPEER_API_URL=http://api.example
+fi
+preflight() { :; }
+lock_installation() { :; }
+check_existing_installation() { :; }
+prepare_secrets_enrollment() { exit 99; }
+main --install-dir "$1"
+''', str(self.root / state), state)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('scheme does not match', result.stderr)
+
     def test_loopback_config_is_rejected_before_installation(self):
         for host in ('localhost', 'LOCALHOST', 'localhost.', '127.0.0.1', '127.42.0.1'):
             result = self.shell('''INSTALL_DIR="$1"
-MOCK_CONFIG_URL="$2"
+LIVEPEER_API_URL="$2"
 authenticate_node
-''', str(self.root / 'new'), 'http://' + host + ':41932/config')
+''', str(self.root / 'new'), 'http://' + host + ':41932')
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('loopback', result.stderr)
             self.assertFalse((self.root / 'new').exists())
@@ -457,7 +478,7 @@ python3 -c 'import os; assert "LIVEPEER_ENROLLMENT_TOKEN" not in os.environ; ass
             ("curl() { printf '{}\\n200'; }", 'invalid enrollment response: node_id'),
             ("curl() { printf 'not-json\\n200'; }", 'invalid enrollment response: node_id'),
             ("MOCK_SERVICE_TOKEN=bad", 'invalid enrollment credentials'),
-            ("MOCK_CONFIG_URL=file:///invalid", 'invalid configuration URL'),
+            ("MOCK_CONFIG_URL=http://other.example/v1/nodes/aaaaaaaaaaaaaaaaaaaaaaaaaa/config", 'invalid configuration URL'),
         ]
         for setup, expected in cases:
             result = self.shell('INSTALL_DIR="$1"; ' + setup + '; authenticate_node', str(self.root / 'new'))
@@ -480,15 +501,15 @@ class EnrollmentHTTPTests(TempTest):
                 received['authorization'] = self.headers.get('Authorization')
                 received['body'] = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 response = {'node_id': 'a' * 26, 'token': 'c' * 64,
-                            'config_url': 'https://api.example/v1/nodes/' + 'a' * 26 + '/config',
+                            'config_url': 'http://api.example/v1/nodes/' + 'a' * 26 + '/config',
                             'credential_version': 1}
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(json.dumps(response).encode())
         url = self.stack.enter_context(serve(Registration))
         result = self.shell('''INSTALL_DIR="$1"
-LIVEPEER_API_URL="$2"
-curl() { command curl "$@"; }
+fixture_url="$2"
+curl() { command curl --noproxy '*' --connect-to "api.example:80:${fixture_url#http://}" "$@"; }
 chown() { :; }
 authenticate_node
 prepare_installation
