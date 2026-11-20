@@ -107,6 +107,19 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.drainTimeout() {
 		return result, ErrDrainNotExpired
 	}
+	if !force && state.Lifecycle == "active" && state.Target == "" && state.ApplyingConfigDigest != "" {
+		var bundle []byte
+		if err := tx.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle); err != nil {
+			return result, err
+		}
+		published, _, err := ReadApplied(bundle)
+		if err != nil {
+			return result, err
+		}
+		if published.ConfigDigest == state.ApplyingConfigDigest {
+			return result, ErrDrainChanged
+		}
+	}
 	state.Generation++
 	if force {
 		if state.Lifecycle != "active" || state.Target != "" || state.DrainStartedAt.IsZero() ||

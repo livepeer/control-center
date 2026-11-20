@@ -284,8 +284,7 @@ func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposur
 		if e != nil {
 			return nil, false, e
 		}
-		record.HeldOrchestrator = manifest
-		record.HeldOnchain = onchainJSON(old.Onchain)
+		s.holdWorkload(ctx, m, &record.State, old, manifest)
 	}
 	if record.Lifecycle == "draining" {
 		done, e := s.removalComplete(ctx, m, &record.State)

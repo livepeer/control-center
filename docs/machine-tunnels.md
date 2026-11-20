@@ -139,11 +139,13 @@ Ordinary removal withdraws readiness and waits for draining. An expired drain
 deadline remains blocked even if a late completion arrives. An administrator can
 start a fresh drain with `drain/retry` or deliberately remove with `force:true`.
 
-For an expired in-place workload replacement, `drain/force` authorizes Control
-Center to publish the pending configuration without waiting for a drained
-report. Replacing the orchestrator ends its remaining sessions. Admission stays
-paused until Runtime confirms the replacement is ready. The authorization
-applies to the specified generation and its pending configuration.
+For an expired in-place drain, `drain/force` publishes the specified generation's
+pending configuration without waiting for drain completion. The replacement uses
+the existing enrollment and endpoints and ends any remaining sessions. Admission
+resumes when Runtime confirms readiness.
+
+Upgrade every Control Center API replica before using `drain/force`. Let forced
+replacements finish before rolling back the API to an older version.
 
 Deletion denies token delivery, installs deny-only ingress, revokes connector
 authentication before disconnecting, deletes owned DNS and tunnel resources.

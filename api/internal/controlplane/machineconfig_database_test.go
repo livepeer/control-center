@@ -254,6 +254,11 @@ func TestForceExpiredWorkloadRollout(t *testing.T) {
 			if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
 				t.Fatal("expected one audited force operation")
 			}
+			path := "/api/admin/machines/" + m.NodeID + "/drain/retry"
+			for range 2 {
+				requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": state.Generation}), 409)
+				reconcile()
+			}
 			reportRuntime(t, s, c, "runtime", true)
 			reconcile()
 			if state = loadRollout(); state.DrainRequested || state.ApprovedConfigDigest != pending.PendingConfigDigest || state.ForcedDrainTarget != "" {
@@ -387,6 +392,57 @@ func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
 				t.Fatal("unexpected workload after reconciliation", runtime.ConfigDigest, runtime.DrainRequested)
 			}
 		})
+	}
+}
+
+func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("5", 64))
+	initial := readyTunnel(t, s, c)
+	adminA(t, s)
+	node := c["node_id"]
+	m, err := s.authenticateMachine(t.Context(), node, c["token"], false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPlan := func() string {
+		t.Helper()
+		var data []byte
+		if err := s.db.QueryRow(`SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&data); err != nil {
+			t.Fatal(err)
+		}
+		return archiveFiles(t, data)["upgrade-plan/plan.yaml"]
+	}
+	desired := desiredConfiguration(s, m, &initial)
+	pendingPlan := readPlan()
+	previousPlan := strings.Replace(pendingPlan, m.K3sVersion, "v1.37.1+k3s1", 1)
+	if pendingPlan == previousPlan {
+		t.Fatal("fixture did not change the upgrade plan")
+	}
+	desired.State.HeldUpgradePlan = previousPlan
+	data, digest, err := machineconfig.Build(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s.db, `UPDATE lpcc.machine_configs SET bundle=$2,sha256=$3 WHERE node_id=$1`, node, data, digest)
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	configureTestTunnels(t, s)
+	expired := expireWorkloadDrain(t, s, node)
+	path := "/api/admin/machines/" + node
+	requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": expired.Generation}), 202)
+	if err := s.tunnels.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.ApplyingConfigDigest != expired.PendingConfigDigest || readPlan() != previousPlan {
+		t.Fatal("expected an unpublished force", err)
+	}
+	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
+	if err := s.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if readPlan() != previousPlan {
+		t.Fatal("ordinary removal published the pending upgrade plan")
 	}
 }
 
