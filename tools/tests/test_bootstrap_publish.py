@@ -38,6 +38,7 @@ FAKE_WRANGLER = textwrap.dedent('''\
         log.write(json.dumps(args) + '\\n')
     assert args[:2] == ['r2', 'object'] and args[-1] == '--remote', args
     op, path, options = args[2], args[3], dict(zip(args[4:-1:2], args[5:-1:2]))
+    assert options.pop('--env-file') == os.devnull, args
     bucket, key = path.split('/', 1)
     if os.environ.get('FAKE_R2_FAIL') == op + ':' + key:
         sys.exit('✘ [ERROR] Authentication error [code: 10000]')

@@ -1,8 +1,8 @@
 // Cloudflare Workers Static Assets deployment for the Control Center UI.
 // Build first (`npm run build`); wrangler uploads ./dist and worker/index.ts.
 //
-//   npx wrangler deploy                     workers.dev smoke instance
-//   npx wrangler deploy --env production    controlcenter.livepeer.live
+//   npx wrangler deploy --env-file /dev/null                     workers.dev smoke instance
+//   npx wrangler deploy --env-file /dev/null --env production    controlcenter.livepeer.live
 //
 // See deploy/README.md for the release, rollback and bootstrap runbook.
 {
