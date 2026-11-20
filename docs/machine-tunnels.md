@@ -141,9 +141,9 @@ Ordinary removal withdraws readiness and waits for draining. An expired drain
 deadline remains blocked even if a late completion arrives. An administrator can
 start a fresh drain with `drain/retry` or deliberately remove with `force:true`.
 
-If waiting for sessions to finish times out during an orchestrator update, use
-`drain/force` to queue it. Replacing the orchestrator ends remaining sessions. The
-new orchestrator accepts sessions when Runtime reports it ready.
+If waiting for sessions to drain times out during an orchestrator update, use
+`drain/force` to continue the update. Replacing the orchestrator ends remaining
+sessions. The new orchestrator accepts sessions when Runtime reports it ready.
 
 Upgrade every Control Center API replica before using `drain/force`. Let forced
 replacements finish before rolling back the API to an older version.
