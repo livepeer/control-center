@@ -80,6 +80,11 @@ func TestOnchainCredentialsRequireBoundRuntimeProofWhileSecretsUnavailable(t *te
 	if count(t, s, `SELECT count(*) FROM lpcc.onchain_grants`) != 1 {
 		t.Fatal("replay minted another grant")
 	}
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = true, "http://api.example"
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false WHERE node_id=$1`, node)
+	requireStatus(t, request(t, s, "POST", path, machine["token"], signedOnchainRequest(t, s, node, in.Launch)), 403)
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = false, "https://api.example"
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=true WHERE node_id=$1`, node)
 	execSQL(t, s.db, `UPDATE lpcc.secret_machines SET public_key='' WHERE node_id=$1`, node)
 	requireStatus(t, request(t, s, "POST", path, machine["token"], in), 403)
 	execSQL(t, s.db, `DELETE FROM lpcc.secret_machines WHERE node_id=$1`, node)
@@ -468,6 +473,16 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 200 {
 		t.Fatal("refresh revoked retained grant")
 	}
+	s.params.DevelopmentHTTP = true
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
+		t.Fatal("development accepted an existing grant")
+	}
+	s.params.DevelopmentHTTP = false
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false WHERE node_id=$1`, node)
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
+		t.Fatal("ineligible machine kept redemption access")
+	}
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=true WHERE node_id=$1`, node)
 	if _, e = s.db.Exec(`UPDATE lpcc.onchain_state SET initialized=true WHERE fingerprint=$1`, fingerprint); e != nil {
 		t.Fatal(e)
 	}

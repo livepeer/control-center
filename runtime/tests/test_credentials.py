@@ -33,6 +33,7 @@ source "$1"
 INSTALL_DIR=$2; export INSTALL_DIR
 if [[ -n $TEST_API ]]; then LIVEPEER_API_URL=$TEST_API; else unset LIVEPEER_API_URL; fi
 CREDENTIAL_TRANSITION=$TEST_MODE
+prepare_secrets_enrollment() { printf 'prepare-secrets\n' >> "$INSTALL_DIR/steps"; }
 SECRET_PUBLIC=$(command cat "$INSTALL_DIR/fake-public-key" 2>/dev/null || printf public-fixture)
 replace_secrets_key() { SECRET_PUBLIC=replacement-fixture; printf '%s' "$SECRET_PUBLIC" > "$INSTALL_DIR/fake-public-key"; printf 'key-rotated\n' >> "$INSTALL_DIR/steps"; }
 secrets_key_proof() { printf signature-fixture; }
@@ -104,10 +105,14 @@ transition_credentials
         self.assertFalse((self.root / 'state/credential-transition.json').exists())
         self.assertFalse((self.root / 'steps').exists())
         self.assertEqual((self.root / 'credentials/service-token').read_text(), 'b' * 64)
-        # The correct explicit endpoint still works, including HTTP-to-HTTPS refresh.
+        # Reject the HTTP refresh before preparing secrets or stopping consumers.
         (self.root / 'credentials/config-url').write_text('http://control.example.invalid/v1/nodes/' + 'a' * 26 + '/config')
         result = self.transition()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'steps').exists())
+        result = self.transition(mode='reenroll')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'credentials/node-id').read_text(), 'c' * 26)
 
     def test_standard_origin_refresh_can_omit_api_override(self):
         (self.root / 'credentials/config-url').write_text('https://controlcenter-api.livepeer.live/v1/nodes/' + 'a' * 26 + '/config')

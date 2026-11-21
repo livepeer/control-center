@@ -35,28 +35,13 @@ type Manager struct {
 	endpointVerifier func(context.Context, RoutingState, string) error
 }
 
-// New also supports reading persisted state while provisioning is disabled.
-// Configure enables provisioning and must finish before workers start.
 func New(config Config, deps Dependencies) *Manager {
-	return &Manager{signDiscovery: deps.SignDiscovery, db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
-		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints}
-}
-
-func (s *Manager) Configure(publicAPIURL string) error {
-	if !s.params.CloudflareEnabled {
-		return nil
-	}
-	if err := s.params.Validate(publicAPIURL); err != nil {
-		return err
-	}
-	if s.params.CloudflareAPIToken == "" {
-		return errors.New("missing Cloudflare provisioning credential")
-	}
-	if s.provider == nil {
-		s.provider = &cloudflareHTTP{params: s.params, client: &http.Client{Timeout: 15 * time.Second,
+	if deps.Provider == nil && config.CloudflareAPIToken != "" {
+		deps.Provider = &cloudflareHTTP{params: config, client: &http.Client{Timeout: 15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base: "https://api.cloudflare.com/client/v4"}
 	}
-	return nil
+	return &Manager{signDiscovery: deps.SignDiscovery, db: deps.DB, params: config, logger: deps.Logger, rollout: deps.Configurations,
+		provider: deps.Provider, endpointVerifier: deps.VerifyEndpoints}
 }
 
 func (s *Manager) Enabled() bool { return s.provider != nil }

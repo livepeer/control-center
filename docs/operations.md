@@ -130,6 +130,5 @@ the private Node Service remains reachable for management and cleanup.
 
 ## Machine ingress and discovery
 
-Machine tunnels and fleet discovery are opt-in. Follow the [tunnel runbook](machine-tunnels.md)
-for setup and removal, then [fleet discovery](fleet-discovery.md) to expose the
-aggregate inventory.
+Production requires Cloudflare machine tunnels. Follow the [tunnel runbook](machine-tunnels.md)
+for setup and removal. Enable [fleet discovery](fleet-discovery.md) to expose the aggregate inventory.

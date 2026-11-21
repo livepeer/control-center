@@ -21,21 +21,18 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 	node := r.PathValue("node_id")
 	// Writes retain their enrollment and proof checks before reading the response.
 	if r.Method == "POST" {
-		var out protocol.Machine
-		var retired bool
-		e := s.db.QueryRowContext(r.Context(), `SELECT orchestrator_address::text,retired_at IS NOT NULL FROM lpcc.enrollments WHERE node_id=$1`, node).Scan(&out.Owner, &retired)
-		if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		m, e := s.machineEnrollment(r.Context(), node)
+		if e != nil && errorDetails(e).status >= 500 {
 			fail(w, 503, "unavailable")
 			return
 		}
-		if e != nil || retired {
-			out.NodeID = node
-			respond(w, 200, out)
+		if e != nil || m.Terminal || m.tunnelEligible == s.params.DevelopmentHTTP {
+			respond(w, 200, protocol.Machine{NodeID: node, Owner: m.OrchestratorAddress})
 			return
 		}
 
 		var in protocol.MachineBinding
-		if boundedInput(r, &in, 16384) != nil || in.NodeID != node || in.Owner != out.Owner {
+		if boundedInput(r, &in, 16384) != nil || in.NodeID != node || in.Owner != m.OrchestratorAddress {
 			fail(w, 400, "invalid enrollment")
 			return
 		}
@@ -62,12 +59,7 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 403, "key proof required")
 				return
 			}
-			m, err := s.machineEnrollment(r.Context(), node)
-			if err != nil && errorDetails(err).status >= 500 {
-				fail(w, 503, "unavailable")
-				return
-			}
-			if err != nil || m.Terminal || m.OrchestratorAddress != out.Owner || !hmacEqual(in.ManagementProof, protocol.EnrollmentProof(s.enrollmentToken(m), node, in.PublicKey, in.Nonce)) {
+			if !hmacEqual(in.ManagementProof, protocol.EnrollmentProof(s.enrollmentToken(m), node, in.PublicKey, in.Nonce)) {
 				fail(w, 403, "machine proof required")
 				return
 			}
@@ -88,7 +80,7 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	out, err := secretMachineMetadata(r.Context(), s.db, node)
+	out, err := s.secretMachineMetadata(r.Context(), s.db, node)
 	if err != nil {
 		fail(w, 503, "unavailable")
 		return
@@ -96,11 +88,11 @@ func (s *Server) secretMachine(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, out)
 }
 
-func secretMachineMetadata(ctx context.Context, q machineapps.Querier, node string) (protocol.Machine, error) {
+func (s *Server) secretMachineMetadata(ctx context.Context, q machineapps.Querier, node string) (protocol.Machine, error) {
 	out := protocol.Machine{NodeID: node}
 	// Only the secrets service consumes this projection. Runtime snapshots retain
 	// full pinned definitions; authorization needs only their secret declarations.
-	rows, err := q.QueryContext(ctx, `SELECT e.orchestrator_address::text,e.retired_at IS NOT NULL,
+	rows, err := q.QueryContext(ctx, `SELECT e.orchestrator_address::text,e.retired_at IS NOT NULL OR active.tunnel_eligible IS DISTINCT FROM $2,
  COALESCE(m.public_key,''),COALESCE(m.managed,false),COALESCE(m.encryption_ready,false),
  COALESCE(g.generation,0),COALESCE(s.apps_generation,0),v.revision_id::text,COALESCE(p.denied,false),
  CASE WHEN v.intent->'revision' IS NULL OR v.intent->'revision'='null'::jsonb THEN v.intent
@@ -111,27 +103,28 @@ func secretMachineMetadata(ctx context.Context, q machineapps.Querier, node stri
  THEN convert_from(r.canonical,'UTF8')::jsonb#>'{container,secrets}' END,
  COALESCE(r.digest=v.intent->>'digest',false)
  FROM lpcc.enrollments e
+ LEFT JOIN lpcc.machines active USING(node_id)
  LEFT JOIN lpcc.secret_machines m USING(node_id)
  LEFT JOIN lpcc.operator_policy_generation g ON g.orchestrator_address=e.orchestrator_address
  LEFT JOIN lpcc.machine_states s USING(node_id)
  LEFT JOIN lpcc.machine_app_heads v ON v.node_id=e.node_id AND e.retired_at IS NULL
  LEFT JOIN lpcc.app_revisions r ON r.revision_id=v.revision_id
  LEFT JOIN lpcc.operator_app_policy p ON p.orchestrator_address=e.orchestrator_address AND p.app_name=r.app_name
- WHERE e.node_id=$1 ORDER BY v.revision_id`, node)
+ WHERE e.node_id=$1 ORDER BY v.revision_id`, node, !s.params.DevelopmentHTTP)
 	if err != nil {
 		return out, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var retired, denied, allowed, completed, digestMatches bool
+		var inactive, denied, allowed, completed, digestMatches bool
 		var gen int64
 		var revision sql.NullString
 		var raw, refs []byte
-		if err = rows.Scan(&out.Owner, &retired, &out.PublicKey, &out.Managed, &out.EncryptionReady,
+		if err = rows.Scan(&out.Owner, &inactive, &out.PublicKey, &out.Managed, &out.EncryptionReady,
 			&out.PolicyGeneration, &gen, &revision, &denied, &raw, &allowed, &completed, &refs, &digestMatches); err != nil {
 			return out, err
 		}
-		if retired {
+		if inactive {
 			return protocol.Machine{NodeID: node, Owner: out.Owner}, nil
 		}
 		out.Active = true

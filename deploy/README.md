@@ -106,11 +106,9 @@ Onchain is the default; startup requires valid payment settings. Control Center
 configures each machine automatically. The redeemer retains its wallet and
 `redeemer-data` volume.
 
-Enable managed tunnels and discovery after configuring the `livepeer.vip`
-account/zone, certificate permissions, signing configuration, image digests,
-and node address exclusions. Update `TunnelNodeAddresses` with the public and
-management addresses of every machine before enrollment; the bootstrap
-installer's origin firewall remains required.
+Production requires Cloudflare. Configure the account, zone, certificate permissions,
+and every public and management address in `TunnelNodeAddresses` before enrollment.
+Follow the [machine tunnel runbook](../docs/machine-tunnels.md) for setup and cutover.
 
 ## Telemetry storage
 

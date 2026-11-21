@@ -20,6 +20,11 @@ make ui
 ```
 
 Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
+The local example uses `DevelopmentHTTP = true` with a separate database and
+fresh enrollments. To test enrollment, bind the API on the private dev network
+and set `PublicAPIURL` to the HTTP URL reachable by test hosts and pods. Run
+bootstrap with that `LIVEPEER_API_URL` and `LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1`.
+
 The Vite dev server proxies `/api` to the local API on the same origin. Deployed
 builds call the API origin from `VITE_CONTROLCENTER_API_URL`, which defaults to
 the value in [`ui/production.env`](../ui/production.env). Add the UI origin to

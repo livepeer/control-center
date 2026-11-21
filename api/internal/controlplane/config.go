@@ -13,6 +13,7 @@ import (
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/ingressauth"
 )
 
@@ -37,7 +38,8 @@ type Params struct {
 	DiscoveryParams
 	TelemetryParams
 	Listen                        string `env:"LISTEN_ADDR" default:"localhost:41932" descr:"HTTP listen address"`
-	PublicAPIURL                  string `env:"PUBLIC_API_URL" default:"http://localhost:41932" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
+	PublicAPIURL                  string `env:"PUBLIC_API_URL" pattern:"^https?://[a-zA-Z0-9_.:-]+(/[a-zA-Z0-9_.-]+)*/?$" descr:"API URL reachable from runtime hosts and pods"`
+	DevelopmentHTTP               bool   `env:"DEVELOPMENT_HTTP" default:"false" descr:"Serve private development enrollments over HTTP without Cloudflare"`
 	SupabaseURL                   string `env:"SUPABASE_URL" min:"1" descr:"Supabase project URL"`
 	SupabasePublishableKey        string `env:"SUPABASE_PUBLISHABLE_KEY" min:"1" descr:"Supabase browser-safe publishable key"`
 	Mode                          string `env:"CONTROL_CENTER_MODE" default:"onchain" alts:"offchain,onchain" descr:"Fixed deployment payment mode"`
@@ -139,24 +141,19 @@ func (p *Params) PreValidate() error {
 	if p.DrainTimeout != nil && *p.DrainTimeout < p.RuntimeAppDrainTimeout {
 		return errors.New("DrainTimeout must be at least RuntimeAppDrainTimeout")
 	}
-	if p.RuntimeImage == "" {
+	if !machineconfig.ValidConnectorImage(p.RuntimeImage) {
 		return errors.New("configure a digest-pinned RuntimeImage")
 	}
-	if p.CloudflareEnabled && p.RuntimeConnectorImage == "" {
-		return errors.New("managed tunnels require RuntimeConnectorImage")
+	if (!p.DevelopmentHTTP || p.RuntimeConnectorImage != "") && !machineconfig.ValidConnectorImage(p.RuntimeConnectorImage) {
+		return errors.New("configure a digest-pinned RuntimeConnectorImage")
 	}
-	for _, image := range []string{p.RuntimeImage, p.RuntimeNodeImage, p.RuntimeConnectorImage} {
-		if image != "" && !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$`).MatchString(image) {
-			return errors.New("runtime images must be pinned by sha256 digest")
-		}
+	if p.RuntimeNodeImage != "" && !machineconfig.ValidConnectorImage(p.RuntimeNodeImage) {
+		return errors.New("configure a digest-pinned RuntimeNodeImage")
 	}
 	if err := p.DiscoveryParams.validate(); err != nil {
 		return err
 	}
 	if err := p.TelemetryParams.validate(); err != nil {
-		return err
-	}
-	if err := p.validateTunnels(); err != nil {
 		return err
 	}
 	if p.DefaultAdminEmail != "" {
@@ -172,6 +169,18 @@ func (p *Params) PreValidate() error {
 		if raw != "" && (err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "") {
 			return errors.New("PublicAPIURL and SupabaseURL must be HTTP(S) base URLs without credentials, query strings, or fragments")
 		}
+	}
+	scheme := "https"
+	if p.DevelopmentHTTP {
+		scheme = "http"
+		if p.PublicListen != "" {
+			return errors.New("DevelopmentHTTP requires an empty PublicListen")
+		}
+	} else if err := p.TunnelParams.Validate(); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(p.PublicAPIURL, scheme+"://") {
+		return errors.New("PublicAPIURL must use " + scheme + " for this deployment mode")
 	}
 	return p.validateEdge()
 }

@@ -138,16 +138,10 @@ func TestFleetConfigurationAndPublicDisabledRoute(t *testing.T) {
 		t.Fatal("discovery started without ingress approval")
 	}
 	s.params.CloudflareIngressApproved = true
-	if err := s.ConfigureTunnels(); err != nil {
-		t.Fatal(err)
-	}
 	if err := s.ConfigureDiscovery(); err != nil {
 		t.Fatal(err)
 	}
 	defer s.CloseDiscovery()
-	if s.tunnels.Enabled() {
-		t.Fatal("reader unnecessarily acquired provisioning client")
-	}
 	if status := s.DiscoveryStatus(); !status.Enabled || status.InstanceID == "" || !status.SelectionStale {
 		t.Fatal("startup status treated as fresh inventory")
 	}

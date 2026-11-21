@@ -30,8 +30,7 @@ RuntimeAppDrainTimeout = "12h"
 # Omitted DrainTimeout defaults to RuntimeAppDrainTimeout plus 10m.
 # DrainTimeout = "12h10m"
 
-# Enable after supplying account settings, the private keyring, and fleet IPs.
-CloudflareEnabled = false
+# Production requires Cloudflare account settings, credentials, and fleet IPs.
 CloudflareIngressApproved = false
 DiscoveryEnabled = false
 CloudflareAccountID = "<ACCOUNT_ID>"

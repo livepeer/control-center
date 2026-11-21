@@ -53,9 +53,6 @@ func serve(ctx context.Context, p controlplane.Params) error {
 	if err := app.ConfigureMode(ctx); err != nil {
 		return fmt.Errorf("initialize Control Center mode: %w", err)
 	}
-	if err := app.ConfigureTunnels(); err != nil {
-		return fmt.Errorf("initialize tunnel provisioning: %w", err)
-	}
 	if err := app.ConfigureDiscovery(); err != nil {
 		return fmt.Errorf("initialize fleet discovery: %w", err)
 	}

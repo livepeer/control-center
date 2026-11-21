@@ -92,7 +92,7 @@ type Desired struct {
 	ReportError error
 }
 
-var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
+var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$`)
 
 func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }
 

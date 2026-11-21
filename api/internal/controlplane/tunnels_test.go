@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"strings"
 	"sync"
@@ -137,18 +136,19 @@ func (f *simulatedCloudflare) Route(_ context.Context, r tunnel.CFResource, targ
 	return nil
 }
 
+func testTunnelParams() TunnelParams {
+	return TunnelParams{CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32),
+		CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid",
+		CloudflareAPIToken: "backend-provisioning-only", TunnelStatusTTL: 5 * time.Minute,
+		TunnelNodeAddresses: []string{"198.51.100.10/32"}}
+}
+
 func tunnelTestServer(t *testing.T) (*Server, *simulatedCloudflare) {
 	t.Helper()
 	s := newTestServer(t)
 	t.Cleanup(func() { testTunnelDependencies.Delete(s) })
-	s.params.TunnelParams = TunnelParams{CloudflareEnabled: true, CloudflareIngressApproved: true, CloudflareAccountID: strings.Repeat("a", 32), CloudflareZoneID: strings.Repeat("b", 32), CloudflareBaseDomain: "fleet.example.invalid", CloudflareAPIToken: "backend-provisioning-only", TunnelStatusTTL: 5 * time.Minute}
+	s.params.TunnelParams = testTunnelParams()
 	s.params.DrainTimeout = new(time.Minute)
-	s.params.TunnelNodeAddresses = []string{"198.51.100.10/32"}
-	s.params.RuntimeImage = "registry.example.invalid/runtime@sha256:" + strings.Repeat("d", 64)
-	s.params.RuntimeConnectorImage = "registry.example.invalid/connector@sha256:" + strings.Repeat("c", 64)
-	if e := s.ConfigureTunnels(); e != nil {
-		t.Fatal(e)
-	}
 	fake := newSimulatedCloudflare()
 	testTunnelDeps(s).Provider = fake
 	testTunnelDeps(s).VerifyEndpoints = func(_ context.Context, r tunnel.RoutingState, c string) error {
@@ -172,9 +172,6 @@ func configureTestTunnels(t *testing.T, s *Server) {
 	t.Helper()
 	s.configs = s.newConfigurationManager()
 	s.tunnels = s.newTunnelManager(*testTunnelDeps(s))
-	if err := s.tunnels.Configure(s.params.PublicAPIURL); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func ingressHash(r []tunnel.IngressRule) string {
@@ -485,42 +482,6 @@ func TestTunnelAdministrativeDrainAndRotation(t *testing.T) {
 	}
 	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action IN ('machine.remove','tunnel.rotate') AND outcome='success'`) != 2 {
 		t.Fatal("missing administration audit")
-	}
-}
-
-func TestPrivateWorkloadUpdatePolicy(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprint("managed-enable-", enabled), func(t *testing.T) {
-			s := newTestServer(t)
-			s.params.CloudflareEnabled = enabled
-			s.configs = s.newConfigurationManager()
-			c := enroll(t, s, ownerA, strings.Repeat("4", 64))
-			m, e := s.authenticateMachine(t.Context(), c["node_id"], c["token"], false)
-			if e != nil {
-				t.Fatal(e)
-			}
-			desired := desiredConfiguration(s, m, nil)
-			data, _, e := machineconfig.Build(desired)
-			if e != nil {
-				t.Fatal(e)
-			}
-			previous := strings.Replace(archiveFiles(t, data)["system/node/orchestrator.yaml"], `Network = "offchain"`, `Network = "previous"`, 1)
-			desired.State.HeldOrchestrator = previous
-			data, digest, e := machineconfig.Build(desired)
-			if e != nil {
-				t.Fatal(e)
-			}
-			execSQL(t, s.db, `UPDATE lpcc.machine_configs SET bundle=$2,sha256=$3 WHERE node_id=$1`, m.NodeID, data, digest)
-			if e = s.reconcile(t.Context()); e != nil {
-				t.Fatal(e)
-			}
-			w := request(t, s, "GET", "/v1/nodes/"+m.NodeID+"/config", c["token"], nil)
-			requireStatus(t, w, 200)
-			same := archiveFiles(t, w.Body.Bytes())["system/node/orchestrator.yaml"] == previous
-			if !same {
-				t.Fatal("workload replacement bypassed the drain")
-			}
-		})
 	}
 }
 
