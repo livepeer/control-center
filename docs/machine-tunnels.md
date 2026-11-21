@@ -138,19 +138,17 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-- **Orchestrator replacement.** For an update that keeps the existing
-  endpoints, an administrator can use `drain/force` at any time while the
-  update waits for sessions to finish. Control Center forces these updates
-  automatically after `DrainTimeout`. Forced updates end remaining sessions,
-  and the replacement accepts sessions when Runtime reports it ready.
-- **Endpoint changes and normal removal.** Control Center returns HTTP 409 if
-  you use `drain/force` on a change that moves an endpoint, even if it also
-  replaces the orchestrator. Control Center can switch addresses or continue
-  normal removal once the runner confirms the drain. The runner has up to
-  `DrainTimeout` from the drain request (`12h10m` by default). `0s` makes the
-  attempt expire immediately. After expiry, the operation stays blocked. An
-  endpoint change keeps the old addresses. Use `drain/retry` to start a fresh
-  attempt. See
+- **Orchestrator replacement.** `drain/force` skips the wait for a replacement
+  at the same client addresses. Administrators can run it at any time while
+  sessions drain. Control Center forces the replacement automatically after
+  `DrainTimeout`. Forced updates end remaining sessions, and the replacement
+  accepts sessions when Runtime reports it ready.
+- **Endpoint changes and normal removal.** Control Center keeps the old client
+  addresses until the runner confirms the drain. That rule also applies when an
+  endpoint change includes an orchestrator replacement. Normal removal also
+  waits for confirmation. Each attempt has up to `DrainTimeout` from the
+  request (`12h10m` by default). At `0s`, the attempt expires immediately. If
+  the drain times out, use `drain/retry` to start a fresh attempt. See
   [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
 - **Forced removal.** Send `force:true` with the machine DELETE request to
   start removal without waiting for a graceful drain.
