@@ -159,8 +159,8 @@ github.com/leanovate/gopter v0.2.11 h1:vRjThO1EKPb/1NsDXuDrzldR28RLkBflWYcU9CvzW
 github.com/leanovate/gopter v0.2.11/go.mod h1:aK3tzZP/C+p1m3SPRE4SYZFGP7jjkuSI4f7Xvpt0S9c=
 github.com/livepeer/golang-runner v0.0.0-20261110073804-8664fdb1f080 h1:d51np/CrXtGIvFxLzFR72/Cay2jUb2aSIBBbvOYhnI4=
 github.com/livepeer/golang-runner v0.0.0-20261110073804-8664fdb1f080/go.mod h1:7Eao2+wi/GhTZbCFspOShfFe69DLWv1CabfUCqQaTgc=
-github.com/livepeer/node v1.0.7 h1:ABBsDobbv4B/3ACodHBTx0hzhmyT5k31EaJve568Etk=
-github.com/livepeer/node v1.0.7/go.mod h1:wmK1BmldQEKlxs3HVm2IcTNkxrbr36fUwY4hfsr8YlE=
+github.com/livepeer/node v1.0.10 h1:6HTMgbuErTSLJ//YNq1CsC/o03dD0GzQdw8DqS4rNBs=
+github.com/livepeer/node v1.0.10/go.mod h1:wmK1BmldQEKlxs3HVm2IcTNkxrbr36fUwY4hfsr8YlE=
 github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=
 github.com/mattn/go-colorable v0.1.14/go.mod h1:6LmQG8QLFO4G5z1gPvYEzlUgJ2wF+stgPZH1UqBm1s8=
 github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=
