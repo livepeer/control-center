@@ -14,7 +14,7 @@ generation and current enrollment credential. Normal removal retires the
 enrollment and preserves storage.
 
 `TunnelStatusTTL` sets report freshness and defaults to two minutes.
-See [drain settings](../../../../docs/app-registry.md#runtime-delivery-and-completion-contract)
+See [drain settings](../../../../docs/app-registry.md#runtime-delivery-drain-and-removal)
 
 The [tunnel manager](../tunnel/README.md) orders endpoint replacement. A completed
 drain alone does not establish external readiness.

@@ -60,7 +60,7 @@ verified address in `DefaultAdminEmail`. The UI origin must also appear in
 The Compose network enables IPv6 because direct Supabase database endpoints can
 be IPv6-only. The host needs working IPv6 egress for such an endpoint.
 
-Prepare the required [operator secrets service and Vault](../docs/operator-secrets.md#deployment)
+Prepare the required [operator secrets service and Vault](../docs/operator-secrets.md#deploy-the-secrets-service-and-vault)
 before starting the complete deployment. They use the same Compose file.
 
 Copy `redeemer.example.toml` to `redeemer.toml` and `onchain.example.json` to

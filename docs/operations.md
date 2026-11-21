@@ -1,75 +1,52 @@
-# Operations runbook
+# Operations
 
-## Installation
+For production Compose, registry, UI, and bootstrap releases, see [staging deployment](../deploy/README.md).
 
-Copy `api/config.example.toml` to `api/config.toml` and create its secret files.
-Build and publish the Runtime image, then set `RuntimeImage` to its digest as
-described in the [Runtime prerequisites](../runtime/README.md#prerequisites).
-In the [Supabase authentication dashboard](https://supabase.com/dashboard),
-enable the sign-in methods you plan to use and allow
-`http://localhost:5173/auth/callback` as a redirect URL. Authentication and the
-database must use the same trusted project. `make api` loads `api/config.toml`.
+## Initial setup
 
-## Orchestrators
+1. Copy `api/config.example.toml` to `api/config.toml` and create its secret files.
+2. Publish the Runtime image and set `RuntimeImage` to its digest ([Runtime prerequisites](../runtime/README.md#prerequisites)).
+3. In [Supabase](https://supabase.com/dashboard), enable sign-in methods and allow redirect URL `http://localhost:5173/auth/callback`.
 
-Users select an orchestrator in the console. Its canonical owner is its lowercase
-recipient address, independent of network and payment configuration. Members
-share machines, secrets and app access policies. Administration remains global.
+Authentication and the database must use the same trusted Supabase project. `make api` loads `api/config.toml`.
 
-In an on-chain deployment, select **Add orchestrator**, enter its active
-Arbitrum One address and wait for the activity check. Download the challenge
-JWT, which has no trailing newline, then sign its exact bytes:
+## Manage orchestrators and members
 
-```sh
-livepeer chain sign message --message-file ./orchestrator-claim.jwt \
-  --keystore-file <file> --keystore-password-file <file> --output json
-```
+An orchestrator's canonical owner is its lowercase recipient Ethereum address, independent of network or payment settings. Members share machines, secrets, and app policies. Administration is global.
 
-Paste the returned `signature` into the console. A successful claim creates
-your membership, selects the orchestrator and displays its machine enrollment
-command. One claim permits enrolling multiple machines. A later user cannot
-claim the same address. In an off-chain deployment, **Add orchestrator** creates
-the zero-address workspace by default; enter a distinct Ethereum address to
-create another workspace.
+### Claim an orchestrator
 
-The shared [Vault policy](operator-secrets.md#deployment) covers newly added
-orchestrators.
+1. In onchain mode, select **Add orchestrator**, enter an active Arbitrum One address, and wait for the activity check.
+2. Download the challenge JWT (no trailing newline) and sign its exact bytes.
 
-Invitation links are issued without stored state, expire after 24 hours, and can
-be accepted once. Member removal and departure are recorded in
-`lpcc.admin_audit_events`. Removing a member preserves associated orchestrators
-and machines. Members cannot leave if no other member remains.
+   ```sh
+   livepeer chain sign message --message-file ./orchestrator-claim.jwt \
+     --keystore-file <file> --keystore-password-file <file> --output json
+   ```
 
-The orchestrator ownership migrations require fresh Control Center and secrets
-service data. They refuse populated ownership-dependent tables. Existing
-ciphertext cannot be reassigned by editing its owner field because ownership is
-part of its authenticated encryption metadata.
+3. Paste `signature` into the console.
 
-## Administrator access
+Claiming adds membership, selects the orchestrator, and displays its enrollment command. One claim enrolls multiple machines, and each address is claimable once.
 
-Ensure email confirmation is enabled and administrator accounts have verified
-email addresses. Administrators should initiate signup and never confirm
-unsolicited emails.
+In offchain mode, **Add orchestrator** creates the zero-address workspace by default, or enter a distinct Ethereum address for another workspace. The shared [Vault policy](operator-secrets.md#deploy-the-secrets-service-and-vault) covers new orchestrators.
 
-Set `DefaultAdminEmail` (or `DEFAULT_ADMIN_EMAIL`) to create a pending grant
-when none are active. This creates no login; the person must sign in with a
-confirmed account. Use **Administration** to grant access by exact email or
-revoke another administrator.
+### Membership and migrations
 
-In the Supabase authentication dashboard, open **Authentication → Sign In /
-Providers → Email** and enable **Confirm Email**. The app cannot grant new
-access while this setting is disabled or unavailable. Existing access remains
-in place.
+Stateless invitations expire in `24h` and work once. Member removals and departures log to `lpcc.admin_audit_events`. Removing a member preserves orchestrators and machines, and the last member cannot leave.
 
-Changing the default does not replace pending or deleted-account grants. A new
-account cannot inherit a claimed grant. Recovering an account or linking another
-identity can retain access, so revoke the grant before reassigning its mailbox.
+Ownership migrations need fresh Control Center and secrets databases and refuse populated ownership tables. Ciphertext authenticates ownership metadata, so editing owner fields cannot reassign secrets.
 
-## Recover administrator access
+## Manage administrator access
 
-If the only administrator is inaccessible, deleted, or mistyped, inspect
-`lpcc.administrator_grants` through a trusted database connection. Replace
-the placeholders below; do not delete history or alter account associations.
+Enable **Confirm Email** in Supabase (**Authentication → Sign In / Providers → Email**) and verify admin emails. Admins initiate signup themselves and ignore unsolicited confirmations. Losing email confirmation blocks new grants while active admins remain.
+
+`DefaultAdminEmail` (`DEFAULT_ADMIN_EMAIL`) seeds one pending grant only when zero active grants exist. Recipients claim grants by signing in with a confirmed account. Use **Administration** to grant by exact email or revoke another admin.
+
+Changing `DefaultAdminEmail` keeps pending and deleted-account grants, and new accounts cannot inherit claimed grants. Revoke a grant before reassigning a mailbox because account recovery or linked identities can keep access.
+
+### Recover administrator access
+
+If the sole admin is inaccessible, deleted, or mistyped, inspect `lpcc.administrator_grants` over a trusted DB connection and run this transaction with real values. Keep history and account associations intact.
 
 ```sql
 BEGIN ISOLATION LEVEL READ COMMITTED;
@@ -91,44 +68,22 @@ FROM revoked;
 COMMIT;
 ```
 
-Verify that one row was inserted. Correct `DefaultAdminEmail` and restart; a new
-grant is seeded only if no active grants remain.
+Confirm one row was inserted. Correct `DefaultAdminEmail` and restart. A fresh grant is seeded only if no active grants remain.
 
-## Apps
+## Operate onchain payments
 
-Use **Administration → App catalog** to publish definitions and **Manage apps**
-in the fleet to assign them. See the [app registry guide](app-registry.md).
+Onchain is the default ([deployment install](../deploy/README.md#install)). Control Center fills in each claimed address as recipient on registration and reconciles template updates automatically. Advertised onchain apps require a positive USD `hour` or `fixed` price ([app registry](app-registry.md#write-a-definition)).
 
-## Onchain operation
+### RPC rotation and runtime grants
 
-Onchain is the default. Follow [deployment setup](../deploy/README.md#install).
-Control Center fills in each claimed orchestrator address as the recipient
-when a machine registers and automatically reconciles template changes. Every
-advertised onchain app needs a positive USD `hour` or `fixed` catalog price.
+To rotate RPC endpoints and process-scoped grants, add an immutable `rpc_secret` file named by the SHA-256 of its exact bytes (including trailing newline) and update template `rpc_secret`. The API rehashes the owner-only file on every read. Keep referenced RPC versions for held workloads and rollback, and let changes follow normal app and session drain.
 
-Provision a new immutable `rpc_secret` file for RPC rotation; the configured
-reference is the SHA-256 of its exact bytes, including a final newline. The API
-rehashes the owner-only file on every read. Change the template's `rpc_secret`
-to rotate the RPC endpoint and process-scoped grants. Retain referenced RPC
-versions for held workloads and rollback. Configuration changes use the
-normal app and session drain flow. Grant requests require a fresh signature
-from the enrolled runtime key after the Pod is checked. The key is installed
-with management credentials before secrets setup. Onchain grants do not
-contact the secrets service; registrations without a runtime key are refused.
-Inspect configuration, local admission and handoff health separately in
-**Runtime status**. Redeemer owns confirmation.
+Grant requests need a fresh signature from the enrolled runtime key after Pod checks. That key installs with management credentials before secrets setup. Onchain grants bypass the secrets service, and registrations without a runtime key fail.
 
-Removing a machine can leave pending tickets unredeemed. Forced removal revokes
-submission grants and stops Node early. Keep
-Node's durable data, including a consistent backup of `/data/onchain.sqlite`
-and its sidecars, and back up the redeemer database and wallet separately. The
-recipient, chain and controller remain immutable for a stable machine even after
-re-enrollment. Private endpoints require exact IP:port `rpc_grants` and
-`redeemer_grants`; these allow orchestrator access only. Apps receive neither
-these grants nor Node's RPC or redemption credentials. If onchain readiness is lost,
-the private Node Service remains reachable for management and cleanup.
+### Monitoring, backups, and removal
 
-## Machine ingress and discovery
+Inspect config, local admission, and handoff health separately in **Runtime status** ([machine status](machine-status.md)). Redeemer confirms tickets.
 
-Production requires Cloudflare machine tunnels. Follow the [tunnel runbook](machine-tunnels.md)
-for setup and removal. Enable [fleet discovery](fleet-discovery.md) to expose the aggregate inventory.
+Machine removal can leave pending tickets unredeemed, and forced removal revokes submission grants and stops Node early. Keep consistent backups of `/data/onchain.sqlite` with sidecars, plus separate redeemer DB and wallet backups. Recipient, chain, and controller stay immutable across re-enrollment.
+
+Private endpoints need exact `IP:port` `rpc_grants` and `redeemer_grants` for the orchestrator only (apps receive zero RPC or redemption grants or credentials). Losing onchain readiness keeps the private Node Service reachable for management and cleanup.

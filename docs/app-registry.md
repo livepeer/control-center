@@ -1,38 +1,10 @@
 # App registry
 
-The app registry is Control Center's catalog of HTTP applications. Each entry
-describes a container image, its resources, health check, instance settings, and
-price. The catalog keeps a history of immutable revisions for inspection and
-retirement. It does not assign or deploy apps to machines.
-
-## Publish an app
-
-1. Sign in as an administrator, open **Administration → App catalog**, and
-   select **Create app**.
-2. Enter a TOML definition and select **Validate definition**. Correct any
-   reported errors and validate again.
-3. Review the normalized definition and select **Publish definition**.
-4. To update an app, select it and choose **Publish new revision**. If the app
-   changes while you edit, refresh the publication base and validate again.
-
-Select an app to view its revision history, original TOML, normalized settings,
-and publication details. Select a revision and choose **Retire revision** to
-mark it retired. Retirement is permanent and does not delete the revision.
-
-An app is identified by its case-sensitive name and cannot be renamed. A new
-publication receives the next revision number. Publishing a definition identical
-to an existing revision returns that revision, even if it is retired; it does
-not create a revision or change the latest revision. Formatting changes alone
-do not create a revision. The latest revision can be retired.
+App authors use TOML to define HTTP apps. Administrators publish immutable catalog revisions and assign them to machines.
 
 ## Write a definition
 
-Definitions use UTF-8 TOML, limited to 64 KiB. Keys are case-sensitive. Unknown
-or duplicate keys and incorrect value types are rejected. Values are literal:
-they do not expand environment variables or load files. Do not put secrets in
-the definition.
-
-This example uses a pinned image and configures it to listen on port 8080:
+Definitions are UTF-8 TOML up to `64 KiB` with case-sensitive keys. Unknown keys, duplicate keys, and wrong types fail validation. Values are literal without env expansion or file loading, and exclude secrets.
 
 ```toml
 name = "my-app"
@@ -52,162 +24,118 @@ memory = "1GiB"
 port = 8080
 ```
 
-Replace the image, user, environment, and port with values for your app. The
-image must run as a non-root user; if its metadata specifies root, set
-`container.user` to a compatible nonzero numeric `UID:GID`. Validation checks
-the definition, not whether the image can be pulled or run successfully. In
-onchain mode, add a positive price to the example. See the
-[complete example](../runtime/tests/fixtures/whoami.toml) for more settings.
+Run images as a non-root user. If the image defaults to root, set `container.user` to a nonzero numeric `UID:GID`. Test pulls and startup during deployment. Onchain apps require a positive price. See [the full example](../runtime/tests/fixtures/whoami.toml).
 
-### Required settings
+### Definition settings
 
-| TOML setting | Description |
+| Setting | Default and rules |
 | --- | --- |
-| `name` | 1–128 ASCII letters, digits, dots, underscores, or hyphens; starts with a letter or digit. |
-| `schema_version` | Integer `1`. |
-| `container.image` | OCI/Docker image reference pinned with `@sha256:` and 64 lowercase hexadecimal digits. |
-| `resources.limits.memory` | Memory limit, such as `"1GiB"`. |
-| `http.port` | Application HTTP port, from 1 to 65535. |
+| `name` | **Required.** 1–128 ASCII letters, digits, `.`, `_`, `-`, starting with letter/digit |
+| `schema_version` | **Required.** Integer `1` |
+| `container.image` | **Required.** OCI/Docker ref pinned with `@sha256:` + 64 lowercase hex |
+| `resources.limits.memory` | **Required.** Quoted limit, e.g. `"1GiB"` |
+| `http.port` | **Required.** Integer `1`–`65535` |
+| `app_version` | Empty, max `128` bytes, duplicates allowed |
+| `container.platform` | Image default or `"linux/amd64"` |
+| `container.entrypoint`, `container.command`, `container.working_dir`, `container.user` | Image defaults. Nonempty literal string arrays for entrypoint/command. Absolute path for working dir. |
+| `container.environment` | Empty nonsecret string table |
+| `container.secrets` | Up to `16` `{name, secret, key}` refs to `lp-app-*` Secrets |
+| `resources.limits.cpu` | `1` CPU (integer cores or quoted `"0.5"`, `"500m"`) |
+| `resources.limits.ephemeral_storage` | `"100MB"` |
+| `resources.requests` | Defaults to limits (`<=` limits) |
+| `health.readiness` | Omitted -> TCP on `http.port`. Table defaults to HTTP (`path` required) or `type = "tcp"`. Defaults `interval = "10s"`, `timeout = "2s"`, `failure_threshold = 3` (Runtime enforces `>= 10s` interval). |
+| `filesystem.read_only_root` | `true` (required) |
+| `filesystem.shm_size` | `"64MiB"` memory-backed |
+| `filesystem.scratch` | None. Each `[[filesystem.scratch]]` needs `path`, defaults `size = "64MiB"`, memory-backed. |
+| `network.egress` | `"deny"` or `"public-https"` (DNS + public TCP `443`) |
+| `lifecycle.startup_timeout`, `lifecycle.stop_grace_period` | `"120s"`, `"30s"` |
+| `lifecycle.stop_signal` | Image default or catchable Linux signal, e.g. `"SIGTERM"` |
+| `instances.mode` | `"reusable"` (default) or `"single-session"` |
+| `instances.replicas` | `1` (`1`–`100`) |
+| `instances.capacity_per_instance` | `1` (`1`–`10,000`, `"single-session"` requires `1`) |
+| `runner.mode` | `"persistent"` (default) or `"single-shot"` |
+| `price.amount`, `price.currency`, `price.unit` | `"0"`, `"usd"`, `"hour"`. Nonnegative decimal string, `"usd"`, `"hour"` or `"fixed"`. |
 
-### Optional settings
+### Value and path rules
 
-| TOML setting | Default and accepted values |
-| --- | --- |
-| `app_version` | Empty; an optional string of up to 128 bytes. Versions need not be unique. |
-| `container.platform` | Image default; `"linux/amd64"` if specified. |
-| `container.entrypoint`, `container.command`, `container.working_dir`, `container.user` | Image defaults. Entrypoint and command are nonempty arrays of literal strings; working directory is an absolute path. |
-| `container.environment` | No additions. A table of nonsecret string values. |
-| `container.secrets` | Up to 16 `{name, secret, key}` references to `lp-app-*` Secrets. |
-| `resources.limits.cpu` | 1 CPU. Use integer cores or quoted values such as `"0.5"` or `"500m"`. |
-| `resources.limits.ephemeral_storage` | `"100MB"`. |
-| `resources.requests` | Each omitted CPU, memory, or ephemeral storage request defaults to its corresponding limit. Requests cannot exceed limits. |
-| `health.readiness` | With no table, TCP check on the HTTP port. A supplied table defaults to HTTP and requires `path`; set `type = "tcp"` for TCP. Defaults: `interval = "10s"`, `timeout = "2s"`, `failure_threshold = 3`. Runtime enforces a minimum interval of ten seconds. |
-| `filesystem.read_only_root` | `true`; writable roots are unsupported. |
-| `filesystem.shm_size` | `"64MiB"` of memory-backed shared memory. |
-| `filesystem.scratch` | No mounts. Each `[[filesystem.scratch]]` table requires `path`; `size` defaults to `"64MiB"`. Mounts are memory-backed. |
-| `network.egress` | `"deny"` or `"public-https"` for DNS and public TCP 443. |
-| `lifecycle.startup_timeout`, `lifecycle.stop_grace_period` | `"120s"` and `"30s"`. |
-| `lifecycle.stop_signal` | Image default; otherwise a supported catchable Linux signal name such as `"SIGTERM"`. |
-| `instances.mode` | `"reusable"` or `"single-session"`. Default: `"reusable"`. |
-| `instances.replicas` | `1`; range 1–100. |
-| `instances.capacity_per_instance` | `1`; range 1–10,000. Single-session instances require 1. |
-| `runner.mode` | `"persistent"` or `"single-shot"`. Default: `"persistent"`. |
-| `price.amount`, `price.currency`, `price.unit` | `"0"`, `"usd"`, `"hour"`. Amount is a nonnegative decimal string; currency is USD; unit is `"hour"` or `"fixed"`. |
+Quote case-sensitive byte units (`"100MB"`, `"1GiB"`), whole-second durations (`"5s"`, `"12h"`), fractional CPUs, and prices (TOML floats rejected). Combined `shm_size` and scratch mounts must fit inside `resources.limits.memory`.
 
-Byte quantities are quoted, with units such as `"100MB"` or `"1GiB"`; units
-are case-sensitive. Durations are quoted, such as `"5s"` or `"12h"`, and must
-resolve to whole seconds. Quote fractional CPU values and prices; TOML floats
-are not accepted. Shared memory and scratch sizes together must fit within the
-memory limit.
+Working dir and scratch paths start with `/` without repeated/trailing slashes or `.`/`..` segments. Working dir allows `/`, and scratch forbids `/` and overlaps with other mounts or system/secret paths. HTTP readiness paths are local absolute paths without query, fragment, or traversal.
 
-Working directories and scratch mount paths must start with `/` and cannot contain
-repeated slashes, trailing slashes, or `.` or `..` directory segments. The working
-directory may be `/`; scratch mounts cannot. Scratch mounts cannot overlap each
-other or system and secret paths. HTTP readiness paths must be local absolute paths
-without a query, fragment, or traversal. The validator reports the affected
-field when a setting is invalid.
+Shared deployments allow up to `256` public `[[apps]]` entries with `name`, private `path`, `capacity`, and `price` (unique, nonnested paths).
 
-A shared deployment supports up to 256 public `[[apps]]`, each with a `name`,
-private `path`, `capacity`, and `price`; paths must be unique and nonnested.
+Catalog prices stay generic and immutable. Assignment and registration check compatibility against the machine's desired and observed Node onchain settings. Publishing a price leaves Node onchain activation unchanged ([onchain payments](operations.md#operate-onchain-payments)).
 
-## Pricing policy
+## Publish and retire revisions
 
-Catalog prices remain generic and immutable. Assignment and registration compatibility
-is evaluated against the target machine's desired and observed Node onchain settings.
-See [operations](operations.md#onchain-operation) for deployment configuration and
-activation. Publishing a price does not activate onchain operation on a Node.
+1. Sign in as admin, open **Administration → App catalog**, and select **Create app**.
+2. Paste TOML, select **Validate definition**, fix field errors, review normalized output, and select **Publish definition**.
+3. For updates, select the app and choose **Publish new revision** (refresh base and revalidate on conflicts).
 
-## Catalog API
+Open an app to inspect history, original TOML, normalized settings, and publication details. **Retire revision** permanently retires a revision while keeping history.
 
-Catalog routes require administrator authorization; machine credentials do not
-grant access. Requests and responses use JSON.
+App `name` is case-sensitive and immutable, and new publications increment the revision number. Publishing a definition matching an existing revision (including formatting-only edits) returns that revision, even if retired, leaving revision numbers and latest unchanged. The latest revision can be retired.
 
-| Method and route | Purpose | Request body |
+### Catalog API
+
+JSON routes require administrator authorization, and machine credentials are denied.
+
+| Route | Purpose | Body |
 | --- | --- | --- |
-| `POST /api/admin/apps/validate` | Validate a definition without publishing it. | `source_toml` |
-| `GET /api/admin/apps` | List apps. | — |
-| `GET /api/admin/apps/{name}` | View an app and its revision history. | — |
-| `GET /api/admin/apps/{name}/revisions/{id}` | View a revision, including its original TOML. | — |
-| `POST /api/admin/apps` | Publish a new app. | `source_toml` |
-| `POST /api/admin/apps/{name}/revisions` | Publish a revision. | `source_toml`, `expected_head_revision_id` |
-| `POST /api/admin/apps/{name}/revisions/{id}/retire` | Retire a revision. | `expected_state_version` |
+| `POST /api/admin/apps/validate` | Validate only | `source_toml` |
+| `GET /api/admin/apps` | List apps | — |
+| `GET /api/admin/apps/{name}` | View app and revisions | — |
+| `GET /api/admin/apps/{name}/revisions/{id}` | View revision and TOML | — |
+| `POST /api/admin/apps` | Publish new app | `source_toml` |
+| `POST /api/admin/apps/{name}/revisions` | Publish revision | `source_toml`, `expected_head_revision_id` |
+| `POST /api/admin/apps/{name}/revisions/{id}/retire` | Retire revision | `expected_state_version` |
 
-List routes accept `limit` (default 50, maximum 100); use `after_name` for the
-app list and `before_revision` for revision history. Both cursors are
-exclusive. Mutations return the revision and a `changed` boolean. A stale head
-or state produces a conflict; refresh before retrying. Validation errors
-include field-specific messages.
+List routes accept `limit` (default `50`, max `100`) and exclusive cursors `after_name` and `before_revision`. Mutations return the revision and `changed`, stale preconditions return `409`, and validation errors report fields.
 
-## Assign revisions to a machine
+## Assign revisions to machines
 
-In **Administration → Machine fleet**, choose **Manage apps**, select an app
-and explicit revision, set replicas, and assign it. Multiple revisions may coexist,
-with one assignment per revision and enrollment. Publishing a catalog revision does
-not change existing assignments; scaling does not change the definition or digest.
-New assignments reject retired revisions and definitions incompatible with current
-pricing policy, but existing assignments may scale or recover. Rollback requires an
-explicit assignment or replacement with an eligible prior revision.
+Open **Administration → Machine fleet**, choose **Manage apps**, pick an app, explicit revision, and replicas, and assign it.
 
-**Replace revision** drains the source and stages the target. Matching replica
-limits above one allow rolling replacement within that combined limit. Each
-successor must be ready and registered before another source is withdrawn; target
-failure pauses progress. With a limit of one or differing limits, source cleanup
-finishes first. Replica edits and replacement chains are refused during rolling
-source cleanup; blocked sequential targets cannot be replaced again.
-Removing a target leaves source removal in place. A revision being removed
-cannot be reassigned until cleanup is acknowledged.
+Multiple revisions coexist with one assignment per revision and enrollment. New catalog revisions keep existing assignments unchanged, and scaling keeps the pinned definition and digest. New assignments reject retired revisions and policy-incompatible prices, while existing ones can scale or recover. Rollback assigns or replaces with an eligible prior revision.
 
-**Applied — health unverified** means the requested replicas were reconciled and
-scale-down finished safely; it does not establish current health, registration,
-capacity or discoverability. Bundle delivery alone does not establish app
-completion. Inspect an assignment for pinned settings, actor, time and paginated
-desired history.
+**Replace revision** drains the source and stages the target.
+
+- Matching replica limits above one roll within the shared limit. Each successor must be ready and registered before the next source is withdrawn. Target failure pauses replacement.
+- A limit of one or differing limits requires source cleanup first.
+- Rolling cleanup blocks replica edits and replacement chains. A blocked sequential target cannot be replaced. Removing the target continues source removal. Wait for cleanup acknowledgement before reassigning a removed revision.
+
+- Equal replica limits `> 1` roll within that combined limit, waiting for each successor to become ready and registered before withdrawing another source and pausing on target failure.
+- Limit `1` or differing limits complete source cleanup first.
+- Replica edits and replacement chains are blocked during rolling cleanup, and blocked sequential targets cannot be replaced again.
+- Removing a target keeps source removal active, and reassigning a removing revision waits for acknowledged cleanup.
+
+**Applied — health unverified** confirms replica reconciliation and safe scale-down only. Health, registration, capacity, and discoverability are tracked separately, and bundle delivery alone leaves completion unconfirmed. Assignment details show pinned settings, actor, time, and paginated desired history.
 
 ### Assignment API
 
-All routes require server-verified administrator authority; machine owners,
-bootstrap JWTs and machine service credentials cannot mutate assignments. Let
-`M = /api/admin/machines/{node_id}/apps`:
+Server-verified administrator authority is required (machine owners, bootstrap JWTs, and machine credentials denied). Let `M = /api/admin/machines/{node_id}/apps`.
 
-| Method and route | Body or query |
+| Route | Body or query |
 | --- | --- |
-| `GET M` | `limit` (50 default, 100 maximum), exclusive `after_revision_id` |
+| `GET M` | `limit` (default `50`, max `100`), exclusive `after_revision_id` |
 | `GET M/{revision_id}` | History `limit`, exclusive `before_generation` |
 | `PUT M/{revision_id}` | `digest`, `expected_generation`, optional `replicas` |
 | `DELETE M/{revision_id}` | `expected_generation` |
 | `POST M/{revision_id}/replace` | `expected_generation`, `target: {revision_id, digest, expected_generation, replicas?}` |
 
-Writes require a current active enrollment. `expected_generation: 0` means never
-assigned. Replicas range from 1 to 100; omitting them uses the definition default
-on creation and preserves the count on scaling. Changed operations return 202;
-identical completed retries return 200. Concurrent edits return 409; refresh before
-retrying. At most 100 assignments may be pending, including unacknowledged
-removals. Oversized changes leave the last valid bundle intact.
+Writes need an active enrollment (`expected_generation: 0` creates an assignment), and `replicas` accepts `1`–`100` (omitted uses definition default on create and keeps count on scale). Changes return `202`, identical completed retries return `200`, and conflicts return `409`. At most `100` assignments can be pending (including unacknowledged removals), and oversized changes keep the last valid bundle.
 
-### Runtime delivery and completion contract
+## Runtime delivery, drain, and removal
 
-Runtime supports CPU reusable instances in persistent and single-shot protocol
-modes. Single-session lifetimes are unsupported. Each instance runs in a gVisor
-Pod with a private Service. Node advertises ready instances and checks capacity
-before accepting work; Control Center collects Node's discovery responses.
+Runtime runs CPU `"reusable"` instances in `"persistent"` and `"single-shot"` modes (`"single-session"` unsupported). Each instance runs in a gVisor Pod with a private Service. Node advertises ready instances and checks capacity, and Control Center collects Node discovery responses.
 
-- `RuntimeAppDrainTimeout` gives existing sessions time to finish after an app
-  is withdrawn. It defaults to `12h` and accepts `0s` through `12h`. `0s` ends
-  sessions immediately.
-- `DrainTimeout` is the maximum wait for confirmation after Control Center
-  requests a machine drain. It must be at least `RuntimeAppDrainTimeout` and
-  defaults to the app timeout plus `10m` (`12h10m` by default). Setting both to
-  `0s` makes the machine drain expire immediately.
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `RuntimeAppDrainTimeout` | `12h` | `0s`–`12h` for sessions to finish after withdrawal (`0s` ends immediately) |
+| `DrainTimeout` | `RuntimeAppDrainTimeout + 10m` (`12h10m`) | `>= RuntimeAppDrainTimeout` for machine drain confirmation (both `0s` expires immediately) |
 
-After Node confirms registration removal, Runtime removes the Pod and Service
-and reports cleanup. A Node restart or an expired runner registration can end sessions early.
+After Node confirms registration removal, Runtime deletes the Pod and Service and reports cleanup. Node restarts or expired registrations can end sessions early.
 
-Normal machine removal withdraws assignments and waits for app cleanup and
-machine drain. Forced removal stops Node early without a graceful drain. It
-retains volumes, routes and the connector for app cleanup until the final phase,
-unless credentials are compromised. Registration cleanup requires the Node
-Deployment to be absent and no Node Pods to remain. A retired enrollment can
-receive terminal cleanup instructions and acknowledge cleanup; re-enrollment
-requires that acknowledgement. See [machine status](machine-status.md) for
-diagnosis and [machine tunnels](machine-tunnels.md#rotation-and-removal) for
-removal commands.
+Normal removal withdraws assignments and waits for app cleanup and machine drain. Forced removal stops Node early without graceful drain, keeping volumes, routes, and connector for app cleanup until the final phase unless credentials are compromised.
+
+Registration cleanup requires Node Deployment absent and zero Node Pods remaining. Retired enrollments fetch terminal cleanup bundles and acknowledge cleanup, which re-enrollment requires. See [machine status](machine-status.md) and [tunnel removal](machine-tunnels.md#rotate-connectors-drain-and-remove-machines).

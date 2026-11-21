@@ -46,7 +46,7 @@ curl -fsSL https://controlcenter.livepeer.live/bootstrap.sh |
 
 The one-hour enrollment command can enroll multiple machines. The installer saves
 service credentials in owner-only files and uses them for reruns. See [operator
-secrets](../docs/operator-secrets.md#enrollment-and-identity) for managed identity
+secrets](../docs/operator-secrets.md#enroll-a-runtime) for managed identity
 setup and recovery. Runtime polls Control Center every minute and delivers the
 last valid configuration to Flux.
 
@@ -112,7 +112,7 @@ returns the installer status:
 
 Runtime delivers management and app workloads separately, allowing management
 updates during app reconciliation failures. Node reports its applied revision
-and workload status. See the [app lifecycle contract](../docs/app-registry.md#runtime-delivery-and-completion-contract)
+and workload status. See the [app lifecycle contract](../docs/app-registry.md#runtime-delivery-drain-and-removal)
 and [machine status guide](../docs/machine-status.md).
 
 Production apps require compatible Node and SDK releases. Configure backend
