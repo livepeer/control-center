@@ -138,11 +138,13 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-- **Orchestrator replacement.** `drain/force` skips the wait for a replacement
-  at the same client addresses. Administrators can run it at any time while
-  sessions drain. Control Center forces the replacement automatically after
-  `DrainTimeout`. Forced updates end remaining sessions, and the replacement
-  accepts sessions when Runtime reports it ready.
+- **Orchestrator replacement.** For drain commands, the endpoints are the
+  orchestrator API base URL (`ServiceURL`) and the pattern for generating
+  session proxy URLs (`ProxyURLTemplate`). If both values stay the same,
+  administrators can call `drain/force` at any time while sessions drain.
+  Control Center forces the replacement automatically after `DrainTimeout`.
+  Forced updates end remaining sessions, and the replacement accepts sessions
+  when Runtime reports it ready.
 - **Endpoint changes and normal removal.** Control Center keeps the old client
   addresses until the runner confirms the drain. That rule also applies when an
   endpoint change includes an orchestrator replacement. Normal removal also
