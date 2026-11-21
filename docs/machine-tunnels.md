@@ -147,10 +147,10 @@ pattern (`ProxyURLTemplate`).
   orchestrator replacement with unchanged endpoints proceeds automatically when
   the deadline expires. Normal removal and unforced endpoint changes require
   runner confirmation before the deadline.
-- **Force an update.** Use `drain/force` at any time during a pending
-  orchestrator replacement or endpoint change. It skips waiting for active
-  sessions and may interrupt them. Control Center still checks Runtime
-  readiness and verifies the new route before advertising it as ready.
+- **Force an update.** Use `drain/force` at any time during a pending runtime
+  change. It skips waiting for active sessions and may interrupt them. Control
+  Center still checks Runtime readiness and verifies the new route before
+  advertising it as ready.
 - **Retry or remove.** After a timeout, `drain/retry` starts a fresh attempt.
   To start removal without waiting for sessions, send a machine `DELETE`
   request with `{"force":true}`.
