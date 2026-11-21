@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Grafana 13.2.6 with the pinned VictoriaLogs datasource baked in, so the
 # container never downloads plugins at startup.
-FROM grafana/grafana:13.2.6@sha256:b21409d7951ddcfd63a4b49083e4ef2cc35bc1437d071813bf82bfb238b00bca
+FROM grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
 ARG VICTORIALOGS_DATASOURCE_VERSION=v0.33.1
 ARG VICTORIALOGS_DATASOURCE_SHA256=849edf4d86a6555bbf3fdbe1c53ed719a6c51c3d69965dcc0384e2c129ad991a
 USER root
