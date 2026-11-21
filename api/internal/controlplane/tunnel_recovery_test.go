@@ -404,6 +404,105 @@ func TestUnfinishedEndpointDrainCannotResetItsDeadline(t *testing.T) {
 	}
 }
 
+func TestForcedEndpointChangeStillRequiresRouteReadiness(t *testing.T) {
+	s, provider := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	_, original := publishedMachineConfiguration(t, s, node)
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	pending, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if pending.Target == "" || pending.ServiceURL != initial.ServiceURL {
+		t.Fatal("endpoint change did not wait for the drain", pending)
+	}
+	adminA(t, s)
+	force := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": pending.Generation - 1}), 409)
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+
+	testTunnelDeps(s).Provider = &endpointCreateFailure{provider}
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	_, held := publishedMachineConfiguration(t, s, node)
+	if held != original {
+		t.Fatal("force published the replacement before provider ingress was configured")
+	}
+
+	testTunnelDeps(s).Provider = provider
+	testTunnelDeps(s).VerifyEndpoints = func(context.Context, tunnel.RoutingState, string) error {
+		return errors.New("route verification pending")
+	}
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	current, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	runtime, manifest := publishedMachineConfiguration(t, s, node)
+	if current.ServiceURL != pending.Target || current.Ready || !runtime.DrainRequested ||
+		!strings.Contains(manifest, current.ServiceURL) || !strings.Contains(manifest, current.ProxyURLTemplate) {
+		t.Fatal("force did not release the replacement while keeping admission closed", current, runtime)
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if current.Ready || current.Reason != "runtime_pending" {
+		t.Fatal("missing connector report allowed the new route", current)
+	}
+	reportRuntime(t, s, c, "connector", true)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if current.Ready || current.Reason != "tls_or_route_pending" {
+		t.Fatal("unverified route became ready", current)
+	}
+	testTunnelDeps(s).VerifyEndpoints = func(context.Context, tunnel.RoutingState, string) error { return nil }
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if !current.Ready || current.DrainRequested || current.ServiceURL != pending.Target ||
+		count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
+		t.Fatal("audited force did not complete the endpoint change", current)
+	}
+}
+
+func TestForcedEndpointChangeDoesNotReleaseSupersedingWorkload(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	_, original := publishedMachineConfiguration(t, s, node)
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	pending, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	adminA(t, s)
+	force := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	current, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	_, held := publishedMachineConfiguration(t, s, node)
+	if current.Target != pending.Target || current.ServiceURL != initial.ServiceURL || held != original ||
+		current.Generation <= pending.Generation+1 || current.PendingConfigDigest == pending.PendingConfigDigest ||
+		!current.DrainStartedAt.Equal(pending.DrainStartedAt) {
+		t.Fatal("force crossed a change to the pending workload", current)
+	}
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": current.Generation}), 202)
+	driveTunnels(t, s)
+	_, manifest := publishedMachineConfiguration(t, s, node)
+	if !strings.Contains(manifest, s.params.RuntimeNodeImage) || !strings.Contains(manifest, pending.Target) {
+		t.Fatal("fresh force did not release the superseding workload")
+	}
+}
+
 type reconnectingConnector struct {
 	*rotationFailures
 	original string

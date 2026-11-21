@@ -145,13 +145,12 @@ pattern (`ProxyURLTemplate`).
   `12h10m` and expires immediately at `0s`. See [drain
   settings](app-registry.md#runtime-delivery-and-completion-contract). Only an
   orchestrator replacement with unchanged endpoints proceeds automatically when
-  the deadline expires. Normal removal and any change to either endpoint (even
-  when also replacing the orchestrator) require runner confirmation before the
-  deadline.
+  the deadline expires. Normal removal and unforced endpoint changes require
+  runner confirmation before the deadline.
 - **Force an update.** Use `drain/force` at any time during a pending
-  replacement at the same endpoints to skip the wait for existing sessions.
-  This can interrupt them. The replacement accepts new sessions when Runtime
-  reports it ready.
+  orchestrator replacement or endpoint change. It skips waiting for active
+  sessions and may interrupt them. Control Center still checks Runtime
+  readiness and verifies the new route before advertising it as ready.
 - **Retry or remove.** After a timeout, `drain/retry` starts a fresh attempt.
   To start removal without waiting for sessions, send a machine `DELETE`
   request with `{"force":true}`.

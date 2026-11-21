@@ -22,7 +22,7 @@ func (s *Manager) applied(ctx context.Context, m Machine) (appliedWorkload, erro
 	return readAppliedWorkload(data)
 }
 
-// Gate holds the applied workload until its drain completes, is forced, or reaches its deadline.
+// Gate holds the applied workload until the drain completes or the replacement is forced.
 // The caller saves this state under the enrollment's lease before publication.
 func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Desired) (bool, error) {
 	if desired.OnchainError != nil {
@@ -37,10 +37,10 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
 	state.observeForcedPublication(old.ConfigDigest)
-	forced := state.ForcedDrainTarget != "" && state.ForcedDrainTarget == DrainTarget(m.NodeID, *state) &&
-		state.PendingConfigDigest == digest && sameWorkloadEndpoints(old.manifest, desired)
+	forced := state.forcedDrainMatches(m.NodeID, digest) &&
+		(state.ExplicitDrainForce || sameWorkloadEndpoints(old.manifest, desired))
 	if state.ForcedDrainTarget != "" && !forced {
-		state.ForcedDrainTarget = ""
+		state.clearForcedDrain()
 		if state.ApplyingConfigDigest != "" {
 			state.ApplyingConfigDigest = ""
 			state.ApplyingUpgradeVersion = ""
@@ -117,9 +117,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	}
 	if old.ConfigDigest != digest && !forced {
 		now := time.Now()
-		if s.drainExpired(state.DrainStartedAt, now) && state.canForceDrain() &&
-			sameWorkloadEndpoints(old.manifest, desired) {
-			state.forceDrain(m.NodeID)
+		if s.drainExpired(state.DrainStartedAt, now) && state.Target == "" &&
+			state.canForceDrain() && sameWorkloadEndpoints(old.manifest, desired) {
+			state.forceDrain(m.NodeID, false)
 		} else if done, err := s.drainComplete(ctx, m, state, now); err != nil || !done {
 			return true, err
 		}
@@ -128,7 +128,13 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	state.HeldUpgradePlan = ""
 	state.ApplyingConfigDigest = digest
 	state.ApplyingUpgradeVersion = upgradeVersion(desired)
-	state.Target = ""
+	if state.Target != "" {
+		state.Target = ""
+		if forced {
+			// Keep the force bound to this revision until the bundle is published.
+			state.ForcedDrainTarget = DrainTarget(m.NodeID, *state)
+		}
+	}
 	state.RolloutReason = "rollout_pending"
 	return false, nil
 }
@@ -152,7 +158,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 			return false, nil
 		}
 		state.observeForcedPublication(old.ConfigDigest)
-		state.ForcedDrainTarget = ""
+		state.clearForcedDrain()
 		// If the route change is canceled, resume waiting for the published workload.
 		if state.UnconfirmedForcedDigest == old.ConfigDigest {
 			state.ApplyingConfigDigest, state.ApplyingUpgradeVersion = old.ConfigDigest, old.UpgradeVersion
@@ -165,6 +171,13 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 		state.DrainStartedAt = time.Now().UTC()
 		state.PendingConfigDigest = digest
 		old.hold(state)
+	} else if state.PendingConfigDigest != digest {
+		state.Generation++
+		state.PendingConfigDigest = digest
+		state.clearForcedDrain()
+	}
+	if state.ExplicitDrainForce && state.forcedDrainMatches(m.NodeID, digest) {
+		return false, nil
 	}
 	done, err := s.drainComplete(ctx, m, state, time.Now())
 	return !done, err
@@ -173,7 +186,7 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 func (s *State) CancelTarget() {
 	s.Generation++
 	s.Target = ""
-	s.ForcedDrainTarget = ""
+	s.clearForcedDrain()
 	s.HeldOrchestrator, s.HeldUpgradePlan = "", ""
 	s.PendingConfigDigest = s.ApplyingConfigDigest
 	if s.ApplyingConfigDigest != "" {
@@ -186,20 +199,31 @@ func (s *State) CancelTarget() {
 	s.RolloutReason = ""
 }
 func (state State) canForceDrain() bool {
-	return state.Lifecycle == "active" && state.Target == "" && state.DrainRequested &&
+	return state.Lifecycle == "active" && state.DrainRequested &&
 		!state.DrainStartedAt.IsZero() && state.HeldOrchestrator != "" && state.PendingConfigDigest != "" &&
 		state.ApplyingConfigDigest == "" && state.ForcedDrainTarget == ""
 }
 
-func (state *State) forceDrain(node string) {
+func (state State) forcedDrainMatches(node, digest string) bool {
+	return state.ForcedDrainTarget != "" && state.PendingConfigDigest == digest &&
+		state.ForcedDrainTarget == DrainTarget(node, state)
+}
+
+func (state *State) forceDrain(node string, explicit bool) {
 	state.Generation++
 	state.ForcedDrainTarget = DrainTarget(node, *state)
+	state.ExplicitDrainForce = explicit
+}
+
+func (state *State) clearForcedDrain() {
+	state.ForcedDrainTarget = ""
+	state.ExplicitDrainForce = false
 }
 
 // Publication can be observed even if Runtime has never fetched the bundle.
 func (state *State) observeForcedPublication(digest string) {
 	if state.ForcedDrainTarget != "" && state.ApplyingConfigDigest == digest {
-		state.ForcedDrainTarget = ""
+		state.clearForcedDrain()
 		state.UnconfirmedForcedDigest = digest
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 	} else if state.UnconfirmedForcedDigest != digest {

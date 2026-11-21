@@ -424,7 +424,6 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	adminA(t, s)
 	drain := "/api/admin/machines/" + m.NodeID + "/drain/"
 	intent := map[string]int64{"generation": state.Generation}
-	requireStatus(t, request(t, s, "POST", drain+"force", "session-a", intent), 409)
 	backdateWorkloadDrain(t, s, m.NodeID)
 	requireNoError(t, s.reconcile(t.Context()))
 	expired, _, err := s.loadTunnel(t.Context(), m.NodeID)
@@ -432,8 +431,7 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if err != nil || expired.RolloutReason != "drain_timeout" || manifest != old {
 		t.Fatal("timeout forced a change to the workload endpoints", expired.RolloutReason, err)
 	}
-	requireStatus(t, request(t, s, "POST", drain+"retry", "session-a", intent), 202)
-	reportRuntime(t, s, c, "runner", true)
+	requireStatus(t, request(t, s, "POST", drain+"force", "session-a", intent), 202)
 	driveTunnels(t, s)
 	updated := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["system/node/orchestrator.yaml"]
 	if updated == old || !strings.Contains(updated, state.ServiceURL) {

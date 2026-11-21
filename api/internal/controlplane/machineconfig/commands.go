@@ -65,7 +65,7 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node string, force boo
 		state.DrainStartedAt = time.Now().UTC()
 		state.Target = ""
 		state.PendingConfigDigest = ""
-		state.ForcedDrainTarget = ""
+		state.clearForcedDrain()
 		state.RolloutReason = "drain_pending"
 		raw, _ = json.Marshal(state)
 		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,state,rollout) VALUES($1,'{}',$2) ON CONFLICT(node_id) DO UPDATE SET rollout=EXCLUDED.rollout,revision=lpcc.machine_states.revision+1,next_attempt_at=now()`, node, string(raw))
@@ -89,8 +89,8 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	if err != nil {
 		return result, err
 	}
-	var raw, routing []byte
-	err = tx.QueryRowContext(ctx, `SELECT rollout,state FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw, &routing)
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrDrainChanged
 	}
@@ -124,22 +124,14 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 		if !state.canForceDrain() {
 			return result, ErrForceDrainUnavailable
 		}
-		var exposure *Exposure
-		if s.deps.Exposure != nil {
-			exposure, err = s.deps.Exposure(routing)
-			if err != nil {
-				return result, err
-			}
-		}
-		if !sameWorkloadEndpoints(state.HeldOrchestrator, Desired{State: state, Exposure: exposure}) {
-			return result, ErrForceDrainUnavailable
-		}
-		state.forceDrain(node)
+		state.forceDrain(node, true)
 		state.RolloutReason = "rollout_pending"
 	} else {
 		state.Generation++
-		// The new generation revokes force. Keep the marker so Gate can
-		// restore the held workload if the replacement was not published.
+		// Keep the revoked marker if Gate might still have to restore the held workload.
+		if state.ApplyingConfigDigest == "" {
+			state.clearForcedDrain()
+		}
 		state.DrainStartedAt = time.Now().UTC()
 		state.RolloutReason = "drain_pending"
 	}
