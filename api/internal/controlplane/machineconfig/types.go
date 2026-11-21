@@ -34,7 +34,6 @@ type State struct {
 	HeldOrchestrator        string    `json:"held_orchestrator,omitempty"`
 	PendingConfigDigest     string    `json:"pending_config_digest,omitempty"`
 	ForcedDrainTarget       string    `json:"forced_drain_target,omitempty"`
-	ExplicitDrainForce      bool      `json:"explicit_drain_force,omitempty"`
 	UnconfirmedForcedDigest string    `json:"unconfirmed_forced_digest,omitempty"`
 	ApprovedConfigDigest    string    `json:"approved_config_digest,omitempty"`
 	RolloutReason           string    `json:"rollout_reason,omitempty"`

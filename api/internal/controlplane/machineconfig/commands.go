@@ -65,7 +65,7 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node string, force boo
 		state.DrainStartedAt = time.Now().UTC()
 		state.Target = ""
 		state.PendingConfigDigest = ""
-		state.clearForcedDrain()
+		state.ForcedDrainTarget = ""
 		state.RolloutReason = "drain_pending"
 		raw, _ = json.Marshal(state)
 		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,state,rollout) VALUES($1,'{}',$2) ON CONFLICT(node_id) DO UPDATE SET rollout=EXCLUDED.rollout,revision=lpcc.machine_states.revision+1,next_attempt_at=now()`, node, string(raw))
@@ -124,13 +124,13 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 		if !state.canForceDrain() {
 			return result, ErrForceDrainUnavailable
 		}
-		state.forceDrain(node, true)
+		state.forceDrain(node)
 		state.RolloutReason = "rollout_pending"
 	} else {
 		state.Generation++
 		// Keep the revoked marker if Gate might still have to restore the held workload.
-		if state.ApplyingConfigDigest == "" {
-			state.clearForcedDrain()
+		if state.Target != "" || state.ApplyingConfigDigest == "" {
+			state.ForcedDrainTarget = ""
 		}
 		state.DrainStartedAt = time.Now().UTC()
 		state.RolloutReason = "drain_pending"

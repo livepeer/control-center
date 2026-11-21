@@ -141,20 +141,17 @@ without the secrets service.
 Client endpoints are the API base URL (`ServiceURL`) and session proxy URL
 pattern (`ProxyURLTemplate`).
 
-- **Deadline.** `DrainTimeout` starts with the drain request, defaults to
-  `12h10m`, and expires immediately at `0s`. At the deadline, Control Center
-  automatically forces a replacement at the same addresses. If either address
-  is changing, the old addresses stay in place. Retry the drain or force the
-  update to continue. Normal removal requires all sessions to be fully drained
-  before the deadline. See
+- **Deadline.** When `DrainTimeout` expires, Control Center stops waiting for
+  sessions and proceeds with the pending Runtime replacement, even if a client
+  URL changes. Active sessions can be interrupted. See
   [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
-- **Force an update.** Use `drain/force` at any time during a pending runtime
-  change. It skips waiting for active sessions and may interrupt them. Control
-  Center still checks Runtime readiness and verifies the new route before
-  advertising it as ready.
-- **Retry or remove.** After a timeout, `drain/retry` starts a fresh attempt.
-  To start removal without waiting for sessions, send a machine `DELETE`
-  request with `{"force":true}`.
+- **Force an update.** Use `drain/force` to skip the remaining drain wait for a
+  pending runtime change. In both cases, address changes still require a
+  certificate and provider ingress, and Control Center verifies Runtime,
+  connector and route readiness.
+- **Remove a machine.** Normal removal requires all sessions to drain before
+  the deadline. After a timeout, use `drain/retry` to start a new drain or
+  send a machine `DELETE` with `{"force":true}` to skip it.
 
 Stop all older Control Center API replicas before an upgraded replica starts
 writing rollout state. Let ongoing forced updates finish before rolling back to an

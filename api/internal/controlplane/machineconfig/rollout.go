@@ -37,10 +37,9 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	desired.State.HeldUpgradePlan = ""
 	digest := Digest(desired)
 	state.observeForcedPublication(old.ConfigDigest)
-	forced := state.forcedDrainMatches(m.NodeID, digest) &&
-		(state.ExplicitDrainForce || sameWorkloadEndpoints(old.manifest, desired))
+	forced := state.forcedDrainMatches(m.NodeID, digest)
 	if state.ForcedDrainTarget != "" && !forced {
-		state.clearForcedDrain()
+		state.ForcedDrainTarget = ""
 		if state.ApplyingConfigDigest != "" {
 			state.ApplyingConfigDigest = ""
 			state.ApplyingUpgradeVersion = ""
@@ -116,11 +115,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 		old.hold(state)
 	}
 	if old.ConfigDigest != digest && !forced {
-		now := time.Now()
-		if s.drainExpired(state.DrainStartedAt, now) && state.Target == "" &&
-			state.canForceDrain() && sameWorkloadEndpoints(old.manifest, desired) {
-			state.forceDrain(m.NodeID, false)
-		} else if done, err := s.drainComplete(ctx, m, state, now); err != nil || !done {
+		if done, err := s.rolloutDrainComplete(ctx, m, state); err != nil || !done {
 			return true, err
 		}
 	}
@@ -130,7 +125,7 @@ func (s *Manager) Gate(ctx context.Context, m Machine, state *State, desired Des
 	state.ApplyingUpgradeVersion = upgradeVersion(desired)
 	if state.Target != "" {
 		state.Target = ""
-		if forced {
+		if state.ForcedDrainTarget != "" {
 			// Keep the force bound to this revision until the bundle is published.
 			state.ForcedDrainTarget = DrainTarget(m.NodeID, *state)
 		}
@@ -158,7 +153,6 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 			return false, nil
 		}
 		state.observeForcedPublication(old.ConfigDigest)
-		state.clearForcedDrain()
 		// If the route change is canceled, resume waiting for the published workload.
 		if state.UnconfirmedForcedDigest == old.ConfigDigest {
 			state.ApplyingConfigDigest, state.ApplyingUpgradeVersion = old.ConfigDigest, old.UpgradeVersion
@@ -174,19 +168,20 @@ func (s *Manager) StageTarget(ctx context.Context, m Machine, state *State, desi
 	} else if state.PendingConfigDigest != digest {
 		state.Generation++
 		state.PendingConfigDigest = digest
-		state.clearForcedDrain()
 	}
-	if state.ExplicitDrainForce && state.forcedDrainMatches(m.NodeID, digest) {
+	if state.forcedDrainMatches(m.NodeID, digest) {
+		state.RolloutReason = ""
 		return false, nil
 	}
-	done, err := s.drainComplete(ctx, m, state, time.Now())
+	state.ForcedDrainTarget = ""
+	done, err := s.rolloutDrainComplete(ctx, m, state)
 	return !done, err
 }
 
 func (s *State) CancelTarget() {
 	s.Generation++
 	s.Target = ""
-	s.clearForcedDrain()
+	s.ForcedDrainTarget = ""
 	s.HeldOrchestrator, s.HeldUpgradePlan = "", ""
 	s.PendingConfigDigest = s.ApplyingConfigDigest
 	if s.ApplyingConfigDigest != "" {
@@ -201,7 +196,7 @@ func (s *State) CancelTarget() {
 func (state State) canForceDrain() bool {
 	return state.Lifecycle == "active" && state.DrainRequested &&
 		!state.DrainStartedAt.IsZero() && state.HeldOrchestrator != "" && state.PendingConfigDigest != "" &&
-		state.ApplyingConfigDigest == "" && state.ForcedDrainTarget == ""
+		(state.ApplyingConfigDigest == "" || state.Target != "") && state.ForcedDrainTarget == ""
 }
 
 func (state State) forcedDrainMatches(node, digest string) bool {
@@ -209,21 +204,15 @@ func (state State) forcedDrainMatches(node, digest string) bool {
 		state.ForcedDrainTarget == DrainTarget(node, state)
 }
 
-func (state *State) forceDrain(node string, explicit bool) {
+func (state *State) forceDrain(node string) {
 	state.Generation++
 	state.ForcedDrainTarget = DrainTarget(node, *state)
-	state.ExplicitDrainForce = explicit
-}
-
-func (state *State) clearForcedDrain() {
-	state.ForcedDrainTarget = ""
-	state.ExplicitDrainForce = false
 }
 
 // Publication can be observed even if Runtime has never fetched the bundle.
 func (state *State) observeForcedPublication(digest string) {
-	if state.ForcedDrainTarget != "" && state.ApplyingConfigDigest == digest {
-		state.clearForcedDrain()
+	if state.ForcedDrainTarget != "" && state.ApplyingConfigDigest == digest && state.PendingConfigDigest == digest {
+		state.ForcedDrainTarget = ""
 		state.UnconfirmedForcedDigest = digest
 		state.HeldOrchestrator, state.HeldUpgradePlan = "", ""
 	} else if state.UnconfirmedForcedDigest != digest {
@@ -233,6 +222,16 @@ func (state *State) observeForcedPublication(digest string) {
 
 func (s *Manager) drainExpired(startedAt, now time.Time) bool {
 	return !startedAt.IsZero() && !now.Before(startedAt.Add(s.drainTimeout()))
+}
+
+func (s *Manager) rolloutDrainComplete(ctx context.Context, m Machine, state *State) (bool, error) {
+	now := time.Now()
+	if s.drainExpired(state.DrainStartedAt, now) && state.canForceDrain() {
+		state.forceDrain(m.NodeID)
+		state.RolloutReason = ""
+		return true, nil
+	}
+	return s.drainComplete(ctx, m, state, now)
 }
 
 func (s *Manager) drainComplete(ctx context.Context, m Machine, state *State, now time.Time) (bool, error) {

@@ -451,6 +451,14 @@ func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
 }
 
 func TestCancelEndpointChangeWhileForcedWorkloadStarts(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force=%t", force), func(t *testing.T) {
+			testEndpointChangeWhileForcedWorkloadStarts(t, force)
+		})
+	}
+}
+
+func testEndpointChangeWhileForcedWorkloadStarts(t *testing.T, force bool) {
 	s, _ := tunnelTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
 	node := c["node_id"]
@@ -470,6 +478,16 @@ func TestCancelEndpointChangeWhileForcedWorkloadStarts(t *testing.T) {
 	state, _, err := s.loadTunnel(t.Context(), node)
 	if err != nil || state.Target == "" {
 		t.Fatal("expected pending endpoint change", err)
+	}
+	if force {
+		path := "/api/admin/machines/" + node + "/drain/force"
+		requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": state.Generation}), 202)
+		driveTunnels(t, s)
+		current, _ := publishedMachineConfiguration(t, s, node)
+		if current.ConfigDigest != state.PendingConfigDigest || current.ServiceURL != state.Target || !current.DrainRequested {
+			t.Fatal("force did not release the new endpoint while keeping admission closed", current)
+		}
+		return
 	}
 	s.params.CloudflareBaseDomain = domain
 	configureTestTunnels(t, s)
