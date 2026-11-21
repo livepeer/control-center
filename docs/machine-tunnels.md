@@ -142,13 +142,11 @@ Client endpoints are the API base URL (`ServiceURL`) and session proxy URL
 pattern (`ProxyURLTemplate`).
 
 - **Deadline.** When `DrainTimeout` expires, Control Center stops waiting for
-  sessions and proceeds with the pending Runtime replacement, even if a client
-  URL changes. Active sessions can be interrupted. See
+  sessions and proceeds with the pending Runtime replacement. Active sessions
+  can be interrupted. See
   [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
 - **Force an update.** Use `drain/force` to skip the remaining drain wait for a
-  pending runtime change. In both cases, address changes still require a
-  certificate and provider ingress, and Control Center verifies Runtime,
-  connector and route readiness.
+  pending runtime change.
 - **Remove a machine.** Normal removal requires all sessions to drain before
   the deadline. After a timeout, use `drain/retry` to start a new drain or
   send a machine `DELETE` with `{"force":true}` to skip it.
