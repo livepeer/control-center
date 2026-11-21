@@ -87,9 +87,9 @@ diagnosis and recovery.
 
 The worker provisions the tunnel and private ingress routing. It waits for the
 current ingress configuration digest, Runtime readiness and connector readiness
-before publishing routes. Orchestrator updates and endpoint changes wait for
-sessions to drain. Endpoint changes require a retry if the deadline expires.
-Connector token changes replace its Deployment.
+before publishing routes. See [drain controls](#rotation-and-removal) for
+orchestrator updates and endpoint changes. Connector token changes replace its
+Deployment.
 
 After certificate and Runtime readiness, three proxied CNAMEs point at the tunnel UUID:
 `api.<node>.<domain>`, `discovery.<node>.<domain>` and `*.<node>.<domain>`.
@@ -138,16 +138,23 @@ alone leaves established connections active. Follow the
 for public-key distribution and retention. Signing and ingress verification work
 without the secrets service.
 
-Ordinary removal withdraws readiness and waits for draining. For removal and
-endpoint migration, an expired drain remains blocked even if a late completion
-arrives. An administrator can start a fresh drain with `drain/retry` or remove
-the machine with `force:true`.
+Client endpoints are the API base URL (`ServiceURL`) and session proxy URL
+pattern (`ProxyURLTemplate`).
 
-If waiting for sessions to drain during an orchestrator update, an administrator
-can use `drain/force` at any time. Control Center forces the update on its next
-update check after `TunnelDrainTimeout` expires (12 hours by default). Replacing
-the orchestrator ends remaining sessions. The new orchestrator accepts sessions
-when Runtime reports it ready.
+- **Deadline.** `DrainTimeout` starts with the drain request. It defaults to
+  `12h10m` and expires immediately at `0s`. See [drain
+  settings](app-registry.md#runtime-delivery-and-completion-contract). Only an
+  orchestrator replacement with unchanged endpoints proceeds automatically when
+  the deadline expires. Normal removal and any change to either endpoint (even
+  when also replacing the orchestrator) require runner confirmation before the
+  deadline.
+- **Force an update.** Use `drain/force` at any time during a pending
+  replacement at the same endpoints to skip the wait for existing sessions.
+  This can interrupt them. The replacement accepts new sessions when Runtime
+  reports it ready.
+- **Retry or remove.** After a timeout, `drain/retry` starts a fresh attempt.
+  To start removal without waiting for sessions, send a machine `DELETE`
+  request with `{"force":true}`.
 
 Stop all older Control Center API replicas before an upgraded replica starts
 writing rollout state. Let ongoing forced updates finish before rolling back to an

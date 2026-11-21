@@ -9,16 +9,12 @@ auditing, and wiring.
 
 ## Rollout and removal
 
-A workload replacement holds the applied workload while it drains. A fresh runner
-report matching the requested generation and current enrollment credential allows
-replacement. An administrator can force an orchestrator update while it waits for
-sessions to drain. Control Center forces it on its next update check after the
-deadline expires. Normal removal and endpoint migration require an authorized
-retry if their drain expires. Normal removal retires the enrollment and publishes
-a terminal bundle that retains storage, with or without a tunnel.
+A graceful replacement waits for a fresh runner report matching the drain
+generation and current enrollment credential. Normal removal retires the
+enrollment and preserves storage.
 
-`TunnelDrainTimeout` sets the drain deadline; an unset or nonpositive value uses
-12 hours. `TunnelStatusTTL` sets report freshness and defaults to two minutes.
+`TunnelStatusTTL` sets report freshness and defaults to two minutes.
+See [drain settings](../../../../docs/app-registry.md#runtime-delivery-and-completion-contract)
 
 The [tunnel manager](../tunnel/README.md) orders endpoint replacement. A completed
 drain alone does not establish external readiness.

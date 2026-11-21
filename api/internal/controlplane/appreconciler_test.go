@@ -145,7 +145,7 @@ func TestManagementSurvivesUnsupportedAppRendering(t *testing.T) {
 func TestMaintenanceAdmissionFreezeEndsOnlyAtActualTarget(t *testing.T) {
 	s := newTestServer(t)
 	c := enroll(t, s, ownerA, strings.Repeat("e", 64))
-	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("c", 64), DrainTimeout: time.Hour}, machineconfig.Dependencies{DB: s.db, Logger: s.logger})
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: "registry.invalid/runtime@sha256:" + strings.Repeat("a", 64), NodeImage: "registry.invalid/node@sha256:" + strings.Repeat("c", 64), DrainTimeout: new(time.Hour)}, machineconfig.Dependencies{DB: s.db, Logger: s.logger})
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}

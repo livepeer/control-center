@@ -122,7 +122,7 @@ func TestCredentialRefreshSerializesWithBlockedStateWrite(t *testing.T) {
 
 func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	s := newTestServer(t)
-	s.params.TunnelDrainTimeout = time.Minute
+	s.params.RuntimeAppDrainTimeout = 2 * time.Minute
 	// Leave StatusTTL unset to cover the private draining freshness default.
 	s.configs = s.newConfigurationManager()
 	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
@@ -135,10 +135,22 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	if err != nil || !state.DrainRequested || state.HeldOrchestrator != previous {
 		t.Fatal("private replacement was not drain gated", state, err)
 	}
+	runtime, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if want := runtime.DrainStartedAt.Add(12 * time.Minute); runtime.DrainStartedAt.IsZero() || !runtime.DrainDeadline.Equal(want) {
+		t.Fatalf("machine drain deadline = %v, want %v", runtime.DrainDeadline, want)
+	}
 	if s.tunnels.Enabled() || state.TunnelID != "" {
 		t.Fatal("private rollout acquired provider resources")
 	}
-	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
+	s.params.RuntimeAppDrainTimeout = 3 * time.Minute
+	s.configs = s.newConfigurationManager()
+	requireNoError(t, s.reconcile(t.Context()))
+	updated, held := publishedMachineConfiguration(t, s, m.NodeID)
+	if held != previous || updated.Generation != runtime.Generation+1 ||
+		!updated.DrainStartedAt.Equal(runtime.DrainStartedAt) || !updated.DrainDeadline.Equal(runtime.DrainStartedAt.Add(13*time.Minute)) {
+		t.Fatal("changing the app timeout did not preserve the in-flight drain start and fence the old target")
+	}
+	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: runtime.Generation, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
 	for len(s.reconcileWake) > 0 {
 		<-s.reconcileWake
 	}
@@ -257,9 +269,28 @@ func TestAutomaticForceAndRollback(t *testing.T) {
 		t.Fatal("expected forced replacement to be published with admission closed")
 	}
 
+	// A failed observation can hold the already-published replacement.
+	requireNoError(t, s.reconcile(t.Context()))
+	tx, err := s.db.Begin()
+	requireNoError(t, err)
+	defer tx.Rollback()
+	_, err = tx.Exec("LOCK TABLE lpcc.onchain_state IN ACCESS EXCLUSIVE MODE")
+	requireNoError(t, err)
+	requireNoError(t, s.configs.Reconcile(t.Context()))
+	requireNoError(t, tx.Rollback())
+	state, _, err := s.loadTunnel(t.Context(), m.NodeID)
+	requireNoError(t, err)
+	if state.HeldOrchestrator == "" || state.ApplyingConfigDigest != replacement.ConfigDigest || state.RolloutReason != "lifecycle_observation_failed" {
+		t.Fatal("expected the observation failure to hold the published replacement")
+	}
+
 	s.params.RuntimeNodeImage = image
 	s.configs = s.newConfigurationManager()
 	requireNoError(t, s.reconcile(t.Context()))
+	draining, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if draining.ConfigDigest != replacement.ConfigDigest || !draining.DrainStartedAt.After(replacement.DrainStartedAt) {
+		t.Fatal("rollback must drain the published replacement with a fresh deadline")
+	}
 	reportRuntime(t, s, c, "runner", true)
 	requireNoError(t, s.reconcile(t.Context()))
 	rollback, _ := publishedMachineConfiguration(t, s, m.NodeID)
@@ -616,7 +647,7 @@ func TestRemovalKeepsAppliedWorkload(t *testing.T) {
 
 func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	s := newTestServer(t)
-	s.params.TunnelDrainTimeout = time.Minute
+	s.params.DrainTimeout = new(time.Minute)
 	s.params.TunnelStatusTTL = time.Minute
 	s.configs = s.newConfigurationManager()
 	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
@@ -626,7 +657,7 @@ func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	}
 	reportRuntime(t, s, c, "runner", true)
 	refreshed := false
-	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute, StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: new(time.Minute), StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !refreshed {
 			refreshed = true
 			jwt, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
@@ -760,7 +791,7 @@ func TestOrdinaryReportDoesNotWakeWholeFleet(t *testing.T) {
 
 func TestConcurrentRemovalDoesNotAbortFleetPass(t *testing.T) {
 	s := newTestServer(t)
-	s.params.TunnelDrainTimeout = time.Minute
+	s.params.DrainTimeout = new(time.Minute)
 	s.configs = s.newConfigurationManager()
 	one := enroll(t, s, ownerA, strings.Repeat("2", 64))
 	two := enroll(t, s, ownerA, strings.Repeat("3", 64))
@@ -772,7 +803,7 @@ func TestConcurrentRemovalDoesNotAbortFleetPass(t *testing.T) {
 	}
 	removed := false
 	builtSecond := false
-	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: new(time.Minute)}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !removed {
 			removed = true
 			if err := s.RetireMachine(t.Context(), one["node_id"]); err != nil {

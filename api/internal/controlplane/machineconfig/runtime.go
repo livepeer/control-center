@@ -63,13 +63,15 @@ func upgradeVersion(m Desired) string {
 	}
 	return match[1]
 }
-func specializeNode(raw string, m Desired) string {
-	timeout := 12 * time.Hour
-	if m.NodeDrainTimeout != nil {
-		timeout = *m.NodeDrainTimeout
+func nodeDrainTimeout(timeout *time.Duration) time.Duration {
+	if timeout == nil {
+		return 12 * time.Hour
 	}
+	return *timeout
+}
+func specializeNode(raw string, m Desired) string {
 	raw = specializeOnchain(raw, m)
-	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", timeout.String())
+	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", nodeDrainTimeout(m.NodeDrainTimeout).String())
 	if m.NodeImage != "" {
 		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
 	}
@@ -107,7 +109,7 @@ func DesiredRuntime(m Desired) Runtime {
 	d.DrainStartedAt = m.State.DrainStartedAt
 	if d.DrainRequested {
 		d.DrainTarget = DrainTarget(m.NodeID, m.State)
-		if m.DrainTimeout > 0 {
+		if !m.State.DrainStartedAt.IsZero() {
 			d.DrainDeadline = m.State.DrainStartedAt.Add(m.DrainTimeout)
 		}
 	}

@@ -191,15 +191,16 @@ modes. Single-session lifetimes are unsupported. Each instance runs in a gVisor
 Pod with a private Service. Node advertises ready instances and checks capacity
 before accepting work; Control Center collects Node's discovery responses.
 
-Removal withdraws an instance from discovery and drains existing work. Set
-`RuntimeNodeDrainTimeout` from 0 to 12 hours (default 12 hours); zero ends work
-immediately. Normally Runtime waits for Node to confirm registration removal,
-then removes the Pod and Service and reports cleanup. `TunnelDrainTimeout` is a
-separate machine-maintenance deadline that defaults to 12 hours. After it expires
-during an orchestrator update, Control Center forces replacement on its next
-update check, possibly without Node confirmation. Ordinary machine removal and
-endpoint migration require a retry after expiry. Node restart or owner expiry can
-lose sessions.
+- `RuntimeAppDrainTimeout` gives existing sessions time to finish after an app
+  is withdrawn. It defaults to `12h` and accepts `0s` through `12h`. `0s` ends
+  sessions immediately.
+- `DrainTimeout` is the maximum wait for confirmation after Control Center
+  requests a machine drain. It must be at least `RuntimeAppDrainTimeout` and
+  defaults to the app timeout plus `10m` (`12h10m` by default). Setting both to
+  `0s` makes the machine drain expire immediately.
+
+After Node confirms registration removal, Runtime removes the Pod and Service
+and reports cleanup. A Node restart or an expired runner registration can end sessions early.
 
 Normal machine removal withdraws assignments and waits for app cleanup and
 machine drain. Forced removal stops Node early without a graceful drain. It

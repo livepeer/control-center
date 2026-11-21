@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/j0sh/boa/pkg/boa"
+	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 )
 
 func TestPublicConfig(t *testing.T) {
@@ -183,11 +184,75 @@ RedeemerUpstreamURL = "http://redeemer:8941"
 	}
 }
 
+func TestDrainTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, appEnv, drainEnv string
+		args                           []string
+		app, drain                     time.Duration
+		wantError                      string
+	}{
+		{name: "defaults", app: 12 * time.Hour, drain: 12*time.Hour + 10*time.Minute},
+		{name: "TOML app timeout", config: "RuntimeAppDrainTimeout = \"45m\"\n", app: 45 * time.Minute, drain: 55 * time.Minute},
+		{name: "TOML zeros", config: "RuntimeAppDrainTimeout = \"0s\"\nDrainTimeout = \"0s\"\n"},
+		{name: "omitted machine timeout with zero app timeout", appEnv: "0s", drain: 10 * time.Minute},
+		{name: "environment zeros", appEnv: "0s", drainEnv: "0s"},
+		{name: "flag zeros", args: []string{"--runtime-app-drain-timeout=0s", "--drain-timeout=0s"}},
+		{name: "equal timeouts after overrides", config: "RuntimeAppDrainTimeout = \"40m\"\nDrainTimeout = \"50m\"\n", appEnv: "30m", args: []string{"--drain-timeout=30m"}, app: 30 * time.Minute, drain: 30 * time.Minute},
+		{name: "machine below app", drainEnv: "10m", wantError: "DrainTimeout must be at least RuntimeAppDrainTimeout"},
+		{name: "explicit machine zero below app", args: []string{"--drain-timeout=0s"}, wantError: "DrainTimeout must be at least RuntimeAppDrainTimeout"},
+		{name: "negative machine timeout", appEnv: "0s", drainEnv: "-1s", wantError: "DrainTimeout must be at least RuntimeAppDrainTimeout"},
+		{name: "negative app timeout", args: []string{"--runtime-app-drain-timeout=-1s"}, wantError: "RuntimeAppDrainTimeout must be between zero and 12h"},
+		{name: "excessive app timeout", appEnv: "13h", wantError: "RuntimeAppDrainTimeout must be between zero and 12h"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("RUNTIME_APP_DRAIN_TIMEOUT", tc.appEnv)
+			t.Setenv("DRAIN_TIMEOUT", tc.drainEnv)
+			p := testParams()
+			p.PGConnstr = "postgres://example@localhost/test"
+			p.SupabaseURL = "https://auth.example"
+			config := ""
+			if tc.config != "" {
+				config = filepath.Join(t.TempDir(), "config.toml")
+				if err := os.WriteFile(config, []byte(tc.config), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := (boa.Cmd[Params]{Params: &p, RawArgs: append([]string{"--config=" + config}, tc.args...)}).Validate()
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("expected %q, got %v", tc.wantError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now().UTC().Add(-3 * time.Minute)
+			manager := machineconfig.New(machineconfig.Config{
+				DrainTimeout:     p.DrainTimeout,
+				NodeDrainTimeout: &p.RuntimeAppDrainTimeout,
+			}, machineconfig.Dependencies{})
+			desired := manager.Desired(machineconfig.Machine{}, machineconfig.State{
+				DrainRequested: true,
+				DrainStartedAt: started,
+			}, nil)
+			if got := *desired.NodeDrainTimeout; got != tc.app {
+				t.Errorf("Node app drain timeout = %s, want %s", got, tc.app)
+			}
+			if got, want := machineconfig.DesiredRuntime(desired).DrainDeadline, started.Add(tc.drain); !got.Equal(want) {
+				t.Errorf("machine drain deadline = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DEFAULT_ADMIN_EMAIL", "")
 	for _, name := range []string{"CONTROL_CENTER_CONFIG", "CONTROL_CENTER_MODE", "PG_CONNSTR", "PG_CONNSTR_FILE", "PG_PASSWORD", "PG_PASSWORD_FILE", "LISTEN_ADDR", "PUBLIC_API_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "JWT_SIGNING_PRIVATE_KEY_FILE", "MACHINE_TOKEN_SECRET", "MACHINE_TOKEN_SECRET_FILE", "CONFIG_RECONCILE_INTERVAL", "RUNTIME_IMAGE", "SECRETS_URL",
-		"TELEMETRY_ENABLED", "TELEMETRY_METRICS_URL", "TELEMETRY_LOGS_URL", "TELEMETRY_TOKEN_TTL", "TELEMETRY_MAX_BODY_BYTES", "TELEMETRY_NODE_RATE_BYTES", "TELEMETRY_APP_LOGS_ENABLED"} {
+		"TELEMETRY_ENABLED", "TELEMETRY_METRICS_URL", "TELEMETRY_LOGS_URL", "TELEMETRY_TOKEN_TTL", "TELEMETRY_MAX_BODY_BYTES", "TELEMETRY_NODE_RATE_BYTES", "TELEMETRY_APP_LOGS_ENABLED",
+		"RUNTIME_APP_DRAIN_TIMEOUT", "DRAIN_TIMEOUT"} {
 		t.Setenv(name, "")
 	}
 }

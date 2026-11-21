@@ -14,17 +14,18 @@ import (
 )
 
 type Config struct {
-	IngressPublicKeys       []byte
-	APIURL                  string
-	Connector               ConnectorConfig
-	DrainTimeout, StatusTTL time.Duration
-	RuntimeImage            string
-	NodeDrainTimeout        *time.Duration
-	NodeImage               string
-	StopSignals             bool
-	Telemetry               bool
-	TelemetryAppLogs        bool
-	TelemetryMaxBody        int64
+	IngressPublicKeys []byte
+	APIURL            string
+	Connector         ConnectorConfig
+	DrainTimeout      *time.Duration
+	StatusTTL         time.Duration
+	RuntimeImage      string
+	NodeDrainTimeout  *time.Duration
+	NodeImage         string
+	StopSignals       bool
+	Telemetry         bool
+	TelemetryAppLogs  bool
+	TelemetryMaxBody  int64
 }
 
 type Dependencies struct {
@@ -94,10 +95,10 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	return d
 }
 func (s *Manager) drainTimeout() time.Duration {
-	if s.config.DrainTimeout <= 0 {
-		return 12 * time.Hour
+	if s.config.DrainTimeout == nil {
+		return nodeDrainTimeout(s.config.NodeDrainTimeout) + 10*time.Minute
 	}
-	return s.config.DrainTimeout
+	return *s.config.DrainTimeout
 }
 
 func (s *Manager) Reconcile(ctx context.Context) error {

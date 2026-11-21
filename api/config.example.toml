@@ -48,10 +48,11 @@ DiscoveryGrants = []
 # CloudflareBaseDomain = "<BASE_DOMAIN>"
 # CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
 RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required; build instructions in runtime/README.md
-RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
+RuntimeAppDrainTimeout = "12h"
+# Omitted DrainTimeout defaults to RuntimeAppDrainTimeout plus 10m.
+# DrainTimeout = "12h10m"
 # RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # Runtime helper and cloudflared
 # TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
-# TunnelDrainTimeout = "<DRAIN_DEADLINE>"
 # TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
 
 # Machine telemetry is on by default. Without local VictoriaMetrics and
