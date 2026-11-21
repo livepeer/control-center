@@ -141,12 +141,13 @@ without the secrets service.
 Client endpoints are the API base URL (`ServiceURL`) and session proxy URL
 pattern (`ProxyURLTemplate`).
 
-- **Deadline.** `DrainTimeout` starts with the drain request. It defaults to
-  `12h10m` and expires immediately at `0s`. See [drain
-  settings](app-registry.md#runtime-delivery-and-completion-contract). Only an
-  orchestrator replacement with unchanged endpoints proceeds automatically when
-  the deadline expires. Normal removal and unforced endpoint changes require
-  runner confirmation before the deadline.
+- **Deadline.** `DrainTimeout` starts with the drain request, defaults to
+  `12h10m`, and expires immediately at `0s`. At the deadline, Control Center
+  automatically forces a replacement at the same addresses. If either address
+  is changing, the old addresses stay in place. Retry the drain or force the
+  update to continue. Normal removal requires all sessions to be fully drained
+  before the deadline. See
+  [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
 - **Force an update.** Use `drain/force` at any time during a pending runtime
   change. It skips waiting for active sessions and may interrupt them. Control
   Center still checks Runtime readiness and verifies the new route before
