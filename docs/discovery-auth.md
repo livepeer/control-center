@@ -1,5 +1,7 @@
 # Discovery authentication
 
+Discovery authentication lets a machine verify that a request for its app inventory came from Control Center. Control Center authenticates to each machine's protected discovery endpoint with a signed, machine-specific bearer token, while keeping the fleet-wide `GET /discovery` aggregate public.
+
 Control Center signs enrollment grants, orchestrator claims, invitations, discovery tokens, and telemetry write tokens using one local Ed25519 key shared by all API replicas. Signing and ingress verification run independently of the secrets service.
 
 ## Configure the signing key

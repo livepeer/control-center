@@ -1,6 +1,6 @@
 # Fleet discovery
 
-Control Center runs Node's public Collector and serves its cached Node-compatible inventory at public, read-only `GET /discovery` via Cloudflare Tunnel. Fleet discovery is disabled by default.
+Control Center polls enrolled machines through their protected routes and publishes a cached, fleet-wide list of the app runners they advertise, along with their endpoints, at public, read-only `GET /discovery`. It serves this Node-compatible JSON inventory through Cloudflare Tunnel, and fleet discovery is disabled by default.
 
 ## Enable fleet discovery
 
@@ -20,7 +20,7 @@ Selection excludes unverified provisioning generations, removed enrollments, and
 
 Each poll signs a local discovery token ([verify ingress](discovery-auth.md#verify-discovery-ingress)), and signing failures deny that poll while healthy sources continue. Polling enforces verified HTTPS, `3s` timeout, zero env proxies/cookies/redirects, Node's destination policy, and `1 MiB` body limit.
 
-The Collector ignores peer metadata and skips its own origin. Credential updates apply on the next poll, and HTTP reads never trigger polls.
+Control Center ignores peer metadata and never polls its own discovery endpoint. Credential updates apply on the next poll, and HTTP reads never trigger polls.
 
 ## Caching, merging, and diagnosis
 

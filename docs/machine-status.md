@@ -1,5 +1,7 @@
 # Machine and app status
 
+The machine and app status view shows whether an enrolled machine and its assigned apps are ready to receive work and where rollout, startup, registration, or cleanup got stuck.
+
 Open **View status** on your machine or **Runtime status** in **Administration → Machine fleet**. Only the enrollment owner and administrators can read status. Catalog access and assignment changes require an administrator. Retired enrollments stay visible until cleanup acknowledgement. Replacement enrollments have separate diagnostics.
 
 ## Read work readiness and stages

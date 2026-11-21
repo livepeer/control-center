@@ -1,6 +1,8 @@
 # Operator secrets
 
-The secrets service stores application credentials per orchestrator and controls runtime delivery. Members share secrets and app policies (orchestrator address owns resources, user IDs record audit actors). Control Center sees secret names only, keeping values and runtime private keys outside Control Center.
+A separate operator secrets service delivers app credentials only to authorized workloads without storing values in app definitions. Control Center sees secret names only, the service handles secret values, and runtime private keys stay on their machines.
+
+The service stores credentials per orchestrator and controls runtime delivery. Orchestrator members share secrets and app policies (the orchestrator address owns resources, and user IDs record audit actors).
 
 Each orchestrator supports up to `100` secrets, including deleted keys. The browser encrypts each value with a random data key, and Vault Transit **wraps** that key for storage. For authorized runtimes, the service unwraps the key via Vault and re-encrypts it for that runtime to decrypt locally.
 

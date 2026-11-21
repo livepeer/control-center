@@ -1,6 +1,6 @@
 # App registry
 
-App authors use TOML to define HTTP apps. Administrators publish immutable catalog revisions and assign them to machines.
+The app registry is Control Center's catalog of HTTP applications. App authors use TOML to define HTTP apps. Administrators publish immutable catalog revisions and assign them to machines.
 
 ## Write a definition
 

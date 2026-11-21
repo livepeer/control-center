@@ -1,6 +1,8 @@
 # Machine tunnels and protected discovery
 
-Control Center provisions one Cloudflare Tunnel per machine enrollment. Runtime's connector forwards client API and app traffic via private Traefik ingress and Node to workloads, and discovery uses machine-bound bearer auth ([discovery auth](discovery-auth.md)). Public Trickle (`/ai/trickle/*`) is denied, so dependent apps can appear in discovery while failing client calls.
+The Runtime firewall and private services protect managed workloads from direct inbound access. Control Center provisions one Cloudflare Tunnel per machine enrollment, and a connector dials out to Cloudflare to expose only the client API, app routes, and token-protected discovery ([discovery auth](discovery-auth.md)) without a public IP or inbound ports on the machine.
+
+Cloudflare serves public DNS and TLS, while the connector needs outbound access. The connector forwards traffic through private Traefik ingress and Node to workloads. Public Trickle (`/ai/trickle/*`) is denied, so dependent apps can appear in discovery while failing client calls.
 
 ## Configure Cloudflare infrastructure
 
