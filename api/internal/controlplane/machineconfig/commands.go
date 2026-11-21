@@ -89,8 +89,8 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	if err != nil {
 		return result, err
 	}
-	var raw, routing []byte
-	err = tx.QueryRowContext(ctx, `SELECT rollout,state FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw, &routing)
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return result, ErrDrainChanged
 	}
@@ -124,22 +124,14 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 		if !state.canForceDrain() {
 			return result, ErrForceDrainUnavailable
 		}
-		var exposure *Exposure
-		if s.deps.Exposure != nil {
-			exposure, err = s.deps.Exposure(routing)
-			if err != nil {
-				return result, err
-			}
-		}
-		if !sameWorkloadEndpoints(state.HeldOrchestrator, Desired{State: state, Exposure: exposure}) {
-			return result, ErrForceDrainUnavailable
-		}
 		state.forceDrain(node)
 		state.RolloutReason = "rollout_pending"
 	} else {
 		state.Generation++
-		// The new generation revokes force. Keep the marker so Gate can
-		// restore the held workload if the replacement was not published.
+		// Keep the revoked marker if Gate might still have to restore the held workload.
+		if state.Target != "" || state.ApplyingConfigDigest == "" {
+			state.ForcedDrainTarget = ""
+		}
 		state.DrainStartedAt = time.Now().UTC()
 		state.RolloutReason = "drain_pending"
 	}

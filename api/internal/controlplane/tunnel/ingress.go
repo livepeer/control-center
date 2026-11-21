@@ -34,6 +34,11 @@ func RoutingFor(node, domain string) Snapshot {
 		ServiceURL:       "https://api." + node + "." + domain,
 		ProxyURLTemplate: "https://{proxy}." + node + "." + domain, DiscoveryURL: "https://discovery." + node + "." + domain + "/discovery", Resources: map[string]CFResource{}}}
 }
+
+func (s RoutingState) sameClientEndpoints(other RoutingState) bool {
+	return s.ServiceURL == other.ServiceURL && s.ProxyURLTemplate == other.ProxyURLTemplate
+}
+
 func ingressFor(state RoutingState) []IngressRule {
 	api := endpointHost(state.ServiceURL)
 	discovery := endpointHost(state.DiscoveryURL)

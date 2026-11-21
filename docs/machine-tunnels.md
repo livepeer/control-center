@@ -131,20 +131,15 @@ Signing and ingress verification work without the secrets service. Follow the
 Client endpoints are the API base URL (`ServiceURL`) and session proxy URL
 pattern (`ProxyURLTemplate`).
 
-- **Deadline.** `DrainTimeout` starts with the drain request. It defaults to
-  `12h10m` and expires immediately at `0s`. See [drain
-  settings](app-registry.md#runtime-delivery-and-completion-contract). Only an
-  orchestrator replacement with unchanged endpoints proceeds automatically when
-  the deadline expires. Normal removal and any change to either endpoint (even
-  when also replacing the orchestrator) require runner confirmation before the
-  deadline.
-- **Force an update.** Use `drain/force` at any time during a pending
-  replacement at the same endpoints to skip the wait for existing sessions.
-  This can interrupt them. The replacement accepts new sessions when Runtime
-  reports it ready.
-- **Retry or remove.** After a timeout, `drain/retry` starts a fresh attempt.
-  To start removal without waiting for sessions, send a machine `DELETE`
-  request with `{"force":true}`.
+- **Deadline.** When `DrainTimeout` expires, Control Center stops waiting for
+  sessions and proceeds with the pending Runtime replacement. Active sessions
+  can be interrupted. See
+  [drain settings](app-registry.md#runtime-delivery-and-completion-contract).
+- **Force an update.** Use `drain/force` to skip the remaining drain wait for a
+  pending runtime change.
+- **Remove a machine.** Normal removal requires all sessions to drain before
+  the deadline. After a timeout, use `drain/retry` to start a new drain or
+  send a machine `DELETE` with `{"force":true}` to skip it.
 
 Stop all older Control Center API replicas before an upgraded replica starts
 writing rollout state. Let ongoing forced updates finish before rolling back to an

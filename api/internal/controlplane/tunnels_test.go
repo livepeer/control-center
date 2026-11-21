@@ -418,23 +418,11 @@ func TestTunnelDrainRolloutAndObservationExpiry(t *testing.T) {
 	if state.Target != "" {
 		t.Fatal("expected initial exposure to use a workload drain")
 	}
-	adminA(t, s)
-	drain := "/api/admin/machines/" + m.NodeID + "/drain/"
-	intent := map[string]int64{"generation": state.Generation}
-	requireStatus(t, request(t, s, "POST", drain+"force", "session-a", intent), 409)
 	backdateWorkloadDrain(t, s, m.NodeID)
-	requireNoError(t, s.reconcile(t.Context()))
-	expired, _, err := s.loadTunnel(t.Context(), m.NodeID)
-	_, manifest := publishedMachineConfiguration(t, s, m.NodeID)
-	if err != nil || expired.RolloutReason != "drain_timeout" || manifest != old {
-		t.Fatal("timeout forced a change to the workload endpoints", expired.RolloutReason, err)
-	}
-	requireStatus(t, request(t, s, "POST", drain+"retry", "session-a", intent), 202)
-	reportRuntime(t, s, c, "runner", true)
 	driveTunnels(t, s)
 	updated := archiveFiles(t, request(t, s, "GET", path, c["token"], nil).Body.Bytes())["system/node/orchestrator.yaml"]
 	if updated == old || !strings.Contains(updated, state.ServiceURL) {
-		t.Fatal("drained configuration not released")
+		t.Fatal("deadline did not release the initial public configuration")
 	}
 	reportRuntime(t, s, c, "runtime", true)
 	reportRuntime(t, s, c, "connector", true)

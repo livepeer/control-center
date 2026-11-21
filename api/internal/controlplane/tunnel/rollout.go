@@ -27,7 +27,7 @@ func (l *tunnelLease) gateNodeConfiguration(ctx context.Context) (bool, error) {
 }
 
 func (l *tunnelLease) stageEndpoints(ctx context.Context, desired Snapshot) (bool, error) {
-	if desired.ServiceURL == l.state.ServiceURL {
+	if l.state.IngressDigest == "" || l.state.sameClientEndpoints(desired.RoutingState) {
 		return false, nil
 	}
 	candidate := l.state
@@ -41,13 +41,5 @@ func (l *tunnelLease) stageEndpoints(ctx context.Context, desired Snapshot) (boo
 	if e := l.save(ctx); e != nil {
 		return false, e
 	}
-	if err != nil || waiting {
-		return waiting, err
-	}
-	l.state.ServiceURL = desired.ServiceURL
-	l.state.ProxyURLTemplate = desired.ProxyURLTemplate
-	l.state.DiscoveryURL = desired.DiscoveryURL
-	l.state.SourceGeneration++
-	l.state.EndpointGeneration++
-	return false, l.save(ctx)
+	return waiting, err
 }
