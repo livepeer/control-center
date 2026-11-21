@@ -1,51 +1,36 @@
 # Discovery authentication
 
-Control Center signs enrollment grants, orchestrator claims, invitations and
-machine discovery tokens with a local Ed25519 key. All API replicas need the
-same signing configuration. Signing and ingress verification do not depend on
-the secrets service.
+Discovery authentication lets a machine verify that a request for its app inventory came from Control Center. Control Center authenticates to each machine's protected discovery endpoint with a signed, machine-specific bearer token, while keeping the fleet-wide `GET /discovery` aggregate public.
 
-## Signing configuration
+Control Center signs enrollment grants, orchestrator claims, invitations, discovery tokens, and telemetry write tokens using one local Ed25519 key shared by all API replicas. Signing and ingress verification run independently of the secrets service.
 
-Generate an Ed25519 PKCS#8 PEM key and retain it securely:
+## Configure the signing key
+
+Generate an Ed25519 PKCS#8 PEM key and restrict permissions.
 
 ```sh
 openssl genpkey -algorithm ED25519 -out jwt-signing-key.pem
 chmod 0600 jwt-signing-key.pem
 ```
 
-Mount the key read-only, readable by the API identity (UID 65532), and set
-`JWTSigningPrivateKeyFile` to its path. `JWTSigningKeyID` defaults to `1`.
-Optionally, `JWTVerificationPublicKeysFile` names a JSON object mapping key IDs
-to standard-base64 encoded 32-byte Ed25519 public keys. The current signing
-key's public key is included automatically. Keep private keys out of machine
-artifacts, ConfigMaps, logs and command arguments.
+Mount read-only for API UID `65532` and keep private keys out of machine artifacts, ConfigMaps, logs, and command args.
 
-## Discovery ingress
+| Setting | Purpose |
+| --- | --- |
+| `JWTSigningPrivateKeyFile` | Read-only Ed25519 PKCS#8 PEM key path |
+| `JWTSigningKeyID` | Signing key ID (default `"1"`) |
+| `JWTVerificationPublicKeysFile` | Optional JSON map of key IDs to base64 32-byte Ed25519 public keys (active key auto-included) |
 
-Control Center signs a token for each managed source request. The token has
-issuer `livepeer-control-center`, audience `livepeer-discovery`, scope
-`discovery:read`, the machine's node ID as subject, and issued-at and expiration
-times. Its lifetime is five minutes with 30 seconds of clock tolerance. The
-Collector sends credentials only to the exact configured HTTPS source and does
-not follow redirects.
+## Verify discovery ingress
 
-On each machine, the persistent `livepeer-runtime ingress-auth` HTTP service
-verifies tokens with public keys and the machine's node ID. Traefik calls
-`GET /authorize` using ForwardAuth: valid credentials return 204, missing or
-invalid credentials return 401, and service failure denies access. `GET /readyz`
-is private. The machine receives public verification keys, never the private
-signing key.
+Each poll mints a discovery token (`iss` `livepeer-control-center`, `aud` `livepeer-discovery`, `scope` `discovery:read`, `sub` `<node_id>`, `iat`/`exp`, `5m` lifetime, `30s` skew). The Collector sends credentials only to the exact HTTPS source without redirects.
 
-## Key rotation
+Machine `livepeer-runtime ingress-auth` checks tokens against public keys and node ID. Traefik ForwardAuth calls `GET /authorize` (`204` valid, `401` invalid/missing, deny on error). `GET /readyz` stays private, and machines receive public keys only.
 
-1. Add the next public key to `JWTVerificationPublicKeysFile` while continuing
-   to sign with the current key. Verify that the new ingress configuration digest
-   is applied and Runtime reports ingress ready.
-2. Switch `JWTSigningPrivateKeyFile` and `JWTSigningKeyID` to the new key and ID.
-3. Keep the previous public key for at least 24 hours after its last issuance,
-   covering invitations as well as shorter-lived tokens. Then remove it in a
-   separate public-key rollout.
+## Rotate signing keys
 
-Public-key distribution has its own inventory and ingress digest. Updating it
-does not change Node's replacement digest or require a Node drain.
+1. Add the next public key to `JWTVerificationPublicKeysFile` while signing with the current key. Confirm the new ingress digest applies and reports ready.
+2. Switch `JWTSigningPrivateKeyFile` and `JWTSigningKeyID` to the new key.
+3. Retain the old public key for `>= 24h` after last issuance (covering 24-hour invitations and shorter tokens), then remove it in a separate rollout.
+
+Public-key rollouts use an independent inventory and ingress digest, leaving Node's replacement digest unchanged with zero Node drain.

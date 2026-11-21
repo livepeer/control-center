@@ -1,40 +1,28 @@
 # Development
 
-The repository contains the Go API (`api/`), web UI (`ui/`), and host bootstrap
-and tests (`runtime/`), with one Go module at the repository root. Run the
-commands below from the repository root.
+Run commands from the repository root. The Go API, web UI, and host bootstrap live in `api/`, `ui/`, and `runtime/`.
 
 ## Run locally
 
-Requires Go 1.27.4+, Node.js 22.12+, TLS-enabled PostgreSQL 15+, and authentication.
-Configure credentials and sign-in using
-[api/config.example.toml](../api/config.example.toml) and the
-[operations runbook](operations.md). Then run:
+Use Go 1.27.4+, Node.js 22.12+, and TLS-enabled PostgreSQL 15+. Configure Supabase using [the API config example](../api/config.example.toml) and [initial setup](operations.md#initial-setup).
 
 ```sh
 go mod download
 npm --prefix ui ci
 make api
-# In another terminal:
+# Second terminal
 make ui
 ```
 
 Open [http://localhost:5173](http://localhost:5173). Migrations run on startup.
-The local example uses `DevelopmentHTTP = true` with a separate database and
-fresh enrollments. To test enrollment, bind the API on the private dev network
-and set `PublicAPIURL` to the HTTP URL reachable by test hosts and pods. Run
-bootstrap with that `LIVEPEER_API_URL` and `LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1`.
 
-The Vite dev server proxies `/api` to the local API on the same origin. Deployed
-builds call the API origin from `VITE_CONTROLCENTER_API_URL`, which defaults to
-the value in [`ui/production.env`](../ui/production.env). Add the UI origin to
-the deployed API's `AllowedOrigins`.
+The local example sets `DevelopmentHTTP = true` with a separate DB and fresh enrollments. For local enrollment tests, bind the API on the private dev network, set `PublicAPIURL` to the HTTP URL reachable by hosts and Pods, and run bootstrap with matching `LIVEPEER_API_URL` and `LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1`.
 
-To try the deployed edge behaviour locally (SPA fallback, `_headers`, and
-bootstrap routes against a local R2 bucket), build the UI and run
-`npx wrangler dev --env-file /dev/null` in `ui/`.
+Vite proxies `/api` to the local API. Production builds use `VITE_CONTROLCENTER_API_URL` from [`ui/production.env`](../ui/production.env) by default. Add the **UI origin** to the API's `AllowedOrigins`.
 
-## Development checks
+To test the deployed SPA fallback, `_headers`, and bootstrap routes with local R2, build the UI and run `npx wrangler dev --env-file /dev/null` in `ui/`.
+
+## Run checks and CI
 
 ```sh
 make test
@@ -43,67 +31,40 @@ npm --prefix ui run test:browser
 npm --prefix ui run test:worker
 ```
 
-Database tests skip without `TEST_DATABASE_URL` for a disposable PostgreSQL
-instance with database and test-role creation privileges. Browser tests use
-Chrome and mocks.
+- **Database tests** — need `TEST_DATABASE_URL` for a disposable PostgreSQL with DB and test-role creation privileges (skipped when unset).
+- **Browser tests** — run Chrome with mocks.
+- **Real-process tests** — set `NODE_BINARY` and `LIVEPEER_NODE_TEST_BINARY` to the compatible Node binary (Flux/gVisor cluster tests are opt-in).
 
-[GitHub Actions CI](../.github/workflows/ci.yml) runs on pull requests and can
-be run manually. The hidden file check allows the root `.github/` directory,
-`.gitignore` and `.dockerignore`. It rejects other tracked dot-prefixed names,
-including inside `.github/`. CI checks Go
-formatting and runs race tests, Vet, Staticcheck and Govulncheck. It builds and
-browser-tests the UI, tests its edge Worker, dry-runs the production UI
-deployment and runs the bootstrap, remote runner and Runtime tests. CI
-supplies PostgreSQL, Livepeer Node and cloudflared for integration tests.
-Pushes to `main` also run these checks.
+[CI](../.github/workflows/ci.yml) runs on PRs, `main` pushes, and manual dispatch. Hidden-file checks allow `.github/`, `.gitignore`, and `.dockerignore` and reject other dot-prefixed tracked paths, including inside `.github/`.
 
-For local real-process tests, set `NODE_BINARY` and `LIVEPEER_NODE_TEST_BINARY`
-to the compatible Node binary. CI sets both. Isolated Flux/gVisor cluster tests
-remain opt-in.
+CI runs `gofmt`, race tests (PostgreSQL, Node, cloudflared, Traefik, VictoriaMetrics, VictoriaLogs, vmagent fixtures), `go vet`, Staticcheck, Govulncheck, UI build/browser/Worker tests, Wrangler production dry-run, and bootstrap/remote-runner/Runtime tests.
 
-[Build](../.github/workflows/build.yml) validates the API, secrets and Runtime
-Docker images on native Linux amd64 and arm64 runners for pull requests and
-`main` pushes, and can be run manually. Image publication and bootstrap
-activation follow the [deployment process](../deploy/README.md). The UI is
-released separately with the [Deploy UI](../.github/workflows/ui-deploy.yml)
-workflow; see [UI hosting](../deploy/README.md#ui-hosting).
+[Build](../.github/workflows/build.yml) validates API, secrets, and Runtime images on Linux `amd64`/`arm64` for PRs, `main`, and manual runs. Image publishing and bootstrap activation follow [staging deployment](../deploy/README.md). [Deploy UI](../.github/workflows/ui-deploy.yml) deploys the UI ([UI hosting](../deploy/README.md#ui-hosting)).
 
-## Runtime unit tests
+## Run Runtime and end-to-end tests
+
+### Unit and host tests
 
 ```sh
 python3 -m unittest discover -s runtime/tests
 ```
 
-On macOS, the host-safe tests use the system Bash and test fixtures for GNU
-commands. They use Python 3 and jq, and the Secrets signature test requires
-an `openssl` that supports Ed25519. Run the Linux host checks and firewall
-container with `make test-runtime`.
+macOS runs host-safe tests with system Bash, GNU fixtures, Python 3, `jq`, and Ed25519 `openssl` (Secrets signature tests). Run Linux host checks and the firewall container via `make test-runtime`.
 
-## Remote Runtime tests
+### Remote Runtime tests
 
 ```sh
 make test-runtime REMOTE=<ssh-host>
 make test-runtime REMOTE=<ssh-host> REF=<commit>
 ```
 
-The first command tests current `runtime/` files, including uncommitted changes;
-`REF` selects a repository commit. Only `runtime/` is transferred.
+The first command tests current `runtime/` files (including uncommitted changes). `REF` selects a commit. Only `runtime/` is transferred.
 
-The local machine needs Git, Python 3.10+, and OpenSSH configured for the remote
-host. The Linux remote user needs Bash, Python 3.10+, ShellCheck, jq, bzip2,
-standard shell, archive and checksum utilities, and access without sudo to a
-Docker daemon over a Unix socket. Image retrieval and container package
-installation need network access. Optional kubectl/PyYAML checks report skips
-when unavailable.
+- **Local** — Git, Python `3.10+`, OpenSSH configured for `<ssh-host>`.
+- **Remote Linux** — Bash, Python `3.10+`, ShellCheck, `jq`, `bzip2`, standard shell/archive/checksum utilities, sudo-less Docker socket access, network access for images/packages (`kubectl`/PyYAML skip if absent).
 
+Find logs and `result.json` in `.remote-test-results/<run-id>/`. The command exits nonzero on test, transport, or cleanup failure. After interruption, inspect the printed IDs for leftover remote containers or directories before cleanup or retry.
 
-Logs and results are written to `.remote-test-results/<run-id>/`; `result.json`
-records test and cleanup outcomes. The command returns nonzero for test,
-transport, or cleanup failures. Interrupted runs may retain a remote container
-or temporary directory; inspect the resource identifiers printed by the helper
-before removing those resources or rerunning. Delete the local run directory
-when its results are no longer needed.
+### End-to-end tests
 
-## End-to-end tests
-
-Use the separate `e2e-clankery` harness; commands are in its `README.txt`.
+Use the separate `e2e-clankery` harness per its `README.txt`.

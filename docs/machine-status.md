@@ -1,80 +1,51 @@
 # Machine and app status
 
-Open **View status** on an owned machine or **Runtime status** in the administrator
-fleet. Only the enrollment's owner or an administrator can read it; machine
-credentials cannot. Owners cannot change assignments or inspect the catalog.
-Retired enrollments remain visible until removal acknowledgement. A replacement
-enrollment does not inherit access to the previous enrollment's diagnostics.
+The machine and app status view shows whether an enrolled machine and its assigned apps are ready to receive work and where rollout, startup, registration, or cleanup got stuck.
 
-## Reading status
+Open **View status** on your machine or **Runtime status** in **Administration → Machine fleet**. Only the enrollment owner and administrators can read status. Catalog access and assignment changes require an administrator. Retired enrollments stay visible until cleanup acknowledgement. Replacement enrollments have separate diagnostics.
 
-The machine list and **Work readiness** section use the same readiness criteria.
-Each fleet poll makes one HTTP request. The browser fetches detailed status
-only for the selected machine.
+## Read work readiness and stages
 
-- **Green — Ready to receive work.** The current Node deployment is ready,
-  onchain admission is ready when configured, and all active assignments have
-  fresh health evidence and Node has accepted the requested replicas as ready.
-  Managed tunnels require verified ingress and a ready connector. With
-  discovery enabled, the fresh inventory must include a current admitted replica.
-- **Amber — Pending, partially ready, or unverified.** Readiness evidence is
-  missing or expired, startup or rollout is in progress, or only some
-  requested app replicas are confirmed ready. Older Runtime reports can show
-  healthy or registered replicas while admission evidence is still pending.
-- **Red — Not ready or not accepting work.** A confirmed blocker prevents work,
-  there are no active assignments, or the enrollment is draining or retired.
+Machine lists and **Work readiness** share identical criteria. Fleet polls make one HTTP request, and detailed status fetches for the selected machine only.
 
-Compare the stages and their timestamps for the same enrollment and app:
-
-| Stage | What it establishes |
+| Badge | Criteria |
 | --- | --- |
-| Requested | The desired app generation and pinned revisions |
-| Delivered | The backend published the identified apps in a bundle |
-| Downloaded | Runtime validated and cached the bundle; resources may not yet be applied |
-| Staged, published, applied | The app artifact and its original generation and digest reached each stage |
-| Applied receipt | Resource reconciliation completed; app health is separate |
-| Configured health | The result and threshold of the configured local HTTP or TCP check, including its startup deadline |
-| Registered | Node confirmed this runner and app while that observation remains valid |
-| Discovery | The published fleet inventory contained the exact public app endpoint and version at the snapshot time |
+| **Green** — Ready to receive work | Node is ready, including onchain admission when configured. All active assignments have fresh health evidence and Node confirms that the requested replicas are ready. Managed tunnels need verified ingress and a ready connector. When enabled, discovery must show a current admitted replica. |
+| **Amber** — Pending, partially ready, or unverified | Evidence is missing or expired, rollout is in progress, or only some replicas are ready. Older Runtime reports can show health or registration while admission remains pending. |
+| **Red** — Not ready or not accepting work | Confirmed blocker, no active assignments, or enrollment draining or retired. |
 
-An external client completing a session requires separate verification. The
-readiness badge uses the control plane's operational evidence.
+Compare stages and timestamps for the same enrollment and app.
 
-Reports expire after `TunnelStatusTTL` (two minutes by default). Probes, Node
-and connector observations, and discovery snapshots have their own deadlines.
-Only fresh discovery for the current source and credentials verifies membership.
-Reports show at most 128 instance details and indicate any omissions.
+| Stage | Establishes |
+| --- | --- |
+| Requested | Desired generation and pinned revisions |
+| Delivered | Control Center published apps in a bundle |
+| Downloaded | Runtime validated and cached bundle before apply |
+| Staged, published, applied | App artifact with original generation and digest reached stage |
+| Applied receipt | Resource reconciliation done (app health separate) |
+| Configured health | Local HTTP/TCP check result, threshold, and startup deadline |
+| Registered | Node confirmed runner and app within observation window |
+| Discovery | Fleet inventory held exact public endpoint and version at snapshot |
 
-## Diagnose a failure
+Work readiness reflects control-plane evidence only (verify client sessions separately). Reports expire after `TunnelStatusTTL` (default `2m`), while probes, Node/connector observations, and discovery snapshots track independent deadlines.
 
-Start with the first unresolved stage and compare its generation, identity and
-observation time:
+Only fresh discovery matching current source and credentials verifies membership. Reports list up to `128` instances and flag omissions.
 
-- **Requested, delivered or downloaded differ:** inspect the delivery failure and
-  Runtime adapter logs. Retained last-good app input keeps its original identity.
-- **No instance exists:** inspect the assignment's resource refusal or cleanup
-  prerequisite. Fresh reports for the current input, assignment generation and
-  activation show the current startup blocker before any retained reconciliation
-  diagnostic. Secret delivery being unavailable does not establish that a secret
-  is missing. Artifact stages retain their original identities; an applied
-  artifact alone does not clear a reported reconciliation failure. Another
-  assignment can still be healthy.
-- **Image, startup, isolation or probe failure:** inspect the failure, Pod UID,
-  configured check and startup deadline in the instance details.
-- **Node registration or protocol failure:** inspect the request failure and
-  verify the deployed Node and SDK revisions meet the
-  [Runtime protocol](../runtime/README.md#system-workload-delivery).
-- **Node work is unknown:** check Node connectivity and status. Missing or expired
-  observations do not establish whether sessions are still running.
-- **Cleanup is pending:** check the drain deadline, published workload configuration,
-  Pod and Service deletion, and registration cleanup. A maintenance deadline can
-  initiate workload removal when Node is unavailable; Flux or Kubernetes outages
-  can delay deletion.
-- **Authentication or collection failed:** check connector status, tunnel verification and
-  the source transport outcome separately. See [machine tunnels](machine-tunnels.md)
-  and [fleet discovery](fleet-discovery.md).
+## Diagnose failures
 
-Use Runtime and Node logs and Flux/Kubernetes diagnostics, for example:
+Start at the first unresolved stage and compare generation, identity, and observation time.
+
+| Symptom | Check |
+| --- | --- |
+| Requested, delivered, or downloaded differ | Delivery errors and Runtime adapter logs (retained last-good input keeps original identity) |
+| No instance exists | Resource refusal or cleanup prerequisites. Fresh reports for current input/generation/activation show startup blockers before retained diagnostics. Secret outages leave secret presence unconfirmed. Applied artifacts keep original identities and leave reconciliation failures intact. Other assignments can stay healthy. |
+| Image, startup, isolation, or probe failure | Failure reason, Pod UID, configured check, and startup deadline in instance details |
+| Node registration or protocol failure | Request error and Node/SDK revisions ([Runtime protocol](../runtime/README.md#system-workload-delivery)) |
+| Node work unknown | Node connectivity and status (missing/expired observations leave active sessions unknown) |
+| Cleanup pending | Drain deadline, workload config, Pod/Service deletion, and registration cleanup (maintenance deadlines trigger removal offline, and Flux/K8s outages delay deletion) |
+| Auth or collection failed | Connector status, tunnel verification, and source transport separately ([tunnels](machine-tunnels.md), [discovery](fleet-discovery.md)) |
+
+Inspect Flux, app workloads, and Node on the host.
 
 ```sh
 kubectl -n flux-system get kustomizations,externalartifacts
@@ -83,25 +54,14 @@ kubectl -n livepeer-apps describe pod <instance-pod-name>
 kubectl -n livepeer logs deployment/orchestrator
 ```
 
-Correlate enrollment, app generation and revision, activation, instance, Pod UID,
-runner and app IDs, artifact digest and observation time. Keep session IDs in
-authorized logs or events. Do not paste credentials, bearer URLs, app environment
-values or sensitive app output into issue evidence.
+Correlate enrollment, app generation/revision, activation, instance, Pod UID, runner/app IDs, artifact digest, and observation time. Keep session IDs in authorized logs/events and omit credentials, bearer URLs, env values, and sensitive app output from issue reports.
 
-## Recovery and rollout
+## Upgrade order and HTTP 412 recovery
 
-Before upgrading Runtime, deploy a Control Center API version that accepts its
-status report fields. When reverting to an API version that rejects those fields,
-roll back Runtime first.
+Deploy an API accepting new status fields before upgrading Runtime. Roll back Runtime before reverting to an older API.
 
-A status report HTTP 412 indicates lost or regressed ordering state. Restore
-trustworthy state; do not delete counters or repeatedly increment them until the
-server accepts a report. For active enrollments, the existing authorized
-credential recovery can establish a new scope. Retired enrollments have no new
-credential recovery protocol and remain unconfirmed if their ordering state is
-lost. A process restart alone does not reset report ordering.
+HTTP `412` signals lost or regressed report ordering state (process restarts preserve ordering). Restore trustworthy state and never delete counters or bump them repeatedly to force acceptance.
 
-## Verification
+Active enrollments recover scope via authorized credential recovery. Retired enrollments have no recovery protocol and remain unconfirmed if ordering state is lost.
 
-See [development checks](development.md#development-checks) and the
-[end-to-end harness](development.md#end-to-end-tests).
+For test suites, see [checks](development.md#run-checks-and-ci) and [end-to-end tests](development.md#end-to-end-tests).
