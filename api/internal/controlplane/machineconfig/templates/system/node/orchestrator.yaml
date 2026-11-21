@@ -103,7 +103,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: orchestrator
-        image: ghcr.io/livepeer/node:v1.0.7@sha256:a4b36c77e2b13153b6b9db7ab86008904405e7b529a164d9166aeccaceee0e32
+        image: ghcr.io/livepeer/node:v1.0.10@sha256:5c061725935a498c23cdffcb58c34e2bba4023b8830bed04788b5bf057dab383
         args:
         - orchestrator
         - --config

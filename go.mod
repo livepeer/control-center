@@ -5,11 +5,12 @@ go 1.27.4
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/distribution/reference v0.6.0
+	github.com/ethereum/go-ethereum v1.17.10
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/j0sh/boa v1.0.5
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/livepeer/golang-runner v0.0.0-20261110073804-8664fdb1f080
-	github.com/livepeer/node v1.0.7
+	github.com/livepeer/node v1.0.10
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/common v0.73.1
 	github.com/prometheus/procfs v0.22.0
@@ -30,7 +31,6 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.8 // indirect
-	github.com/ethereum/go-ethereum v1.17.10 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fjl/jsonw v0.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
