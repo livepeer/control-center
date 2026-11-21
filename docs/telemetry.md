@@ -49,7 +49,7 @@ Both Deployments in `livepeer-telemetry` use the Pod network without host ports.
 
 `vmagent` drops labels that mention sessions, tokens, tickets, secrets, passwords, or credentials. Fluent Bit caps lines at 16 KiB and app output at 200 lines/s per machine. It reads root-owned `0640` logs as UID 0 with all capabilities dropped and a read-only root. The other containers in `livepeer-telemetry-agent` run as UID `65532`.
 
-During outages, `vmagent` buffers ~`512 MiB` (smallest supported queue) in `volumes/telemetry/<NODE_ID>` and Fluent Bit buffers `128 MiB` in `volumes/telemetry-logs/<NODE_ID>`. Full buffers drop oldest data and resend within budget after recovery. Buffers are enrollment-scoped, and re-enrollment stops agents and deletes prior buffers before issuing new credentials.
+During outages, `vmagent` buffers ~`512 MiB` (smallest supported queue) in `volumes/telemetry/<NODE_ID>` and Fluent Bit buffers `128 MiB` in `volumes/telemetry-logs/<NODE_ID>` (about 22 minutes at 100 KiB/s growth). Full buffers drop oldest data and resend within budget after recovery. Buffers are enrollment-scoped, and re-enrollment stops agents and deletes prior buffers before issuing new credentials.
 
 ## Credentials and identity
 
