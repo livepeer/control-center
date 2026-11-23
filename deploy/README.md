@@ -209,6 +209,12 @@ npm --prefix ui run build
 (cd ui && npx wrangler rollback <version-id> --env-file /dev/null --env production)
 ```
 
+The `staging` environment is a separate deployment on
+`controlcenter-staging.livepeer.live`, with the Worker `controlcenter-ui-staging`
+and the `controlcenter-bootstrap-staging` bucket. Build it with
+`npm --prefix ui run build -- --mode staging`, which reads
+[`ui/staging.env`](../ui/staging.env), and deploy it with `--env staging`.
+
 `npx wrangler deploy --env-file /dev/null` publishes a smoke-test copy on
 `workers.dev`. It reads the same bootstrap bucket but its origin is not in
 `AllowedOrigins`, so sign-in there is expected to fail.

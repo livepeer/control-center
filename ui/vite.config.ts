@@ -2,9 +2,14 @@ import { loadEnvFile } from 'node:process'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// Browser-safe settings for deployed builds: `vite build` reads production.env
+// and `vite build --mode staging` reads staging.env. Variables already set in
+// the build environment take precedence.
+const deployments = new Set(['production', 'staging'])
+
 export default defineConfig(({ mode }) => {
-  if (mode === 'production') {
-    loadEnvFile(new URL('./production.env', import.meta.url))
+  if (deployments.has(mode)) {
+    loadEnvFile(new URL(`./${mode}.env`, import.meta.url))
   }
 
   return {

@@ -3,6 +3,8 @@
 //
 //   npx wrangler deploy --env-file /dev/null                     workers.dev smoke instance
 //   npx wrangler deploy --env-file /dev/null --env production    controlcenter.livepeer.live
+//   npx wrangler deploy --env-file /dev/null --env staging       controlcenter-staging.livepeer.live
+//                                                                (build with --mode staging)
 //
 // See deploy/README.md for the release, rollback and bootstrap runbook.
 {
@@ -29,6 +31,13 @@
       // hostname's proxied DNS record stays in place.
       "routes": [{ "pattern": "controlcenter.livepeer.live/*", "zone_name": "livepeer.live" }],
       "r2_buckets": [{ "binding": "BOOTSTRAP", "bucket_name": "controlcenter-bootstrap" }]
+    },
+    // A separate staging deployment with its own API and bootstrap releases.
+    "staging": {
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "controlcenter-staging.livepeer.live/*", "zone_name": "livepeer.live" }],
+      "r2_buckets": [{ "binding": "BOOTSTRAP", "bucket_name": "controlcenter-bootstrap-staging" }]
     }
   }
 }
