@@ -1,0 +1,292 @@
+name: Publish images
+
+# Builds the deployable linux/amd64 images once per main commit and pushes
+# them to ghcr.io/livepeer/controlcenter-<name>:sha-<commit>. Deployments
+# resolve these tags and pin the digests they find.
+#
+# Package settings (organization Packages page), once after the first run:
+#   - controlcenter-runtime, -connector and -node: Public. Managed machines
+#     pull them anonymously.
+#   - controlcenter-api, -secrets and -grafana: Private.
+#   - Every package: Manage Actions access → livepeer/deploy-control-center, Read.
+# Do not add a retention policy. Installed machines and rollbacks depend on
+# earlier digests. A tag that already exists is kept, so reruns never replace
+# an image that a deployment may have pinned. A tag is built only when GHCR
+# answers that it does not exist (.github/scripts/image-ref.sh), and callers
+# serialize runs for the same commit.
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Full commit SHA to publish
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  COMMIT: ${{ inputs.commit }}
+  REGISTRY: ghcr.io/livepeer
+
+jobs:
+  images:
+    name: Publish ${{ matrix.image.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api
+            file: deploy/Dockerfile
+            target: api
+          - name: runtime
+            file: runtime/Dockerfile
+            target: ''
+          - name: secrets
+            file: deploy/Dockerfile.secrets
+            target: ''
+          - name: grafana
+            file: deploy/Dockerfile.grafana
+            target: ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - name: Check source revision
+        run: |
+          if [[ ! $COMMIT =~ ^[0-9a-f]{40}$ || $(git rev-parse HEAD) != "$COMMIT" ]]; then
+            echo "::error::Publish needs the full commit SHA of the checked-out source."
+            exit 1
+          fi
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Find existing image
+        id: existing
+        env:
+          NAME: ${{ matrix.image.name }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_SCOPE: pull,push
+        run: |
+          image=$(.github/scripts/image-ref.sh "$NAME" "$COMMIT")
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        if: steps.existing.outputs.image == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.image.file }}
+          target: ${{ matrix.image.target }}
+          platforms: linux/amd64
+          push: true
+          # One plain manifest per tag, which deployment verification expects.
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/controlcenter-${{ matrix.image.name }}:sha-${{ env.COMMIT }}
+          build-args: |
+            VERSION=${{ env.COMMIT }}
+            COMMIT=${{ env.COMMIT }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.COMMIT }}
+          cache-from: type=gha,scope=docker-${{ matrix.image.name }}-amd64
+
+  managed:
+    name: Publish connector and node
+    needs: images
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      # tools/upgrade-node.py reads go.mod with `go mod edit`.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Resolve inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          runtime=$(.github/scripts/image-ref.sh runtime "$COMMIT")
+          if [[ -z $runtime ]]; then
+            echo "::error::The runtime image for $COMMIT is missing."
+            exit 1
+          fi
+          upstream=$(python3 tools/upgrade-node.py --resolve-upstream)
+          connector=$(GHCR_SCOPE=pull,push .github/scripts/image-ref.sh connector "$COMMIT")
+          node=$(GHCR_SCOPE=pull,push .github/scripts/image-ref.sh node "$COMMIT")
+          jq -r '"node_version=\(.version)", "node_commit=\(.commit)", "node_image=\(.image)"' <<<"$upstream" >> "$GITHUB_OUTPUT"
+          {
+            echo "runtime=$runtime"
+            echo "connector=$connector"
+            echo "node=$node"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build and push connector
+        if: steps.inputs.outputs.connector == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: runtime/services
+          file: runtime/services/Dockerfile.tunnel
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/controlcenter-connector:sha-${{ env.COMMIT }}
+          build-args: |
+            RUNTIME_IMAGE=${{ steps.inputs.outputs.runtime }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.COMMIT }}
+            io.livepeer.runtime.image=${{ steps.inputs.outputs.runtime }}
+      # The node image is verified before it is pushed, so it is built locally.
+      - name: Build node
+        if: steps.inputs.outputs.node == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: runtime/services
+          file: runtime/services/Dockerfile.node
+          platforms: linux/amd64
+          load: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/controlcenter-node:sha-${{ env.COMMIT }}
+          build-args: |
+            NODE_IMAGE=${{ steps.inputs.outputs.node_image }}
+            RUNTIME_IMAGE=${{ steps.inputs.outputs.runtime }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.COMMIT }}
+            io.livepeer.node.version=${{ steps.inputs.outputs.node_version }}
+            io.livepeer.node.commit=${{ steps.inputs.outputs.node_commit }}
+            io.livepeer.node.image=${{ steps.inputs.outputs.node_image }}
+            io.livepeer.runtime.image=${{ steps.inputs.outputs.runtime }}
+      - name: Verify and push node
+        if: steps.inputs.outputs.node == ''
+        env:
+          RUNTIME: ${{ steps.inputs.outputs.runtime }}
+          NODE_VERSION: ${{ steps.inputs.outputs.node_version }}
+          NODE_COMMIT: ${{ steps.inputs.outputs.node_commit }}
+        run: |
+          node=$REGISTRY/controlcenter-node:sha-$COMMIT
+          docker image inspect "$node" | jq -e '.[0] | .Os == "linux" and .Architecture == "amd64"
+            and .Config.User == "65532:65532" and .Config.Entrypoint == ["/usr/local/bin/livepeer"]' >/dev/null || {
+            echo "::error::The node image has the wrong platform, user or entrypoint."
+            exit 1
+          }
+          version=$(docker run --rm --network none --read-only --cap-drop ALL "$node" version)
+          if [[ $version != "livepeer $NODE_VERSION ($NODE_COMMIT)" ]]; then
+            echo "::error::The node image reports '$version', not Node $NODE_VERSION ($NODE_COMMIT)."
+            exit 1
+          fi
+          docker pull --platform linux/amd64 "$RUNTIME"
+          wrapper() {
+            local container
+            container=$(docker create --platform linux/amd64 "$1")
+            docker cp "$container:/usr/local/bin/livepeer-runtime" "$RUNNER_TEMP/$2"
+            docker container rm "$container" >/dev/null
+            sha256sum "$RUNNER_TEMP/$2" | cut -d' ' -f1
+          }
+          expected=$(wrapper "$RUNTIME" runtime-wrapper)
+          actual=$(wrapper "$node" node-wrapper)
+          if [[ ! $expected =~ ^[0-9a-f]{64}$ || $actual != "$expected" ]]; then
+            echo "::error::The node image does not contain this release's Runtime wrapper."
+            exit 1
+          fi
+          docker push "$node"
+
+  release:
+    name: Record release
+    needs: managed
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Resolve published images
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          images='{}'
+          for name in api secrets grafana runtime connector node; do
+            ref=$(.github/scripts/image-ref.sh "$name" "$COMMIT")
+            if [[ -z $ref ]]; then
+              echo "::error::The $name image for $COMMIT is missing."
+              exit 1
+            fi
+            images=$(jq -c --arg name "$name" --arg ref "$ref" '. + {($name): $ref}' <<<"$images")
+          done
+          labels() {
+            docker buildx imagetools inspect "$1" --format '{{json .Image}}' | jq -c '.config.Labels'
+          }
+          runtime=$(jq -r .runtime <<<"$images")
+          connector_labels=$(labels "$(jq -r .connector <<<"$images")")
+          node_labels=$(labels "$(jq -r .node <<<"$images")")
+          for value in "$connector_labels" "$node_labels"; do
+            if [[ $(jq -r '."io.livepeer.runtime.image"' <<<"$value") != "$runtime" ]]; then
+              echo "::error::The connector and node images must be built on this release's runtime image."
+              exit 1
+            fi
+          done
+          jq -n --arg commit "$COMMIT" --arg run "$RUN_URL" --argjson images "$images" --argjson node "$node_labels" '{
+            commit: $commit, run: $run, images: $images,
+            node: {version: $node."io.livepeer.node.version", commit: $node."io.livepeer.node.commit",
+                   image: $node."io.livepeer.node.image"}}' > "$RUNNER_TEMP/release.json"
+          {
+            echo "### Published images for \`${COMMIT::12}\`"
+            echo
+            echo '| Image | Reference |'
+            echo '| --- | --- |'
+            jq -r '.images | to_entries[] | "| \(.key) | `\(.value)` |"' "$RUNNER_TEMP/release.json"
+            echo
+            jq -r '"Node \(.node.version) (\(.node.commit)), upstream `\(.node.image)`"' "$RUNNER_TEMP/release.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}/release.json
+          if-no-files-found: error

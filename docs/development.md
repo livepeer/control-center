@@ -39,7 +39,9 @@ npm --prefix ui run test:worker
 
 CI runs `gofmt`, race tests (PostgreSQL, Node, cloudflared, Traefik, VictoriaMetrics, VictoriaLogs, vmagent fixtures), `go vet`, Staticcheck, Govulncheck, UI build/browser/Worker tests, Wrangler production dry-run, and bootstrap/remote-runner/Runtime tests.
 
-[Build](../.github/workflows/build.yml) validates API, secrets, and Runtime images on Linux `amd64`/`arm64` for PRs, `main`, and manual runs. Image publishing and bootstrap activation follow [staging deployment](../deploy/README.md). [Deploy UI](../.github/workflows/ui-deploy.yml) deploys the UI ([UI hosting](../deploy/README.md#ui-hosting)).
+[Build](../.github/workflows/build.yml) validates API, secrets, Runtime, and Grafana images on Linux `amd64`/`arm64` for PRs, `main`, and manual runs. After checks pass on a `main` push, [Publish images](../.github/workflows/publish.yml) builds each deployable `linux/amd64` image once and pushes it to GHCR as `ghcr.io/livepeer/controlcenter-<name>:sha-<commit>` (`api`, `secrets`, `grafana`, `runtime`, `connector`, `node`). The managed Node image uses the Node release in `go.mod`; CI checks that its binary reports that release and carries the runtime image's wrapper before pushing it. The run summary and `release` artifact list the digests. Machines pull runtime, connector, and node anonymously; the other packages are private. Published tags are never replaced, so reruns reuse existing images.
+
+After a green `main` build, [Request staging deploy](../.github/workflows/staging-dispatch.yml) asks the staging deployer to preflight the commit when the deployer GitHub App is configured. Bootstrap activation follows [staging deployment](../deploy/README.md). [Deploy UI](../.github/workflows/ui-deploy.yml) deploys the UI ([UI hosting](../deploy/README.md#ui-hosting)).
 
 ## Run Runtime and end-to-end tests
 

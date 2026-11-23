@@ -74,8 +74,13 @@ Copy `redeemer.example.toml` to `redeemer.toml` and `onchain.example.json` to
 - `secrets/redeemer/auth-url`: `http://api:43812/internal/redemption/authorize`.
 - `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
 
-Build and publish images from this directory. Set `NODE_IMAGE` to the compatible
-upstream Node release digest; the first command starts only the registry:
+Every `main` commit also has published linux/amd64 images in GHCR, listed in the
+[Publish images](../docs/development.md#run-checks-and-ci) run summary.
+The runtime, connector and node digests there can be used for `RuntimeImage`,
+`RuntimeConnectorImage` and `RuntimeNodeImage` instead of local builds; machines
+pull them anonymously. To build and publish images from this directory instead,
+set `NODE_IMAGE` to the compatible upstream Node release digest. The first
+command starts only the registry:
 
 ```sh
 LIVEPEER_REDEEMER_IMAGE="$NODE_IMAGE" docker compose --env-file compose.env up -d registry
@@ -179,8 +184,14 @@ Cloudflare account prerequisites:
   `CLOUDFLARE_ACCOUNT_ID`. This token can publish the JavaScript that seals
   operator secrets; keep it there.
 
-Run **Deploy UI** from `main` with `deploy` to build and release that commit.
-The run summary lists recent Worker versions. To roll back, run it with
+When the **Build images** run for a `main` push succeeds and the commit's `ui/`
+differs from that of the closest earlier `main` commit that also built
+successfully, **Deploy UI** starts for that commit and waits for a `production`
+reviewer. Changes from earlier commits in the same push, or from commits whose
+builds failed, are therefore proposed by the next successful build. A run is
+skipped when a newer `main` commit with a different `ui/` has already built
+successfully, because that commit's run proposes it. To release a commit by hand, run **Deploy UI**
+from `main` with `deploy`. The run summary lists recent Worker versions. To roll back, run it with
 `rollback` and the version ID to restore; static assets roll back with the
 Worker version. The build bakes in `VITE_CONTROLCENTER_API_URL` from
 `ui/production.env` or the build environment. Set the GitHub environment

@@ -3,6 +3,15 @@ name: Deploy UI
 # Publishes ui/ to Cloudflare Workers Static Assets on
 # controlcenter.livepeer.live, independently of backend deployments.
 #
+# A successful Build images run for a main push proposes a deploy of its
+# commit when ui/ differs from the closest earlier main commit whose Build
+# images run succeeded. Changes from every commit of a push, or from commits
+# whose builds failed, are therefore proposed by the next green build. A
+# production reviewer approves the deploy. A proposal is skipped when a newer
+# main commit with a different ui/ has already built successfully, because
+# that commit's run proposes it, so a late build never replaces a newer UI.
+# Manual deploys and rollbacks use the dispatch form.
+#
 # Repository configuration (Settings → Environments → production):
 #   - Required reviewers, and deployment branches limited to main.
 #   - Secret CLOUDFLARE_API_TOKEN: account "Workers Scripts: Edit", and
@@ -24,13 +33,13 @@ on:
         description: Worker version ID to restore (rollback only; see the previous run summaries)
         type: string
         default: ''
+  workflow_run:
+    workflows: [Build images]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
-
-concurrency:
-  group: ui-deploy-production
-  cancel-in-progress: false
 
 defaults:
   run:
@@ -38,20 +47,91 @@ defaults:
     working-directory: ui
 
 jobs:
+  changes:
+    if: >-
+      github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      deploy: ${{ steps.diff.outputs.deploy }}
+    env:
+      COMMIT: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check for UI changes
+        id: diff
+        run: |
+          # Commits of successful Build images runs for main pushes.
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml --branch main \
+            --event push --status success --limit 200 --json headSha --jq '.[].headSha' > "$RUNNER_TEMP/green"
+          previous=
+          newer=
+          while read -r sha; do
+            if [[ $sha == "$COMMIT" ]]; then
+              continue
+            elif git merge-base --is-ancestor "$sha" "$COMMIT" 2>/dev/null; then
+              # Keep the closest earlier commit.
+              if [[ -z $previous ]] || git merge-base --is-ancestor "$previous" "$sha"; then
+                previous=$sha
+              fi
+            elif git merge-base --is-ancestor "$COMMIT" "$sha" 2>/dev/null &&
+              ! git diff --quiet "$COMMIT" "$sha" -- ui; then
+              newer=$sha
+            fi
+          done < "$RUNNER_TEMP/green"
+          if [[ -n $newer ]]; then
+            echo "::notice::Main commit $newer has a newer ui/ and built successfully; its run proposes the UI deploy."
+            deploy=false
+          elif [[ -z $previous ]]; then
+            echo "::notice::No earlier main commit built successfully; proposing a UI deploy."
+            deploy=true
+          elif git diff --quiet "$previous" "$COMMIT" -- ui; then
+            deploy=false
+          else
+            echo "::notice::ui/ changed since ${previous::12}, the last main commit that built successfully."
+            deploy=true
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
   production:
-    if: github.ref == 'refs/heads/main'
+    needs: changes
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main'
+      && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.deploy == 'true')
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    # Only deploys and rollbacks share this group, so a change check or an
+    # unrelated build never replaces a deploy waiting for approval.
+    concurrency:
+      group: ui-deploy-production
+      cancel-in-progress: false
     environment:
       name: production
       url: https://controlcenter.livepeer.live
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+      ACTION: ${{ inputs.action || 'deploy' }}
       WRANGLER_SEND_METRICS: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.COMMIT }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -60,7 +140,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
       - name: Build and test
-        if: inputs.action == 'deploy'
+        if: env.ACTION == 'deploy'
         env:
           API_URL: ${{ vars.CONTROLCENTER_API_URL }}
         run: |
@@ -68,10 +148,10 @@ jobs:
           npm run build
           npm run test:worker
       - name: Deploy
-        if: inputs.action == 'deploy'
-        run: npx wrangler deploy --env-file /dev/null --env production --tag "${GITHUB_SHA::12}" --message "Deploy ${GITHUB_SHA} by ${GITHUB_ACTOR}"
+        if: env.ACTION == 'deploy'
+        run: npx wrangler deploy --env-file /dev/null --env production --tag "${COMMIT::12}" --message "Deploy ${COMMIT} by ${GITHUB_ACTOR}"
       - name: Roll back
-        if: inputs.action == 'rollback'
+        if: env.ACTION == 'rollback'
         env:
           VERSION: ${{ inputs.version }}
         run: |
