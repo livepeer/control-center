@@ -24,7 +24,13 @@ An orchestrator's canonical owner is its lowercase recipient Ethereum address, i
      --keystore-file <file> --keystore-password-file <file> --output json
    ```
 
-   Any [EIP-191](https://eips.ethereum.org/EIPS/eip-191) `personal_sign` signer, like [`cast wallet sign`](https://www.getfoundry.sh/reference/cast/wallet/sign), also works.
+   Any [EIP-191](https://eips.ethereum.org/EIPS/eip-191) `personal_sign` signer, like [`cast wallet sign`](https://www.getfoundry.sh/reference/cast/wallet/sign), also works. Pass the file's contents, not its path:
+
+   ```sh
+   cast wallet sign --keystore <file> "$(cat orchestrator-claim.jwt)"
+   ```
+
+   Safe (multisig) addresses are not supported.
 
 3. Paste `signature` into the console.
 
