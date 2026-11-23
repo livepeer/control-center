@@ -1,0 +1,51 @@
+name: Request staging deploy
+
+# After a successful Build images run for a main push, which has published
+# that commit's images, asks livepeer/deploy-control-center to preflight the
+# commit for staging. It is a separate workflow so that a failed request never
+# fails Build images, whose result also gates UI deploys.
+#
+# Repository configuration:
+#   - Variable DEPLOYER_APP_CLIENT_ID: client ID of a GitHub App with Contents
+#     write on livepeer/deploy-control-center. Without it, nothing runs.
+#   - Environment deploy-dispatch, deployment branches limited to main, with
+#     the App's private key as the secret DEPLOYER_APP_PRIVATE_KEY.
+
+on:
+  workflow_run:
+    workflows: [Build images]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    name: Request staging deployment
+    if: >-
+      vars.DEPLOYER_APP_CLIENT_ID != ''
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    environment: deploy-dispatch
+    steps:
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: app
+        with:
+          client-id: ${{ vars.DEPLOYER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEPLOYER_APP_PRIVATE_KEY }}
+          owner: livepeer
+          repositories: deploy-control-center
+          permission-contents: write
+      - name: Dispatch
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          gh api --method POST repos/livepeer/deploy-control-center/dispatches \
+            -f event_type=controlcenter-published \
+            -f "client_payload[commit]=$COMMIT" \
+            -f "client_payload[run_id]=$RUN_ID"

@@ -11,7 +11,9 @@ name: Publish images
 #   - Every package: Manage Actions access → livepeer/deploy-control-center, Read.
 # Do not add a retention policy. Installed machines and rollbacks depend on
 # earlier digests. A tag that already exists is kept, so reruns never replace
-# an image that a deployment may have pinned.
+# an image that a deployment may have pinned. A tag is built only when GHCR
+# answers that it does not exist (.github/scripts/image-ref.sh), and callers
+# serialize runs for the same commit.
 
 on:
   workflow_call:
@@ -77,6 +79,9 @@ jobs:
         id: existing
         env:
           NAME: ${{ matrix.image.name }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_SCOPE: pull,push
         run: |
           image=$(.github/scripts/image-ref.sh "$NAME" "$COMMIT")
           echo "image=$image" >> "$GITHUB_OUTPUT"
@@ -131,6 +136,8 @@ jobs:
         id: inputs
         env:
           GH_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           runtime=$(.github/scripts/image-ref.sh runtime "$COMMIT")
           if [[ -z $runtime ]]; then
@@ -138,8 +145,8 @@ jobs:
             exit 1
           fi
           upstream=$(python3 tools/upgrade-node.py --resolve-upstream)
-          connector=$(.github/scripts/image-ref.sh connector "$COMMIT")
-          node=$(.github/scripts/image-ref.sh node "$COMMIT")
+          connector=$(GHCR_SCOPE=pull,push .github/scripts/image-ref.sh connector "$COMMIT")
+          node=$(GHCR_SCOPE=pull,push .github/scripts/image-ref.sh node "$COMMIT")
           jq -r '"node_version=\(.version)", "node_commit=\(.commit)", "node_image=\(.image)"' <<<"$upstream" >> "$GITHUB_OUTPUT"
           {
             echo "runtime=$runtime"
@@ -240,6 +247,8 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Resolve published images
         env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           images='{}'
