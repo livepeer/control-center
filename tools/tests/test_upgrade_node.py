@@ -183,6 +183,16 @@ class UpgradeTests(unittest.TestCase):
         self.state = self.root / 'state'
         self.state.mkdir(mode=0o700)
 
+    def test_compose_uses_explicit_env_files(self):
+        self.assertEqual(self.job.compose[-2:], ['--env-file', Path(os.devnull)])
+        default = self.deploy / 'compose.env'
+        default.touch()
+        job = upgrade.Upgrade(self.root, self.deploy)
+        self.assertEqual(job.compose[-2:], ['--env-file', default])
+        override = self.deploy / 'staging.env'
+        job = upgrade.Upgrade(self.root, self.deploy, env_file=override)
+        self.assertEqual(job.compose[-2:], ['--env-file', override])
+
     def test_patch_preserves_unrelated_bytes_and_toml(self):
         for newline in (b'\n', b'\r\n'):
             data = self.config.replace(b'\n', newline)

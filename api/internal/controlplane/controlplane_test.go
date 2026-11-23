@@ -95,6 +95,13 @@ func archiveFiles(t *testing.T, data []byte) map[string]string {
 	return files
 }
 
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	db := testdb.Open(t)
 	if err := Migrate(t.Context(), db); err != nil {

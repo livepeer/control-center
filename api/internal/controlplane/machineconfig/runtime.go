@@ -13,12 +13,23 @@ import (
 func routeEnabled(m Desired) bool {
 	return !m.Terminal && m.Exposure != nil && m.Exposure.IngressDigest != "" && (m.State.Lifecycle == "active" || m.State.Lifecycle == "draining")
 }
-func templateValues(m Desired) *strings.Replacer {
-	service, proxy := PrivateOrchestrator, ""
+func workloadEndpoints(m Desired) (service, proxy string) {
 	if routeEnabled(m) {
-		service = m.Exposure.ServiceURL
-		proxy = m.Exposure.ProxyURLTemplate
+		return m.Exposure.ServiceURL, m.Exposure.ProxyURLTemplate
 	}
+	return PrivateOrchestrator, ""
+}
+
+func sameWorkloadEndpoints(heldManifest string, desired Desired) bool {
+	service, proxy := workloadEndpoints(desired)
+	// Read the endpoints from the held orchestrator ConfigMap. The bundle's
+	// Runtime metadata can already describe routes the held workload has not applied.
+	return strings.Contains(heldManifest, fmt.Sprintf("\n    ServiceURL = %q\n", service)) &&
+		strings.Contains(heldManifest, fmt.Sprintf("\n    ProxyURLTemplate = %q\n", proxy))
+}
+
+func templateValues(m Desired) *strings.Replacer {
+	service, proxy := workloadEndpoints(m)
 	mode := "https"
 	if strings.HasPrefix(m.ControlAPIURL, "http://") {
 		mode = "development-http"
@@ -52,13 +63,15 @@ func upgradeVersion(m Desired) string {
 	}
 	return match[1]
 }
-func specializeNode(raw string, m Desired) string {
-	timeout := 12 * time.Hour
-	if m.NodeDrainTimeout != nil {
-		timeout = *m.NodeDrainTimeout
+func nodeDrainTimeout(timeout *time.Duration) time.Duration {
+	if timeout == nil {
+		return 12 * time.Hour
 	}
+	return *timeout
+}
+func specializeNode(raw string, m Desired) string {
 	raw = specializeOnchain(raw, m)
-	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", timeout.String())
+	raw = strings.ReplaceAll(raw, "@NODE_DRAIN_TIMEOUT@", nodeDrainTimeout(m.NodeDrainTimeout).String())
 	if m.NodeImage != "" {
 		raw = regexp.MustCompile(`(?m)^        image: ghcr.io/livepeer/node:[^\n]+`).ReplaceAllString(raw, "        image: "+m.NodeImage)
 	}
@@ -96,7 +109,7 @@ func DesiredRuntime(m Desired) Runtime {
 	d.DrainStartedAt = m.State.DrainStartedAt
 	if d.DrainRequested {
 		d.DrainTarget = DrainTarget(m.NodeID, m.State)
-		if m.DrainTimeout > 0 {
+		if !m.State.DrainStartedAt.IsZero() {
 			d.DrainDeadline = m.State.DrainStartedAt.Add(m.DrainTimeout)
 		}
 	}

@@ -20,21 +20,23 @@ type Machine struct {
 
 // State is the enrollment's workload rollout, independent of any provider.
 type State struct {
-	ConnectorImage         string    `json:"connector_image,omitempty"`
-	HeldUpgradePlan        string    `json:"held_upgrade_plan,omitempty"`
-	ApplyingConfigDigest   string    `json:"applying_config_digest,omitempty"`
-	ApplyingUpgradeVersion string    `json:"applying_upgrade_version,omitempty"`
-	Lifecycle              string    `json:"lifecycle"`
-	Generation             int64     `json:"generation"`
-	DrainRequested         bool      `json:"drain_requested,omitempty"`
-	DrainStartedAt         time.Time `json:"drain_started_at,omitempty"`
-	DrainedGeneration      int64     `json:"drained_generation,omitempty"`
-	Target                 string    `json:"target,omitempty"`
-	HeldOnchain            string    `json:"held_onchain,omitempty"`
-	HeldOrchestrator       string    `json:"held_orchestrator,omitempty"`
-	PendingConfigDigest    string    `json:"pending_config_digest,omitempty"`
-	ApprovedConfigDigest   string    `json:"approved_config_digest,omitempty"`
-	RolloutReason          string    `json:"rollout_reason,omitempty"`
+	ConnectorImage          string    `json:"connector_image,omitempty"`
+	HeldUpgradePlan         string    `json:"held_upgrade_plan,omitempty"`
+	ApplyingConfigDigest    string    `json:"applying_config_digest,omitempty"`
+	ApplyingUpgradeVersion  string    `json:"applying_upgrade_version,omitempty"`
+	Lifecycle               string    `json:"lifecycle"`
+	Generation              int64     `json:"generation"`
+	DrainRequested          bool      `json:"drain_requested,omitempty"`
+	DrainStartedAt          time.Time `json:"drain_started_at,omitempty"`
+	DrainedGeneration       int64     `json:"drained_generation,omitempty"`
+	Target                  string    `json:"target,omitempty"`
+	HeldOnchain             string    `json:"held_onchain,omitempty"`
+	HeldOrchestrator        string    `json:"held_orchestrator,omitempty"`
+	PendingConfigDigest     string    `json:"pending_config_digest,omitempty"`
+	ForcedDrainTarget       string    `json:"forced_drain_target,omitempty"`
+	UnconfirmedForcedDigest string    `json:"unconfirmed_forced_digest,omitempty"`
+	ApprovedConfigDigest    string    `json:"approved_config_digest,omitempty"`
+	RolloutReason           string    `json:"rollout_reason,omitempty"`
 }
 
 func InitialState(terminal bool) State {
@@ -90,7 +92,7 @@ type Desired struct {
 	ReportError error
 }
 
-var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
+var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$`)
 
 func ValidConnectorImage(image string) bool { return imageDigestPattern.MatchString(image) }
 

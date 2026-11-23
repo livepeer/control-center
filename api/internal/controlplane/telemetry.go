@@ -187,7 +187,9 @@ func (s *Server) refreshTelemetry(ctx context.Context) error {
 	if !s.params.TelemetryEnabled {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id,orchestrator_address::text,credential_version FROM lpcc.enrollments WHERE retired_at IS NULL`)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.node_id,e.orchestrator_address::text,e.credential_version
+ FROM lpcc.enrollments e JOIN lpcc.machines m USING(node_id)
+ WHERE e.retired_at IS NULL AND m.tunnel_eligible=$1`, !s.params.DevelopmentHTTP)
 	if err != nil {
 		return err
 	}

@@ -14,17 +14,18 @@ import (
 )
 
 type Config struct {
-	IngressPublicKeys       []byte
-	APIURL                  string
-	Connector               ConnectorConfig
-	DrainTimeout, StatusTTL time.Duration
-	RuntimeImage            string
-	NodeDrainTimeout        *time.Duration
-	NodeImage               string
-	StopSignals             bool
-	Telemetry               bool
-	TelemetryAppLogs        bool
-	TelemetryMaxBody        int64
+	IngressPublicKeys []byte
+	APIURL            string
+	Connector         ConnectorConfig
+	DrainTimeout      *time.Duration
+	StatusTTL         time.Duration
+	RuntimeImage      string
+	NodeDrainTimeout  *time.Duration
+	NodeImage         string
+	StopSignals       bool
+	Telemetry         bool
+	TelemetryAppLogs  bool
+	TelemetryMaxBody  int64
 }
 
 type Dependencies struct {
@@ -94,10 +95,10 @@ func (s *Manager) Desired(m Machine, state State, exposure *Exposure) Desired {
 	return d
 }
 func (s *Manager) drainTimeout() time.Duration {
-	if s.config.DrainTimeout <= 0 {
-		return 12 * time.Hour
+	if s.config.DrainTimeout == nil {
+		return nodeDrainTimeout(s.config.NodeDrainTimeout) + 10*time.Minute
 	}
-	return s.config.DrainTimeout
+	return *s.config.DrainTimeout
 }
 
 func (s *Manager) Reconcile(ctx context.Context) error {
@@ -249,14 +250,12 @@ func (s *Manager) planManagement(ctx context.Context, m Machine, record *Record)
 	}
 	// Lifecycle observations can hold a disruptive target, but cannot veto delivery
 	// of a management repair. Reuse the last delivered workload and route identity.
-	old, manifest, readErr := s.applied(ctx, m)
+	old, readErr := s.applied(ctx, m)
 	if readErr != nil {
 		return nil, false, err
 	}
 	record.State = before
-	record.HeldOrchestrator = manifest
-	record.HeldOnchain = onchainJSON(old.Onchain)
-	s.holdUpgrade(ctx, m, &record.State)
+	old.hold(&record.State)
 	record.RolloutReason = "lifecycle_observation_failed"
 	if old.IngressDigest != "" {
 		exposure = &Exposure{IngressVersion: old.IngressVersion, TunnelID: old.TunnelID, ServiceURL: old.ServiceURL, ProxyURLTemplate: old.ProxyURLTemplate, DiscoveryURL: old.DiscoveryURL, IngressDigest: old.IngressDigest, CredentialGeneration: old.TokenGeneration, ProviderVersion: old.ProviderVersion}
@@ -280,12 +279,11 @@ func (s *Manager) plan(ctx context.Context, m Machine, record *Record) (*Exposur
 		return exposure, false, nil
 	}
 	if (record.Lifecycle == "draining" || record.Target != "") && record.HeldOrchestrator == "" {
-		old, manifest, e := s.applied(ctx, m)
+		old, e := s.applied(ctx, m)
 		if e != nil {
 			return nil, false, e
 		}
-		record.HeldOrchestrator = manifest
-		record.HeldOnchain = onchainJSON(old.Onchain)
+		old.hold(&record.State)
 	}
 	if record.Lifecycle == "draining" {
 		done, e := s.removalComplete(ctx, m, &record.State)

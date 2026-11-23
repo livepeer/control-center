@@ -19,7 +19,7 @@ name: Deploy UI
 #     resolves the route's zone_name) only. This token can ship the
 #     JavaScript that seals operator secrets; keep it in this environment.
 #   - Variable CLOUDFLARE_ACCOUNT_ID.
-#   - Optional variable CONTROLCENTER_API_URL (default in ui/.env.production).
+#   - Optional variable CONTROLCENTER_API_URL (default in ui/production.env).
 
 on:
   workflow_dispatch:
@@ -149,7 +149,7 @@ jobs:
           npm run test:worker
       - name: Deploy
         if: env.ACTION == 'deploy'
-        run: npx wrangler deploy --env production --tag "${COMMIT::12}" --message "Deploy ${COMMIT} by ${GITHUB_ACTOR}"
+        run: npx wrangler deploy --env-file /dev/null --env production --tag "${COMMIT::12}" --message "Deploy ${COMMIT} by ${GITHUB_ACTOR}"
       - name: Roll back
         if: env.ACTION == 'rollback'
         env:
@@ -159,13 +159,13 @@ jobs:
             echo "::error::Pass the Worker version ID to restore."
             exit 1
           fi
-          npx wrangler rollback "$VERSION" --env production --message "Rollback by ${GITHUB_ACTOR}" --yes
+          npx wrangler rollback "$VERSION" --env-file /dev/null --env production --message "Rollback by ${GITHUB_ACTOR}" --yes
       - name: Record deployments
         if: always()
         run: |
           {
             echo '### Production deployments'
             echo '```'
-            npx wrangler deployments list --env production 2>&1 | tail -n 40
+            npx wrangler deployments list --env-file /dev/null --env production 2>&1 | tail -n 40
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

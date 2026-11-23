@@ -38,21 +38,23 @@ func (s *Server) prepareMachineRemoval(r *http.Request, _ UserIdentity) (AdminAp
 	}, nil
 }
 
-func (s *Server) prepareDrainRetry(r *http.Request, _ UserIdentity) (AdminApply, error) {
-	var in struct {
-		Generation int64 `json:"generation"`
-	}
-	if err := appInput(r, &in); err != nil {
-		return nil, err
-	}
-	node := r.PathValue("node_id")
-	return func(ctx context.Context, tx *sql.Tx, _ UserIdentity) (AdminChange, error) {
-		result, err := s.configs.RetryDrain(ctx, tx, node, in.Generation)
-		if err != nil {
-			return AdminChange{}, configurationProblem(err)
+func (s *Server) prepareDrain(force bool) func(*http.Request, UserIdentity) (AdminApply, error) {
+	return func(r *http.Request, _ UserIdentity) (AdminApply, error) {
+		var in struct {
+			Generation int64 `json:"generation"`
 		}
-		return AdminChange{Target: AdminTarget{Kind: "machine", ID: node, Revision: node + ":" + strconv.FormatInt(result.Generation, 10)}, Changed: result.Changed, Status: 202, Body: map[string]any{"generation": result.Generation, "lifecycle": result.Lifecycle}}, nil
-	}, nil
+		if err := appInput(r, &in); err != nil {
+			return nil, err
+		}
+		node := r.PathValue("node_id")
+		return func(ctx context.Context, tx *sql.Tx, _ UserIdentity) (AdminChange, error) {
+			result, err := s.configs.RetryDrain(ctx, tx, node, in.Generation, force)
+			if err != nil {
+				return AdminChange{}, configurationProblem(err)
+			}
+			return AdminChange{Target: AdminTarget{Kind: "machine", ID: node, Revision: node + ":" + strconv.FormatInt(result.Generation, 10)}, Changed: result.Changed, Status: 202, Body: map[string]any{"generation": result.Generation, "lifecycle": result.Lifecycle}}, nil
+		}, nil
+	}
 }
 
 func configurationProblem(err error) error {
@@ -63,6 +65,8 @@ func configurationProblem(err error) error {
 		return problem(409, "drain_changed", "Drain intent changed.")
 	case errors.Is(err, machineconfig.ErrDrainNotExpired):
 		return problem(409, "drain_not_expired", "The current drain deadline has not expired.")
+	case errors.Is(err, machineconfig.ErrForceDrainUnavailable):
+		return problem(409, "force_drain_unavailable", "No pending workload replacement can be forced for this machine.")
 	default:
 		return err
 	}

@@ -93,7 +93,7 @@ class Bucket:
         self.name, self.wrangler = name, wrangler
 
     def run(self, *args):
-        result = subprocess.run([*self.wrangler, 'r2', 'object', *args, '--remote'],
+        result = subprocess.run([*self.wrangler, 'r2', 'object', *args, '--env-file', os.devnull, '--remote'],
                                 cwd=ROOT / 'ui', capture_output=True, text=True,
                                 env={**os.environ, 'WRANGLER_SEND_METRICS': 'false'})
         return result.returncode, result.stdout + result.stderr

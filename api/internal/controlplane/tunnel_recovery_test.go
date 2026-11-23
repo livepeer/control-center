@@ -250,31 +250,37 @@ func TestLateDrainReportNeedsAuditedRetry(t *testing.T) {
 	}
 }
 
-func TestDevelopmentEnrollmentNeedsExplicitRefresh(t *testing.T) {
-	s, _ := tunnelTestServer(t)
+func TestDevelopmentEnrollmentStaysPrivate(t *testing.T) {
+	s := newTestServer(t)
 	jwt, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
 	fp := strings.Repeat("1", 64)
-	body := registrationBody(ownerA, fp, jwt)
-	body["development_http"] = true
+	secure := registrationBody(ownerA, fp, jwt)
+	dev := registrationBody(ownerA, fp, jwt)
+	dev["development_http"] = true
 	seed := sha256.Sum256([]byte(ownerA + fp))
-	body["signature"] = ed25519.Sign(ed25519.NewKeyFromSeed(seed[:]), protocol.RegistrationProof(jwt, fp, "worker-01", "/opt/livepeer", "v1.37.2+k3s1", body["public_key"].(string), true))
-	w := request(t, s, "POST", "/v1/nodes/register", jwt, body)
+	dev["signature"] = ed25519.Sign(ed25519.NewKeyFromSeed(seed[:]), protocol.RegistrationProof(jwt, fp, "worker-01", "/opt/livepeer", "v1.37.2+k3s1", dev["public_key"].(string), true))
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, dev), 403)
+
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = true, "http://api.example"
+	s.configs = s.newConfigurationManager()
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, secure), 403)
+	w := request(t, s, "POST", "/v1/nodes/register", jwt, dev)
 	requireStatus(t, w, 200)
 	c := credentials(t, w.Body.Bytes())
-	reportRuntime(t, s, c, "runtime", false)
-	driveTunnels(t, s)
-	// An ordinary enrollment retry over the production URL must not upgrade a
-	// credential previously released to development HTTP consumers.
-	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, registrationBody(ownerA, fp, jwt)), 200)
-	driveTunnels(t, s)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.machine_states WHERE state->>'tunnel_id' IS NOT NULL AND state->>'tunnel_id'<>''`) != 0 {
-		t.Fatal("development enrollment became live")
+	path := "/v1/nodes/" + c["node_id"]
+	if c["config_url"] != s.params.PublicAPIURL+path+"/config" {
+		t.Fatal("development config URL is not bound to the HTTP origin")
 	}
-	w = request(t, s, "POST", "/v1/nodes/"+c["node_id"]+"/credentials/refresh", jwt, map[string]any{"management_proof": c["token"], "fingerprint": fp, "install_dir": "/opt/livepeer", "operation_id": uuid.New().String(), "expected_credential_version": 1})
-	requireStatus(t, w, 200)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible AND credential_version=2`) != 1 {
-		t.Fatal("explicit refresh did not enable secure enrollment")
-	}
+	requireStatus(t, request(t, s, "GET", path+"/config", c["token"], nil), 200)
+	requireStatus(t, request(t, s, "POST", path+"/tunnel/connector-token", c["token"], nil), 403)
+
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = false, "https://api.example"
+	requireStatus(t, request(t, s, "GET", path+"/config", c["token"], nil), 401)
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/register", jwt, secure), 409)
+	requireStatus(t, request(t, s, "POST", path+"/credentials/refresh", jwt, map[string]any{
+		"management_proof": c["token"], "fingerprint": fp, "install_dir": "/opt/livepeer",
+		"operation_id": uuid.New().String(), "expected_credential_version": 1,
+	}), 404)
 }
 
 type dnsDeleteFailure struct{ *simulatedCloudflare }
@@ -329,21 +335,6 @@ func TestLateRetiredResultCannotAffectReplacementReadiness(t *testing.T) {
 	readyTunnel(t, s, newC)
 }
 
-func TestSecureEnrollmentBeforeEnablementCanProvision(t *testing.T) {
-	s, f := tunnelTestServer(t)
-	s.params.CloudflareEnabled = false
-	testTunnelDeps(s).Provider = nil
-	configureTestTunnels(t, s)
-	c := enroll(t, s, ownerA, strings.Repeat("d", 64))
-	if count(t, s, `SELECT count(*) FROM lpcc.machines WHERE tunnel_eligible`) != 1 || count(t, s, `SELECT count(*) FROM lpcc.machine_states`) != 0 {
-		t.Fatal("secure issuance coupled to enablement")
-	}
-	s.params.CloudflareEnabled = true
-	testTunnelDeps(s).Provider = f
-	configureTestTunnels(t, s)
-	readyTunnel(t, s, c)
-}
-
 func TestEndpointDrainCancellationAndFailedStageRollback(t *testing.T) {
 	for _, completed := range []bool{false, true} {
 		t.Run(fmt.Sprint("completed-", completed), func(t *testing.T) {
@@ -379,28 +370,217 @@ func TestEndpointDrainCancellationAndFailedStageRollback(t *testing.T) {
 		})
 	}
 }
-func TestUnfinishedEndpointDrainCannotResetItsDeadline(t *testing.T) {
-	s, _ := tunnelTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
-	initial := readyTunnel(t, s, c)
+func stageEndpointChange(t *testing.T, s *Server, node string) tunnel.Snapshot {
+	t.Helper()
 	s.params.CloudflareBaseDomain = "replacement.example.invalid"
 	configureTestTunnels(t, s)
 	driveTunnels(t, s)
-	old := time.Now().UTC().Add(-time.Hour)
-	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($1::text))`, old.Format(time.RFC3339Nano))
-	reportRuntime(t, s, c, "runner", true)
+	pending, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	return pending
+}
+
+func TestExpiredEndpointDrainForcesReplacement(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
+	initial := readyTunnel(t, s, c)
+	pending := stageEndpointChange(t, s, c["node_id"])
+	if pending.Target == "" || pending.ServiceURL != initial.ServiceURL {
+		t.Fatal("endpoint replacement did not wait for the drain deadline", pending)
+	}
+	backdateWorkloadDrain(t, s, c["node_id"])
 	driveTunnels(t, s)
-	state, _, _ := s.loadTunnel(t.Context(), c["node_id"])
-	if state.Reason != "drain_timeout" || state.ServiceURL != initial.ServiceURL || !state.DrainStartedAt.Equal(old) {
-		t.Fatal("same-target retry revived expired drain", state)
+	runtime, _ := publishedMachineConfiguration(t, s, c["node_id"])
+	if runtime.ServiceURL != pending.Target || runtime.ConfigDigest != pending.PendingConfigDigest || !runtime.DrainRequested {
+		t.Fatal("deadline did not release the endpoint replacement with admission closed", runtime)
+	}
+}
+
+func TestForcedEndpointChangeStillRequiresRouteReadiness(t *testing.T) {
+	s, provider := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	_, original := publishedMachineConfiguration(t, s, node)
+	pending := stageEndpointChange(t, s, node)
+	if pending.Target == "" || pending.ServiceURL != initial.ServiceURL {
+		t.Fatal("endpoint change did not wait for the drain", pending)
 	}
 	adminA(t, s)
-	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+c["node_id"]+"/drain/retry", "session-a", map[string]any{"generation": state.Generation}), 202)
-	reportRuntime(t, s, c, "runner", true)
+	force := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+
+	testTunnelDeps(s).Provider = &endpointCreateFailure{provider}
+	configureTestTunnels(t, s)
 	driveTunnels(t, s)
-	state, _, _ = s.loadTunnel(t.Context(), c["node_id"])
-	if state.ServiceURL == initial.ServiceURL {
-		t.Fatal("audited endpoint retry did not proceed", state)
+	current, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	beforeIngress, held := publishedMachineConfiguration(t, s, node)
+	if held != original || beforeIngress.ServiceURL != initial.ServiceURL ||
+		current.ServiceURL != initial.ServiceURL || current.Reason != "provisioning_pending" {
+		t.Fatal("force changed the published route before provider ingress succeeded", current)
+	}
+
+	testTunnelDeps(s).Provider = provider
+	testTunnelDeps(s).VerifyEndpoints = func(context.Context, tunnel.RoutingState, string) error {
+		return errors.New("route verification pending")
+	}
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	runtime, manifest := publishedMachineConfiguration(t, s, node)
+	if current.ServiceURL != pending.Target || current.Ready || !runtime.DrainRequested ||
+		!strings.Contains(manifest, current.ServiceURL) || !strings.Contains(manifest, current.ProxyURLTemplate) {
+		t.Fatal("force did not release the replacement while keeping admission closed", current, runtime)
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if current.Ready || current.Reason != "runtime_pending" {
+		t.Fatal("missing connector report allowed the new route", current)
+	}
+	reportRuntime(t, s, c, "connector", true)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if current.Ready || current.Reason != "tls_or_route_pending" {
+		t.Fatal("unverified route became ready", current)
+	}
+	testTunnelDeps(s).VerifyEndpoints = func(context.Context, tunnel.RoutingState, string) error { return nil }
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	current, _, err = s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if !current.Ready || current.DrainRequested || current.ServiceURL != pending.Target {
+		t.Fatal("forced endpoint change did not become ready", current)
+	}
+}
+
+func TestForcedEndpointChangeDoesNotReleaseSupersedingWorkload(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	_, original := publishedMachineConfiguration(t, s, node)
+	pending := stageEndpointChange(t, s, node)
+	adminA(t, s)
+	force := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	current, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	_, held := publishedMachineConfiguration(t, s, node)
+	if current.Target != pending.Target || current.ServiceURL != initial.ServiceURL || held != original ||
+		current.Generation <= pending.Generation+1 || current.PendingConfigDigest == pending.PendingConfigDigest ||
+		!current.DrainStartedAt.Equal(pending.DrainStartedAt) {
+		t.Fatal("force crossed a change to the pending workload", current)
+	}
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": current.Generation}), 202)
+	driveTunnels(t, s)
+	_, manifest := publishedMachineConfiguration(t, s, node)
+	if !strings.Contains(manifest, s.params.RuntimeNodeImage) || !strings.Contains(manifest, pending.Target) {
+		t.Fatal("fresh force did not release the superseding workload")
+	}
+}
+
+func TestOneForceReleasesFirstPublicEndpointAfterDomainChange(t *testing.T) {
+	s, provider := tunnelTestServer(t)
+	provider.certificateStatus = "pending_validation"
+	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	node := c["node_id"]
+	reportRuntime(t, s, c, "runtime", false)
+	driveTunnels(t, s)
+	initial, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if initial.Reason != "certificate_pending" || initial.IngressDigest != "" {
+		t.Fatal("expected the first certificate to be pending", initial)
+	}
+
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	provider.certificateStatus = "active"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	pending, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	adminA(t, s)
+	path := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+	driveTunnels(t, s)
+	runtime, manifest := publishedMachineConfiguration(t, s, node)
+	if runtime.ConfigDigest != pending.PendingConfigDigest ||
+		!strings.Contains(manifest, "replacement.example.invalid") || !strings.Contains(manifest, s.params.RuntimeNodeImage) {
+		t.Fatal("one force did not release the first public workload", runtime)
+	}
+}
+
+func TestProxyOnlyEndpointChangeRequiresDrainOrForce(t *testing.T) {
+	s, provider := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("a", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	prior := initial
+	prior.ProxyURLTemplate = strings.Replace(initial.ProxyURLTemplate, "fleet.example.invalid", "prior.example.invalid", 1)
+	rules := append([]tunnel.IngressRule(nil), provider.configurations[prior.TunnelID]...)
+	for i := range rules {
+		if strings.HasPrefix(rules[i].Hostname, "*.") {
+			rules[i].Hostname = strings.Replace(rules[i].Hostname, "fleet.example.invalid", "prior.example.invalid", 1)
+		}
+	}
+	version, err := provider.Configure(t.Context(), prior.TunnelID, rules)
+	requireNoError(t, err)
+	prior.IngressDigest = ingressHash(rules)
+	raw, err := json.Marshal(rules)
+	requireNoError(t, err)
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET state=state || jsonb_build_object('proxy_url_template',$2::text,'applied_ingress',$3::jsonb,'ingress_digest',$4::text,'provider_version',$5::bigint) WHERE node_id=$1`, node, prior.ProxyURLTemplate, string(raw), prior.IngressDigest, version)
+	priorMachineConfiguration(t, s, c, &prior)
+
+	driveTunnels(t, s)
+	pending, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if pending.Target == "" || pending.ServiceURL != initial.ServiceURL || pending.ProxyURLTemplate != prior.ProxyURLTemplate {
+		t.Fatal("proxy-only change did not wait for the drain", pending)
+	}
+	adminA(t, s)
+	force := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", force, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+	driveTunnels(t, s)
+	runtime, _ := publishedMachineConfiguration(t, s, node)
+	if runtime.ProxyURLTemplate != initial.ProxyURLTemplate || runtime.ServiceURL != initial.ServiceURL {
+		t.Fatal("force did not release the proxy-only change", runtime)
+	}
+}
+
+func TestConnectorRotationRevokesStagedEndpointForce(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	pending := stageEndpointChange(t, s, node)
+	adminA(t, s)
+	path := "/api/admin/machines/" + node
+	force := func(generation int64, status int) {
+		t.Helper()
+		requireStatus(t, request(t, s, "POST", path+"/drain/force", "session-a", map[string]int64{"generation": generation}), status)
+	}
+	force(pending.Generation, 202)
+	requireStatus(t, request(t, s, "POST", path+"/tunnel/rotate", "session-a", map[string]string{"kind": "connector"}), 202)
+	driveTunnels(t, s)
+	rotated, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if rotated.CredentialGeneration == initial.CredentialGeneration || rotated.ServiceURL != initial.ServiceURL {
+		t.Fatal("connector rotation did not leave the endpoint change waiting", rotated)
+	}
+	force(rotated.Generation, 202)
+	driveTunnels(t, s)
+	runtime, _ := publishedMachineConfiguration(t, s, node)
+	if runtime.ConfigDigest != pending.PendingConfigDigest {
+		t.Fatal("a fresh force did not release the staged replacement")
 	}
 }
 
@@ -446,19 +626,6 @@ func TestRemovalRevokesReconnectingConnectorAndResumesLostResponse(t *testing.T)
 				t.Fatal("rotation required an already deleted tunnel")
 			}
 		})
-	}
-}
-func TestModernIneligibleMachineCanCompleteRemoval(t *testing.T) {
-	s, f := tunnelTestServer(t)
-	c := enroll(t, s, ownerA, strings.Repeat("e", 64))
-	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false`)
-	adminA(t, s)
-	requireStatus(t, request(t, s, "DELETE", "/api/admin/machines/"+c["node_id"], "session-a", map[string]any{}), 202)
-	reportRuntime(t, s, c, "runner", true)
-	driveTunnels(t, s)
-	driveTunnels(t, s)
-	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 0 || f.creates["tunnel"] != 0 {
-		t.Fatal("removal depended on provisioning eligibility")
 	}
 }
 

@@ -25,34 +25,16 @@ JWTSigningPrivateKeyFile = "secrets/jwt-signing-key.pem"
 # JWTVerificationPublicKeysFile = "/private/jwt-verification-public-keys.json"
 MachineTokenSecretFile = "secrets/machine-token-secret"
 
+# Private local development. See deploy/config.example.toml for production.
+DevelopmentHTTP = true
 Listen = "localhost:41932"
-# Remote bootstrap hosts AND their Kubernetes pods must reach this URL.
-# Put the API behind a reachable HTTPS endpoint for remote machines.
 PublicAPIURL = "http://localhost:41932"
 ConfigReconcileInterval = "1m"
 
-# Machine ingress is opt-in. See docs/machine-tunnels.md before enabling it.
-CloudflareEnabled = false
-CloudflareIngressApproved = false
-
-# Fleet discovery shares the API process and existing TLS proxy. A Cloudflare
-# provisioning token is not needed when CloudflareEnabled is false.
-DiscoveryEnabled = false
-DiscoveryRefreshInterval = "5m"
-DiscoveryMaxFailedRefreshes = 6
-# Usually empty: grant private IP/IP:port/CIDR destinations only deliberately.
-DiscoveryGrants = []
-# The following are operator decisions; placeholders are intentionally invalid.
-# CloudflareAccountID = "<ACCOUNT_ID>"
-# CloudflareZoneID = "<ZONE_ID>"
-# CloudflareBaseDomain = "<BASE_DOMAIN>"
-# CloudflareAPITokenFile = "secrets/cloudflare-provisioning-token"
 RuntimeImage = "<REGISTRY>/livepeer-runtime@sha256:<IMAGE_DIGEST>" # required; build instructions in runtime/README.md
-RuntimeNodeDrainTimeout = "12h" # 0-12h; 0s ends work immediately
-# RuntimeConnectorImage = "<REGISTRY>/livepeer-tunnel-go@sha256:<IMAGE_DIGEST>" # Runtime helper and cloudflared
-# TunnelStatusTTL = "<OBSERVATION_TTL>" # at least 2m; longer than both poll loops
-# TunnelDrainTimeout = "<DRAIN_DEADLINE>"
-# TunnelNodeAddresses = ["<NODE_OR_MANAGEMENT_IP/CIDR>"] # complete fleet inventory
+RuntimeAppDrainTimeout = "12h"
+# Omitted DrainTimeout defaults to RuntimeAppDrainTimeout plus 10m.
+# DrainTimeout = "12h10m"
 
 # Machine telemetry is on by default. Without local VictoriaMetrics and
 # VictoriaLogs, ingest answers 503 and machines keep buffering; see

@@ -122,7 +122,7 @@ func TestCredentialRefreshSerializesWithBlockedStateWrite(t *testing.T) {
 
 func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	s := newTestServer(t)
-	s.params.TunnelDrainTimeout = time.Minute
+	s.params.RuntimeAppDrainTimeout = 2 * time.Minute
 	// Leave StatusTTL unset to cover the private draining freshness default.
 	s.configs = s.newConfigurationManager()
 	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
@@ -135,10 +135,22 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	if err != nil || !state.DrainRequested || state.HeldOrchestrator != previous {
 		t.Fatal("private replacement was not drain gated", state, err)
 	}
+	runtime, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if want := runtime.DrainStartedAt.Add(12 * time.Minute); runtime.DrainStartedAt.IsZero() || !runtime.DrainDeadline.Equal(want) {
+		t.Fatalf("machine drain deadline = %v, want %v", runtime.DrainDeadline, want)
+	}
 	if s.tunnels.Enabled() || state.TunnelID != "" {
 		t.Fatal("private rollout acquired provider resources")
 	}
-	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: state.Generation - 1, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
+	s.params.RuntimeAppDrainTimeout = 3 * time.Minute
+	s.configs = s.newConfigurationManager()
+	requireNoError(t, s.reconcile(t.Context()))
+	updated, held := publishedMachineConfiguration(t, s, m.NodeID)
+	if held != previous || updated.Generation != runtime.Generation+1 ||
+		!updated.DrainStartedAt.Equal(runtime.DrainStartedAt) || !updated.DrainDeadline.Equal(runtime.DrainStartedAt.Add(13*time.Minute)) {
+		t.Fatal("changing the app timeout did not preserve the in-flight drain start and fence the old target")
+	}
+	stale := currentReport(t, s, m.NodeID, machineconfig.Report{NodeID: m.NodeID, CredentialVersion: 1, Component: "runner", Generation: runtime.Generation, BundleFormat: contract.BundleFormat, Apps: &contract.AppStatus{Instances: []contract.InstanceStatus{}}, HTTPS: true})
 	for len(s.reconcileWake) > 0 {
 		<-s.reconcileWake
 	}
@@ -179,6 +191,377 @@ func TestPrivateMachineRolloutAndRemoval(t *testing.T) {
 	if count(t, s, `SELECT count(*) FROM lpcc.machines`) != 0 || count(t, s, `SELECT count(*) FROM lpcc.enrollments WHERE terminal_bundle IS NOT NULL`) != 1 {
 		t.Fatal("private removal did not publish terminal configuration")
 	}
+}
+
+func TestManualForceOnlyReleasesItsPendingWorkload(t *testing.T) {
+	s := newTestServer(t)
+	adminA(t, s)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	m, previous := priorMachineConfiguration(t, s, c, nil)
+	path := "/api/admin/machines/" + m.NodeID + "/drain/"
+	force := func(token string, generation int64, status int) {
+		t.Helper()
+		requireStatus(t, request(t, s, "POST", path+"force", token, map[string]int64{"generation": generation}), status)
+	}
+	force("session-a", 1, 409)
+	pending := pendingWorkloadDrain(t, s, m.NodeID)
+	force("session-b", pending.Generation, 403)
+	force("session-a", pending.Generation-1, 409)
+	force("session-a", pending.Generation, 202)
+	force("session-a", pending.Generation, 409)
+	if count(t, s, `SELECT count(*) FROM lpcc.admin_audit_events WHERE action='machine.drain.force' AND outcome='success'`) != 1 {
+		t.Fatal("expected one audited force operation")
+	}
+
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("c", 64)
+	s.configs = s.newConfigurationManager()
+	next := pendingWorkloadDrain(t, s, m.NodeID)
+	held, heldManifest := publishedMachineConfiguration(t, s, m.NodeID)
+	if next.PendingConfigDigest == pending.PendingConfigDigest || next.ApplyingConfigDigest != "" || next.ForcedDrainTarget != "" || heldManifest != previous || !held.DrainRequested {
+		t.Fatal("force authorized a different workload", next.RolloutReason)
+	}
+	force("session-a", next.Generation, 202)
+	requireNoError(t, s.reconcile(t.Context()))
+	published, manifest := publishedMachineConfiguration(t, s, m.NodeID)
+	if published.ConfigDigest != next.PendingConfigDigest || published.Generation != next.Generation+1 || manifest == previous || !published.DrainRequested || published.OnchainActive {
+		t.Fatal("expected forced replacement in a new generation with admission closed")
+	}
+
+	// Retry cannot supersede a replacement once its bundle has been published.
+	backdateWorkloadDrain(t, s, m.NodeID)
+	for range 2 {
+		requireStatus(t, request(t, s, "POST", path+"retry", "session-a", map[string]int64{"generation": published.Generation}), 409)
+		requireNoError(t, s.reconcile(t.Context()))
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	ready, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if ready.DrainRequested || ready.ConfigDigest != next.PendingConfigDigest {
+		t.Fatal("ready replacement did not finish the rollout")
+	}
+}
+
+func TestAutomaticForceAndRollback(t *testing.T) {
+	s := newTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	m, _ := priorMachineConfiguration(t, s, c, nil)
+	requireNoError(t, s.reconcile(t.Context()))
+	reportRuntime(t, s, c, "runner", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	reportRuntime(t, s, c, "runtime", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	original, originalManifest := publishedMachineConfiguration(t, s, m.NodeID)
+	if original.DrainRequested {
+		t.Fatal("original workload was not ready")
+	}
+	image := s.params.RuntimeNodeImage
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	s.configs = s.newConfigurationManager()
+	pending := pendingWorkloadDrain(t, s, m.NodeID)
+	requireNoError(t, s.reconcile(t.Context()))
+	if _, manifest := publishedMachineConfiguration(t, s, m.NodeID); manifest != originalManifest {
+		t.Fatal("published the replacement before the drain deadline")
+	}
+	backdateWorkloadDrain(t, s, m.NodeID)
+	requireNoError(t, s.reconcile(t.Context()))
+	replacement, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if replacement.ConfigDigest != pending.PendingConfigDigest || replacement.Generation != pending.Generation+1 || !replacement.DrainRequested {
+		t.Fatal("expected forced replacement to be published with admission closed")
+	}
+
+	// A failed observation can hold the already-published replacement.
+	requireNoError(t, s.reconcile(t.Context()))
+	tx, err := s.db.Begin()
+	requireNoError(t, err)
+	defer tx.Rollback()
+	_, err = tx.Exec("LOCK TABLE lpcc.onchain_state IN ACCESS EXCLUSIVE MODE")
+	requireNoError(t, err)
+	requireNoError(t, s.configs.Reconcile(t.Context()))
+	requireNoError(t, tx.Rollback())
+	state, _, err := s.loadTunnel(t.Context(), m.NodeID)
+	requireNoError(t, err)
+	if state.HeldOrchestrator == "" || state.ApplyingConfigDigest != replacement.ConfigDigest || state.RolloutReason != "lifecycle_observation_failed" {
+		t.Fatal("expected the observation failure to hold the published replacement")
+	}
+
+	s.params.RuntimeNodeImage = image
+	s.configs = s.newConfigurationManager()
+	requireNoError(t, s.reconcile(t.Context()))
+	draining, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if draining.ConfigDigest != replacement.ConfigDigest || !draining.DrainStartedAt.After(replacement.DrainStartedAt) {
+		t.Fatal("rollback must drain the published replacement with a fresh deadline")
+	}
+	reportRuntime(t, s, c, "runner", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	rollback, _ := publishedMachineConfiguration(t, s, m.NodeID)
+	if rollback.ConfigDigest != original.ConfigDigest || rollback.Generation <= replacement.Generation || !rollback.DrainRequested {
+		t.Fatal("expected rollback to wait for readiness in a new generation")
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	if restored, _ := publishedMachineConfiguration(t, s, m.NodeID); restored.DrainRequested || restored.ConfigDigest != original.ConfigDigest {
+		t.Fatal("ready rollback did not restore admission")
+	}
+}
+
+func TestConnectorRotationDuringForcedPublication(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	node := c["node_id"]
+	initial := readyTunnel(t, s, c)
+	adminA(t, s)
+	pending := forcePendingImageRollout(t, s, node)
+	build := s.build
+	rotated := false
+	s.build = func(desired machineconfig.Desired) ([]byte, string, error) {
+		if !rotated && desired.NodeID == node && desired.State.ApplyingConfigDigest == pending.PendingConfigDigest {
+			rotated = true
+			path := "/api/admin/machines/" + node + "/tunnel/rotate"
+			requireStatus(t, request(t, s, "POST", path, "session-a", map[string]string{"kind": "connector"}), 202)
+			requireNoError(t, s.tunnels.Reconcile(t.Context()))
+		}
+		return build(desired)
+	}
+	// Check both the stale publisher and the next worker that sees the rotation.
+	for range 2 {
+		requireNoError(t, s.reconcile(t.Context()))
+		published, _ := publishedMachineConfiguration(t, s, node)
+		if published.ConfigDigest == pending.PendingConfigDigest {
+			t.Fatal("published the replacement after its force generation was superseded")
+		}
+	}
+	state, _, err := s.loadTunnel(t.Context(), node)
+	requireNoError(t, err)
+	if !rotated || state.Generation <= pending.Generation+1 || state.CredentialGeneration == initial.CredentialGeneration {
+		t.Fatal("expected connector rotation to advance the generation")
+	}
+	if state.ForcedDrainTarget != "" || state.ApplyingConfigDigest != "" || state.HeldOrchestrator == "" {
+		t.Fatal("expected the old workload to stay held after rotation")
+	}
+}
+
+func TestForceAcrossRetryOrObservationFailure(t *testing.T) {
+	for _, action := range []string{"ordinary retry", "timeout before publication", "timeout after publication"} {
+		t.Run(action, func(t *testing.T) {
+			s, _ := tunnelTestServer(t)
+			c := enroll(t, s, ownerA, strings.Repeat("9", 64))
+			readyTunnel(t, s, c)
+			adminA(t, s)
+			node := c["node_id"]
+			pending := forcePendingImageRollout(t, s, node)
+			path := "/api/admin/machines/" + node + "/drain/"
+			requireNoError(t, s.tunnels.Reconcile(t.Context()))
+			if action == "timeout after publication" {
+				for range 2 {
+					requireNoError(t, s.configs.Reconcile(t.Context()))
+				}
+			}
+			state, _, err := s.loadTunnel(t.Context(), node)
+			previous, _ := publishedMachineConfiguration(t, s, node)
+			published := previous.ConfigDigest == pending.PendingConfigDigest
+			if err != nil || state.ApplyingConfigDigest != pending.PendingConfigDigest || published != (action == "timeout after publication") {
+				t.Fatal("unexpected publication state for planned force", err)
+			}
+
+			switch action {
+			case "ordinary retry":
+				backdateWorkloadDrain(t, s, node)
+				requireStatus(t, request(t, s, "POST", path+"retry", "session-a", map[string]int64{"generation": state.Generation}), 202)
+			case "timeout before publication", "timeout after publication":
+				tx, err := s.db.Begin()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback()
+				if _, err = tx.Exec(`LOCK TABLE lpcc.onchain_state IN ACCESS EXCLUSIVE MODE`); err != nil {
+					t.Fatal(err)
+				}
+				requireNoError(t, s.configs.Reconcile(t.Context()))
+				if err = tx.Rollback(); err != nil {
+					t.Fatal(err)
+				}
+				state, _, err = s.loadTunnel(t.Context(), node)
+				if err != nil || state.RolloutReason != "lifecycle_observation_failed" || state.HeldOrchestrator == "" {
+					t.Fatal("expected management reconcile to retain the previous workload", err)
+				}
+			}
+			wantPaused := action != "timeout after publication"
+			if !wantPaused {
+				reportRuntime(t, s, c, "runtime", true)
+			}
+			for range 2 {
+				requireNoError(t, s.reconcile(t.Context()))
+			}
+			runtime, _ := publishedMachineConfiguration(t, s, node)
+			want := pending.PendingConfigDigest
+			if action == "ordinary retry" {
+				want = previous.ConfigDigest
+			}
+			if runtime.ConfigDigest != want || runtime.DrainRequested != wantPaused {
+				t.Fatal("unexpected workload after reconciliation", runtime.ConfigDigest, runtime.DrainRequested)
+			}
+		})
+	}
+}
+
+func TestRemovalDuringForceRetainsUpgradePlan(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("5", 64))
+	initial := readyTunnel(t, s, c)
+	adminA(t, s)
+	node := c["node_id"]
+	m, err := s.authenticateMachine(t.Context(), node, c["token"], false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPlan := func() string {
+		t.Helper()
+		var data []byte
+		if err := s.db.QueryRow(`SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&data); err != nil {
+			t.Fatal(err)
+		}
+		return archiveFiles(t, data)["upgrade-plan/plan.yaml"]
+	}
+	desired := desiredConfiguration(s, m, &initial)
+	pendingPlan := readPlan()
+	previousPlan := strings.Replace(pendingPlan, m.K3sVersion, "v1.37.1+k3s1", 1)
+	if pendingPlan == previousPlan {
+		t.Fatal("fixture did not change the upgrade plan")
+	}
+	desired.State.HeldUpgradePlan = previousPlan
+	data, digest, err := machineconfig.Build(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s.db, `UPDATE lpcc.machine_configs SET bundle=$2,sha256=$3 WHERE node_id=$1`, node, data, digest)
+	_, previousManifest := publishedMachineConfiguration(t, s, node)
+	pending := forcePendingImageRollout(t, s, node)
+	path := "/api/admin/machines/" + node
+	requireNoError(t, s.tunnels.Reconcile(t.Context()))
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.ApplyingConfigDigest != pending.PendingConfigDigest || readPlan() != previousPlan {
+		t.Fatal("expected an unpublished force", err)
+	}
+	requireStatus(t, request(t, s, "DELETE", path, "session-a", map[string]any{}), 202)
+	requireNoError(t, s.reconcile(t.Context()))
+	_, manifest := publishedMachineConfiguration(t, s, node)
+	if manifest != previousManifest || readPlan() != previousPlan {
+		t.Fatal("ordinary removal changed the published orchestrator or upgrade plan")
+	}
+}
+
+func TestCancelEndpointChangeWhileForcedWorkloadStarts(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force=%t", force), func(t *testing.T) {
+			testEndpointChangeWhileForcedWorkloadStarts(t, force)
+		})
+	}
+}
+
+func testEndpointChangeWhileForcedWorkloadStarts(t *testing.T, force bool) {
+	s, _ := tunnelTestServer(t)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	node := c["node_id"]
+	readyTunnel(t, s, c)
+	adminA(t, s)
+	pending := forcePendingImageRollout(t, s, node)
+	driveTunnels(t, s)
+	forced, _ := publishedMachineConfiguration(t, s, node)
+	if forced.ConfigDigest != pending.PendingConfigDigest || !forced.DrainRequested {
+		t.Fatal("expected published replacement to wait for readiness")
+	}
+
+	domain := s.params.CloudflareBaseDomain
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.Target == "" {
+		t.Fatal("expected pending endpoint change", err)
+	}
+	if force {
+		path := "/api/admin/machines/" + node + "/drain/force"
+		requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": state.Generation}), 202)
+		driveTunnels(t, s)
+		current, _ := publishedMachineConfiguration(t, s, node)
+		if current.ConfigDigest != state.PendingConfigDigest || current.ServiceURL != state.Target || !current.DrainRequested {
+			t.Fatal("force did not release the new endpoint while keeping admission closed", current)
+		}
+		return
+	}
+	s.params.CloudflareBaseDomain = domain
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	state, _, err = s.loadTunnel(t.Context(), node)
+	current, _ := publishedMachineConfiguration(t, s, node)
+	if err != nil || state.Target != "" || !current.DrainRequested || current.ConfigDigest != forced.ConfigDigest {
+		t.Fatal("canceling endpoint change interrupted the readiness check", err)
+	}
+	reportRuntime(t, s, c, "runtime", true)
+	driveTunnels(t, s)
+	if current, _ = publishedMachineConfiguration(t, s, node); current.DrainRequested || current.ConfigDigest != forced.ConfigDigest {
+		t.Fatal("matching readiness did not complete the forced update")
+	}
+}
+
+func TestForceRolloutFencesOnchainChangeBeforeRender(t *testing.T) {
+	s, _, c := onchainMachine(t)
+	node := c["node_id"]
+	adminA(t, s)
+	next, err := s.loadOnchainTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.RedeemerURL = "https://api.example/pending"
+	writeOnchainTemplate(t, s, next)
+	pending := pendingWorkloadDrain(t, s, node)
+	previous, _ := publishedMachineConfiguration(t, s, node)
+	path := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+
+	changed := false
+	s.db = traceTestQueries(t, s.db, func(query string) {
+		if changed || !strings.HasPrefix(query, "UPDATE lpcc.machine_states SET apps_generation=1,revision=") {
+			return
+		}
+		changed = true
+		next.TicketFaceValue = "4321"
+		writeOnchainTemplate(t, s, next)
+		if enrolled := enroll(t, s, ownerA, strings.Repeat("a", 64)); enrolled["node_id"] != node {
+			t.Fatal("onchain settings change created a new enrollment")
+		}
+	})
+	s.configs = s.newConfigurationManager()
+	requireNoError(t, s.reconcile(t.Context()))
+	runtime, _ := publishedMachineConfiguration(t, s, node)
+	if !changed || runtime.ConfigDigest != previous.ConfigDigest {
+		t.Fatal("published a different configuration after force authorization", changed, runtime.ConfigDigest)
+	}
+}
+
+func forcePendingImageRollout(t *testing.T, s *Server, node string) machineconfig.State {
+	t.Helper()
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	configureTestTunnels(t, s)
+	pending := pendingWorkloadDrain(t, s, node)
+	path := "/api/admin/machines/" + node + "/drain/force"
+	requireStatus(t, request(t, s, "POST", path, "session-a", map[string]int64{"generation": pending.Generation}), 202)
+	return pending
+}
+
+func pendingWorkloadDrain(t *testing.T, s *Server, node string) machineconfig.State {
+	t.Helper()
+	requireNoError(t, s.reconcile(t.Context()))
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || !state.DrainRequested || state.HeldOrchestrator == "" || state.PendingConfigDigest == "" {
+		t.Fatal("expected a pending workload drain", state.RolloutReason, err)
+	}
+	return state.State
+}
+
+func backdateWorkloadDrain(t *testing.T, s *Server, node string) {
+	t.Helper()
+	execSQL(t, s.db, `UPDATE lpcc.machine_states SET rollout=jsonb_set(rollout,'{drain_started_at}',to_jsonb($2::text)) WHERE node_id=$1`, node, time.Now().Add(-24*time.Hour).Format(time.RFC3339Nano))
 }
 
 func TestMachineRolloutWithdrawsTunnelReadiness(t *testing.T) {
@@ -282,7 +665,7 @@ func TestRemovalKeepsAppliedWorkload(t *testing.T) {
 
 func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	s := newTestServer(t)
-	s.params.TunnelDrainTimeout = time.Minute
+	s.params.DrainTimeout = new(time.Minute)
 	s.params.TunnelStatusTTL = time.Minute
 	s.configs = s.newConfigurationManager()
 	c := enroll(t, s, ownerA, strings.Repeat("b", 64))
@@ -292,7 +675,7 @@ func TestCredentialRefreshFencesRolloutApproval(t *testing.T) {
 	}
 	reportRuntime(t, s, c, "runner", true)
 	refreshed := false
-	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute, StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: new(time.Minute), StatusTTL: time.Minute, APIURL: s.params.PublicAPIURL}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !refreshed {
 			refreshed = true
 			jwt, _, _ := s.params.signEnrollment(ownerA, testOrchestrator(ownerA), time.Now())
@@ -426,7 +809,7 @@ func TestOrdinaryReportDoesNotWakeWholeFleet(t *testing.T) {
 
 func TestConcurrentRemovalDoesNotAbortFleetPass(t *testing.T) {
 	s := newTestServer(t)
-	s.params.TunnelDrainTimeout = time.Minute
+	s.params.DrainTimeout = new(time.Minute)
 	s.configs = s.newConfigurationManager()
 	one := enroll(t, s, ownerA, strings.Repeat("2", 64))
 	two := enroll(t, s, ownerA, strings.Repeat("3", 64))
@@ -438,7 +821,7 @@ func TestConcurrentRemovalDoesNotAbortFleetPass(t *testing.T) {
 	}
 	removed := false
 	builtSecond := false
-	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: time.Minute}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
+	s.configs = machineconfig.New(machineconfig.Config{RuntimeImage: s.params.RuntimeImage, DrainTimeout: new(time.Minute)}, machineconfig.Dependencies{DB: s.db, Logger: s.logger, Exposure: func(json.RawMessage) (*machineconfig.Exposure, error) {
 		if !removed {
 			removed = true
 			if err := s.RetireMachine(t.Context(), one["node_id"]); err != nil {
@@ -528,14 +911,26 @@ func TestCompletedEndpointDrainDoesNotMaskProviderFailure(t *testing.T) {
 	}
 }
 
-// Count client commands without logging SQL arguments or bundle contents.
-type configurationQueryCounter struct{ queries int }
+type queryTrace func(string)
 
-func (c *configurationQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
-	c.queries++
+func (f queryTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, q pgx.TraceQueryStartData) context.Context {
+	f(q.SQL)
 	return ctx
 }
-func (*configurationQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (queryTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// Trace SQL commands without reading their arguments or results.
+func traceTestQueries(t *testing.T, db *sql.DB, trace func(string)) *sql.DB {
+	t.Helper()
+	var database string
+	requireNoError(t, db.QueryRow(`SELECT current_database()`).Scan(&database))
+	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	requireNoError(t, err)
+	cfg.Database, cfg.DefaultQueryExecMode, cfg.Tracer = database, pgx.QueryExecModeExec, queryTrace(trace)
+	traced := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { traced.Close() })
+	return traced
+}
 
 func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
 	s := newTestServer(t)
@@ -543,20 +938,10 @@ func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
 	other := enroll(t, s, ownerB, strings.Repeat("b", 64))
 	node := c["node_id"]
 	var bundle []byte
-	var digest, database string
-	if err := s.db.QueryRow(`SELECT bundle,sha256,current_database() FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle, &digest, &database); err != nil {
-		t.Fatal(err)
-	}
-	config, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.Database = database
-	config.DefaultQueryExecMode = pgx.QueryExecModeExec
-	counter := &configurationQueryCounter{}
-	config.Tracer = counter
-	db := sql.OpenDB(stdlib.GetConnector(*config))
-	t.Cleanup(func() { db.Close() })
+	var digest string
+	requireNoError(t, s.db.QueryRow(`SELECT bundle,sha256 FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle, &digest))
+	var commands int
+	db := traceTestQueries(t, s.db, func(string) { commands++ })
 	s.db = db
 	path := "/v1/nodes/" + node + "/config"
 	for _, token := range []string{c["token"], c["token"], other["token"]} {
@@ -564,9 +949,9 @@ func TestConfigurationFetchUpdatesTimestamp(t *testing.T) {
 		if _, err := db.Exec(`UPDATE lpcc.machines SET last_config_fetch_at=$2 WHERE node_id=$1`, node, before); err != nil {
 			t.Fatal(err)
 		}
-		counter.queries = 0
+		commands = 0
 		w := request(t, s, "GET", path, token, nil)
-		queries := counter.queries
+		queries := commands
 		var fetched time.Time
 		if err := db.QueryRow(`SELECT last_config_fetch_at FROM lpcc.machines WHERE node_id=$1`, node).Scan(&fetched); err != nil {
 			t.Fatal(err)

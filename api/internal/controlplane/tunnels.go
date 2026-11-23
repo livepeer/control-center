@@ -4,35 +4,19 @@ import (
 	"context"
 	"errors"
 
-	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/api/internal/controlplane/tunnel"
 )
 
-// Preserve the API configuration's embedded field name and environment flags.
 type TunnelParams = tunnel.Config
 
 func (s *Server) newTunnelManager(deps tunnel.Dependencies) *tunnel.Manager {
 	deps.SignDiscovery = s.signDiscovery
 	deps.DB, deps.Logger, deps.Configurations = s.db, s.logger, s.configs
-	return tunnel.New(s.params.TunnelParams, deps)
-}
-
-func (s *Server) ConfigureTunnels() error {
-	if err := s.params.validateTunnels(); err != nil {
-		return err
+	config := s.params.TunnelParams
+	if s.params.DevelopmentHTTP {
+		config.CloudflareAPIToken = ""
 	}
-	s.tunnels = s.newTunnelManager(tunnel.Dependencies{})
-	return s.tunnels.Configure(s.params.PublicAPIURL)
-}
-
-func (p Params) validateTunnels() error {
-	if p.CloudflareEnabled && !machineconfig.ValidConnectorImage(p.RuntimeImage) {
-		return errors.New("RuntimeImage requires an immutable sha256 digest when CloudflareEnabled")
-	}
-	if p.CloudflareEnabled && !machineconfig.ValidConnectorImage(p.RuntimeConnectorImage) {
-		return errors.New("RuntimeConnectorImage requires an immutable sha256 digest when CloudflareEnabled")
-	}
-	return p.TunnelParams.Validate(p.PublicAPIURL)
+	return tunnel.New(config, deps)
 }
 
 func (s *Server) RunTunnels(ctx context.Context) {

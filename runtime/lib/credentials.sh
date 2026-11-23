@@ -5,6 +5,14 @@ control_transport() {
   if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]]; then printf 'development-http'; else printf 'https'; fi
 }
 
+check_control_url() {
+  case "$(control_transport):$1" in
+    https:https://*|development-http:http://*) return ;;
+    https:http://*) die 'set LIVEPEER_ALLOW_DEVELOPMENT_HTTP=1 for private development. To move an HTTP enrollment to production, retire it, finish app cleanup, then use --reenroll with the verified HTTPS API.' ;;
+  esac
+  die 'configuration URL scheme does not match LIVEPEER_ALLOW_DEVELOPMENT_HTTP'
+}
+
 api_url() {
   local api=${LIVEPEER_API_URL:-https://controlcenter-api.livepeer.live}
   api=${api%/}
@@ -112,29 +120,32 @@ stop_credential_consumers() {
       if [[ -d "$buffer" && ! -L "$buffer" ]]; then find "$buffer" -mindepth 1 -delete; fi
     done
   fi
-  # Replica count alone does not prove old HTTP-speaking processes terminated.
+  # Wait for every consumer to release the old credential.
   kube -n flux-system wait pod -l app=livepeer-http-source --for=delete --timeout=120s
   kube -n flux-system wait pod -l app=livepeer-app-reconciler --for=delete --timeout=120s
   kube -n flux-system wait pod -l app=livepeer-tunnel --for=delete --timeout=120s
 }
 
 transition_credentials() {
-  local api fingerprint operation expected response status request metadata previous_node issued_node apps replicas cluster_node
+  local api saved_url fingerprint operation expected response status request metadata previous_node issued_node apps replicas cluster_node
   managed_installation || die 'credential transition requires an initialized installation'
   [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" ]] || die 'restore the runner bootstrap credential before changing credentials'
   runtime_image
   [[ -n "$ENROLLMENT_TOKEN" ]] || die 'credential transition requires LIVEPEER_ENROLLMENT_TOKEN with a fresh owner enrollment JWT'
-  [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment JWT'
   api=$(api_url)
   [[ "$api" == https://* ]] || die 'set LIVEPEER_API_URL to the verified HTTPS API'
   NODE_ID=$(cat "$INSTALL_DIR/credentials/node-id")
   [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ ]] || die 'invalid saved machine ID'
-  if [[ -z ${LIVEPEER_API_URL:-} ]]; then
-    [[ -s "$INSTALL_DIR/credentials/config-url" && $(< "$INSTALL_DIR/credentials/config-url") == "$api/v1/nodes/$NODE_ID/config" ]] ||
-      die 'set LIVEPEER_API_URL to the original verified HTTPS API before changing credentials'
-  fi
+  saved_url=$(< "$INSTALL_DIR/credentials/config-url")
+  [[ "$CREDENTIAL_TRANSITION" == reenroll || "$saved_url" == https://* ]] || die 'refresh requires an HTTPS enrollment'
+  [[ -n ${LIVEPEER_API_URL:-} || "$saved_url" == "$api/v1/nodes/$NODE_ID/config" ]] ||
+    die 'set LIVEPEER_API_URL to the verified HTTPS API for this installation'
   fingerprint=$(printf '%s' "$(cat /etc/machine-id)" | sha256sum); fingerprint=${fingerprint:0:64}
   [[ $(cat "$INSTALL_DIR/credentials/fingerprint") == "$fingerprint" ]] || die 'installation fingerprint changed'
+  [[ -s "$INSTALL_DIR/credentials/identity.json" ]] || die 'restore the enrollment identity before changing credentials'
+  read_identity "$(cat "$INSTALL_DIR/credentials/identity.json")" || die 'invalid saved enrollment identity'
+  prepare_secrets_enrollment
+  [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment JWT'
   if [[ -f "$INSTALL_DIR/state/credential-transition.json" ]]; then
     metadata=$(cat "$INSTALL_DIR/state/credential-transition.json")
     [[ $(jq -r '.mode' <<< "$metadata") == "$CREDENTIAL_TRANSITION" ]] || die 'resume the existing credential transition mode'
@@ -142,8 +153,6 @@ transition_credentials() {
   else
     if [[ "$CREDENTIAL_TRANSITION" == reenroll ]]; then verify_retired_apps "$api"; fi
     operation=$(cat /proc/sys/kernel/random/uuid)
-    [[ -s "$INSTALL_DIR/credentials/identity.json" ]] || die 'restore the enrollment identity before changing credentials'
-    read_identity "$(cat "$INSTALL_DIR/credentials/identity.json")" || die 'invalid saved enrollment identity'
     expected=$CREDENTIAL_VERSION
     previous_node=$IDENTITY_NODE_ID
     jq -nc --arg mode "$CREDENTIAL_TRANSITION" --arg api "$api" --arg operation "$operation" --argjson expected "$expected" --arg previous_node "$previous_node" \

@@ -204,6 +204,7 @@ func TestEdgeConfigValidation(t *testing.T) {
 		{func(p *Params) { p.PublicListen = "0.0.0.0:43811"; p.RedeemerUpstreamURL = "ftp://redeemer" }, "RedeemerUpstreamURL"},
 	} {
 		p := testParams()
+		p.TunnelParams = testTunnelParams()
 		p.Listen = "0.0.0.0:43812"
 		tc.change(&p)
 		if err := p.PreValidate(); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -211,6 +212,7 @@ func TestEdgeConfigValidation(t *testing.T) {
 		}
 	}
 	p := testParams()
+	p.TunnelParams = testTunnelParams()
 	p.Listen, p.PublicListen = "0.0.0.0:43812", "0.0.0.0:43811"
 	p.AllowedOrigins = []string{"https://controlcenter.livepeer.live", "http://localhost:5173"}
 	p.RedeemerUpstreamURL = "http://redeemer:8941"

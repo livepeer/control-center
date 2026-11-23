@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("machine not found")
-	ErrDrainChanged    = errors.New("drain intent changed")
-	ErrDrainNotExpired = errors.New("drain deadline has not expired")
+	ErrNotFound              = errors.New("machine not found")
+	ErrDrainChanged          = errors.New("drain intent changed")
+	ErrDrainNotExpired       = errors.New("drain deadline has not expired")
+	ErrForceDrainUnavailable = errors.New("no pending workload replacement to force")
 )
 
 type Change struct {
@@ -64,6 +65,7 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node string, force boo
 		state.DrainStartedAt = time.Now().UTC()
 		state.Target = ""
 		state.PendingConfigDigest = ""
+		state.ForcedDrainTarget = ""
 		state.RolloutReason = "drain_pending"
 		raw, _ = json.Marshal(state)
 		_, err = tx.ExecContext(ctx, `INSERT INTO lpcc.machine_states(node_id,state,rollout) VALUES($1,'{}',$2) ON CONFLICT(node_id) DO UPDATE SET rollout=EXCLUDED.rollout,revision=lpcc.machine_states.revision+1,next_attempt_at=now()`, node, string(raw))
@@ -76,7 +78,8 @@ func (s *Manager) Remove(ctx context.Context, tx *sql.Tx, node string, force boo
 	return result, err
 }
 
-func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, generation int64) (Change, error) {
+// RetryDrain starts a fresh drain or authorizes replacement of the held workload.
+func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, generation int64, force bool) (Change, error) {
 	result := Change{NodeID: node}
 	var present int
 	err := tx.QueryRowContext(ctx, `SELECT 1 FROM lpcc.machines WHERE node_id=$1 FOR UPDATE`, node).Scan(&present)
@@ -87,7 +90,11 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 		return result, err
 	}
 	var raw []byte
-	if err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw); err != nil {
+	err = tx.QueryRowContext(ctx, `SELECT rollout FROM lpcc.machine_states WHERE node_id=$1 FOR UPDATE`, node).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return result, ErrDrainChanged
+	}
+	if err != nil {
 		return result, err
 	}
 	var state State
@@ -97,12 +104,37 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	if !state.DrainRequested || state.Generation != generation || state.Lifecycle == "removed" {
 		return result, ErrDrainChanged
 	}
-	if !state.DrainStartedAt.IsZero() && time.Since(state.DrainStartedAt) <= s.drainTimeout() {
+	if !force && !state.DrainStartedAt.IsZero() && !s.drainExpired(state.DrainStartedAt, time.Now()) {
 		return result, ErrDrainNotExpired
 	}
-	state.Generation++
-	state.DrainStartedAt = time.Now().UTC()
-	state.RolloutReason = "drain_pending"
+	if !force && state.Lifecycle == "active" && state.Target == "" && state.ApplyingConfigDigest != "" {
+		var bundle []byte
+		if err := tx.QueryRowContext(ctx, `SELECT bundle FROM lpcc.machine_configs WHERE node_id=$1`, node).Scan(&bundle); err != nil {
+			return result, err
+		}
+		published, _, err := ReadApplied(bundle)
+		if err != nil {
+			return result, err
+		}
+		if published.ConfigDigest == state.ApplyingConfigDigest {
+			return result, ErrDrainChanged
+		}
+	}
+	if force {
+		if !state.canForceDrain() {
+			return result, ErrForceDrainUnavailable
+		}
+		state.forceDrain(node)
+		state.RolloutReason = "rollout_pending"
+	} else {
+		state.Generation++
+		// Keep the revoked marker if Gate might still have to restore the held workload.
+		if state.Target != "" || state.ApplyingConfigDigest == "" {
+			state.ForcedDrainTarget = ""
+		}
+		state.DrainStartedAt = time.Now().UTC()
+		state.RolloutReason = "drain_pending"
+	}
 	raw, _ = json.Marshal(state)
 	_, err = tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET rollout=$2,revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, node, string(raw))
 	result.Changed = true
@@ -111,9 +143,9 @@ func (s *Manager) RetryDrain(ctx context.Context, tx *sql.Tx, node string, gener
 	return result, err
 }
 
-// FenceCredentialRefresh runs in the credential transaction, after updating the
-// enrollment. A waiting state writer must recheck the changed shared revision.
-func (s *Manager) FenceCredentialRefresh(ctx context.Context, tx *sql.Tx, node string) error {
+// FenceConfigUpdate makes workers recheck the revision after a configuration
+// input changes in the enrollment's transaction.
+func (s *Manager) FenceConfigUpdate(ctx context.Context, tx *sql.Tx, node string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE lpcc.machine_states SET revision=revision+1,next_attempt_at=now() WHERE node_id=$1`, node)
 	return err
 }

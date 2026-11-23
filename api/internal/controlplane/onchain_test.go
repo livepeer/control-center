@@ -14,9 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineconfig"
 	"github.com/livepeer/control-center/runtime/artifact"
@@ -83,6 +80,11 @@ func TestOnchainCredentialsRequireBoundRuntimeProofWhileSecretsUnavailable(t *te
 	if count(t, s, `SELECT count(*) FROM lpcc.onchain_grants`) != 1 {
 		t.Fatal("replay minted another grant")
 	}
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = true, "http://api.example"
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false WHERE node_id=$1`, node)
+	requireStatus(t, request(t, s, "POST", path, machine["token"], signedOnchainRequest(t, s, node, in.Launch)), 403)
+	s.params.DevelopmentHTTP, s.params.PublicAPIURL = false, "https://api.example"
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=true WHERE node_id=$1`, node)
 	execSQL(t, s.db, `UPDATE lpcc.secret_machines SET public_key='' WHERE node_id=$1`, node)
 	requireStatus(t, request(t, s, "POST", path, machine["token"], in), 403)
 	execSQL(t, s.db, `DELETE FROM lpcc.secret_machines WHERE node_id=$1`, node)
@@ -126,36 +128,15 @@ func TestAutomaticOnchainConfigurationAndUpdates(t *testing.T) {
 	}
 }
 
-type onchainQueryTrace func(string)
-
-func (f onchainQueryTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, q pgx.TraceQueryStartData) context.Context {
-	f(q.SQL)
-	return ctx
-}
-func (onchainQueryTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
 func TestOnchainReconcileSkipsUnchangedMachines(t *testing.T) {
 	s, _, a := onchainMachine(t)
 	b := enroll(t, s, ownerB, strings.Repeat("b", 64))
 	if err := s.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	var database string
-	if err := s.db.QueryRow(`SELECT current_database()`).Scan(&database); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgx.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Database, cfg.DefaultQueryExecMode = database, pgx.QueryExecModeExec
 	var queries []string
-	cfg.Tracer = onchainQueryTrace(func(q string) { queries = append(queries, q) })
-	s.db = stdlib.OpenDB(*cfg)
-	t.Cleanup(func() { s.db.Close() })
-	if err = s.reconcileOnchain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	s.db = traceTestQueries(t, s.db, func(query string) { queries = append(queries, query) })
+	requireNoError(t, s.reconcileOnchain(t.Context()))
 	if len(queries) != 1 || !strings.HasPrefix(queries[0], "SELECT m.fingerprint") {
 		t.Fatalf("unchanged pass issued %d commands: %v", len(queries), queries)
 	}
@@ -492,6 +473,16 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 200 {
 		t.Fatal("refresh revoked retained grant")
 	}
+	s.params.DevelopmentHTTP = true
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
+		t.Fatal("development accepted an existing grant")
+	}
+	s.params.DevelopmentHTTP = false
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=false WHERE node_id=$1`, node)
+	if webhook(c.Recipient, h, s.params.OnchainWebhookSecret) != 403 {
+		t.Fatal("ineligible machine kept redemption access")
+	}
+	execSQL(t, s.db, `UPDATE lpcc.machines SET tunnel_eligible=true WHERE node_id=$1`, node)
 	if _, e = s.db.Exec(`UPDATE lpcc.onchain_state SET initialized=true WHERE fingerprint=$1`, fingerprint); e != nil {
 		t.Fatal(e)
 	}
@@ -522,26 +513,27 @@ func TestOnchainCredentialsWebhookAndRevocation(t *testing.T) {
 
 }
 
+func reportOnchainReady(t *testing.T, s *Server, c map[string]string) {
+	t.Helper()
+	node := c["node_id"]
+	m := onchainMetadata(t, s, node)
+	launch := consumer.Launch{PodName: "orchestrator-test", PodUID: "node-pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
+	grant := onchainGrant(t, s, c, launch)
+	r := currentReport(t, s, node, machineconfig.Report{NodeID: node, CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
+	requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
+}
+
 func TestOnchainActivationAndNormalDrain(t *testing.T) {
 	s, _, c := onchainMachine(t)
 	node := c["node_id"]
-	metadata := func() contract.Metadata { return onchainMetadata(t, s, node) }
-	if metadata().OnchainActive {
+	if onchainMetadata(t, s, node).OnchainActive {
 		t.Fatal("saved setting treated as active onchain operation")
 	}
-	launch := consumer.Launch{PodName: "orchestrator-test", PodUID: "node-pod", LaunchID: strings.Repeat("a", 32), ProcessID: strings.Repeat("b", 64)}
-	grant := onchainGrant(t, s, c, launch)
-	report := func() {
-		t.Helper()
-		m := metadata()
-		r := currentReport(t, s, node, machineconfig.Report{NodeID: c["node_id"], CredentialVersion: 1, Component: "runtime", Generation: m.Generation, ConfigDigest: m.ConfigDigest, K3sVersion: "v1.37.2+k3s1", Ready: true, Reason: "ready", Onchain: &onchain.Observation{Generation: m.Onchain.Generation, Mode: "onchain", PodUID: "node-pod", GrantID: grant.GrantID, Applied: true, Ready: true, Handoff: "unverified"}})
-		requireStatus(t, request(t, s, "POST", "/v1/nodes/"+node+"/status", c["token"], r), 200)
-	}
-	report()
+	reportOnchainReady(t, s, c)
 	if e := s.reconcile(t.Context()); e != nil {
 		t.Fatal(e)
 	}
-	if !metadata().OnchainActive {
+	if !onchainMetadata(t, s, node).OnchainActive {
 		t.Fatal("fresh applied Node did not activate")
 	}
 	adminA(t, s)
@@ -557,6 +549,113 @@ func TestOnchainActivationAndNormalDrain(t *testing.T) {
 		t.Fatal("ordinary removal did not complete")
 	}
 
+}
+
+func TestSupersedingUnreadyOnchainForceNeedsNewDrain(t *testing.T) {
+	s, _, c := onchainMachine(t)
+	node := c["node_id"]
+	reportOnchainReady(t, s, c)
+	requireNoError(t, s.reconcile(t.Context()))
+	if !onchainMetadata(t, s, node).OnchainActive {
+		t.Fatal("original workload was not ready")
+	}
+	adminA(t, s)
+	setImage := func(image string) {
+		s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat(image, 64)
+		s.configs = s.newConfigurationManager()
+	}
+	setImage("d")
+	pending := pendingWorkloadDrain(t, s, node)
+	requireStatus(t, request(t, s, "POST", "/api/admin/machines/"+node+"/drain/force", "session-a", map[string]int64{"generation": pending.Generation}), 202)
+	requireNoError(t, s.reconcile(t.Context()))
+	requireNoError(t, s.reconcile(t.Context()))
+	forced := onchainMetadata(t, s, node)
+	if forced.ConfigDigest != pending.PendingConfigDigest || !forced.DrainRequested {
+		t.Fatal("expected forced replacement to be published with admission closed")
+	}
+
+	generation := forced.Generation
+	for _, image := range []string{"c", "d", "c"} {
+		setImage(image)
+		requireNoError(t, s.reconcile(t.Context()))
+		m := onchainMetadata(t, s, node)
+		if m.ConfigDigest != forced.ConfigDigest || m.Generation <= generation || !m.DrainRequested {
+			t.Fatal("image change bypassed the drain", image)
+		}
+		generation = m.Generation
+	}
+
+	reportRuntime(t, s, c, "runner", true)
+	requireNoError(t, s.reconcile(t.Context()))
+	drained := onchainMetadata(t, s, node)
+	if drained.ConfigDigest == forced.ConfigDigest || drained.Generation != generation {
+		t.Fatal("a fresh drain should release the superseding workload")
+	}
+	// The previously forced digest can now be published as a normal startup repair.
+	for _, image := range []string{"d", "e"} {
+		setImage(image)
+		requireNoError(t, s.reconcile(t.Context()))
+		m, manifest := publishedMachineConfiguration(t, s, node)
+		if !strings.Contains(manifest, s.params.RuntimeNodeImage) || m.Generation != generation || !m.DrainRequested {
+			t.Fatal("a past force blocked startup repair after the fresh drain", image)
+		}
+	}
+}
+
+func TestOnchainStartupRepairSupersedesDrain(t *testing.T) {
+	s, _, c := onchainMachine(t)
+	node := c["node_id"]
+	settings, err := s.loadOnchainTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemer := settings.RedeemerURL
+	settings.RedeemerURL = "https://api.example/other"
+	writeOnchainTemplate(t, s, settings)
+	pendingWorkloadDrain(t, s, node)
+	settings.RedeemerURL = redeemer
+	writeOnchainTemplate(t, s, settings)
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	s.configs = s.newConfigurationManager()
+	requireNoError(t, s.reconcile(t.Context()))
+	meta, manifest := publishedMachineConfiguration(t, s, node)
+	if !strings.Contains(manifest, s.params.RuntimeNodeImage) || meta.OnchainActive {
+		t.Fatal("a never-ready workload should allow repair while keeping admission closed")
+	}
+}
+
+func TestOnchainStartupRepairDoesNotBlockEndpointChange(t *testing.T) {
+	s, _ := tunnelTestServer(t)
+	onchainSettings(t, s)
+	configureTestTunnels(t, s)
+	c := enroll(t, s, ownerA, strings.Repeat("7", 64))
+	node := c["node_id"]
+	reportRuntime(t, s, c, "runtime", false)
+	driveTunnels(t, s)
+	reportRuntime(t, s, c, "runner", true)
+	driveTunnels(t, s)
+	original, manifest := publishedMachineConfiguration(t, s, node)
+	if original.OnchainActive || !strings.Contains(manifest, s.params.CloudflareBaseDomain) {
+		t.Fatal("expected a starting workload on the original route")
+	}
+	s.params.RuntimeNodeImage = "registry.invalid/node@sha256:" + strings.Repeat("d", 64)
+	configureTestTunnels(t, s)
+	execSQL(t, s.db, "UPDATE lpcc.machine_states SET next_attempt_at=now()")
+	requireNoError(t, s.tunnels.Reconcile(t.Context()))
+	state, _, err := s.loadTunnel(t.Context(), node)
+	if err != nil || state.ApplyingConfigDigest == "" || state.ApplyingConfigDigest == original.ConfigDigest {
+		t.Fatal("expected an unpublished startup repair", err)
+	}
+	s.params.CloudflareBaseDomain = "replacement.example.invalid"
+	configureTestTunnels(t, s)
+	driveTunnels(t, s)
+	reportRuntime(t, s, c, "runner", true)
+	driveTunnels(t, s)
+	state, _, err = s.loadTunnel(t.Context(), node)
+	m, manifest := publishedMachineConfiguration(t, s, node)
+	if err != nil || state.Target != "" || !strings.Contains(manifest, s.params.CloudflareBaseDomain) || !m.DrainRequested {
+		t.Fatal("the drained endpoint change did not publish while waiting for readiness", err)
+	}
 }
 
 func TestObservedGrantCannotRevokeANewerProcessGrant(t *testing.T) {

@@ -66,7 +66,8 @@ class CaptureTests(Repository):
         self.write('runtime/config/k3s.yaml', 'current\n')
         (self.root / 'runtime/lib/helper.sh').unlink()
         self.write('runtime/new file\nwith $quote.txt', 'new\n')
-        for name in ('.env', '.env.example', 'secrets/key', 'credentials/token', 'state/install',
+        for name in ('.env', '.env.example', 'local.env', 'config/production.env.local',
+                     'secrets/key', 'credentials/token', 'state/install',
                      'config/kubeconfig.yaml', '.venv/lib/dependency', 'ignored', 'services/__pycache__/x.pyc'):
             self.write('runtime/' + name, 'excluded')
         self.write('api/secrets/key', 'not Runtime source')
@@ -91,10 +92,10 @@ class CaptureTests(Repository):
         self.assertNotIn('runtime/untracked', files)
 
     def test_forbidden_tracked_files_fail_in_both_modes(self):
-        self.write('runtime/.env', 'secret')
+        self.write('runtime/production.env', 'secret')
         revision = self.commit()
         for ref in ('', revision):
-            with self.subTest(ref=ref), self.assertRaisesRegex(remote.RunError, 'Forbidden tracked path.*runtime/.env'):
+            with self.subTest(ref=ref), self.assertRaisesRegex(remote.RunError, r'Forbidden tracked path.*runtime/production\.env'):
                 self.archive(ref)
 
     def test_links_submodules_and_nonregular_files_are_rejected(self):

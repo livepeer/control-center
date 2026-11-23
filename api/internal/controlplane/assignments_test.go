@@ -377,7 +377,7 @@ func TestMachineRemovalWaitsForAppsAndRetainsTerminalCleanup(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			s := newTestServer(t)
 			adminA(t, s)
-			s.params.TunnelDrainTimeout = time.Minute
+			s.params.DrainTimeout = new(time.Minute)
 			s.configs = s.newConfigurationManager()
 			c := enroll(t, s, ownerB, fmt.Sprintf("%064x", 21))
 			r := publishAssignmentRevision(t, s, registryFixture(t), "")

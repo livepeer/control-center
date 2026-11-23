@@ -176,7 +176,6 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 	if waiting, e := l.stageEndpoints(ctx, desired); e != nil || waiting {
 		return e
 	}
-	prefix := "g" + strconv.FormatInt(l.state.EndpointGeneration, 10) + "-"
 	tunnel, e := l.ensure(ctx, "tunnel", "tunnel", "", "")
 	if e != nil {
 		return e
@@ -187,11 +186,17 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 			return e
 		}
 	}
-	discoveryHost := endpointHost(l.state.DiscoveryURL)
-	rules := ingressFor(l.state.RoutingState)
+	rules := ingressFor(desired.RoutingState)
 	version, e := l.provider.Configure(ctx, tunnel.ID, rules)
 	if e != nil {
 		return e
+	}
+	if !l.state.sameClientEndpoints(desired.RoutingState) || l.state.DiscoveryURL != desired.DiscoveryURL {
+		l.state.ServiceURL = desired.ServiceURL
+		l.state.ProxyURLTemplate = desired.ProxyURLTemplate
+		l.state.DiscoveryURL = desired.DiscoveryURL
+		l.state.SourceGeneration++
+		l.state.EndpointGeneration++
 	}
 	l.state.IngressDigest = ingressHash(rules)
 	l.state.AppliedIngress = rules
@@ -225,7 +230,8 @@ func (l *tunnelLease) provision(ctx context.Context) error {
 		l.state.Ready = false
 		return l.save(ctx)
 	}
-	hosts := []string{endpointHost(l.state.ServiceURL), discoveryHost, "*." + l.Machine.NodeID + "." + p.CloudflareBaseDomain}
+	prefix := "g" + strconv.FormatInt(l.state.EndpointGeneration, 10) + "-"
+	hosts := []string{endpointHost(l.state.ServiceURL), endpointHost(l.state.DiscoveryURL), "*." + l.Machine.NodeID + "." + p.CloudflareBaseDomain}
 	for i, host := range hosts {
 		if _, e = l.ensure(ctx, prefix+"dns-"+strconv.Itoa(i), "dns", host, tunnel.ID); e != nil {
 			return e

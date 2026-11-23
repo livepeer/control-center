@@ -44,7 +44,8 @@ type Machine struct {
 	LastConfigFetchAt   *time.Time `json:"last_config_fetch_at"`
 	CredentialVersion   int64      `json:"-"`
 	Terminal            bool       `json:"-"`
-	DevelopmentHTTP     bool       `json:"development_http,omitempty"`
+	tunnelEligible      bool
+	DevelopmentHTTP     bool `json:"development_http,omitempty"`
 }
 
 type Server struct {
@@ -133,7 +134,8 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("DELETE /api/admin/machines/{node_id}", s.adminMutation("machine.remove", s.prepareMachineRemoval))
 	mux.HandleFunc("POST /api/admin/machines/{node_id}/tunnel/rotate", s.adminMutation("tunnel.rotate", s.prepareTunnelRotation))
-	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/retry", s.adminMutation("machine.drain.retry", s.prepareDrainRetry))
+	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/retry", s.adminMutation("machine.drain.retry", s.prepareDrain(false)))
+	mux.HandleFunc("POST /api/admin/machines/{node_id}/drain/force", s.adminMutation("machine.drain.force", s.prepareDrain(true)))
 	mux.HandleFunc("GET /api/admin/apps", s.adminRead(s.listApps))
 	mux.HandleFunc("POST /api/admin/apps/validate", s.adminRead(s.validateApp))
 	mux.HandleFunc("POST /api/admin/apps", s.adminMutation("app.create", s.prepareCreateApp))
@@ -164,7 +166,6 @@ func (s *Server) Handler() http.Handler {
 		defer cancel()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Livepeer-Tunnels-Enabled", strconv.FormatBool(s.params.CloudflareEnabled))
 		routes.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -293,6 +294,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid machine metadata")
 		return
 	}
+	if m.DevelopmentHTTP != s.params.DevelopmentHTTP {
+		fail(w, 403, "enrollment transport does not match the deployment")
+		return
+	}
 	var id [16]byte
 	if _, err = rand.Read(id[:]); err != nil {
 		fail(w, 500, "cannot generate node identity")
@@ -324,10 +329,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
  ON CONFLICT(fingerprint) DO UPDATE SET hostname=EXCLUDED.hostname,updated_at=now()
  WHERE lpcc.machines.orchestrator_address=EXCLUDED.orchestrator_address AND lpcc.machines.fingerprint=EXCLUDED.fingerprint
 	 AND lpcc.machines.install_dir=EXCLUDED.install_dir AND lpcc.machines.k3s_version=EXCLUDED.k3s_version
- RETURNING node_id,credential_version`, m.NodeID, m.Fingerprint, owner, m.EnrolledByUserID, m.Hostname, m.InstallDir, m.K3sVersion, strings.HasPrefix(s.params.PublicAPIURL, "https://") && !m.DevelopmentHTTP)
+	 AND lpcc.machines.tunnel_eligible=EXCLUDED.tunnel_eligible
+ RETURNING node_id,credential_version`, m.NodeID, m.Fingerprint, owner, m.EnrolledByUserID, m.Hostname, m.InstallDir, m.K3sVersion, !m.DevelopmentHTTP)
 	err = row.Scan(&m.NodeID, &m.CredentialVersion)
 	if errors.Is(err, sql.ErrNoRows) {
-		fail(w, 409, "machine already registered with a different owner or installation")
+		fail(w, 409, "machine already registered with a different owner, installation, or transport")
 		return
 	}
 	if err != nil {
@@ -358,7 +364,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, e)
 		return
 	}
-	config, _, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	config, changed, err := s.syncOnchainConfig(r.Context(), tx, m.Fingerprint, owner)
+	if err == nil && changed && m.NodeID != newNodeID {
+		err = s.configs.FenceConfigUpdate(r.Context(), tx, m.NodeID)
+	}
 	if err != nil {
 		s.databaseError(w, err)
 		return

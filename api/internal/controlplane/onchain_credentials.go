@@ -29,7 +29,7 @@ func (s *Server) onchainCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in consumer.Request
-	if boundedInput(r, &in, 4096) != nil || !consumer.ValidLaunch(in.Launch) || in.OnchainGeneration < 1 || !fingerprintPattern.MatchString(in.ConfigDigest) || !strings.HasPrefix(s.params.PublicAPIURL, "https://") {
+	if s.params.DevelopmentHTTP || boundedInput(r, &in, 4096) != nil || !consumer.ValidLaunch(in.Launch) || in.OnchainGeneration < 1 || !fingerprintPattern.MatchString(in.ConfigDigest) {
 		fail(w, 403, "onchain delivery refused")
 		return
 	}
@@ -95,7 +95,7 @@ func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
 		Headers http.Header     `json:"headers"`
 		Ticket  json.RawMessage `json:"ticket"`
 	}
-	if appInput(r, &in) != nil {
+	if s.params.DevelopmentHTTP || appInput(r, &in) != nil {
 		respond(w, 200, map[string]int{"status": 403})
 		return
 	}
@@ -119,7 +119,7 @@ func (s *Server) redemptionAuthorize(w http.ResponseWriter, r *http.Request) {
 	allowed := count == 1 && ok && appID(id) && len(s.params.MachineTokenSecret) >= 32 && hmac.Equal([]byte(token), []byte(s.submissionToken(id))) && json.Unmarshal(in.Ticket, &ticket) == nil && onchain.Address.MatchString(ticket.Recipient)
 	if allowed {
 		var recipient string
-		e := s.db.QueryRowContext(r.Context(), `SELECT v.config->>'recipient' FROM lpcc.onchain_grants g JOIN lpcc.enrollments e ON e.node_id=g.node_id JOIN lpcc.onchain_configs v ON v.fingerprint=e.fingerprint AND v.generation=g.onchain_generation JOIN lpcc.machines m ON m.node_id=g.node_id WHERE g.grant_id=$1 AND g.revoked_at IS NULL`, id).Scan(&recipient)
+		e := s.db.QueryRowContext(r.Context(), `SELECT v.config->>'recipient' FROM lpcc.onchain_grants g JOIN lpcc.enrollments e ON e.node_id=g.node_id JOIN lpcc.onchain_configs v ON v.fingerprint=e.fingerprint AND v.generation=g.onchain_generation JOIN lpcc.machines m ON m.node_id=g.node_id WHERE g.grant_id=$1 AND g.revoked_at IS NULL AND m.tunnel_eligible`, id).Scan(&recipient)
 		allowed = e == nil && strings.EqualFold(recipient, ticket.Recipient)
 	}
 	status := 403

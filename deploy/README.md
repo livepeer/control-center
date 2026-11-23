@@ -41,6 +41,10 @@ secret file mode `0600`, and deployed secret ownership `65532:65532` so the
 non-root API and cloudflared processes can read their respective mounts.
 Keep the configuration readable by UID 65532 as well.
 
+Create `compose.env` in this directory for Compose interpolation settings.
+For an existing deployment, rename its current Compose interpolation file to
+`compose.env` and update your Compose commands to pass `--env-file compose.env`.
+
 Generate `secrets/jwt-signing-key.pem` as an Ed25519 PKCS#8 PEM key; see the
 [discovery authentication guide](../docs/discovery-auth.md). Preserve this key
 and machine credential secrets across upgrades. The registry uses the persistent
@@ -56,7 +60,7 @@ verified address in `DefaultAdminEmail`. The UI origin must also appear in
 The Compose network enables IPv6 because direct Supabase database endpoints can
 be IPv6-only. The host needs working IPv6 egress for such an endpoint.
 
-Prepare the required [operator secrets service and Vault](../docs/operator-secrets.md#deployment)
+Prepare the required [operator secrets service and Vault](../docs/operator-secrets.md#deploy-the-secrets-service-and-vault)
 before starting the complete deployment. They use the same Compose file.
 
 Copy `redeemer.example.toml` to `redeemer.toml` and `onchain.example.json` to
@@ -71,7 +75,7 @@ Copy `redeemer.example.toml` to `redeemer.toml` and `onchain.example.json` to
 - `secrets/redeemer/auth-headers`: `Authorization: Bearer <onchain-webhook-auth>`.
 
 Every `main` commit also has published linux/amd64 images in GHCR, listed in the
-[Publish images](../docs/development.md#development-checks) run summary.
+[Publish images](../docs/development.md#run-checks-and-ci) run summary.
 The runtime, connector and node digests there can be used for `RuntimeImage`,
 `RuntimeConnectorImage` and `RuntimeNodeImage` instead of local builds; machines
 pull them anonymously. To build and publish images from this directory instead,
@@ -79,7 +83,7 @@ set `NODE_IMAGE` to the compatible upstream Node release digest. The first
 command starts only the registry:
 
 ```sh
-LIVEPEER_REDEEMER_IMAGE="$NODE_IMAGE" docker compose up -d registry
+LIVEPEER_REDEEMER_IMAGE="$NODE_IMAGE" docker compose --env-file compose.env up -d registry
 docker build -f ../runtime/Dockerfile -t 127.0.0.1:63812/controlcenter/runtime:staging ..
 docker push 127.0.0.1:63812/controlcenter/runtime:staging
 docker build -f ../runtime/services/Dockerfile.tunnel \
@@ -95,23 +99,21 @@ docker push 127.0.0.1:63812/controlcenter/node:staging
 
 Use the public registry hostname and returned digests for `RuntimeImage`,
 `RuntimeConnectorImage`, and `RuntimeNodeImage` in `config.toml`. Set
-`LIVEPEER_REDEEMER_IMAGE` in `.env` to the same managed Node digest as
+`LIVEPEER_REDEEMER_IMAGE` in `compose.env` to the same managed Node digest as
 `RuntimeNodeImage`. Start the complete deployment, then
 [publish a bootstrap release](#bootstrap-releases):
 
 ```sh
-docker compose up -d --build --wait
+docker compose --env-file compose.env up -d --build --wait
 ```
 
 Onchain is the default; startup requires valid payment settings. Control Center
 configures each machine automatically. The redeemer retains its wallet and
 `redeemer-data` volume.
 
-Enable managed tunnels and discovery after configuring the `livepeer.vip`
-account/zone, certificate permissions, signing configuration, image digests,
-and node address exclusions. Update `TunnelNodeAddresses` with the public and
-management addresses of every machine before enrollment; the bootstrap
-installer's origin firewall remains required.
+Production requires Cloudflare. Configure the account, zone, certificate permissions,
+and every public and management address in `TunnelNodeAddresses` before enrollment.
+Follow the [machine tunnel runbook](../docs/machine-tunnels.md) for setup and cutover.
 
 ## Telemetry storage
 
@@ -130,7 +132,7 @@ sudo install -d -m 0700 -o 65532 -g 65532 /opt/controlcenter-telemetry \
 ```
 
 Retention defaults to 30 days for metrics and 14 days for logs, with logs also
-capped at 50 GiB. Override them in `.env` with `TELEMETRY_METRICS_RETENTION`,
+capped at 50 GiB. Override them in `compose.env` with `TELEMETRY_METRICS_RETENTION`,
 `TELEMETRY_LOGS_RETENTION` and `TELEMETRY_LOGS_MAX_DISK`. Plan about 6 MB of
 metrics per machine per day; log volume depends mostly on app output. Back up
 `/opt/controlcenter-telemetry/grafana` with the deployment; the stores can be
@@ -145,7 +147,7 @@ Grafana accepts only Cloudflare Access logins:
    administrator grants, so update both when administrators change.
 3. Set `CF_ACCESS_TEAM_DOMAIN` (the `<team>` in `<team>.cloudflareaccess.com`),
    `CF_ACCESS_AUD` (the application's audience tag) and, for another hostname,
-   `GRAFANA_ROOT_URL` in `.env`.
+   `GRAFANA_ROOT_URL` in `compose.env`.
 
 Grafana verifies each Access assertion against the team's signing keys and the
 audience tag. Without these settings the container exits instead of starting.
@@ -182,33 +184,38 @@ Cloudflare account prerequisites:
   `CLOUDFLARE_ACCOUNT_ID`. This token can publish the JavaScript that seals
   operator secrets; keep it there.
 
-When a `main` commit changes `ui/` and its **Build images** run succeeds,
-**Deploy UI** starts for that commit and waits for a `production` reviewer.
-A run is skipped when a newer `main` commit has changed `ui/` again, because
-that commit's run deploys it. To release a commit by hand, run **Deploy UI**
+When the **Build images** run for a `main` push succeeds and the commit's `ui/`
+differs from that of the closest earlier `main` commit that also built
+successfully, **Deploy UI** starts for that commit and waits for a `production`
+reviewer. Changes from earlier commits in the same push, or from commits whose
+builds failed, are therefore proposed by the next successful build. A run is
+skipped when a newer `main` commit with a different `ui/` has already built
+successfully, because that commit's run proposes it. To release a commit by hand, run **Deploy UI**
 from `main` with `deploy`. The run summary lists recent Worker versions. To roll back, run it with
 `rollback` and the version ID to restore; static assets roll back with the
-Worker version. The build bakes in `VITE_CONTROLCENTER_API_URL`
-(`ui/.env.production`, overridden by the environment variable
-`CONTROLCENTER_API_URL`); publish only browser-safe values there.
+Worker version. The build bakes in `VITE_CONTROLCENTER_API_URL` from
+`ui/production.env` or the build environment. Set the GitHub environment
+variable `CONTROLCENTER_API_URL` to override the default in the workflow.
+Publish only browser-safe values there.
 
-The same commands work from a workstation authenticated with `wrangler login`:
+The same commands work from a workstation authenticated with
+`npx wrangler login --env-file /dev/null`:
 
 ```sh
 npm --prefix ui ci
 npm --prefix ui run build
-(cd ui && npx wrangler deploy --env production)
-(cd ui && npx wrangler deployments list --env production)
-(cd ui && npx wrangler rollback <version-id> --env production)
+(cd ui && npx wrangler deploy --env-file /dev/null --env production)
+(cd ui && npx wrangler deployments list --env-file /dev/null --env production)
+(cd ui && npx wrangler rollback <version-id> --env-file /dev/null --env production)
 ```
 
-`npx wrangler deploy` without `--env` publishes a smoke-test copy on
+`npx wrangler deploy --env-file /dev/null` publishes a smoke-test copy on
 `workers.dev`. It reads the same bootstrap bucket but its origin is not in
 `AllowedOrigins`, so sign-in there is expected to fail.
 
-The CSP in `_headers` is report-only. Promote it to `Content-Security-Policy`
-once a production session (sign-in, machines, administration and secrets)
-shows no violations in the browser console.
+Before enforcing a CSP change in `_headers`, test it in report-only mode
+through sign-in, machines, administration and secrets. Resolve any violations
+reported in the browser console.
 
 ## Bootstrap releases
 
@@ -231,7 +238,7 @@ python3 tools/publish-bootstrap.py --activate "$NEW_RELEASE_ID"
 
 The build machine needs Python 3.10+, Git, Node.js 22.12+ with
 `npm --prefix ui ci` (for wrangler), and Cloudflare credentials with R2 write
-access (`wrangler login`, or `CLOUDFLARE_API_TOKEN` and
+access (`npx wrangler login --env-file /dev/null`, or `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID`). Target hosts need none of these. By default the
 packager uses `RuntimeImage` in `staging-images.json` and the public
 `https://controlcenter.livepeer.live` origin. Supply `--runtime-image` with
@@ -241,7 +248,7 @@ the deployed API, Node and connector before activation.
 
 Each release retains the complete bundle, `SHA256SUMS`, its exact `bootstrap.sh`,
 and `release.json` containing checksums, source revision/dirty-state evidence,
-asset hashes and recorded image build provenance when available. Only tracked
+asset hashes and recorded image metadata when available. Only tracked
 installer assets are packaged; add any newly required helpers/templates to Git
 before packaging. The loader includes the bundle checksum. The packager stages
 the complete local release and refuses reused IDs. The publisher checks that
@@ -260,11 +267,11 @@ release. Keep
 `deploy/bootstrap` and the activation and validation records with the
 deployment artifacts.
 
-To roll back, or to switch to a release from another branch, activate a
-retained release explicitly:
+To roll back or switch branches, set `RETAINED_RELEASE_ID` to the ID of the
+retained release to restore.
 
 ```sh
-python3 tools/publish-bootstrap.py --activate bootstrap-20261112.1 --rollback
+python3 tools/publish-bootstrap.py --activate "$RETAINED_RELEASE_ID" --rollback
 ```
 
 `--all` publishes every release under `deploy/bootstrap/releases`, which
@@ -281,18 +288,19 @@ release; broader host lifecycle and application acceptance remain separate gates
 
 ```sh
 cd /opt/controlcenter/deploy
-docker compose ps
-docker compose logs --tail=100 api registry-proxy cloudflared
+docker compose --env-file compose.env ps
+docker compose --env-file compose.env logs --tail=100 api registry-proxy cloudflared
 curl --fail http://127.0.0.1:43811/readyz
 curl --fail http://127.0.0.1:43811/api/config
 curl --fail http://127.0.0.1:13812/api/health
 curl --fail http://127.0.0.1:23813/ready
-docker compose up -d --build --wait
+docker compose --env-file compose.env up -d --build --wait
 curl --fail --head https://controlcenter.livepeer.live/bootstrap.sh
 ```
 
 Docker restarts the services after host reboot. Public registry requests allow
 only GET and HEAD; publish images through the loopback port on the SSH host.
 Use digest-pinned image references for enrolled machines and retain referenced
-images when updating staging. Do not use `docker compose down --volumes` unless
-you intend to delete the stored images.
+images when updating staging. Only pass `--volumes` to
+`docker compose --env-file compose.env down` if you intend to delete the stored
+images.

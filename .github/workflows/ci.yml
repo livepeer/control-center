@@ -9,6 +9,33 @@ permissions:
   contents: read
 
 jobs:
+  hidden-files:
+    name: Check hidden files
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reject hidden paths outside the allowlist
+        shell: bash
+        run: |
+          git ls-files -z | {
+            status=0
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                .dockerignore|.gitignore) continue ;;
+              esac
+              case "${path#.github/}" in
+                .*|*/.*)
+                  printf 'Unexpected hidden path: %q\n' "$path" >&2
+                  status=1
+                  ;;
+              esac
+            done
+            exit "$status"
+          }
+
   test:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -135,7 +162,7 @@ jobs:
       - name: Validate edge deployment
         env:
           WRANGLER_SEND_METRICS: 'false'
-        run: npx wrangler deploy --dry-run --env production --outdir "$RUNNER_TEMP/wrangler-dry-run"
+        run: npx wrangler deploy --env-file /dev/null --dry-run --env production --outdir "$RUNNER_TEMP/wrangler-dry-run"
       - name: Install Chrome
         run: npx playwright install --with-deps chrome
       - name: Browser tests

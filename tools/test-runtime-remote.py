@@ -109,7 +109,7 @@ def excluded(path):
     return (
         not parts or parts[0] in INSTALL_DIRS
         or any(p in EXCLUDED_DIRS for p in parts)
-        or any(p == '.env' or p.startswith('.env.') for p in parts)
+        or any(p.endswith('.env') or '.env.' in p for p in parts)
         or parts[-1].endswith(('.pyc', '.pyo')) or parts[-1] == '.coverage'
         or parts == ('config', 'kubeconfig.yaml')
     )

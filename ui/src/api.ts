@@ -1,6 +1,6 @@
 import type { Session } from '@supabase/supabase-js'
 
-// Deployed builds call the API origin directly (see .env.production). Local
+// Deployed builds call the API origin directly (see production.env). Local
 // development leaves it empty so the Vite proxy serves /api on the same origin.
 const apiBase = (import.meta.env.VITE_CONTROLCENTER_API_URL ?? '').replace(/\/$/, '')
 

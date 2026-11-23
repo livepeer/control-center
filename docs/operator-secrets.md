@@ -1,30 +1,15 @@
 # Operator secrets
 
-The secrets service stores application credentials and controls which runtimes
-may receive them. Select an orchestrator to manage its secrets. Members share
-secrets and app policies; the orchestrator address owns resources and user IDs
-identify audit actors. Control Center manages assignments and sees names, but
-not values or runtime private keys.
+A separate operator secrets service delivers app credentials only to authorized workloads without storing values in app definitions. Control Center sees secret names only, the service handles secret values, and runtime private keys stay on their machines.
 
-Each orchestrator can have at most 100 secrets. Deleted keys still count towards this limit.
+The service stores credentials per orchestrator and controls runtime delivery. Orchestrator members share secrets and app policies (the orchestrator address owns resources, and user IDs record audit actors).
 
-The browser encrypts each value with a random data key. The service stores the
-ciphertext and uses Vault Transit to encrypt, or **wrap**, that key for storage.
-For an authorized runtime, the service asks Vault to unwrap the key and
-encrypts it for that runtime. The runtime decrypts the key and value locally
-for the application.
+Each orchestrator supports up to `100` secrets, including deleted keys. The browser encrypts each value with a random data key, and Vault Transit **wraps** that key for storage. For authorized runtimes, the service unwraps the key via Vault and re-encrypts it for that runtime to decrypt locally.
 
-## Enrollment and trust
+## Enroll a runtime
 
-Generate an enrollment command in each browser profile that manages secrets.
-This obtains a setup grant valid for one hour and saves the service's signing
-public key as a **pin** in browser storage for that service origin. A changed
-pin is refused. Run the command on the runtime machine; the installer creates
-and saves a runtime signing key. Its private key stays on the machine.
-The installer proves possession of its Control Center machine credential with
-a purpose-bound HMAC over the node ID, runtime public key and fresh enrollment
-nonce. The secrets service forwards the proof to Control Center for verification;
-the reusable machine credential stays on the runtime.
+1. In each managing browser profile, generate an enrollment command (issues a `1h` setup grant and saves the service signing public key as an origin **pin**, rejecting changed pins).
+2. Run the command on the host. The installer creates a local runtime signing key and proves its Control Center machine credential via a purpose-bound HMAC over node ID, runtime public key, and fresh nonce while keeping the reusable machine credential on the host.
 
 ```mermaid
 sequenceDiagram
@@ -49,130 +34,84 @@ sequenceDiagram
     C->>S: Forward activation
 ```
 
-The receipt binds the two identities and the fresh random challenge, or nonce,
-so an old receipt cannot complete a new attempt. Retries preserve the runtime
-key and service pin. Later requests are signed with the runtime key; service
-replies are signed and bound to the exact request and authorization. Invalid
-proofs and replayed replies are retried, while verified revocation is enforced.
+### Trust and encryption boundaries
 
-Initial enrollment trusts Cloudflare and HTTPS to introduce both signing
-identities. Without a prior pin, the installer cannot establish that the first
-service key belongs to the intended service from its signature alone. The
-browser similarly pins the key returned when it obtains the grant. Cloudflare
-can observe the bearer credentials used for enrollment and member-authorized
-resets, and those authorization paths remain trusted. After enrollment, a
-modified service reply or replacement signing key fails verification against
-the saved pin.
+Signed receipts bind identities and nonce against replay, and retries keep the runtime key and service pin. Later requests and replies are signed and bound to exact request and authorization (invalid proofs and replays retry, verified revocations apply).
 
-For uploads, the browser verifies a fresh signed service encryption key against
-its pin, then encrypts the data key to the service using HPKE. The service
-decrypts it inside its independent boundary before Vault wraps it. For delivery,
-the runtime creates a fresh X25519 encryption key pair for each request. It
-keeps the private key in memory and signs the request containing the public
-key. The service checks authorization and encrypts the unwrapped data key to
-that key. With trusted client code, Cloudflare sees metadata and operator
-bearer tokens but no usable data keys on these encrypted paths. Browser
-protection depends on the JavaScript it receives: altered code could bypass
-encryption.
+Initial enrollment trusts Cloudflare and HTTPS to introduce signing keys, and Cloudflare can see enrollment and reset bearer tokens. Once pinned, altered replies or changed keys fail verification.
 
-## Deployment
+On upload, the browser verifies a signed service encryption key against its pin and seals the data key via HPKE (security relies on unmodified browser JS).
 
-The secrets service and Vault are required services in the default
-[Compose deployment](../deploy/compose.yaml). Existing installations using the
-`livepeer-secrets` project should use the local deployment helper to retain the
-running Vault and its network. For a fresh setup, work from `deploy/`. Set
-`LIVEPEER_REDEEMER_IMAGE` in `.env` to a compatible digest-pinned Node image
-before running Compose. This value is required even when starting only Vault.
+On delivery, the runtime generates a per-request ephemeral X25519 key pair in memory, signs the request carrying its public key, and receives the unwrapped data key encrypted to that key. With trusted client code, Cloudflare sees metadata and bearer tokens only.
 
-1. Copy `secrets-service.env.example` to `secrets-service.env`. Use the same
-   Supabase settings as `config.toml`, and keep `SECRETS_PUBLIC_URL` equal to
-   `SecretsURL`. Route that public hostname through the Cloudflare tunnel to
-   `http://localhost:23812`. Set `SECRETS_CONTROL_URL=http://control-metadata:43812`
-   for callbacks over the private API and secrets network. Callbacks require the
-   shared metadata token. The API must listen on `0.0.0.0:43812`, as in
-   `config.example.toml`; that private listener, not the public one, serves
-   these callbacks. Set `SECRETS_ALLOWED_ORIGIN` to the exact UI origin
-   (`https://controlcenter.livepeer.live`); browsers from any other origin are
-   refused. Use HTTPS for callbacks across hosts or untrusted
-   networks. Public origins and service identity pins use `SECRETS_PUBLIC_URL`.
-2. Create `secrets-service-private/`, owned by `65532:65532`, mode `0700`.
-   Give its files the same ownership and mode `0600`:
+## Use secrets in apps
 
-   | File | Contents |
-   | --- | --- |
-   | `database-url` | TLS PostgreSQL connection URI for the secrets service |
-   | `signing-key` | Independent enrollment signing secret, at least 32 bytes |
-   | `identity-key.pem` | Ed25519 service signing private key |
-   | `encryption-key.pem` | X25519 service encryption private key |
-   | `control-metadata-token` | Independent credential, at least 32 bytes, shared with the API's `SecretsMetadataTokenFile` |
-   | `vault-token` | Vault Transit credential from the next step |
-   | `ca-bundle.pem` | Public HTTPS root certificates plus the Vault CA |
+Save values on the **Secrets** screen before or after assignment. Apps provision once required secrets exist, declaring `container.secrets` for Runtime to inject as env vars.
 
-   Generate the service keys once and retain them across upgrades:
+Secret updates replace affected instances one by one, waiting for readiness (single-instance apps incur downtime). Running instances survive service or Vault outages, while starting or restarting secret-dependent instances needs active authorization.
+
+Deleting a secret or denying an app stops affected instances, and active sessions or offline machines delay removal. Revoke compromised credentials at their issuer too.
+
+## Deploy the secrets service and Vault
+
+Both services are required in [`deploy/compose.yaml`](../deploy/compose.yaml). Work from `deploy/` and set `LIVEPEER_REDEEMER_IMAGE` in `compose.env` to a compatible digest-pinned Node image before any Compose command, even for Vault alone.
+
+### Configure the service
+
+Copy `secrets-service.env.example` to `secrets-service.env` and match the Supabase settings in `config.toml`.
+
+| Setting | Value |
+| --- | --- |
+| `SECRETS_PUBLIC_URL` | Match `SecretsURL`. Route its hostname through Cloudflare Tunnel to `http://localhost:23812`. This origin scopes service key pins. |
+| `SECRETS_CONTROL_URL` | `http://control-metadata:43812` for callbacks using the shared metadata token. Set the private API `Listen` to `0.0.0.0:43812`. Use HTTPS across hosts or untrusted networks. |
+| `SECRETS_ALLOWED_ORIGIN` | Exact UI origin, `https://controlcenter.livepeer.live` in the example. |
+
+### Create private files
+
+Create `secrets-service-private/` with mode `0700`. Set file modes to `0600` and own the directory and files as `65532:65532`.
+
+| File | Contents |
+| --- | --- |
+| `database-url` | TLS PostgreSQL URI |
+| `signing-key` | Independent enrollment signing secret (`>= 32` bytes) |
+| `identity-key.pem` | Ed25519 service signing private key |
+| `encryption-key.pem` | X25519 service encryption private key |
+| `control-metadata-token` | Independent secret (`>= 32` bytes) matching `SecretsMetadataTokenFile` |
+| `vault-token` | Vault Transit token created below |
+| `ca-bundle.pem` | Public HTTPS roots plus Vault CA |
+
+Generate service keys once and retain across upgrades.
+
+```sh
+openssl genpkey -algorithm ED25519 -out secrets-service-private/identity-key.pem
+openssl genpkey -algorithm X25519 -out secrets-service-private/encryption-key.pem
+```
+
+### Start and configure Vault
+
+1. Prepare `/opt/controlcenter-secrets/vault/{config,tls,data}`. Preserve existing data and assign UID `65532` to `data`. Copy `vault.hcl` to `config/server.hcl`. Supply `tls/ca.pem`, `tls/server.pem`, and `tls/server-key.pem` readable by UID `65532`. The certificate must cover `vault` and `127.0.0.1`.
+2. Start Vault.
 
    ```sh
-   openssl genpkey -algorithm ED25519 -out secrets-service-private/identity-key.pem
-   openssl genpkey -algorithm X25519 -out secrets-service-private/encryption-key.pem
+   docker compose --env-file compose.env up -d vault
    ```
 
-3. Prepare `/opt/controlcenter-secrets/vault/{config,tls,data}` with data owned
-   by UID 65532. Copy `vault.hcl` to `config/server.hcl`, and supply
-   `tls/ca.pem`, `tls/server.pem`, and `tls/server-key.pem`, readable by UID 65532.
-   The certificate must cover hostname `vault` and IP address `127.0.0.1`.
-   Preserve existing Vault data when adopting these paths. Start Vault:
+3. Initialize and unseal Vault. Enable Transit at `transit/`. As a Vault administrator, apply [the policy](../deploy/vault-policy.hcl) as `operator-secrets` and save a token with that policy in `vault-token`. It permits `orchestrator-*` wrapping and unwrapping, self-renewal, and self-lookup. The service token needs no key export or administration privileges.
 
-   ```sh
-   docker compose up -d vault
-   ```
+Keep recovery keys private and arrange unsealing and token renewal. Vault binds HTTPS to `127.0.0.1:28200`. Disable raw Vault audit and ingress body logging.
 
-   Initialize and unseal it, then enable Transit at `transit/`. Using an
-   administrator credential, apply [the service policy](../deploy/vault-policy.hcl)
-   as `operator-secrets` and issue a token with that policy. Save the token in
-   `vault-token`. The policy allows wrapping and unwrapping for `orchestrator-*`,
-   token renewal, and inspection of the token's own permissions.
-   Do not grant key export or administration. Keep recovery keys privately and
-   arrange unsealing after restarts and renewal of expiring tokens. Vault's HTTPS
-   port binds only to `127.0.0.1:28200`. Disable raw Vault audit and ingress body
-   logging.
-4. Start the complete deployment:
+### Start the full deployment
 
-   ```sh
-   docker compose up -d --build --wait
-   ```
+```sh
+docker compose --env-file compose.env up -d --build --wait
+```
 
-The service applies PostgreSQL migrations on startup. See
-[orchestrator provisioning](operations.md#orchestrators). To inspect migrations,
-run `docker compose run --rm --no-deps secrets migrate status`; use `migrate up`
-to apply them separately. `migrate down` can delete data.
+Migrations run on startup ([orchestrators](operations.md#manage-orchestrators-and-members)). Inspect or run manually with `docker compose --env-file compose.env run --rm --no-deps secrets migrate status` or `migrate up` (`migrate down` can delete data).
 
-## Application behavior
+## Back up and recover
 
-Apps are provisioned only when their required secrets are available.
-You can save values on the Secrets screen before an app is running.
-Applications declare secret references in `container.secrets`; the runtime
-provides values as environment variables. When a secret changes, affected app
-instances are replaced one at a time, waiting for each replacement to become
-ready. A single-instance app has downtime during this process.
+Back up secrets DB, Vault state, machine identity files, encrypted Kubernetes state, runtime journal, signing keys, and service encryption key. Restoring values needs both DB and Vault wrapping keys. Keep key backups separate from DB backups and preserve revocations and deletions on restore.
 
-Running instances continue during a service or Vault outage. Starting or
-restarting an instance that needs secrets requires current authorization.
-Deleting a secret or denying an app stops affected instances, although active
-sessions and offline machines can delay removal. Revoke credentials at their
-issuer too, to invalidate values already delivered to an app.
+Losing `identity-key.pem` breaks enrolled runtime verification, so restore the original key to preserve pins. For a compromised runtime key, call member-authorized `POST /v1/machines/{node}/reset` and re-enroll. Call `POST /v1/machines/{node}/revoke` to revoke access while keeping identity.
 
-## Recovery
-
-Back up the service database, Vault state, machine identity files, encrypted
-Kubernetes state, runtime journal, signing keys and service encryption key. The
-database alone cannot recover values without Vault's wrapping keys. Keep key
-backups separate from database backups, and preserve revocations and deletions
-when restoring old data.
-
-Losing the service identity key breaks verification on enrolled runtimes.
-Restore the original private key instead of silently replacing their pins. For
-a compromised runtime key, use member-authorized
-`POST /v1/machines/{node}/reset`, then enroll again. To revoke access without
-resetting identity, use `POST /v1/machines/{node}/revoke`.
-
-A member's departure and routine management credential refresh preserve the
-runtime identity. Machine retirement and explicit identity revocation disable it.
+Member departure and routine credential refresh preserve runtime identity. Machine retirement and explicit revocation disable it.

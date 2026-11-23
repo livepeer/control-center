@@ -86,7 +86,6 @@ authenticate_node() {
   local credentials="$INSTALL_DIR/credentials" key request response api status machine_id
   NODE_ID=''; SERVICE_TOKEN=''; CONFIG_URL=''; IDENTITY_NODE_ID=''; INSTALLATION_FINGERPRINT=''; CREDENTIAL_VERSION=0
   if [[ -f "$INSTALL_DIR/state/enrolled" ]] || { managed_installation && [[ -f "$credentials/node-id" && -f "$credentials/service-token" && -f "$credentials/config-url" && -f "$credentials/identity.json" ]]; }; then
-    ENROLLMENT_TOKEN=''
     for key in node-id service-token config-url fingerprint; do
       [[ -f "$credentials/$key" && -s "$credentials/$key" ]] || die "saved credential is missing or invalid: $key; restore it from backup"
     done
@@ -97,14 +96,18 @@ authenticate_node() {
     INSTALLATION_FINGERPRINT=$(cat "$credentials/fingerprint")
     SERVICE_TOKEN=$(cat "$credentials/service-token")
     CONFIG_URL=$(cat "$credentials/config-url")
+    check_control_url "$CONFIG_URL"
     if [[ ! -s "$credentials/identity.json" ]] || ! read_identity "$(cat "$credentials/identity.json")"; then
       die 'invalid saved enrollment identity; restore it from backup'
     fi
+    prepare_secrets_enrollment
+    ENROLLMENT_TOKEN=''
   else
     [[ -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires LIVEPEER_ENROLLMENT_TOKEN'
-    [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
     api=$(api_url)
-    [[ "$api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS; development HTTP must be explicit'
+    check_control_url "$api"
+    prepare_secrets_enrollment
+    [[ "$ENROLLMENT_TOKEN" =~ ^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$ ]] || die 'invalid enrollment token format'
     machine_id=$(read_machine_id) || die '/etc/machine-id must be initialized'
     INSTALLATION_FINGERPRINT=$(printf '%s' "$machine_id" | sha256sum)
     INSTALLATION_FINGERPRINT=${INSTALLATION_FINGERPRINT:0:64}
@@ -131,15 +134,12 @@ authenticate_node() {
     SERVICE_TOKEN=$(printf '%s' "$response" | jq -er '.token | select(type == "string")') || die 'invalid enrollment response: token'
     CONFIG_URL=$(printf '%s' "$response" | jq -er '.config_url | select(type == "string")') || die 'invalid enrollment response: config_url'
     read_identity "$response" || die 'invalid enrollment identity metadata'
-    if [[ ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} != 1 ]]; then
-      [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" ]] || die 'enrollment returned invalid HTTPS configuration URL'
-    fi
+    [[ "$CONFIG_URL" == "$api/v1/nodes/$NODE_ID/config" ]] || die 'enrollment returned invalid configuration URL'
   fi
   [[ "$INSTALLATION_FINGERPRINT" =~ ^[a-f0-9]{64}$ ]] || die 'invalid installation fingerprint'
   [[ "$IDENTITY_NODE_ID" == "$NODE_ID" ]] || die 'saved identity does not match the node'
   [[ "$NODE_ID" =~ ^[a-z2-7]{26}$ && "$SERVICE_TOKEN" =~ ^[a-f0-9]{64}$ ]] || die 'invalid enrollment credentials'
   [[ "$CONFIG_URL" =~ ^https?://[a-zA-Z0-9/_.:-]+$ ]] || die 'invalid configuration URL'
-  [[ "$CONFIG_URL" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'saved HTTP credential requires --refresh-credentials over HTTPS'
   if (shopt -s nocasematch; [[ "$CONFIG_URL" =~ ^https?://(localhost\.?|127\.[0-9.]+)(:[0-9]+)?(/|$) ]]); then
     die 'configuration URL uses loopback; Kubernetes pods need a reachable API address'
   fi
@@ -357,19 +357,9 @@ main() {
   lock_installation
   check_existing_installation
   if [[ -n "$CREDENTIAL_TRANSITION" ]]; then
-    managed_installation || die 'credential transition requires an initialized installation'
-    [[ -s "$INSTALL_DIR/credentials/runner-bootstrap.secret" && -s "$INSTALL_DIR/credentials/identity.json" ]] || die 'restore the saved enrollment credentials before changing credentials'
-    read_identity "$(cat "$INSTALL_DIR/credentials/identity.json")" || die 'invalid saved enrollment identity'
-    [[ -n "$ENROLLMENT_TOKEN" ]] || die 'credential transition requires a fresh enrollment command'
-    [[ $(api_url) == https://* ]] || die 'credential transition requires the verified HTTPS API'
-    prepare_secrets_enrollment; transition_credentials; enroll_secrets; return
+    transition_credentials; enroll_secrets; return
   fi
   [[ ! -f "$INSTALL_DIR/state/credential-transition.json" ]] || die 'resume the interrupted credential transition before normal installation'
-  [[ -f "$INSTALL_DIR/credentials/node-id" || -n "$ENROLLMENT_TOKEN" ]] || die 'a new installation requires an enrollment command'
-  local verified_api
-  verified_api=$(api_url)
-  [[ "$verified_api" == https://* || ${LIVEPEER_ALLOW_DEVELOPMENT_HTTP:-0} == 1 ]] || die 'enrollment requires HTTPS'
-  prepare_secrets_enrollment
   authenticate_node
   trap diagnostics ERR
   prepare_installation

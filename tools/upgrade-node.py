@@ -228,8 +228,10 @@ class Upgrade:
         self.compose = ['docker', 'compose', '--project-directory', self.deploy]
         for path in self.files:
             self.compose += ['-f', path]
-        if env_file:
-            self.compose += ['--env-file', env_file.resolve()]
+        if env_file is None:
+            default_env_file = self.deploy / 'compose.env'
+            env_file = default_env_file if default_env_file.exists() else Path(os.devnull)
+        self.compose += ['--env-file', env_file.resolve()]
 
     def inspect(self, kind, reference):
         result = json.loads(self.run('docker', kind, 'inspect', reference))
@@ -549,7 +551,8 @@ def main():
                       help='verify the go.mod release image upstream, print it as JSON, then exit')
     parser.add_argument('--deploy-dir', type=Path, default=ROOT / 'deploy')
     parser.add_argument('--compose-file', type=Path, action='append', help='existing Compose file, in original order; repeat for overlays')
-    parser.add_argument('--env-file', type=Path, help='existing Compose interpolation environment file')
+    parser.add_argument('--env-file', type=Path,
+                        help='Compose interpolation file (default: compose.env in --deploy-dir, if present)')
     parser.add_argument('--admin-token-file', type=Path, help='private file containing an existing administrator bearer token')
     parser.add_argument('--expected-version', help='require this go.mod version')
     parser.add_argument('--state-dir', type=Path, default=Path('/var/lib/controlcenter/node-upgrades'), help='private backup/lock directory')
