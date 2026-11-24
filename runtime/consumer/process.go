@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -48,11 +49,23 @@ func repairOnchainPermissions(path string) {
 			continue
 		}
 		if err := os.Chmod(name, 0600); err != nil {
-			slog.Error("Node SQLite permission repair failed", "path", name)
+			slog.Error("Node SQLite permission repair failed", "path", name, "reason", repairFailure(err))
 			continue
 		}
 		slog.Warn("Restored owner-only Node SQLite permissions", "path", name)
 	}
+}
+
+func repairFailure(err error) string {
+	switch {
+	case errors.Is(err, syscall.EROFS):
+		return "read_only_filesystem"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission_denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "file_missing"
+	}
+	return "chmod_failed"
 }
 
 func start(ctx context.Context, profile Profile, client transport.Requester, tokenPath, name, uid, process string, args []string, exec func(string, []string, []string) error) error {
@@ -206,7 +219,10 @@ func probe(ctx context.Context, profile Profile, client transport.Requester, mar
 	if !ready {
 		failures = append(failures, "readiness_endpoint_failed")
 	}
-	if profile == Orchestrator && unreported != "" {
+	// Missing local evidence persists, and Control Center can only show the
+	// connector as offline, so the pod reports it. Connector delivery keeps its
+	// short budget: a slow agent does not make a working tunnel unready.
+	if unreported != "" && (profile == Orchestrator || unreported != "observation_undelivered") {
 		failures = append(failures, unreported)
 	}
 	if len(failures) > 0 {
