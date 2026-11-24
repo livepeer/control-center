@@ -92,8 +92,10 @@ spec:
       - name: fluent-bit
         # Fluent Bit 5.1.5. Kubelet and journald write root-owned 0640 files, so
         # this reader runs as UID 0 with every capability dropped: it reads
-        # through owner permissions only and cannot bypass file modes.
-        image: cr.fluentbit.io/fluent/fluent-bit:5.1.5@sha256:2740f387f6e68fab66d28e4fa6a853387b9cab6ffb4cb78958f69bba4eb0e7b4
+        # through owner permissions only and cannot bypass file modes. Pulled
+        # from Docker Hub: cr.fluentbit.io redirects containerd there, and the
+        # redirect drops the pull token, so the pull fails.
+        image: fluent/fluent-bit:5.1.5@sha256:2740f387f6e68fab66d28e4fa6a853387b9cab6ffb4cb78958f69bba4eb0e7b4
         args: [-c, /etc/telemetry/fluent-bit.conf]
         resources:
           requests: {cpu: 25m, memory: 32Mi}
