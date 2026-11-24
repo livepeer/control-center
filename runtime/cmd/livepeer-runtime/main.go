@@ -46,8 +46,8 @@ func run(ctx context.Context, args []string) error {
 	case "orchestrator-start":
 		return consumer.Start(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/rpc", os.Getenv("POD_NAME"), os.Getenv("POD_UID"), args[1:])
 	case "orchestrator-probe":
-		if !consumer.Probe(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/launch.json") {
-			return errors.New("orchestrator not ready")
+		if err := consumer.Probe(ctx, consumer.Orchestrator, "/management/control.sock", "/run/onchain/private/launch.json"); err != nil {
+			return fmt.Errorf("orchestrator not ready: %w", err)
 		}
 		return nil
 	case "http-source":
@@ -78,8 +78,8 @@ func connectorCommand(ctx context.Context, command string, args []string) error 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	if !consumer.Probe(ctx, consumer.Connector, *socket, *marker) {
-		return errors.New("connector not ready")
+	if err := consumer.Probe(ctx, consumer.Connector, *socket, *marker); err != nil {
+		return fmt.Errorf("connector not ready: %w", err)
 	}
 	return nil
 }

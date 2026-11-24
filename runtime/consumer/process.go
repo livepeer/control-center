@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -107,8 +108,9 @@ func start(ctx context.Context, profile Profile, client transport.Requester, tok
 	return exec(command, append([]string{command}, args...), []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent"})
 }
 
-// Probe reports local process health and scoped observations.
-func Probe(ctx context.Context, profile Profile, socket, marker string) bool {
+// Probe reports local process health and scoped observations. Its error says
+// why the Pod is not ready; kubelet shows exec probe output in Pod events.
+func Probe(ctx context.Context, profile Profile, socket, marker string) error {
 	base := "http://127.0.0.1:20241"
 	if profile == Orchestrator {
 		base = "http://127.0.0.1:8936"
@@ -116,7 +118,7 @@ func Probe(ctx context.Context, profile Profile, socket, marker string) bool {
 	return probe(ctx, profile, transport.NewLocal(socket), marker, base, processIdentity)
 }
 
-func probe(ctx context.Context, profile Profile, client transport.Requester, marker, base string, identity func() (string, error)) bool {
+func probe(ctx context.Context, profile Profile, client transport.Requester, marker, base string, identity func() (string, error)) error {
 	budget := time.Second
 	if profile == Orchestrator {
 		budget = 3 * time.Second
@@ -155,18 +157,37 @@ func probe(ctx context.Context, profile Profile, client transport.Requester, mar
 	b, err := os.ReadFile(marker)
 	var association Association
 	process, processErr := identity()
-	reported := false
-	if err == nil && processErr == nil && len(b) <= 16384 && transport.Decode(b, &association) == nil && ValidLaunch(association.Launch) && association.ProcessID == process {
+	unreported := ""
+	switch {
+	case err != nil || len(b) > 16384 || transport.Decode(b, &association) != nil || !ValidLaunch(association.Launch):
+		unreported = "launch_marker_unavailable"
+	case processErr != nil:
+		unreported = processErr.Error()
+	case association.ProcessID != process:
+		unreported = "launch_process_replaced"
+	default:
 		deliveryBudget := 500 * time.Millisecond
 		if profile == Orchestrator {
 			deliveryBudget = budget
 		}
 		deliveryCtx, cancel := context.WithTimeout(ctx, deliveryBudget)
 		_, _, err = client.Request(deliveryCtx, profile.observationPath()[1:], Observation{Association: association, Ready: ready, ProviderVersion: config.Version, ObservedAt: time.Now()}, 1024)
-		reported = err == nil
+		if err != nil {
+			unreported = "observation_undelivered"
+		}
 		cancel()
 	}
-	return ready && (profile == Connector || reported)
+	var failures []string
+	if !ready {
+		failures = append(failures, "readiness_endpoint_failed")
+	}
+	if profile == Orchestrator && unreported != "" {
+		failures = append(failures, unreported)
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, ", "))
+	}
+	return nil
 }
 
 func checkOnchainState(path string, required bool) error {
