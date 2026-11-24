@@ -10,7 +10,9 @@ func processIdentity() (string, error) {
 	if err != nil {
 		return "", errors.New("connector_process_identity")
 	}
-	namespace, err := os.Readlink("/proc/1/ns/pid")
+	// Probes share PID 1's namespace. Reading their own link needs no ptrace
+	// access to PID 1, which stacked AppArmor labels deny (Ubuntu 25.04+).
+	namespace, err := os.Readlink("/proc/self/ns/pid")
 	if err != nil {
 		return "", errors.New("connector_process_identity")
 	}
