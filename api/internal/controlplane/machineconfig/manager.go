@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/livepeer/control-center/api/internal/controlplane/machineapps"
 	"github.com/livepeer/control-center/runtime/artifact"
 	"github.com/livepeer/control-center/runtime/onchain"
@@ -120,10 +121,33 @@ func (s *Manager) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return reconcileEach(ctx, machines, machineReconcileTimeout, s.reconcile, s.deps.Logger)
+}
+
+// machineReconcileTimeout bounds one machine's reconciliation. A pass shares no
+// deadline, so slow database round trips or row locks on one machine cannot
+// keep the machines after it from ever being reconciled.
+const machineReconcileTimeout = 30 * time.Second
+
+func reconcileEach(ctx context.Context, machines []Machine, timeout time.Duration, reconcile func(context.Context, Machine) error, logger *slog.Logger) error {
+	var failed int
+	var last error
 	for _, m := range machines {
-		if err = s.reconcile(ctx, m); err != nil && !errors.Is(err, ErrFenced) {
-			return err
+		machineCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := reconcile(machineCtx, m)
+		cancel()
+		if err == nil || errors.Is(err, ErrFenced) {
+			continue
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		failed++
+		last = err
+		logger.Error("machine configuration reconciliation failed", "node_id", m.NodeID, "error", err)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d machines failed: %w", failed, len(machines), last)
 	}
 	return nil
 }

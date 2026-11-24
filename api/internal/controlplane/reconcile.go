@@ -25,8 +25,13 @@ func (s *Server) Reconcile(ctx context.Context) {
 			}
 		}
 		passCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		if err := s.reconcile(passCtx); err != nil && ctx.Err() == nil {
+		err := s.reconcilePolicy(passCtx)
+		cancel()
+		if err == nil {
+			// Each machine has its own deadline, so the pass has none.
+			err = s.configs.Reconcile(ctx)
+		}
+		if err != nil && ctx.Err() == nil {
 			s.logger.Error("configuration reconciliation failed", "error", err)
 		}
 	}
@@ -46,6 +51,15 @@ func (s *Server) Reconcile(ctx context.Context) {
 }
 
 func (s *Server) reconcile(ctx context.Context) error {
+	if e := s.reconcilePolicy(ctx); e != nil {
+		return e
+	}
+	return s.configs.Reconcile(ctx)
+}
+
+// reconcilePolicy applies operator app policy and onchain settings, which machine
+// configuration reconciliation then renders.
+func (s *Server) reconcilePolicy(ctx context.Context) error {
 	if _, e := s.db.ExecContext(ctx, `DELETE FROM lpcc.revoked_enrollment_grants WHERE expires_at<=$1`, s.currentTime()); e != nil {
 		return e
 	}
@@ -81,8 +95,5 @@ func (s *Server) reconcile(ctx context.Context) error {
 	if e = tx.Commit(); e != nil {
 		return e
 	}
-	if e = s.reconcileOnchain(ctx); e != nil {
-		return e
-	}
-	return s.configs.Reconcile(ctx)
+	return s.reconcileOnchain(ctx)
 }
