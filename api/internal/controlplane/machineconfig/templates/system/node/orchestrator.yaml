@@ -158,9 +158,11 @@ spec:
         secret:
           secretName: runner-bootstrap
           defaultMode: 288
+      # kubelet applies fsGroup to local volumes by adding group read/write to
+      # every file, which Node refuses for its owner-only SQLite state. It never
+      # changes hostPath contents. The retained PV and PVC are no longer mounted.
       - name: data
-        persistentVolumeClaim:
-          claimName: orchestrator
+        hostPath: {path: '@INSTALL_DIR@/volumes/orchestrator', type: Directory}
 ---
 apiVersion: v1
 kind: Service

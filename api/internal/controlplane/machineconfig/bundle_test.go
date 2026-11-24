@@ -38,6 +38,10 @@ func TestConfigurationBundle(t *testing.T) {
 	if strings.Contains(files["system/node/orchestrator.yaml"], "@INSTALL_DIR@") || strings.Contains(files["system/node/orchestrator.yaml"], "@NODE_ID@") || !strings.Contains(files["system/node/orchestrator.yaml"], "/srv/livepeer/volumes/orchestrator") {
 		t.Fatal("incorrect machine rendering")
 	}
+	// kubelet's fsGroup walk must never reach Node's owner-only SQLite state.
+	if !strings.Contains(files["system/node/orchestrator.yaml"], "      - name: data\n        hostPath: {path: '/srv/livepeer/volumes/orchestrator', type: Directory}\n") || strings.Contains(files["system/node/orchestrator.yaml"], "claimName:") {
+		t.Fatal("Node data must be a hostPath volume")
+	}
 	reenrolled := m
 	reenrolled.NodeID = strings.Repeat("b", 26)
 	fresh, _, err := Build(reenrolled)

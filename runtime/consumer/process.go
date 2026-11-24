@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,7 +28,31 @@ func Start(ctx context.Context, profile Profile, socket, tokenPath, podName, pod
 	if err != nil {
 		return err
 	}
+	if profile == Orchestrator {
+		repairOnchainPermissions("/data/onchain.sqlite")
+	}
 	return start(ctx, profile, transport.NewLocal(socket), tokenPath, podName, podUID, process, args, syscall.Exec)
+}
+
+// Before Node's data volume became a hostPath, kubelet's fsGroup walk could add
+// group read/write to its SQLite state. Undo exactly that change and leave any
+// other permissions to Node's own owner-only check.
+func repairOnchainPermissions(path string) {
+	for _, name := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Lstat(name)
+		if err != nil || info.Mode() != 0660 {
+			continue
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(owner.Uid) != os.Geteuid() || int(owner.Gid) != os.Getegid() {
+			continue
+		}
+		if err := os.Chmod(name, 0600); err != nil {
+			slog.Error("Node SQLite permission repair failed", "path", name)
+			continue
+		}
+		slog.Warn("Restored owner-only Node SQLite permissions", "path", name)
+	}
 }
 
 func start(ctx context.Context, profile Profile, client transport.Requester, tokenPath, name, uid, process string, args []string, exec func(string, []string, []string) error) error {
