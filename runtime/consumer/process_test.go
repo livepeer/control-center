@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -88,12 +90,14 @@ func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
 		reason            string
 	}{
 		{name: "connector-report-outage", profile: Connector, healthy: true, delay: 10 * time.Second, ready: true, delivered: true},
-		{name: "connector-replaced-process", profile: Connector, mismatch: true, healthy: true, ready: true},
-		{name: "connector-identity-denied", profile: Connector, healthy: true, identityErr: errors.New("connector_process_identity"), ready: true},
+		{name: "connector-undelivered", profile: Connector, healthy: true, deliveryErr: errors.New("offline"), ready: true, delivered: true},
+		{name: "connector-replaced-process", profile: Connector, mismatch: true, healthy: true, reason: "launch_process_replaced"},
+		{name: "connector-identity-denied", profile: Connector, healthy: true, identityErr: errors.New("process_identity_unavailable"), reason: "process_identity_unavailable"},
+		{name: "connector-unready-and-denied", profile: Connector, identityErr: errors.New("process_identity_unavailable"), reason: "readiness_endpoint_failed, process_identity_unavailable"},
 		{name: "connector-unavailable", profile: Connector, delivered: true, reason: "readiness_endpoint_failed"},
 		{name: "node-delayed-proof", profile: Orchestrator, healthy: true, delay: 600 * time.Millisecond, ready: true, delivered: true},
 		{name: "node-replaced-process", profile: Orchestrator, mismatch: true, healthy: true, reason: "launch_process_replaced"},
-		{name: "node-identity-denied", profile: Orchestrator, healthy: true, identityErr: errors.New("connector_process_identity"), reason: "connector_process_identity"},
+		{name: "node-identity-denied", profile: Orchestrator, healthy: true, identityErr: errors.New("process_identity_unavailable"), reason: "process_identity_unavailable"},
 		{name: "node-report-outage", profile: Orchestrator, healthy: true, deliveryErr: errors.New("offline"), delivered: true, reason: "observation_undelivered"},
 		{name: "node-unready-and-replaced", profile: Orchestrator, mismatch: true, reason: "readiness_endpoint_failed, launch_process_replaced"},
 	} {
@@ -150,6 +154,14 @@ func TestProbeLocalReadinessAndProcessEvidence(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestRepairFailureReasons(t *testing.T) {
+	for errno, want := range map[syscall.Errno]string{syscall.EROFS: "read_only_filesystem", syscall.EPERM: "permission_denied", syscall.EACCES: "permission_denied", syscall.ENOENT: "file_missing", syscall.EIO: "chmod_failed"} {
+		if got := repairFailure(&fs.PathError{Op: "chmod", Path: "/data/onchain.sqlite", Err: errno}); got != want {
+			t.Fatal("unexpected repair failure reason", errno, got)
+		}
 	}
 }
 
