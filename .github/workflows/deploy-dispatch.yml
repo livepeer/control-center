@@ -3,9 +3,9 @@ name: Request deploy
 # After a successful Build images run for a main push, which has published
 # that commit's images, asks livepeer/deploy-control-center to deploy the
 # commit. Its Deploy staging workflow deploys it to staging without approval
-# and, when that succeeds, proposes it to Deploy prod, which waits for a
-# reviewer. This is a separate workflow so that a failed request never fails
-# Build images, whose result also gates UI deploys.
+# and, when that succeeds, has Deploy prod preflight it. A maintainer applies it
+# to prod by running Deploy prod by hand. This is a separate workflow so that a
+# failed request never fails Build images, whose result also gates UI deploys.
 #
 # Repository configuration:
 #   - Variable DEPLOYER_APP_CLIENT_ID: client ID of a GitHub App with Contents
