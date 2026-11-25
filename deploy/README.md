@@ -248,10 +248,21 @@ python3 tools/publish-bootstrap.py --release-id "$NEW_RELEASE_ID"
 python3 tools/publish-bootstrap.py --activate "$NEW_RELEASE_ID"
 ```
 
-The build machine needs Python 3.10+, Git, Node.js 22.12+ with
-`npm --prefix ui ci` (for wrangler), and Cloudflare credentials with R2 write
-access (`npx wrangler login --env-file /dev/null`, or `CLOUDFLARE_API_TOKEN` and
-`CLOUDFLARE_ACCOUNT_ID`). Target hosts need none of these. By default the
+The build machine needs Python 3.10+, Git, and R2 write access in one of two
+ways:
+
+- **R2's S3 API:** set `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and
+  `CLOUDFLARE_ACCOUNT_ID`. This takes an API token limited to Workers R2
+  Storage Bucket Item Read and Write on the one bucket: the key ID is the
+  token's ID, and the secret is the SHA-256 of its value. Automated deploys use
+  this.
+- **wrangler:** install Node.js 22.12+ and run `npm --prefix ui ci`, then use
+  `npx wrangler login --env-file /dev/null` or set `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID`. wrangler refuses bucket-limited tokens, so this needs
+  account-wide R2 access.
+
+`python3 tools/publish-bootstrap.py --bucket <bucket> --check` only reads the
+active loader. Target hosts need none of these. By default the
 packager uses `RuntimeImage` in `staging-images.json` and the public
 `https://controlcenter.livepeer.live` origin. Supply `--runtime-image` with
 another compatible published digest and `--public-origin https://your-host` for
