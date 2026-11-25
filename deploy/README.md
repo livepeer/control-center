@@ -211,9 +211,15 @@ npm --prefix ui run build
 
 The `staging` environment is a separate deployment on
 `controlcenter-staging.livepeer.live`, with the Worker `controlcenter-ui-staging`
-and the `controlcenter-bootstrap-staging` bucket. Build it with
+and the `controlcenter-bootstrap-staging` bucket. **Deploy UI** deploys it
+without approval whenever it would propose a production deploy. It builds with
 `npm --prefix ui run build -- --mode staging`, which reads
-[`ui/staging.env`](../ui/staging.env), and deploy it with `--env staging`.
+[`ui/staging.env`](../ui/staging.env), then runs `wrangler versions upload` and
+`wrangler versions deploy` with `--env staging`. That pair never changes routes,
+so the GitHub `staging` environment's `CLOUDFLARE_API_TOKEN` needs only Workers
+Editor on that one Worker. The staging backend is deployed by
+livepeer/deploy-control-center for every green `main` commit, before the commit
+is proposed for production.
 
 `npx wrangler deploy --env-file /dev/null` publishes a smoke-test copy on
 `workers.dev`. It reads the same bootstrap bucket but its origin is not in
