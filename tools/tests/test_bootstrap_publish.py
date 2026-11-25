@@ -1,16 +1,19 @@
-"""R2 publication tests for bootstrap releases, using a fake wrangler."""
+"""R2 publication tests for bootstrap releases, using a fake wrangler and a fake S3 API."""
 import contextlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import textwrap
 import unittest
 import unittest.mock
+from urllib.error import HTTPError
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -222,6 +225,17 @@ class BootstrapPublish(unittest.TestCase):
         self.assertIn('did not read back intact', output)
         self.assertIsNone(self.remote('bootstrap.sh'))
 
+    def test_check_reads_the_active_loader_without_writing(self):
+        code, output = self.run_publish('--check')
+        self.assertEqual(code, 1)
+        self.assertIn('no active bootstrap.sh', output)
+        self.assertEqual(self.run_publish('--all', '--activate', 'r1')[0], 0)
+        self.calls.unlink()
+        code, output = self.run_publish('--check')
+        self.assertEqual(code, 0, output)
+        self.assertEqual([json.loads(line)[2] for line in self.calls.read_text().splitlines()], ['get'])
+        self.assertEqual(self.run_publish('--check', '--activate', 'r1')[0], 2)
+
     def test_rejects_inconsistent_or_unexpected_local_releases(self):
         (self.source / 'releases/r1/SHA256SUMS').write_text('0' * 64 + '  runtime-bootstrap.tar.gz\n')
         (self.source / 'releases/r2/notes.txt').write_text('extra')
@@ -230,6 +244,170 @@ class BootstrapPublish(unittest.TestCase):
             self.assertEqual(code, 1, release_id)
             self.assertIn(message, output, release_id)
         self.assertFalse(self.calls.exists())
+
+
+class FakeS3:
+    """R2's S3 API for one account: checks each request's signature and stores objects."""
+
+    def __init__(self, key_id, secret, account):
+        self.key_id, self.secret, self.host = key_id, secret, f'{account}.r2.cloudflarestorage.com'
+        self.objects, self.metadata, self.requests, self.denied = {}, {}, [], set()
+
+    def open(self, request, timeout):
+        url = urlsplit(request.full_url)
+        method, key = request.get_method(), unquote(url.path).lstrip('/')
+        headers = {name.lower(): value for name, value in request.header_items()}
+        self.requests.append((method, key))
+        assert url.scheme == 'https' and url.netloc == self.host, request.full_url
+        data = request.data or b''
+        assert headers['x-amz-content-sha256'] == publisher.sha256(data)
+        credential, signed, signature = re.fullmatch(
+            r'AWS4-HMAC-SHA256 Credential=([^,]+), SignedHeaders=([^,]+), Signature=([0-9a-f]{64})',
+            headers['authorization']).groups()
+        signed_headers = {name: self.host if name == 'host' else headers[name] for name in signed.split(';')}
+        scope, _, expected = publisher.signature_v4(self.secret, method, url.path, signed_headers, headers['x-amz-date'])
+        assert credential == f'{self.key_id}/{scope}' and signature == expected, 'bad signature'
+        if key in self.denied:
+            raise HTTPError(request.full_url, 403, 'Forbidden', {}, io.BytesIO(b'<Error><Code>AccessDenied</Code></Error>'))
+        if method == 'GET':
+            if key not in self.objects:
+                raise HTTPError(request.full_url, 404, 'Not Found', {}, io.BytesIO(b'<Error><Code>NoSuchKey</Code></Error>'))
+            return Response(self.objects[key])
+        assert method == 'PUT' and {'content-type', 'cache-control'} <= set(signed.split(';')), signed
+        self.objects[key], self.metadata[key] = data, (headers['content-type'], headers['cache-control'])
+        return Response(b'')
+
+
+class Response(io.BytesIO):
+    status = 200
+
+
+class BootstrapPublishS3(BootstrapPublish):
+    """The same publication rules through R2's S3 API."""
+
+    ACCOUNT = '0123456789abcdef0123456789abcdef'
+
+    def setUp(self):
+        super().setUp()
+        self.s3 = FakeS3('KEYID0123456789AB', 'f' * 64, self.ACCOUNT)
+        patcher = unittest.mock.patch.dict(os.environ, {'R2_ACCESS_KEY_ID': self.s3.key_id,
+                                                        'R2_SECRET_ACCESS_KEY': self.s3.secret,
+                                                        'CLOUDFLARE_ACCOUNT_ID': self.ACCOUNT})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = unittest.mock.patch.object(publisher, 'build_opener', return_value=self.s3)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def remote(self, key):
+        return self.s3.objects.get(f'{publisher.DEFAULT_BUCKET}/{key}')
+
+    def store_object(self, key, data):
+        self.s3.objects[f'{publisher.DEFAULT_BUCKET}/{key}'] = data
+
+    def puts(self):
+        return [key.split('/', 1)[1] for method, key in self.s3.requests if method == 'PUT']
+
+    # Tests of the wrangler path that inspect its store or call log directly.
+    def test_publishes_then_activates_the_loader_last(self):
+        code, output = self.run_publish('--release-id', 'r1', '--activate', 'r1')
+        self.assertEqual(code, 0, output)
+        self.assertFalse(self.calls.exists())
+        for name in publisher.RELEASE_FILES:
+            self.assertEqual(self.remote(f'releases/r1/{name}'), self.local('r1', name))
+        self.assertEqual(self.puts(), ['releases/r1/runtime-bootstrap.tar.gz', 'releases/r1/SHA256SUMS',
+                                       'releases/r1/release.json', 'releases/r1/bootstrap.sh', 'bootstrap.sh'])
+        self.assertEqual(self.s3.metadata[f'{publisher.DEFAULT_BUCKET}/releases/r1/runtime-bootstrap.tar.gz'],
+                         ('application/gzip', 'public, max-age=31536000, immutable'))
+        self.assertEqual(self.s3.metadata[f'{publisher.DEFAULT_BUCKET}/bootstrap.sh'], ('text/x-shellscript', 'no-cache'))
+
+    def test_republishing_identical_content_writes_nothing(self):
+        self.assertEqual(self.run_publish('--release-id', 'r1')[0], 0)
+        self.s3.requests.clear()
+        code, output = self.run_publish('--release-id', 'r1')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.puts(), [])
+
+    def test_refuses_to_replace_a_published_release(self):
+        self.store_object('releases/r1/SHA256SUMS', b'other\n')
+        code, output = self.run_publish('--release-id', 'r1', '--activate', 'r1')
+        self.assertEqual(code, 1)
+        self.assertIn('immutable', output)
+        self.assertEqual(self.remote('releases/r1/SHA256SUMS'), b'other\n')
+        self.assertIsNone(self.remote('bootstrap.sh'))
+
+    def test_refuses_to_activate_an_older_or_diverged_release(self):
+        for commit in ('c1', 'c3'):
+            self.s3.objects.clear()
+            self.set_commit('r1', commit)
+            self.assertEqual(self.run_publish('--all', '--activate', 'r2')[0], 0, commit)
+            code, output = self.run_publish('--activate', 'r1')
+            self.assertEqual(code, 1, commit)
+            self.assertIn('is not newer than the active release r2', output)
+
+    def test_refuses_releases_it_cannot_order(self):
+        self.set_commit('r2', 'a' * 40)
+        self.assertEqual(self.run_publish('--all', '--activate', 'r1')[0], 0)
+        code, output = self.run_publish('--activate', 'r2')
+        self.assertEqual(code, 1)
+        self.assertIn('fetch its history', output)
+
+    def test_read_errors_are_not_mistaken_for_missing_objects(self):
+        self.s3.denied.add(f'{publisher.DEFAULT_BUCKET}/releases/r1/runtime-bootstrap.tar.gz')
+        code, output = self.run_publish('--release-id', 'r1')
+        self.assertEqual(code, 1)
+        self.assertIn('HTTP 403', output)
+        self.assertEqual(self.puts(), [])
+
+    def test_write_must_read_back_intact(self):
+        original = self.s3.open
+        def corrupt(request, timeout):
+            response = original(request, timeout)
+            key = unquote(urlsplit(request.full_url).path).lstrip('/')
+            if request.get_method() == 'PUT' and key.endswith('runtime-bootstrap.tar.gz'):
+                self.s3.objects[key] = b'corrupted'
+            return response
+        self.s3.open = corrupt
+        code, output = self.run_publish('--release-id', 'r1', '--activate', 'r1')
+        self.assertEqual(code, 1)
+        self.assertIn('did not read back intact', output)
+        self.assertIsNone(self.remote('bootstrap.sh'))
+
+    def test_check_reads_the_active_loader_without_writing(self):
+        code, output = self.run_publish('--check')
+        self.assertEqual(code, 1)
+        self.assertIn('no active bootstrap.sh', output)
+        self.assertEqual(self.run_publish('--all', '--activate', 'r1')[0], 0)
+        self.s3.requests.clear()
+        self.assertEqual(self.run_publish('--check')[0], 0)
+        self.assertEqual(self.s3.requests, [('GET', f'{publisher.DEFAULT_BUCKET}/bootstrap.sh')])
+
+    def test_rejects_inconsistent_or_unexpected_local_releases(self):
+        (self.source / 'releases/r1/SHA256SUMS').write_text('0' * 64 + '  runtime-bootstrap.tar.gz\n')
+        code, output = self.run_publish('--release-id', 'r1')
+        self.assertEqual(code, 1)
+        self.assertIn('inconsistent', output)
+        self.assertEqual(self.s3.requests, [])
+
+    def test_incomplete_s3_settings_are_refused(self):
+        for name in ('R2_SECRET_ACCESS_KEY', 'CLOUDFLARE_ACCOUNT_ID'):
+            with self.subTest(name), unittest.mock.patch.dict(os.environ, {name: ''}):
+                code, output = self.run_publish('--check')
+                self.assertEqual(code, 1)
+                self.assertIn('R2_ACCESS_KEY_ID needs', output)
+        self.assertEqual(self.s3.requests, [])
+
+
+class SignatureV4(unittest.TestCase):
+    def test_matches_the_aws_s3_get_object_example(self):
+        # From the AWS S3 documentation's Signature Version 4 header examples.
+        headers = {'host': 'examplebucket.s3.amazonaws.com', 'range': 'bytes=0-9',
+                   'x-amz-content-sha256': publisher.sha256(b''), 'x-amz-date': '20130524T000000Z'}
+        scope, signed, signature = publisher.signature_v4('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'GET', '/test.txt',
+                                                          headers, '20130524T000000Z', region='us-east-1')
+        self.assertEqual(scope, '20130524/us-east-1/s3/aws4_request')
+        self.assertEqual(signed, 'host;range;x-amz-content-sha256;x-amz-date')
+        self.assertEqual(signature, 'f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41')
 
 
 if __name__ == '__main__':
