@@ -1,4 +1,4 @@
-# Staging deployment
+# Production deployment
 
 Docker Compose runs the Go API, persistent image registry and its read-only
 proxy, payment redeemer, operator secrets service, Vault, machine telemetry
@@ -307,6 +307,6 @@ curl --fail --head https://controlcenter.livepeer.live/bootstrap.sh
 Docker restarts the services after host reboot. Public registry requests allow
 only GET and HEAD; publish images through the loopback port on the SSH host.
 Use digest-pinned image references for enrolled machines and retain referenced
-images when updating staging. Only pass `--volumes` to
+images when updating production. Only pass `--volumes` to
 `docker compose --env-file compose.env down` if you intend to delete the stored
 images.

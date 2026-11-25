@@ -1,8 +1,8 @@
-name: Request staging deploy
+name: Request prod deploy
 
 # After a successful Build images run for a main push, which has published
 # that commit's images, asks livepeer/deploy-control-center to preflight the
-# commit for staging. It is a separate workflow so that a failed request never
+# commit for prod. It is a separate workflow so that a failed request never
 # fails Build images, whose result also gates UI deploys.
 #
 # Repository configuration:
@@ -21,7 +21,7 @@ permissions: {}
 
 jobs:
   dispatch:
-    name: Request staging deployment
+    name: Request prod deployment
     if: >-
       vars.DEPLOYER_APP_CLIENT_ID != ''
       && github.event.workflow_run.conclusion == 'success'
