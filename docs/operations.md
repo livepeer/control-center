@@ -1,6 +1,6 @@
 # Operations
 
-For production Compose, registry, UI, and bootstrap releases, see [staging deployment](../deploy/README.md).
+For production Compose, registry, UI, and bootstrap releases, see [production deployment](../deploy/README.md).
 
 ## Initial setup
 
