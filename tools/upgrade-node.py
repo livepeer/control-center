@@ -2,10 +2,11 @@
 """Publish and activate a managed Node image on a Linux amd64 host and fleet.
 
 The default dry-run checks metadata only. --apply ends after it verifies the
-installed API revision and loaded runtime_node_image via /api/admin/deployment;
-fleet reconciliation may begin immediately. Supply an existing administrator
-bearer token in a private --admin-token-file. The installed API needs that
-protected endpoint and the same COMMIT in its binary and OCI revision label.
+installed API revision and loaded Runtime images through the API's
+loopback-only GET /internal/deployment, queried inside the API container with
+docker exec; fleet reconciliation may begin immediately. No administrator
+session is needed. The installed API needs that probe and the same COMMIT in
+its binary and OCI revision label.
 An onchain redeemer must separately use the verified upstream image. The config
 timestamp gate may require a separate reload of pending or recovered edits before retry.
 Private backups under --state-dir contain config secrets; retain them for recovery.
@@ -30,7 +31,7 @@ import sys
 import tempfile
 import tomllib
 from urllib.error import HTTPError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,13 @@ PUBLIC = 'controlcenter-registry.livepeer.live/controlcenter/node'
 UPLOAD = '127.0.0.1:63812/controlcenter/node'
 # The API's public listener on the deployment host (PublicListen in config.toml).
 API = 'http://127.0.0.1:43811'
+# Served on the private listener (Listen) to loopback peers only, so it is
+# queried from inside the API container. Its fields come from the running
+# process, not from the configuration file.
+PROBE = '/internal/deployment'
+DEFAULT_LISTEN = 'localhost:41932'
+LOADED_IMAGES = {'RuntimeImage': 'runtime_image', 'RuntimeConnectorImage': 'runtime_connector_image',
+                 'RuntimeNodeImage': 'runtime_node_image'}
 PLATFORM = 'linux/amd64'
 DIGEST = r'sha256:[0-9a-f]{64}'
 IMAGE = rf'[a-zA-Z0-9][a-zA-Z0-9./:_-]*@{DIGEST}'
@@ -61,6 +69,16 @@ def sha(data):
 
 def encoded(value):
     return (json.dumps(value, indent=2, sort_keys=True) + '\n').encode()
+
+
+def listen_port(address):
+    """Return the port of a Go listen address such as 0.0.0.0:43812 or [::]:43812."""
+    host, _, port = address.rpartition(':')
+    require(port.isdigit() and 0 < int(port) < 65536, 'config.toml Listen needs a numeric port')
+    # The probe connects to 127.0.0.1 inside the API container.
+    require(host in ('', '0.0.0.0', '[::]', 'localhost', '127.0.0.1'),
+            'config.toml Listen must accept connections on 127.0.0.1')
+    return int(port)
 
 
 def run(*args, cwd=None, timeout=120):
@@ -152,12 +170,11 @@ class Snapshot:
     gid: int
 
     @classmethod
-    def read(cls, path, limit=None):
+    def read(cls, path):
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
             info = os.fstat(stream.fileno())
             require(stat.S_ISREG(info.st_mode), 'deployment input must be a regular file')
-            data = stream.read() if limit is None else stream.read(limit + 1)
-            require(limit is None or len(data) <= limit, 'deployment input exceeds its size limit')
+            data = stream.read()
             return cls(path, data, stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
 
     def unchanged(self):
@@ -215,15 +232,9 @@ def registry_manifest(base, reference, missing_ok=False):
         raise ValueError(f'registry manifest request failed (HTTP {error.code})') from None
 
 
-class RejectRedirects(HTTPRedirectHandler):
-    def redirect_request(self, *_args, **_kwargs):
-        return None
-
-
 class Upgrade:
-    def __init__(self, root, deploy, files=None, env_file=None, runner=run, token_file=None):
+    def __init__(self, root, deploy, files=None, env_file=None, runner=run):
         self.root, self.deploy, self.run = root.resolve(), deploy.resolve(), runner
-        self.token_file = token_file
         self.files = [path.resolve() for path in files or [self.deploy / 'compose.yaml']]
         self.compose = ['docker', 'compose', '--project-directory', self.deploy]
         for path in self.files:
@@ -246,34 +257,38 @@ class Upgrade:
     def remote_image(self, reference):
         return remote_image(reference, self.run)
 
-    def deployment(self):
-        request = Request(API + '/api/admin/deployment',
-                          headers={'Authorization': 'Bearer ' + self.token})
+    def deployment(self, container):
+        """Return the Runtime images the running API loaded, keyed as in config.toml."""
+        port = listen_port(self.params.get('Listen', DEFAULT_LISTEN))
         try:
-            with build_opener(ProxyHandler({}), RejectRedirects()).open(request, timeout=30) as response:
-                data = response.read(16385)
-                require(len(data) <= 16384, 'deployment response exceeds its size limit')
-                result = json.loads(data)
-        except HTTPError as error:
-            error.close()
-            raise ValueError(f'administrator deployment check failed (HTTP {error.code})') from None
-        require(isinstance(result, dict) and set(result) == {'revision', 'runtime_node_image'}
-                and isinstance(result.get('runtime_node_image'), str)
-                and re.fullmatch(r'[0-9a-f]{40}', result.get('revision', '')),
-                'API must expose loaded Node image and baked revision in /api/admin/deployment')
+            data = self.run('docker', 'exec', container['Id'], 'wget', '-q', '-T', '10', '-O', '-',
+                            f'http://127.0.0.1:{port}{PROBE}')
+        except ValueError:
+            raise ValueError('API deployment probe failed; the installed API must serve GET ' + PROBE
+                             + ' on its Listen address') from None
+        require(len(data) <= 16384, 'deployment response exceeds its size limit')
+        try:
+            result = json.loads(data)
+        except ValueError:
+            result = None
+        fields = {'revision', *LOADED_IMAGES.values()}
+        require(isinstance(result, dict) and set(result) == fields
+                and all(isinstance(result[field], str) for field in fields)
+                and re.fullmatch(r'[0-9a-f]{40}', result['revision']),
+                'API must report its baked revision and loaded Runtime images at ' + PROBE)
         require(result['revision'] == self.api_revision, 'API build revision differs from the intended installed image')
-        return result['runtime_node_image']
+        return {key: result[field] for key, field in LOADED_IMAGES.items()}
+
+    def require_loaded(self, container, params, message):
+        loaded = self.deployment(container)
+        for key in LOADED_IMAGES:
+            require(loaded[key] == params.get(key, ''), message.format(key))
 
     def mounted_hash(self, container, path='/etc/controlcenter/config.toml'):
         return self.run('docker', 'exec', container['Id'], 'sha256sum', '--', path).split()[0]
 
     def preflight(self):
         self.version, _ = source_version(self.root, self.run)
-        require(self.token_file is not None, 'provide an existing administrator bearer token with --admin-token-file')
-        token = Snapshot.read(self.token_file, limit=8192)
-        require(token.mode & 0o077 == 0, 'administrator token file must be private (mode 0600)')
-        self.token = token.data.decode().strip()
-        require(re.fullmatch(r'[a-zA-Z0-9._-]+', self.token), 'invalid administrator token file')
         require(not self.run('git', 'status', '--porcelain', '--', *INPUTS, cwd=self.root),
                 'commit upgrade build inputs before deployment')
         self.commit = self.run('git', 'rev-parse', 'HEAD', cwd=self.root)
@@ -374,8 +389,7 @@ class Upgrade:
                         'API startup file changed after API startup; load pending changes separately first')
                 require(self.mounted_hash(container, target) == sha(path.read_bytes()),
                         'API startup file differs from its host source; load pending changes separately first')
-        require(self.deployment() == self.params.get('RuntimeNodeImage', ''),
-                'API has not loaded the current RuntimeNodeImage; resolve it separately first')
+        self.require_loaded(container, self.params, 'API has not loaded the current {}; resolve it separately first')
 
     def check_redeemer(self):
         enabled = any(self.params.get(key) for key in ('OnchainSecretsDir', 'OnchainWebhookSecretFile', 'OnchainWebhookSecret'))
@@ -509,8 +523,8 @@ class Upgrade:
             require(started['Id'] != current['Id'] and started['Image'] == current['Image'],
                     'API was not recreated with the existing image')
             self.check_api(started)
-            require(self.mounted_hash(started) == sha(config) and self.deployment() == image,
-                    'API did not load the new RuntimeNodeImage')
+            require(self.mounted_hash(started) == sha(config), 'API did not load the new RuntimeNodeImage')
+            self.require_loaded(started, tomllib.loads(config.decode()), 'API did not load the new {}')
             with urlopen(API + '/readyz', timeout=10) as response:
                 require(response.status == 200, 'API readiness failed')
             phase('api_loaded')
@@ -553,7 +567,6 @@ def main():
     parser.add_argument('--compose-file', type=Path, action='append', help='existing Compose file, in original order; repeat for overlays')
     parser.add_argument('--env-file', type=Path,
                         help='Compose interpolation file (default: compose.env in --deploy-dir, if present)')
-    parser.add_argument('--admin-token-file', type=Path, help='private file containing an existing administrator bearer token')
     parser.add_argument('--expected-version', help='require this go.mod version')
     parser.add_argument('--state-dir', type=Path, default=Path('/var/lib/controlcenter/node-upgrades'), help='private backup/lock directory')
     args = parser.parse_args()
@@ -570,7 +583,7 @@ def main():
         if args.resolve_upstream:
             print(json.dumps(resolve_upstream(ROOT), sort_keys=True))
             return
-        upgrade = Upgrade(ROOT, args.deploy_dir, args.compose_file, args.env_file, token_file=args.admin_token_file)
+        upgrade = Upgrade(ROOT, args.deploy_dir, args.compose_file, args.env_file)
         if not args.apply:
             print(json.dumps({'mode': 'dry_run', **upgrade.preflight()}, indent=2))
             return

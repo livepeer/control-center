@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/operator/config", s.operatorConfig)
 	mux.HandleFunc("GET /api/operator/apps", s.operatorApps)
 	mux.HandleFunc("PUT /api/operator/apps/{name}/policy", s.operatorPolicy)
+	mux.HandleFunc("GET /internal/deployment", s.localDeployment)
 	mux.HandleFunc("GET /internal/secrets/nodes/{node_id}", s.secretMachine)
 	mux.HandleFunc("POST /internal/secrets/nodes/{node_id}", s.secretMachine)
 	mux.HandleFunc("POST /api/bootstrap-token", s.bootstrapToken)
