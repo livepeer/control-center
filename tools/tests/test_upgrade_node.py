@@ -6,11 +6,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tomllib
-from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 
@@ -47,7 +47,9 @@ class FakeDocker:
         self.deploy, self.calls = deploy, []
         self.api_id = 'old-api'
         self.mounted = (deploy / 'config.toml').read_bytes()
-        self.reported = None
+        self.reported = None  # A loaded RuntimeNodeImage that differs from the mounted file.
+        self.probe = None  # Raw probe output replacing the reported deployment.
+        self.probe_fails = False  # wget exits non-zero, as on an HTTP error.
         self.revision = COMMIT
         self.image_revision = COMMIT
         self.extra_mounts = {}
@@ -122,6 +124,17 @@ class FakeDocker:
                     'org.opencontainers.image.revision': COMMIT, 'org.opencontainers.image.version': VERSION}}}])
             return json.dumps([self.built])
         if args[:2] == ['docker', 'exec']:
+            if args[3] == 'wget':
+                require_probe(args, self.api_id)
+                if self.probe_fails:
+                    raise ValueError('docker exec failed (exit 1)')
+                if self.probe is not None:
+                    return self.probe
+                loaded = tomllib.loads(self.mounted.decode())
+                node = self.reported if self.reported is not None else loaded.get('RuntimeNodeImage', '')
+                return json.dumps({'revision': self.revision, 'runtime_image': loaded.get('RuntimeImage', ''),
+                                   'runtime_connector_image': loaded.get('RuntimeConnectorImage', ''),
+                                   'runtime_node_image': node})
             if args[3] == 'sha256sum':
                 data = self.mounted if args[-1] == '/etc/controlcenter/config.toml' else self.extra_mounts[args[-1]]
                 return upgrade.sha(data) + '  ' + args[-1]
@@ -137,6 +150,13 @@ class FakeDocker:
         raise AssertionError('unexpected fake command: ' + repr(args))
 
 
+def require_probe(args, api_id):
+    expected = ['docker', 'exec', api_id, 'wget', '-q', '-T', '10', '-O', '-',
+                'http://127.0.0.1:43812/internal/deployment']
+    if args != expected:
+        raise AssertionError('unexpected deployment probe: ' + repr(args))
+
+
 class UpgradeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -144,7 +164,7 @@ class UpgradeTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.deploy = self.root / 'deploy'
         self.deploy.mkdir()
-        self.config = (f'# private settings\nRuntimeImage = "{RUNTIME}"\n'
+        self.config = (f'# private settings\nListen = "0.0.0.0:43812"\nRuntimeImage = "{RUNTIME}"\n'
                        f"RuntimeNodeImage = '{OLD}' # retain comment\nSecret = 'private-value'\n").encode()
         self.record = {'images': {'RuntimeImage': RUNTIME, 'RuntimeNodeImage': OLD},
                        'controlcenter_commit': 'runtime-build', 'source_note': 'old build note',
@@ -159,23 +179,10 @@ class UpgradeTests(unittest.TestCase):
             path.write_text('recipe')
         (self.root / upgrade.FALLBACK).write_text(f'image: ghcr.io/livepeer/node:{VERSION}@{NODE.split("@")[1]}\n')
         self.docker = FakeDocker(self.deploy)
-        self.token_file = self.root / 'admin-token'
-        self.token_file.write_text('private.admin.token')
-        self.token_file.chmod(0o600)
-        self.job = upgrade.Upgrade(self.root, self.deploy, runner=self.docker, token_file=self.token_file)
-        def http(request, **_kwargs):
-            if isinstance(request, upgrade.Request) and request.full_url.endswith('/api/admin/deployment'):
-                value = self.docker.reported if self.docker.reported is not None else tomllib.loads(self.docker.mounted.decode()).get('RuntimeNodeImage', '')
-                return Response(upgrade.encoded({'revision': self.docker.revision, 'runtime_node_image': value}))
-            return Response()
-        self.http_response = http
-        self.http = patch.object(upgrade, 'urlopen', side_effect=http)
+        self.job = upgrade.Upgrade(self.root, self.deploy, runner=self.docker)
+        self.http = patch.object(upgrade, 'urlopen', return_value=Response())
         self.http_mock = self.http.start()
         self.addCleanup(self.http.stop)
-        self.local_http_mock = Mock(side_effect=http)
-        opener = patch.object(upgrade, 'build_opener', return_value=SimpleNamespace(open=self.local_http_mock))
-        self.opener_mock = opener.start()
-        self.addCleanup(opener.stop)
         self.environment = patch.dict(os.environ, {'DOCKER_HOST': ''})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -261,11 +268,12 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual((directory / 'config.toml').read_bytes(), self.config)
         self.assertEqual((directory / 'config.toml').stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads((directory / 'receipt.json').read_bytes())['phase'], 'api_loaded')
-        self.assertNotIn('private.admin.token', json.dumps(self.docker.calls))
-        self.assertNotIn('private.admin.token', (directory / 'receipt.json').read_text())
-        requests = [call.args[0] for call in self.local_http_mock.call_args_list]
-        self.assertTrue(requests)
-        self.assertTrue(all(request.get_header('Authorization') == 'Bearer private.admin.token' for request in requests))
+        # The old and the recreated API were each probed in their own container.
+        probes = [args[2] for args in self.docker.calls if args[:2] == ['docker', 'exec'] and args[3] == 'wget']
+        self.assertEqual(probes[0], 'old-api')
+        self.assertEqual(probes[-1], 'old-api-new')
+        self.assertFalse(any(isinstance(call.args[0], upgrade.Request) and call.args[0].has_header('Authorization')
+                             for call in self.http_mock.call_args_list))
 
     def test_loaded_target_rerun_does_not_recreate_api(self):
         provenance = {'node_version': VERSION}
@@ -302,7 +310,7 @@ class UpgradeTests(unittest.TestCase):
         data = self.config.replace(OLD.encode(), NEW.encode())
         (self.deploy / 'config.toml').write_bytes(data)
         self.docker = FakeDocker(self.deploy)
-        self.job = upgrade.Upgrade(self.root, self.deploy, runner=self.docker, token_file=self.token_file)
+        self.job = upgrade.Upgrade(self.root, self.deploy, runner=self.docker)
         self.job.preflight()
         result = self.job.activate(NEW, {'corrected_metadata': True}, self.state)
         self.assertEqual(result['status'], 'already_loaded')
@@ -401,10 +409,11 @@ class UpgradeTests(unittest.TestCase):
                 api['Image'] = 'sha256:other'
             with self.subTest(edit=edit), self.assertRaises(ValueError):
                 self.job.check_api(api)
-        with patch.object(self.opener_mock.return_value, 'open', return_value=Response(b'{}')), self.assertRaisesRegex(ValueError, 'must expose'):
-            self.job.deployment()
+        self.docker.probe = '{}'
+        with self.assertRaisesRegex(ValueError, 'must report'):
+            self.job.deployment(self.job.api)
 
-    def test_deployment_auth_and_installed_revision_are_required_before_publish(self):
+    def test_installed_revision_is_required_before_publish(self):
         self.docker.revision = 'f' * 40
         with self.assertRaisesRegex(ValueError, 'build revision differs'):
             self.job.preflight()
@@ -413,36 +422,76 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'needs a baked COMMIT'):
             self.job.preflight()
         self.docker.image_revision = COMMIT
-        self.token_file.chmod(0o644)
-        with self.assertRaisesRegex(ValueError, 'must be private'):
+        # An API built without COMMIT reports "unknown" from the probe.
+        self.docker.revision = 'unknown'
+        with self.assertRaisesRegex(ValueError, 'must report'):
             self.job.preflight()
-        self.token_file.chmod(0o600)
-        with patch.object(self.opener_mock.return_value, 'open', side_effect=HTTPError('url', 403, 'forbidden', {}, None)), \
-                self.assertRaisesRegex(ValueError, 'administrator deployment check failed'):
+        self.docker.revision = COMMIT
+        # wget exits non-zero on 403 (a refused peer) and 404 (an API without the probe).
+        self.docker.probe_fails = True
+        with self.assertRaisesRegex(ValueError, 'deployment probe failed'):
             self.job.preflight()
         self.assertFalse(any('up' in args or args[:2] == ['docker', 'push'] for args in self.docker.calls))
 
-    def test_deployment_request_cannot_use_proxy_redirect_or_unsafe_token(self):
-        self.job.deployment()
-        proxy, redirects = self.opener_mock.call_args.args
-        self.assertEqual(proxy.proxies, {})
-        self.assertIsNone(redirects.redirect_request(None, None, None, None, None, None))
-        for token in ('private\nadmin.token', 'x' * 8193):
-            self.token_file.write_text(token)
-            with self.assertRaises(ValueError) as error:
-                self.job.preflight()
-            self.assertNotIn(token, str(error.exception))
+    def test_probe_response_is_an_exact_allowlist(self):
+        loaded = {'revision': COMMIT, 'runtime_image': RUNTIME, 'runtime_connector_image': '', 'runtime_node_image': OLD}
+        self.assertEqual(self.job.deployment(self.job.api),
+                         {'RuntimeImage': RUNTIME, 'RuntimeConnectorImage': '', 'RuntimeNodeImage': OLD})
+        for name, probe in (('extra field', {**loaded, 'pg_connstr': 'private'}),
+                            ('missing field', {k: v for k, v in loaded.items() if k != 'runtime_image'}),
+                            ('non-string image', {**loaded, 'runtime_node_image': None}),
+                            ('short revision', {**loaded, 'revision': COMMIT[:7]}),
+                            ('not an object', [loaded])):
+            self.docker.probe = json.dumps(probe)
+            with self.subTest(name), self.assertRaisesRegex(ValueError, 'must report'):
+                self.job.deployment(self.job.api)
+        self.docker.probe = 'not json'
+        with self.assertRaisesRegex(ValueError, 'must report'):
+            self.job.deployment(self.job.api)
+        self.docker.probe = json.dumps({**loaded, 'runtime_image': 'x' * 16384})
+        with self.assertRaisesRegex(ValueError, 'size limit'):
+            self.job.deployment(self.job.api)
 
-    def test_auth_failure_before_mutation_and_after_start_preserves_boundary(self):
-        with patch.object(self.opener_mock.return_value, 'open', side_effect=HTTPError('url', 401, 'expired', {}, None)), \
-                self.assertRaises(ValueError):
+    def test_every_loaded_runtime_image_must_match_the_config(self):
+        for key, field in upgrade.LOADED_IMAGES.items():
+            loaded = {'revision': COMMIT, 'runtime_image': RUNTIME, 'runtime_connector_image': '', 'runtime_node_image': OLD}
+            loaded[field] = 'registry.example/stale@sha256:' + 'f' * 64
+            self.docker.probe = json.dumps(loaded)
+            with self.subTest(key), self.assertRaisesRegex(ValueError, 'has not loaded the current ' + key):
+                self.job.preflight()
+
+    def test_probe_uses_the_private_listen_port(self):
+        self.assertEqual(upgrade.listen_port('0.0.0.0:43812'), 43812)
+        self.assertEqual(upgrade.listen_port('[::]:43812'), 43812)
+        self.assertEqual(upgrade.listen_port(upgrade.DEFAULT_LISTEN), 41932)
+        self.assertEqual(upgrade.listen_port(':43812'), 43812)
+        for address in ('0.0.0.0', '0.0.0.0:', 'localhost:http', '0.0.0.0:70000'):
+            with self.subTest(address), self.assertRaisesRegex(ValueError, 'numeric port'):
+                upgrade.listen_port(address)
+        for address in ('10.0.0.3:43812', '[::1]:43812', 'api:43812'):
+            with self.subTest(address), self.assertRaisesRegex(ValueError, 'accept connections on 127.0.0.1'):
+                upgrade.listen_port(address)
+
+    def test_cli_needs_no_administrator_session(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/upgrade-node.py'), '--help'],
+                                capture_output=True, text=True, check=True)
+        self.assertNotIn('--admin-token-file', result.stdout)
+        self.assertIn('/internal/deployment', result.stdout)
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/upgrade-node.py'), '--admin-token-file', 'token'],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unrecognized arguments', result.stderr)
+
+    def test_probe_failure_before_mutation_and_after_start_preserves_boundary(self):
+        self.docker.probe_fails = True
+        with self.assertRaisesRegex(ValueError, 'deployment probe failed'):
             self.job.activate(NEW, {}, self.state)
         self.assertEqual((self.deploy / 'config.toml').read_bytes(), self.config)
-        def fail_after_start(*args, **kwargs):
-            if self.docker.api_id != 'old-api':
-                raise HTTPError('url', 401, 'expired', {}, None)
-            return self.http_response(*args, **kwargs)
-        with patch.object(self.opener_mock.return_value, 'open', side_effect=fail_after_start), self.assertRaises(ValueError):
+        self.docker.probe_fails = False
+        def fail_after_start():
+            self.docker.probe_fails = True
+        self.docker.on_recreate = fail_after_start
+        with self.assertRaisesRegex(ValueError, 'deployment probe failed'):
             self.job.activate(NEW, {}, self.state)
         self.assertEqual((self.deploy / 'config.toml').read_bytes(), upgrade.patch_config(self.config, NEW))
         receipt = next(self.state.glob('*/receipt.json'))

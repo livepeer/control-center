@@ -31,6 +31,12 @@ reaches over HTTPS with the shared metadata token. It forwards
 redeemer URL in Node configurations (`redeemer_url` in `onchain.json`) on the
 API hostname.
 
+`GET /internal/deployment` on `Listen` reports the API's baked Git revision and
+the `RuntimeImage`, `RuntimeConnectorImage` and `RuntimeNodeImage` it loaded at
+startup. It needs no credential, but answers only loopback peers without
+forwarding headers, so query it from inside the API container. Other
+containers, the host port and the tunnel get `403` or `404`.
+
 ## Install
 
 Place the source checkout in `/opt/controlcenter`, install Docker Engine with
@@ -315,6 +321,7 @@ docker compose --env-file compose.env ps
 docker compose --env-file compose.env logs --tail=100 api registry-proxy cloudflared
 curl --fail http://127.0.0.1:43811/readyz
 curl --fail http://127.0.0.1:43811/api/config
+docker compose --env-file compose.env exec api wget -q -O - http://127.0.0.1:43812/internal/deployment
 curl --fail http://127.0.0.1:13812/api/health
 curl --fail http://127.0.0.1:23813/ready
 docker compose --env-file compose.env up -d --build --wait
